@@ -1,59 +1,42 @@
-# -*- coding: utf-8 -*-
-"""
-tools/generate_nuitka_batch.py
-生成标准 Windows CRLF 编码的 instock-nuitka-batch.cmd
-"""
-
-from pathlib import Path
-
-CMD_CONTENT = r"""@echo off
+@echo off
 chcp 65001 >nul
 setlocal enabledelayedexpansion
 
 :: ================================================================================
-:: Nuitka 批量编译打包调度中心 (Clang-Only)
-:: 组合调用已有的各个独立 Nuitka 打包批处理，绝不修改、覆盖或破坏原有脚本
-:: 运行时自动绕过原有批处理的等待与末尾 pause，实现全自动连续批处理
+:: PyInstaller 批量打包调度中心
+:: 组合调用已有的各个独立打包批处理，绝不修改、覆盖或破坏原有脚本
+:: 运行时自动绕过原有批处理末尾的 pause，实现无缝连续批处理
 :: 编译前后自动归档保留最近 7 天的历史打包 exe，防止新版本异常无法回退排错
-:: 最终显示全部打包的结果集统计时间、产物大小与清单报表
+:: 最终显示全部打包的结果集统计时间、产物大小与清单报表 (支持追加模式与历史耗时对比)
 :: ================================================================================
 
-title Nuitka 批量编译打包调度中心 (Clang-Only)
+title PyInstaller 批量打包调度中心
 
 :: 基础工程目录与产物目录
 set "ROOT_DIR=D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock_standalone"
-set "BUILD_DIR=%ROOT_DIR%\build"
+set "DIST_DIR=%ROOT_DIR%\dist"
 
 :: 自动定位各个子批处理所在目录
 set "CMD_BASE_DIR=%~dp0"
-if not exist "!CMD_BASE_DIR!\nuitka_build_ats_console_onlyClang.bat" (
-    if exist "%ROOT_DIR%\nuitka_build_ats_console_onlyClang.bat" (
-        set "CMD_BASE_DIR=%ROOT_DIR%"
-    ) else if exist "C:\Users\Johnson\nuitka_build_ats_console_onlyClang.bat" (
+if not exist "!CMD_BASE_DIR!\instock-pyinstall-ats-exe.cmd" (
+    if exist "C:\Users\Johnson\instock-pyinstall-ats-exe.cmd" (
         set "CMD_BASE_DIR=C:\Users\Johnson"
+    ) else if exist "%ROOT_DIR%\instock-pyinstall-ats-exe.cmd" (
+        set "CMD_BASE_DIR=%ROOT_DIR%"
     )
 )
 
 :: 去除末尾反斜杠
 if "!CMD_BASE_DIR:~-1!"=="\" set "CMD_BASE_DIR=!CMD_BASE_DIR:~0,-1!"
 
-:: 默认 Nuitka 构建模式 (onefile_spec 为带专属解包目录的单文件模式，也可指定 onefile 或 standalone)
-set "DEFAULT_BUILD_MODE=onefile_spec"
+:: 检查是否开启 --dry-run 演练模式
 set "DRY_RUN=0"
 set "USER_ARGS="
-
-:: 解析命令行选项
 for %%A in (%*) do (
     if /i "%%~A"=="--dry-run" (
         set "DRY_RUN=1"
     ) else if /i "%%~A"=="-n" (
         set "DRY_RUN=1"
-    ) else if /i "%%~A"=="--standalone" (
-        set "DEFAULT_BUILD_MODE=standalone"
-    ) else if /i "%%~A"=="--onefile" (
-        set "DEFAULT_BUILD_MODE=onefile"
-    ) else if /i "%%~A"=="--onefile_spec" (
-        set "DEFAULT_BUILD_MODE=onefile_spec"
     ) else (
         if "!USER_ARGS!"=="" (
             set "USER_ARGS=%%~A"
@@ -68,31 +51,30 @@ if not "!USER_ARGS!"=="" goto :PARSE_ARGS
 :SHOW_MENU
 cls
 echo ================================================================================
-echo                    Nuitka 批量编译打包调度中心 (Clang-Only)
+echo                         PyInstaller 批量打包调度中心
 echo ================================================================================
 echo   [独立单模块打包]
-echo     [1] ats       - ATS 操盘终端 (nuitka_build_ats_console_onlyClang.bat) (默认选项)
-echo     [2] tk        - 行情监控主程序 (nuitka_build_console_onlyClang.bat)
-echo     [3] multi     - 多周期策略 (nuitka_build_multi_period_dialog_onlyClang.bat)
+echo     [1] ats       - ATS 操盘终端 (instock-pyinstall-ats-exe.cmd)
+echo     [2] tk        - 行情监控主程序 (instock-pyinstall-to-exe.cmd)
+echo     [3] pop       - 人气共振 (instock-pyinstall-pop-exe.cmd)
+echo     [4] multi     - 多周期策略 (instock-pyinstall-QT_multi_period_dialog.cmd)
 echo.
 echo   [快捷组合与全量打包]
-echo     [4] tk,ats    - 常用双核组合 【先 TK，后 ATS】
-echo     [5] all       - 核心全量打包 【TK + ATS + MULTI】
+echo     [5] tk,ats    - 常用双核组合 【先 TK，后 ATS】
+echo     [6] all       - 核心全量打包 【TK + ATS + POP + MULTI】
 echo.
-echo   [维护与清理工具]
-echo     [6] clean     - 手动清理编译与解包缓存 (clean_nuitka_cache.bat)
+echo   [扩展模块与完整打包]
+echo     [7] manage    - 窗口管理器 (instock-pyinstall-manage-exe.cmd)
+echo     [8] all+      - 完整全量打包 【TK + ATS + POP + MULTI + MANAGE】
 echo.
 echo     [0] exit      - 退出
 echo ================================================================================
-echo 提示: 支持直接输入序号[如 1 或 4 或 6]，也支持输入模块名称[如 ats 或 clean]，
-echo       或者多选组合[用空格或逗号分隔，如 1 3 或 tk,ats]。
-echo       默认构建模式: !DEFAULT_BUILD_MODE! (可传参 --standalone 或 --onefile 覆盖)
+echo 提示: 支持直接输入序号[如 1 或 5 或 6]，也支持输入模块名称[如 ats 或 all]，
+echo       或者多选组合[用空格或逗号分隔，如 1 3 或 tk,ats,pop]。
 echo ================================================================================
-set "INPUT_CHOICE=1"
-set /p "INPUT_CHOICE=请输入打包选择 [默认 1 ATS操盘终端]: "
-if defined INPUT_CHOICE set "INPUT_CHOICE=!INPUT_CHOICE:"=!"
-if "!INPUT_CHOICE!"=="" set "INPUT_CHOICE=1"
-if "!INPUT_CHOICE!"==" " set "INPUT_CHOICE=1"
+set "INPUT_CHOICE="
+set /p INPUT_CHOICE=请输入打包选择 [默认 6 全部核心]:
+if "!INPUT_CHOICE!"=="" set "INPUT_CHOICE=6"
 
 set "USER_ARGS=!INPUT_CHOICE!"
 
@@ -112,33 +94,38 @@ for %%A in (!NORMALIZED_ARGS!) do (
     if /i "!ARG!"=="quit" goto :QUIT
     if /i "!ARG!"=="q" goto :QUIT
 
-    if /i "!ARG!"=="6" goto :DO_CLEAN
-    if /i "!ARG!"=="clean" goto :DO_CLEAN
-    if /i "!ARG!"=="clean_cache" goto :DO_CLEAN
-    if /i "!ARG!"=="clean-cache" goto :DO_CLEAN
-    if /i "!ARG!"=="clean_nuitka_cache" goto :DO_CLEAN
-
     if /i "!ARG!"=="1" set "RUN_LIST=!RUN_LIST! ats"
     if /i "!ARG!"=="ats" set "RUN_LIST=!RUN_LIST! ats"
 
     if /i "!ARG!"=="2" set "RUN_LIST=!RUN_LIST! tk"
     if /i "!ARG!"=="tk" set "RUN_LIST=!RUN_LIST! tk"
 
-    if /i "!ARG!"=="3" set "RUN_LIST=!RUN_LIST! multi"
+    if /i "!ARG!"=="3" set "RUN_LIST=!RUN_LIST! pop"
+    if /i "!ARG!"=="pop" set "RUN_LIST=!RUN_LIST! pop"
+
+    if /i "!ARG!"=="4" set "RUN_LIST=!RUN_LIST! multi"
     if /i "!ARG!"=="multi" set "RUN_LIST=!RUN_LIST! multi"
     if /i "!ARG!"=="qt" set "RUN_LIST=!RUN_LIST! multi"
     if /i "!ARG!"=="mp" set "RUN_LIST=!RUN_LIST! multi"
 
-    if /i "!ARG!"=="4" set "RUN_LIST=!RUN_LIST! tk ats"
+    if /i "!ARG!"=="5" set "RUN_LIST=!RUN_LIST! tk ats"
     if /i "!ARG!"=="tk_ats" set "RUN_LIST=!RUN_LIST! tk ats"
     if /i "!ARG!"=="tk-ats" set "RUN_LIST=!RUN_LIST! tk ats"
 
-    if /i "!ARG!"=="5" set "RUN_LIST=!RUN_LIST! tk ats multi"
-    if /i "!ARG!"=="all" set "RUN_LIST=!RUN_LIST! tk ats multi"
+    if /i "!ARG!"=="6" set "RUN_LIST=!RUN_LIST! tk ats pop multi"
+    if /i "!ARG!"=="all" set "RUN_LIST=!RUN_LIST! tk ats pop multi"
+
+    if /i "!ARG!"=="7" set "RUN_LIST=!RUN_LIST! manage"
+    if /i "!ARG!"=="manage" set "RUN_LIST=!RUN_LIST! manage"
+    if /i "!ARG!"=="win" set "RUN_LIST=!RUN_LIST! manage"
+
+    if /i "!ARG!"=="8" set "RUN_LIST=!RUN_LIST! tk ats pop multi manage"
+    if /i "!ARG!"=="all+" set "RUN_LIST=!RUN_LIST! tk ats pop multi manage"
+    if /i "!ARG!"=="full" set "RUN_LIST=!RUN_LIST! tk ats pop multi manage"
 )
 
 if "!RUN_LIST!"=="" (
-    echo [警告] 未识别到有效的打包目标代号: !USER_ARGS!
+    echo [警告] 未识别到有效的打包目标代号: %USER_ARGS%
     echo 请重新输入。
     goto :SHOW_MENU
 )
@@ -152,11 +139,10 @@ echo ===========================================================================
 if "!DRY_RUN!"=="1" (
     echo 【DRY-RUN 演练模式】 共 !PLAN_COUNT! 个任务: !RUN_LIST!
 ) else (
-    echo 【计划开始 Nuitka 批量打包】 共 !PLAN_COUNT! 个任务: !RUN_LIST!
+    echo 【计划开始批量打包】 共 !PLAN_COUNT! 个任务: !RUN_LIST!
 )
 echo 批处理基础目录: !CMD_BASE_DIR!
-echo 构建产物目录  : !BUILD_DIR!
-echo 构建模式选项  : !DEFAULT_BUILD_MODE!
+echo 构建产物目录  : !DIST_DIR!
 echo ================================================================================
 
 :: 记录整体开始时间戳与日期
@@ -181,10 +167,10 @@ set "GLOBAL_DIFF_STR=!DIFF_FORMATTED!"
 set "GLOBAL_DIFF_SEC=!DIFF_TOTAL_SEC!"
 
 :: ================================================================================
-:: 最终显示全部打包的结果集统计时间并以追加模式持久化到本地日志 (支持历次对比与缓存命中评估)
+:: 最终显示全部打包的结果集统计时间并以追加模式持久化到本地日志 (支持历次对比与缓存评估)
 :: ================================================================================
-if not exist "!BUILD_DIR!" mkdir "!BUILD_DIR!"
-set "SUMMARY_LOG=!BUILD_DIR!\nuitka_batch_build_last_summary.txt"
+if not exist "!DIST_DIR!" mkdir "!DIST_DIR!"
+set "SUMMARY_LOG=!DIST_DIR!\batch_build_last_summary.txt"
 
 :: 优先调用 Python 历史对比与缓存命中记录器 (追加模式)
 if exist "%ROOT_DIR%\tools\log_build_summary.py" (
@@ -192,16 +178,16 @@ if exist "%ROOT_DIR%\tools\log_build_summary.py" (
     for /L %%I in (1,1,!PLAN_COUNT!) do (
         set "MOD_ARGS=!MOD_ARGS! --module "%%I#!RES_%%I_MOD!#!RES_%%I_TITLE!#!RES_%%I_STATUS!#!RES_%%I_TIME!#!RES_%%I_SIZE!#!RES_%%I_EXE!""
     )
-    python "%ROOT_DIR%\tools\log_build_summary.py" --summary-log "!SUMMARY_LOG!" --build-dir "!BUILD_DIR!" --root-dir "%ROOT_DIR%" --build-mode "!DEFAULT_BUILD_MODE!" --plan-count !PLAN_COUNT! --success-count !SUCCESS_COUNT! --fail-count !FAIL_COUNT! --start-timestamp "!GLOBAL_START_TIMESTAMP!" --end-timestamp "!GLOBAL_END_TIMESTAMP!" --diff-sec !GLOBAL_DIFF_SEC! --diff-str "!GLOBAL_DIFF_STR!" !MOD_ARGS!
+    python "%ROOT_DIR%\tools\log_build_summary.py" --builder pyinstaller --summary-log "!SUMMARY_LOG!" --build-dir "!DIST_DIR!" --root-dir "%ROOT_DIR%" --build-mode "standard" --plan-count !PLAN_COUNT! --success-count !SUCCESS_COUNT! --fail-count !FAIL_COUNT! --start-timestamp "!GLOBAL_START_TIMESTAMP!" --end-timestamp "!GLOBAL_END_TIMESTAMP!" --diff-sec !GLOBAL_DIFF_SEC! --diff-str "!GLOBAL_DIFF_STR!" !MOD_ARGS!
     goto :AFTER_SUMMARY
 )
 
 :: 原生批处理兜底输出与追加记录 (追加模式)
-set "TEMP_SUMMARY=!BUILD_DIR!\nuitka_batch_build_current_run.tmp"
+set "TEMP_SUMMARY=!DIST_DIR!\batch_build_current_run.tmp"
 (
     echo.
     echo ================================================================================
-    echo          【Nuitka 批量打包结果集汇总与时间统计】(追加模式)
+    echo          【PyInstaller 批量打包结果集汇总与时间统计】(追加模式)
     echo ================================================================================
     echo 序号  模块标识   执行状态   单项耗时       产物大小      目标产物文件
     echo --------------------------------------------------------------------------------
@@ -213,8 +199,8 @@ set "TEMP_SUMMARY=!BUILD_DIR!\nuitka_batch_build_current_run.tmp"
     echo 任务启动时间 : !GLOBAL_START_TIMESTAMP!
     echo 任务完成时间 : !GLOBAL_END_TIMESTAMP!
     echo 总体总计耗时 : !GLOBAL_DIFF_STR! [共 !GLOBAL_DIFF_SEC! 秒]
-    echo 产物输出路径 : !BUILD_DIR!
-    echo 历史归档路径 : !BUILD_DIR!\archive [保留最近 7 天版本]
+    echo 产物输出路径 : !DIST_DIR!
+    echo 历史归档路径 : !DIST_DIR!\archive [保留最近 7 天版本]
     echo ================================================================================
 ) > "!TEMP_SUMMARY!" 2>nul
 type "!TEMP_SUMMARY!"
@@ -235,23 +221,33 @@ set /A "CURRENT_INDEX+=1"
 set "MOD=%~1"
 
 :: 映射具体信息
+if "!MOD!"=="tk" (
+    set "TARGET_SCRIPT=!CMD_BASE_DIR!\instock-pyinstall-to-exe.cmd"
+    set "MOD_TITLE=行情监控主程序[TK]"
+    set "TARGET_EXE=instock_MonitorTK.exe"
+)
 if "!MOD!"=="ats" (
-    set "TARGET_SCRIPT=!CMD_BASE_DIR!\nuitka_build_ats_console_onlyClang.bat"
+    set "TARGET_SCRIPT=!CMD_BASE_DIR!\instock-pyinstall-ats-exe.cmd"
     set "MOD_TITLE=ATS 操盘终端"
     set "TARGET_EXE=ATS_Terminal.exe"
 )
-if "!MOD!"=="tk" (
-    set "TARGET_SCRIPT=!CMD_BASE_DIR!\nuitka_build_console_onlyClang.bat"
-    set "MOD_TITLE=行情监控主程序[TK]"
-    set "TARGET_EXE=instock_MonitorTK_Nuita.exe"
+if "!MOD!"=="pop" (
+    set "TARGET_SCRIPT=!CMD_BASE_DIR!\instock-pyinstall-pop-exe.cmd"
+    set "MOD_TITLE=人气共振同步"
+    set "TARGET_EXE=人气共振2.22.exe"
 )
 if "!MOD!"=="multi" (
-    set "TARGET_SCRIPT=!CMD_BASE_DIR!\nuitka_build_multi_period_dialog_onlyClang.bat"
+    set "TARGET_SCRIPT=!CMD_BASE_DIR!\instock-pyinstall-QT_multi_period_dialog.cmd"
     set "MOD_TITLE=多周期策略窗口"
     set "TARGET_EXE=MultiPeriodTester.exe"
 )
+if "!MOD!"=="manage" (
+    set "TARGET_SCRIPT=!CMD_BASE_DIR!\instock-pyinstall-manage-exe.cmd"
+    set "MOD_TITLE=窗口布局管理器"
+    set "TARGET_EXE=manage_window_layout.exe"
+)
 
-set "EXE_PATH=!BUILD_DIR!\!TARGET_EXE!"
+set "EXE_PATH=!DIST_DIR!\!TARGET_EXE!"
 
 echo.
 echo ================================================================================
@@ -269,7 +265,7 @@ if not exist "!TARGET_SCRIPT!" (
     goto :RECORD_RESULT
 )
 
-:: 打包前自动归档：若已有旧版本，先备份到 build\archive\ 并清理超过 7 天的历史版本
+:: 打包前自动归档：若已有旧版本，先备份到 dist\archive\ 并清理超过 7 天的历史版本
 if exist "%ROOT_DIR%\tools\archive_build_exe.py" (
     if "!DRY_RUN!"=="1" (
         python "%ROOT_DIR%\tools\archive_build_exe.py" --target "!EXE_PATH!" --days 7 --stage pre-build --dry-run
@@ -282,16 +278,14 @@ if exist "%ROOT_DIR%\tools\archive_build_exe.py" (
 set "TASK_START_TIME=%TIME: =0%"
 
 if "!DRY_RUN!"=="1" (
-    echo [DRY-RUN 演练] 模拟调用 "!TARGET_SCRIPT!" !DEFAULT_BUILD_MODE! 成功完成 [不执行实际编译]
+    echo [DRY-RUN 演练] 模拟调用 "!TARGET_SCRIPT!" 成功完成 [不执行实际编译]
     set "TASK_EXIT_CODE=0"
     goto :AFTER_BUILD_RUN
 )
 
-:: 真实打包: 传入构建模式参数并利用 < nul 安全绕过子脚本中的 pause 与输入等待，实现无缝连续编译
-pushd "%ROOT_DIR%"
-call "!TARGET_SCRIPT!" !DEFAULT_BUILD_MODE! < nul
+:: 真实打包: 调用原批处理，利用 < nul 安全绕过子脚本末尾的 pause，绝不阻塞！
+call "!TARGET_SCRIPT!" < nul
 set "TASK_EXIT_CODE=!ERRORLEVEL!"
-popd
 
 :AFTER_BUILD_RUN
 :: 记录单项结束时间
@@ -321,11 +315,12 @@ if "!TASK_EXIT_CODE!"=="0" (
 set "STATUS=失败"
 set /A "FAIL_COUNT+=1"
 echo ================================================================================
-echo [ERROR] 模块 !MOD_TITLE! 构建失败 (ExitCode: !TASK_EXIT_CODE!)
-echo 提示: 如需紧急使用旧版，可前往 !BUILD_DIR!\archive\ 提取最近 7 天内的历史备份
+echo [ERROR] 模块 !MOD_TITLE! 打包失败 (ExitCode: !TASK_EXIT_CODE!)
+echo 提示: 如需紧急使用旧版，可前往 !DIST_DIR!\archive\ 提取最近 7 天内的历史备份
 echo ================================================================================
 
 :RECORD_RESULT
+:: 记录结果到数组
 set "RES_!CURRENT_INDEX!_MOD=!MOD!"
 set "RES_!CURRENT_INDEX!_TITLE=!MOD_TITLE!"
 set "RES_!CURRENT_INDEX!_STATUS=!STATUS!"
@@ -381,91 +376,6 @@ if !size_bytes! GTR 1048576 (
 )
 goto :eof
 
-:: ================================================================================
-:: 内部子例程: 手动清理 Nuitka 编译与解包缓存
-:: ================================================================================
-:DO_CLEAN
-cls
-echo ================================================================================
-echo          【手动清理模式】Nuitka 编译缓存与运行时解包目录清理 (clean_nuitka_cache)
-echo ================================================================================
-set "CLEAN_SCRIPT=!CMD_BASE_DIR!\clean_nuitka_cache.bat"
-if not exist "!CLEAN_SCRIPT!" set "CLEAN_SCRIPT=%ROOT_DIR%\clean_nuitka_cache.bat"
-if not exist "!CLEAN_SCRIPT!" set "CLEAN_SCRIPT=C:\Users\Johnson\clean_nuitka_cache.bat"
-
-if not exist "!CLEAN_SCRIPT!" (
-    echo [错误] 找不到清理脚本 clean_nuitka_cache.bat
-    echo 请确认该文件是否存在于工程根目录: %ROOT_DIR%
-    echo.
-    pause
-    if "%~1"=="" goto :SHOW_MENU
-    goto :QUIT
-)
-
-echo 目标清理脚本: !CLEAN_SCRIPT!
-echo 警告: 此操作将清空 .nuitka_cache、sccache、build 中间编译产物及 G:\Temp 单文件解包。
-echo       清理后下一次打包将无法使用增量缓存加速，需从零重新编译。
-echo.
-if "!DRY_RUN!"=="1" (
-    echo [DRY-RUN 演练] 模拟调用 "!CLEAN_SCRIPT!" [不执行实际清理]
-    echo.
-    if "%~1"=="" (
-        echo 按任意键返回调度中心主菜单...
-        pause >nul
-        goto :SHOW_MENU
-    )
-    goto :QUIT
-)
-
-set "CONFIRM_CLEAN=Y"
-if "%~1"=="" (
-    set /p "CONFIRM_CLEAN=确认执行深度清理缓存吗? [Y/n]: "
-    if "!CONFIRM_CLEAN!"=="" set "CONFIRM_CLEAN=Y"
-)
-
-if /i not "!CONFIRM_CLEAN!"=="Y" (
-    echo.
-    echo [取消] 用户取消清理操作。
-    echo.
-    if "%~1"=="" (
-        timeout /t 2 >nul
-        goto :SHOW_MENU
-    )
-    goto :QUIT
-)
-
-echo.
-echo 正在执行清理...
-call "!CLEAN_SCRIPT!" -y
-echo.
-echo ================================================================================
-echo [完成] 缓存清理完毕。工作区已恢复纯净状态。
-echo ================================================================================
-if "%~1"=="" (
-    echo 按任意键返回调度中心主菜单...
-    pause >nul
-    goto :SHOW_MENU
-) else (
-    goto :QUIT
-)
-
 :QUIT
-echo [已退出 Nuitka 批量打包调度中心]
+echo [已退出批量打包调度中心]
 exit /b 0
-"""
-
-def generate():
-    crlf_content = CMD_CONTENT.replace("\r\n", "\n").replace("\n", "\r\n")
-    targets = [
-        Path("instock-nuitka-batch.cmd"),
-        Path("C:/Users/Johnson/instock-nuitka-batch.cmd"),
-    ]
-    for t in targets:
-        try:
-            t.write_bytes(crlf_content.encode("utf-8"))
-            print(f"[OK] Generated {t} with CRLF ({len(crlf_content)} bytes)")
-        except Exception as e:
-            print(f"[ERROR] Failed to write {t}: {e}")
-
-if __name__ == "__main__":
-    generate()

@@ -4066,6 +4066,40 @@ class TDXRealtimeFetcher:
         snapshot = VWAPFactory.get_instance().sync_frame(clean_code, frame, is_index=is_index)
         return frame, snapshot
 
+    def get_cached_kline_bars(self, code: str, category: str = "day", min_count: int = 1) -> Optional[pd.DataFrame]:
+        """
+        【⚡ 只读安全 K 线内存缓存查询接口】
+        供 UI、SBC 图表及高频指标计算安全查询当前内存中存在的 K 线缓存。
+        绝对不发起任何网络 I/O 或套接字操作，未命中时安全返回 None。
+        """
+        c_clean = str(code).zfill(6)
+        cat_str = str(category).lower().strip()
+        if not hasattr(self, "_kline_bars_cache"):
+            return None
+        now_ts = time.time()
+
+        if cat_str in ("day", "d", "日线", "日k", "日", "week", "w", "周线", "周k", "周", "month", "m", "月线", "月k", "月"):
+            cache_ttl = 180.0
+        elif cat_str in ("60m", "60f", "60min", "1h", "120m", "120f", "120min", "2h", "2d", "3d"):
+            cache_ttl = 30.0
+        elif cat_str in ("15m", "15f", "15min", "30m", "30f", "30min"):
+            cache_ttl = 15.0
+        else:
+            cache_ttl = 5.0
+
+        best_df = None
+        best_ts = 0.0
+        for (k_code, k_cat, k_cnt), (c_ts, c_df) in list(self._kline_bars_cache.items()):
+            if k_code == c_clean and k_cat == cat_str:
+                if (now_ts - c_ts) < cache_ttl and c_df is not None and not c_df.empty:
+                    if len(c_df) >= min_count and c_ts > best_ts:
+                        best_ts = c_ts
+                        best_df = c_df
+
+        if best_df is not None:
+            return best_df.copy()
+        return None
+
     def fetch_kline_bars(self, code: str, category: str = "5m", count: int = 150) -> pd.DataFrame:
         """
         拉取不同周期的 K 线数据 (5m, 30m, 60m, day)，并计算 MA5, MA20, MA60, Bollinger 通道 (GG 通道) 与 Volume
