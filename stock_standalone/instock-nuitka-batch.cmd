@@ -173,14 +173,27 @@ set "GLOBAL_DIFF_STR=!DIFF_FORMATTED!"
 set "GLOBAL_DIFF_SEC=!DIFF_TOTAL_SEC!"
 
 :: ================================================================================
-:: 最终显示全部打包的结果集统计时间并持久化到本地日志
+:: 最终显示全部打包的结果集统计时间并以追加模式持久化到本地日志 (支持历次对比与缓存命中评估)
 :: ================================================================================
 if not exist "!BUILD_DIR!" mkdir "!BUILD_DIR!"
 set "SUMMARY_LOG=!BUILD_DIR!\nuitka_batch_build_last_summary.txt"
+
+:: 优先调用 Python 历史对比与缓存命中记录器 (追加模式)
+if exist "%ROOT_DIR%\tools\log_build_summary.py" (
+    set "MOD_ARGS="
+    for /L %%I in (1,1,!PLAN_COUNT!) do (
+        set "MOD_ARGS=!MOD_ARGS! --module "%%I#!RES_%%I_MOD!#!RES_%%I_TITLE!#!RES_%%I_STATUS!#!RES_%%I_TIME!#!RES_%%I_SIZE!#!RES_%%I_EXE!""
+    )
+    python "%ROOT_DIR%\tools\log_build_summary.py" --summary-log "!SUMMARY_LOG!" --build-dir "!BUILD_DIR!" --root-dir "%ROOT_DIR%" --build-mode "!DEFAULT_BUILD_MODE!" --plan-count !PLAN_COUNT! --success-count !SUCCESS_COUNT! --fail-count !FAIL_COUNT! --start-timestamp "!GLOBAL_START_TIMESTAMP!" --end-timestamp "!GLOBAL_END_TIMESTAMP!" --diff-sec !GLOBAL_DIFF_SEC! --diff-str "!GLOBAL_DIFF_STR!" !MOD_ARGS!
+    goto :AFTER_SUMMARY
+)
+
+:: 原生批处理兜底输出与追加记录 (追加模式)
+set "TEMP_SUMMARY=!BUILD_DIR!\nuitka_batch_build_current_run.tmp"
 (
     echo.
     echo ================================================================================
-    echo                      【Nuitka 批量打包结果集汇总与时间统计】
+    echo          【Nuitka 批量打包结果集汇总与时间统计】(追加模式)
     echo ================================================================================
     echo 序号  模块标识   执行状态   单项耗时       产物大小      目标产物文件
     echo --------------------------------------------------------------------------------
@@ -195,10 +208,13 @@ set "SUMMARY_LOG=!BUILD_DIR!\nuitka_batch_build_last_summary.txt"
     echo 产物输出路径 : !BUILD_DIR!
     echo 历史归档路径 : !BUILD_DIR!\archive [保留最近 7 天版本]
     echo ================================================================================
-) > "!SUMMARY_LOG!" 2>nul
+) > "!TEMP_SUMMARY!" 2>nul
+type "!TEMP_SUMMARY!"
+type "!TEMP_SUMMARY!" >> "!SUMMARY_LOG!" 2>nul
+if exist "!TEMP_SUMMARY!" del /f /q "!TEMP_SUMMARY!" >nul 2>&1
 
-type "!SUMMARY_LOG!"
-echo 统计摘要已保存至: !SUMMARY_LOG!
+:AFTER_SUMMARY
+echo 统计摘要已追加至历史日志: !SUMMARY_LOG!
 echo.
 pause
 goto :eof

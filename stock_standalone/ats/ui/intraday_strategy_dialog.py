@@ -534,6 +534,12 @@ class SBCChartCanvas(QWidget):
         if df_view is None or df_view.empty:
             return np.array([], dtype=float)
 
+        # 0. 优先复用前置预计算完成的常驻列 (_bar_vol_computed)
+        if "_bar_vol_computed" in df_view.columns:
+            arr_computed = df_view["_bar_vol_computed"].to_numpy(dtype=float)
+            if len(arr_computed) > 0:
+                return np.maximum(0.0, arr_computed)
+
         # 1. 优先使用明细独立 Bar 成交量 (bar_vol / bar_volume / tick_vol)
         for col in ("bar_vol", "bar_volume", "tick_vol", "minute_vol"):
             if col in df_view.columns:
@@ -659,6 +665,39 @@ class SBCChartCanvas(QWidget):
             end_i = total_n - 1
         return self.df_intraday.iloc[start_i:end_i + 1], start_i, end_i
 
+    def _get_cached_times_all(self) -> Tuple[List[str], Dict[str, int]]:
+        """【⚡ 预缓存时序索引】缓存 DataFrame Index 字符串列表与反查字典，消灭单帧数十次 astype(str) 转换"""
+        if self.df_intraday is None or self.df_intraday.empty:
+            return [], {}
+        df_id = id(self.df_intraday)
+        df_len = len(self.df_intraday)
+        if getattr(self, "_cached_times_token", None) == (df_id, df_len):
+            return self._cached_times_all, self._cached_time_to_idx
+        t_all = [str(x) for x in self.df_intraday.index]
+        t_map = {t: i for i, t in enumerate(t_all)}
+        self._cached_times_token = (df_id, df_len)
+        self._cached_times_all = t_all
+        self._cached_time_to_idx = t_map
+        return t_all, t_map
+
+    def _get_cached_kline_extremes(self, highs: np.ndarray, lows: np.ndarray) -> Tuple[float, float]:
+        """【⚡ 预缓存 K 线全局极值】缓存最高最低价，杜绝每帧自绘时全量提取 DataFrame 数组"""
+        if self.df_intraday is None or self.df_intraday.empty:
+            fh = float(np.max(highs)) if len(highs) > 0 else 0.0
+            fl = float(np.min(lows)) if len(lows) > 0 else 0.0
+            return fh, fl
+        df_id = id(self.df_intraday)
+        df_len = len(self.df_intraday)
+        if getattr(self, "_cached_kline_extremes_token", None) == (df_id, df_len):
+            return self._cached_kline_extremes_val
+        all_highs = self.df_intraday['high'].astype(float).values if 'high' in self.df_intraday.columns else highs
+        all_lows = self.df_intraday['low'].astype(float).values if 'low' in self.df_intraday.columns else lows
+        fh = float(np.max(all_highs)) if len(all_highs) > 0 else 0.0
+        fl = float(np.min(all_lows)) if len(all_lows) > 0 else 0.0
+        self._cached_kline_extremes_token = (df_id, df_len)
+        self._cached_kline_extremes_val = (fh, fl)
+        return fh, fl
+
     def _map_signal_to_visible_index(
         self,
         sig: Dict[str, Any],
@@ -673,8 +712,7 @@ class SBCChartCanvas(QWidget):
            若信号发生在当前可视切片 [start_i, end_i] 之外，直接返回 None，绝不在屏幕上绘制！
         2. 原生 bar_idx 全局绝对索引精准匹配：
            若信号携带 'bar_idx'，直接与 [start_i, end_i] 进行边界裁决；
-        3. 全量数据时序反查唯一 global_idx：
-           结合 date 与 timestamp/time 在全量 self.df_intraday 中反查唯一全局索引；
+        3. 全量数据时序反查唯一 global_idx (已升级为 O(1) 字典预索引哈希命中)；
         4. 严禁使用模糊的 'times_5'（后5位HH:MM）跨日乱投射，杜绝历史多日买卖点错误投影到放大当日。
         """
         if self.df_intraday is None or self.df_intraday.empty or df_view.empty:
@@ -695,15 +733,15 @@ class SBCChartCanvas(QWidget):
             except (ValueError, TypeError):
                 pass
 
-        # 2. 从全量时间序列中反查绝对唯一时间
+        # 2. 从全量时间序列中反查绝对唯一时间 (O(1) 预索引加速)
         sig_t = str(sig.get("timestamp", sig.get("time", "")) if isinstance(sig, dict) else getattr(sig, "timestamp", getattr(sig, "time", ""))).strip()
         sig_d = str(sig.get("date", "") if isinstance(sig, dict) else getattr(sig, "date", "")).strip()
 
-        times_all = list(self.df_intraday.index.astype(str))
+        times_all, time_to_idx = self._get_cached_times_all()
 
-        # 2.1 完整时间戳精确匹配 (例如 "2026-09-03 09:35:00" 或 "09-03 09:35")
-        if sig_t in times_all:
-            g_idx = times_all.index(sig_t)
+        # 2.1 完整时间戳精确匹配 (O(1) 命中)
+        if sig_t in time_to_idx:
+            g_idx = time_to_idx[sig_t]
             if start_i <= g_idx <= end_i:
                 return g_idx - start_i
             return None
@@ -720,11 +758,12 @@ class SBCChartCanvas(QWidget):
                     return None
 
         # 2.3 若在当前局部视图 df_view 索引中能直接找到完整 sig_t
-        view_times = list(df_view.index.astype(str))
-        if sig_t in view_times:
-            return view_times.index(sig_t)
+        if sig_t in time_to_idx:
+            g_idx = time_to_idx[sig_t]
+            if start_i <= g_idx <= end_i:
+                return g_idx - start_i
 
-        # 2.4 如果经过严格时序匹配，该信号根本不属于当前可视范围，坚决不绘制（严禁降级到 HH:MM 跨日乱投射）
+        # 2.4 如果经过严格时序匹配，该信号根本不属于当前可视范围，坚决不绘制
         return None
 
     def keyPressEvent(self, event):
@@ -940,15 +979,19 @@ class SBCChartCanvas(QWidget):
         c_clean = "".join(filter(str.isdigit, str(self.code))).zfill(6) if self.code else "688826"
         p_mode = str(self.period_mode).lower()
 
-        # 1. 确保数据充足：若数据为空或过短，尝试从 TDX API 直连拉取
+        # 1. 确保数据充足：若数据为空或过短，优先读取已存在的缓存；若需补拉则异步委托，严禁阻塞 UI 线程
         if self.df_intraday is None or len(self.df_intraday) < 15:
             try:
                 from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
                 fetcher = TDXRealtimeFetcher.get_instance()
                 cat_req = p_mode if p_mode in ("5m", "15m", "30m", "60m", "day", "2k", "3k", "week", "month") else "60m"
-                df_k = fetcher.fetch_kline_bars(c_clean, category=cat_req, count=150)
-                if not df_k.empty and len(df_k) >= 15:
+                df_k = fetcher.get_cached_kline_bars(c_clean, category=cat_req) if hasattr(fetcher, "get_cached_kline_bars") else None
+                if df_k is not None and not df_k.empty and len(df_k) >= 15:
                     self.df_intraday = df_k
+                else:
+                    parent_win = self.window()
+                    if parent_win and hasattr(parent_win, "reload_chart"):
+                        QTimer.singleShot(0, lambda: parent_win.reload_chart(force_sync=False))
             except Exception as e_tdx:
                 logger.debug(f"[SBC自适应测算] TDX拉取异常: {e_tdx}")
 
@@ -1248,11 +1291,27 @@ class SBCChartCanvas(QWidget):
                             days_detail.append((d_short, round(amp, 1)))
                     days_detail = days_detail[-5:]
 
-            # ── 3. 兜底方案：仅在 1m 或短周期分钟 K 线且本地无多日数据时，才从日 K 缓存提取 ──
+            # ── 3. 兜底方案：仅在 1m 或短周期分钟 K 线且本地无多日数据时，优先读取日 K 内存缓存，严禁阻塞 UI 线程 ──
             if not days_detail and p_mode != "1m":
                 from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
                 fetcher = TDXRealtimeFetcher.get_instance()
-                df_day = fetcher.fetch_kline_bars(c_clean, category="day", count=8)
+                df_day = fetcher.get_cached_kline_bars(c_clean, category="day") if hasattr(fetcher, "get_cached_kline_bars") else None
+                if df_day is None or df_day.empty:
+                    if not hasattr(self, "_amplitude_fetching_codes"):
+                        self._amplitude_fetching_codes = {}
+                    now_t = time.time()
+                    last_try = self._amplitude_fetching_codes.get(c_clean, 0.0)
+                    if (now_t - last_try) > 10.0:  # 10 秒防重入与失败冷却
+                        self._amplitude_fetching_codes[c_clean] = now_t
+                        def _async_fetch_day():
+                            try:
+                                d_df = fetcher.fetch_kline_bars(c_clean, category="day", count=8)
+                                if d_df is not None and not d_df.empty:
+                                    # 明确传递 self 作为 context object，安全回到主线程事件循环
+                                    QTimer.singleShot(0, self, lambda: self.update_amplitude_data(c_clean) if hasattr(self, "update_amplitude_data") else None)
+                            except Exception:
+                                pass
+                        threading.Thread(target=_async_fetch_day, daemon=True).start()
 
                 if df_day is not None and not df_day.empty and len(df_day) >= 2:
                     highs = df_day['high'].astype(float).values
@@ -1384,25 +1443,31 @@ class SBCChartCanvas(QWidget):
             cur_dx += fm_r.horizontalAdvance(item_txt) + 2
 
     def wheelEvent(self, event):
-        """🔍 鼠标滚轮缩放：以鼠标所在 X 坐标为锚点进行平滑缩放"""
+        """⚡ 鼠标滚轮缩放走势图 (100% 对齐通达信手感)：向前滚放大，向后滚缩小，按住 Alt 同步同组窗口"""
         if self.df_intraday is None or self.df_intraday.empty:
             return
 
-        delta_y = event.angleDelta().y()
-        if delta_y == 0:
+        delta = event.angleDelta().y()
+        if delta == 0:
+            delta = event.angleDelta().x()
+        if delta == 0:
+            delta = event.pixelDelta().y()
+        if delta == 0:
+            delta = event.pixelDelta().x()
+        if delta == 0:
             return
 
-        margin_left = self.MARGIN_LEFT
-        margin_right = self.MARGIN_RIGHT
-        chart_w = max(10, self.width() - margin_left - margin_right)
-        mouse_pos = event.position() if hasattr(event, "position") else event.pos()
-        rel_x = max(0.0, min(1.0, (mouse_pos.x() - margin_left) / float(chart_w)))
+        is_alt = is_alt_modifier_active(event)
+        if is_alt:
+            parent_win = self.window()
+            sync_all_open_sbc_zoom(in_=(delta > 0), trigger_dlg=parent_win if isinstance(parent_win, SBCIntradayChartDialog) else None)
+            event.accept()
+            return
 
-        if delta_y > 0:
-            self._zoom_step(in_=True, factor=0.80, anchor_rel_x=rel_x)
+        if delta > 0:
+            self.zoom_in()
         else:
-            self._zoom_step(in_=False, factor=1.25, anchor_rel_x=rel_x)
-
+            self.zoom_out()
         event.accept()
 
     def mousePressEvent(self, event):
@@ -1566,13 +1631,13 @@ class SBCChartCanvas(QWidget):
                 event.accept()
                 return
 
-        # 4. 🎯 正常悬停：记录 hover_pos 触发实时十字光标与价格浮标
-        # 🚀 极致性能优化：增加 25ms 悬停渲染节流与像素位移阈值，避免 1000Hz 鼠标滑动导致 CPU 飙高与卡顿
+        # 🚀 极致性能优化：增加 30ms 严格时间窗悬停渲染节流与像素位移阈值，彻底阻断 1000Hz 鼠标滑动导致 CPU 飙高
         self._hover_pos = mouse_pos
         now_t = time.time()
         last_hover_t = getattr(self, '_last_hover_update_t', 0.0)
         last_hover_pt = getattr(self, '_last_hover_pos', None)
-        if (now_t - last_hover_t >= 0.025) or (last_hover_pt is None or (abs(mouse_pos.x() - last_hover_pt.x()) > 3 or abs(mouse_pos.y() - last_hover_pt.y()) > 3)):
+        has_moved = (last_hover_pt is None or abs(mouse_pos.x() - last_hover_pt.x()) >= 2 or abs(mouse_pos.y() - last_hover_pt.y()) >= 2)
+        if has_moved and (now_t - last_hover_t >= 0.030 or last_hover_pt is None):
             self._last_hover_update_t = now_t
             self._last_hover_pos = mouse_pos
             self.update()
@@ -1689,33 +1754,6 @@ class SBCChartCanvas(QWidget):
             return
 
         super().mouseReleaseEvent(event)
-
-    def wheelEvent(self, event):
-        """⚡ 鼠标滚轮缩放走势图 (100% 对齐通达信手感)：向前滚放大，向后滚缩小，按住 Alt 同步同组窗口"""
-        delta = event.angleDelta().y()
-        if delta == 0:
-            delta = event.angleDelta().x()
-        if delta == 0:
-            delta = event.pixelDelta().y()
-        if delta == 0:
-            delta = event.pixelDelta().x()
-        is_alt = is_alt_modifier_active(event)
-        if delta > 0:
-            if is_alt:
-                parent_win = self.window()
-                sync_all_open_sbc_zoom(in_=True, trigger_dlg=parent_win if isinstance(parent_win, SBCIntradayChartDialog) else None)
-            else:
-                self.zoom_in()
-            event.accept()
-        elif delta < 0:
-            if is_alt:
-                parent_win = self.window()
-                sync_all_open_sbc_zoom(in_=False, trigger_dlg=parent_win if isinstance(parent_win, SBCIntradayChartDialog) else None)
-            else:
-                self.zoom_out()
-            event.accept()
-        else:
-            super().wheelEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         """⚡ 鼠标双击事件：
@@ -2355,6 +2393,7 @@ class SBCChartCanvas(QWidget):
         RIGHT_PAD_RATIO = 0.05
         right_pad_px = max(26, min(48, int(chart_w * RIGHT_PAD_RATIO)))
         active_chart_w = max(10, chart_w - right_pad_px)
+        vols_intraday = self._extract_intraday_bar_volumes(df_view)
 
         self._coord_info = {
             "ready": True,
@@ -2372,7 +2411,7 @@ class SBCChartCanvas(QWidget):
             "times": times,
             "prices": prices,
             "vwaps": vwaps,
-            "vols": self._extract_intraday_bar_volumes(df_view),
+            "vols": vols_intraday,
             "open_price": op_ref,
             "n_items": len(prices),
         }
@@ -2762,37 +2801,53 @@ class SBCChartCanvas(QWidget):
                     painter.drawText(int(box_x + box_pad), int(box_y + 14), marker["label"])
             painter.restore()
 
-        # 🌟 绘制分时图上的买卖信号点与悬浮 Tag (自适应简略显示 + 2D真实碰撞避让 + 半透明毛玻璃 + 高对比度设计)
+        # 🌟 绘制分时图上的买卖信号点与悬浮 Tag (自适应简略显示 + 2D真实碰撞避让 + 布局缓存 + 半透明毛玻璃 + 高对比度设计)
         if self.signals:
-            times_raw = list(df_view.index.astype(str))
-            times_5 = [t[-5:] if len(t) >= 5 else t for t in times_raw]
+            # 🚀 性能优化：引入 2D 防碰撞避让布局缓存。当视口、几何与选中状态未变时，0ms 极速复用上一帧布局
+            layout_token = (
+                id(self.signals),
+                len(self.signals),
+                start_i,
+                end_i,
+                int(chart_w),
+                int(chart_h),
+                int(active_chart_w),
+                int(main_h),
+                getattr(self, "selected_trade_id", None),
+                round(min_p, 4),
+                round(max_p, 4)
+            )
 
-            placed_boxes = []  # 记录已放置标签的真实 2D 包围盒 QRect，杜绝重叠堆叠
+            if getattr(self, "_cached_intraday_layout_token", None) == layout_token and hasattr(self, "_cached_intraday_layout_items"):
+                layout_items = self._cached_intraday_layout_items
+                self._signal_hit_boxes.extend(self._cached_intraday_hit_boxes)
+            else:
+                layout_items = []
+                cached_hit_boxes = []
+                placed_boxes = []
 
-            for sig in self.signals:
-                sig_p = float(sig.get("price", 0.0) if isinstance(sig, dict) else getattr(sig, "price", 0.0))
-                if sig_p <= 0:
-                    continue
+                for sig in self.signals:
+                    sig_p = float(sig.get("price", 0.0) if isinstance(sig, dict) else getattr(sig, "price", 0.0))
+                    if sig_p <= 0:
+                        continue
 
-                sig_t = str(sig.get("timestamp", sig.get("time", "")) if isinstance(sig, dict) else getattr(sig, "timestamp", getattr(sig, "time", ""))).strip()
-                action_type = str(sig.get("action", sig.get("type", "sell")) if isinstance(sig, dict) else getattr(sig, "action", getattr(sig, "type", "sell"))).lower()
-                is_buy = "buy" in action_type or "买" in action_type
-                trade_id_val = sig.get("trade_id") if isinstance(sig, dict) else getattr(sig, "trade_id", None)
-                is_selected_trade = (trade_id_val is not None and trade_id_val == self.selected_trade_id)
+                    action_type = str(sig.get("action", sig.get("type", "sell")) if isinstance(sig, dict) else getattr(sig, "action", getattr(sig, "type", "sell"))).lower()
+                    is_buy = "buy" in action_type or "买" in action_type
+                    trade_id_val = sig.get("trade_id") if isinstance(sig, dict) else getattr(sig, "trade_id", None)
+                    is_selected_trade = (trade_id_val is not None and trade_id_val == self.selected_trade_id)
 
-                border_color = QColor("#FFD700") if is_selected_trade else (QColor("#00ff88") if is_buy else QColor("#ff4d4f"))
-                bg_color = QColor(48, 38, 10, 230) if is_selected_trade else (QColor(10, 32, 18, 190) if is_buy else QColor(36, 12, 16, 190))
-                fg_color = QColor("#ffffff")
-                dot_color = QColor("#FFD700") if is_selected_trade else (QColor("#00ff88") if is_buy else QColor("#ff4d4f"))
+                    border_color = QColor("#FFD700") if is_selected_trade else (QColor("#00ff88") if is_buy else QColor("#ff4d4f"))
+                    bg_color = QColor(48, 38, 10, 230) if is_selected_trade else (QColor(10, 32, 18, 190) if is_buy else QColor(36, 12, 16, 190))
+                    fg_color = QColor("#ffffff")
+                    dot_color = QColor("#FFD700") if is_selected_trade else (QColor("#00ff88") if is_buy else QColor("#ff4d4f"))
 
-                y_s = price_to_y(sig_p)
+                    y_s = price_to_y(sig_p)
 
-                # 寻找在当前可视切片时间轴上的精确对应位置 idx_s (严格视口边界裁剪，杜绝放大时历史信号跨日乱投射)
-                idx_s = self._map_signal_to_visible_index(sig, df_view, start_i, end_i)
-                if idx_s is None or idx_s < 0:
-                    continue
+                    # 寻找在当前可视切片时间轴上的精确对应位置 idx_s (严格视口边界裁剪，杜绝放大时历史信号跨日乱投射)
+                    idx_s = self._map_signal_to_visible_index(sig, df_view, start_i, end_i)
+                    if idx_s is None or idx_s < 0:
+                        continue
 
-                if idx_s >= 0:
                     x_s = time_to_x(idx_s)
                     pnl_pct_v = sig.get("pnl_pct") if isinstance(sig, dict) else getattr(sig, "pnl_pct", None)
 
@@ -2812,7 +2867,6 @@ class SBCChartCanvas(QWidget):
                             else:
                                 lbl_text = f"卖:{sig_p:.1f}"
 
-                    painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
                     fm = painter.fontMetrics()
                     tw_k = fm.horizontalAdvance(lbl_text) + 8
                     th_k = fm.height() + 4
@@ -2842,54 +2896,90 @@ class SBCChartCanvas(QWidget):
                         if found_rect:
                             break
 
+                    mb_w, mb_h = 16, 16
                     if not found_rect:
                         # 极端拥挤场景：降级为微型紧凑圆标 Micro-Badge (16x16px)
                         is_micro_mode = True
-                        mb_w, mb_h = 16, 16
                         mb_x = int(max(margin_left + 2, min(margin_left + chart_w - mb_w - 2, x_s - mb_w / 2)))
                         mb_y = int(max(margin_top + 2, min(margin_top + chart_h - mb_h - 2, target_y_base)))
                         found_rect = QRect(mb_x, mb_y, mb_w, mb_h)
 
                     placed_boxes.append(found_rect)
-                    tag_x, tag_y = found_rect.x(), found_rect.y()
-                    tw_actual, th_actual = found_rect.width(), found_rect.height()
 
-                    # 注册点击区域供鼠标选中与高亮
-                    self._signal_hit_boxes.append({
+                    hit_box = {
                         "rect": found_rect,
                         "trade_id": trade_id_val,
                         "sig": sig,
                         "x": x_s,
                         "y": y_s,
                         "is_buy": is_buy
+                    }
+                    cached_hit_boxes.append(hit_box)
+                    self._signal_hit_boxes.append(hit_box)
+
+                    layout_items.append({
+                        "found_rect": found_rect,
+                        "x_s": x_s,
+                        "y_s": y_s,
+                        "is_buy": is_buy,
+                        "is_selected_trade": is_selected_trade,
+                        "lbl_text": lbl_text,
+                        "border_color": border_color,
+                        "bg_color": bg_color,
+                        "fg_color": fg_color,
+                        "dot_color": dot_color,
+                        "is_micro_mode": is_micro_mode,
+                        "mb_w": mb_w,
+                        "mb_h": mb_h,
                     })
 
-                    # 1. 绘制垂直贯穿虚线与引线
-                    painter.setPen(QPen(QColor(border_color.red(), border_color.green(), border_color.blue(), 90), 1, Qt.PenStyle.DashLine))
-                    painter.drawLine(int(x_s), int(margin_top + chart_h), int(x_s), int(margin_top))
+                self._cached_intraday_layout_token = layout_token
+                self._cached_intraday_layout_items = layout_items
+                self._cached_intraday_hit_boxes = cached_hit_boxes
 
-                    # 2. 从标签中心向实际成交价连接精巧微引线
-                    painter.setPen(QPen(QColor(border_color.red(), border_color.green(), border_color.blue(), 170), 1, Qt.PenStyle.SolidLine))
-                    painter.drawLine(int(x_s), int(y_s), int(tag_x + tw_actual / 2), int(tag_y + th_actual if tag_y < y_s else tag_y))
+            # 批量绘制所有标签
+            painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+            for item in layout_items:
+                found_rect = item["found_rect"]
+                x_s = item["x_s"]
+                y_s = item["y_s"]
+                is_buy = item["is_buy"]
+                is_selected_trade = item["is_selected_trade"]
+                lbl_text = item["lbl_text"]
+                border_color = item["border_color"]
+                bg_color = item["bg_color"]
+                fg_color = item["fg_color"]
+                dot_color = item["dot_color"]
+                is_micro_mode = item["is_micro_mode"]
+                tag_x, tag_y = found_rect.x(), found_rect.y()
+                tw_actual, th_actual = found_rect.width(), found_rect.height()
 
-                    # 3. 实际成交价处的精巧圆点
-                    painter.setPen(QPen(QColor("#ffffff") if not is_selected_trade else QColor("#FFD700"), 1.2))
-                    painter.setBrush(QBrush(dot_color))
-                    painter.drawEllipse(int(x_s - 3), int(y_s - 3), 6, 6)
+                # 1. 绘制垂直贯穿虚线与引线
+                painter.setPen(QPen(QColor(border_color.red(), border_color.green(), border_color.blue(), 90), 1, Qt.PenStyle.DashLine))
+                painter.drawLine(int(x_s), int(margin_top + chart_h), int(x_s), int(margin_top))
 
-                    # 4. 绘制标签实体 (微型徽章模式 vs 紧凑胶囊模式)
-                    if is_micro_mode:
-                        painter.setPen(QPen(border_color, 1.5 if is_selected_trade else 1.0))
-                        painter.setBrush(QBrush(bg_color))
-                        painter.drawEllipse(tag_x, tag_y, mb_w, mb_h)
-                        painter.setPen(QPen(fg_color))
-                        painter.drawText(found_rect, Qt.AlignmentFlag.AlignCenter, "▲" if is_buy else "▼")
-                    else:
-                        painter.setPen(QPen(border_color, 1.8 if is_selected_trade else 1.2))
-                        painter.setBrush(QBrush(bg_color))
-                        painter.drawRoundedRect(tag_x, tag_y, tw_actual, th_actual, 3, 3)
-                        painter.setPen(QPen(fg_color))
-                        painter.drawText(tag_x + 4, tag_y + th_actual - 4, lbl_text)
+                # 2. 从标签中心向实际成交价连接精巧微引线
+                painter.setPen(QPen(QColor(border_color.red(), border_color.green(), border_color.blue(), 170), 1, Qt.PenStyle.SolidLine))
+                painter.drawLine(int(x_s), int(y_s), int(tag_x + tw_actual / 2), int(tag_y + th_actual if tag_y < y_s else tag_y))
+
+                # 3. 实际成交价处的精巧圆点
+                painter.setPen(QPen(QColor("#ffffff") if not is_selected_trade else QColor("#FFD700"), 1.2))
+                painter.setBrush(QBrush(dot_color))
+                painter.drawEllipse(int(x_s - 3), int(y_s - 3), 6, 6)
+
+                # 4. 绘制标签实体 (微型徽章模式 vs 紧凑胶囊模式)
+                if is_micro_mode:
+                    painter.setPen(QPen(border_color, 1.5 if is_selected_trade else 1.0))
+                    painter.setBrush(QBrush(bg_color))
+                    painter.drawEllipse(tag_x, tag_y, item["mb_w"], item["mb_h"])
+                    painter.setPen(QPen(fg_color))
+                    painter.drawText(found_rect, Qt.AlignmentFlag.AlignCenter, "▲" if is_buy else "▼")
+                else:
+                    painter.setPen(QPen(border_color, 1.8 if is_selected_trade else 1.2))
+                    painter.setBrush(QBrush(bg_color))
+                    painter.drawRoundedRect(tag_x, tag_y, tw_actual, th_actual, 3, 3)
+                    painter.setPen(QPen(fg_color))
+                    painter.drawText(tag_x + 4, tag_y + th_actual - 4, lbl_text)
 
             # 绘制当前选中的回测交易收益光束与详情卡片
             if self.selected_trade_id is not None:
@@ -2901,8 +2991,8 @@ class SBCChartCanvas(QWidget):
             painter.setPen(QPen(QColor("#25283b"), 1, Qt.PenStyle.SolidLine))
             painter.drawLine(int(margin_left), int(vol_top), int(margin_left + chart_w), int(vol_top))
 
-            # 2. 提取并计算成交量柱子 (调用拆分算法提取每分钟真实独立增量)
-            vols = self._extract_intraday_bar_volumes(df_view)
+            # 2. 提取并计算成交量柱子 (复用本帧已计算好的增量成交量 vols_intraday，杜绝重复计算)
+            vols = vols_intraday
             if len(vols) > 0:
                 max_vol = float(np.nanmax(vols)) if len(vols) > 0 else 1.0
                 if max_vol <= 0:
@@ -3198,11 +3288,8 @@ class SBCChartCanvas(QWidget):
         global_chan_start = max(0, total_n - chan_len)
         local_chan_start = max(0, global_chan_start - start_i)
 
-        # 全图最高最低价与波段空间 (用于 Fibonacci 黄金分割阶梯稳定呈现)
-        all_highs = self.df_intraday['high'].astype(float).values if 'high' in self.df_intraday.columns else highs
-        all_lows = self.df_intraday['low'].astype(float).values if 'low' in self.df_intraday.columns else lows
-        full_high = float(np.max(all_highs))
-        full_low = float(np.min(all_lows))
+        # 全图最高最低价与波段空间 (用于 Fibonacci 黄金分割阶梯稳定呈现，复用预缓存标量)
+        full_high, full_low = self._get_cached_kline_extremes(highs, lows)
         fib_range = full_high - full_low
 
         # 🌟 严格截断界限：低于最低价 10%，高于最高价 10% (杜绝穿底穿顶及底部横线折线)
@@ -3736,164 +3823,208 @@ class SBCChartCanvas(QWidget):
                 painter.setPen(QPen(col))
                 painter.drawText(int(margin_left + chart_w + 3), int(adj_y + 3), text)
 
-        # 9. 🌟 绘制 SBC 买卖信号 (自适应智能避让 K 线实体 + 半透明毛玻璃 + 高对比度清晰设计)
+        # 9. 🌟 绘制 SBC 买卖信号 (自适应智能避让 K 线实体 + 布局缓存 + 半透明毛玻璃 + 高对比度清晰设计)
         if self.signals:
-            times_k = [str(t).strip() for t in df_view.index]
-            last_k_time = times_k[-1] if times_k else ""
-            today_str = last_k_time[:10] if len(last_k_time) >= 10 and "-" in last_k_time[:10] else ""
+            # 🚀 性能优化：引入 2D 防碰撞避让布局缓存。当视口、几何与选中状态未变时，0ms 极速复用上一帧布局
+            layout_token = (
+                id(self.signals),
+                len(self.signals),
+                start_i,
+                end_i,
+                int(chart_w),
+                int(main_h),
+                getattr(self, "selected_trade_id", None),
+                round(min_p, 4),
+                round(max_p, 4)
+            )
 
-            k_hhmm_list = []
-            today_k_indices = []
-            for i, tk in enumerate(times_k):
-                tk_sub = tk.split()[-1] if " " in tk else tk
-                tk_hm = tk_sub[:5] if len(tk_sub) >= 5 else tk_sub
-                k_hhmm_list.append(tk_hm)
-                if not today_str or tk.startswith(today_str):
-                    today_k_indices.append(i)
+            if getattr(self, "_cached_kline_layout_token", None) == layout_token and hasattr(self, "_cached_kline_layout_items"):
+                layout_items = self._cached_kline_layout_items
+                self._signal_hit_boxes.extend(self._cached_kline_hit_boxes)
+            else:
+                times_k = [str(t).strip() for t in df_view.index]
+                last_k_time = times_k[-1] if times_k else ""
+                today_str = last_k_time[:10] if len(last_k_time) >= 10 and "-" in last_k_time[:10] else ""
 
-            if not today_k_indices:
-                today_k_indices = list(range(n))
+                layout_items = []
+                cached_hit_boxes = []
+                placed_boxes = []
 
-            placed_boxes = []  # 记录已放置标签的真实 2D 包围盒 QRect，杜绝重叠堆叠
+                for sig_idx, sig in enumerate(self.signals):
+                    sig_p = float(sig.get("price", 0.0) if isinstance(sig, dict) else getattr(sig, "price", 0.0))
+                    if sig_p <= 0:
+                        continue
 
-            for sig_idx, sig in enumerate(self.signals):
-                sig_p = float(sig.get("price", 0.0) if isinstance(sig, dict) else getattr(sig, "price", 0.0))
-                if sig_p <= 0:
-                    continue
+                    sig_t_raw = str(sig.get("timestamp", sig.get("time", "")) if isinstance(sig, dict) else getattr(sig, "timestamp", getattr(sig, "time", ""))).strip()
+                    action_type = str(sig.get("action", sig.get("type", "sell")) if isinstance(sig, dict) else getattr(sig, "action", getattr(sig, "type", "sell"))).lower()
+                    is_buy = "buy" in action_type or "买" in action_type
+                    trade_id_val = sig.get("trade_id") if isinstance(sig, dict) else getattr(sig, "trade_id", None)
+                    is_selected_trade = (trade_id_val is not None and trade_id_val == self.selected_trade_id)
 
-                sig_t_raw = str(sig.get("timestamp", sig.get("time", "")) if isinstance(sig, dict) else getattr(sig, "timestamp", getattr(sig, "time", ""))).strip()
-                action_type = str(sig.get("action", sig.get("type", "sell")) if isinstance(sig, dict) else getattr(sig, "action", getattr(sig, "type", "sell"))).lower()
-                is_buy = "buy" in action_type or "买" in action_type
-                trade_id_val = sig.get("trade_id") if isinstance(sig, dict) else getattr(sig, "trade_id", None)
-                is_selected_trade = (trade_id_val is not None and trade_id_val == self.selected_trade_id)
+                    border_color = QColor("#FFD700") if is_selected_trade else (QColor("#00ff88") if is_buy else QColor("#ff4d4f"))
+                    bg_color = QColor(48, 38, 10, 230) if is_selected_trade else (QColor(10, 32, 18, 190) if is_buy else QColor(36, 12, 16, 190))
+                    fg_color = QColor("#ffffff")
+                    dot_color = QColor("#FFD700") if is_selected_trade else (QColor("#00ff88") if is_buy else QColor("#ff4d4f"))
 
-                border_color = QColor("#FFD700") if is_selected_trade else (QColor("#00ff88") if is_buy else QColor("#ff4d4f"))
-                bg_color = QColor(48, 38, 10, 230) if is_selected_trade else (QColor(10, 32, 18, 190) if is_buy else QColor(36, 12, 16, 190))
-                fg_color = QColor("#ffffff")
-                dot_color = QColor("#FFD700") if is_selected_trade else (QColor("#00ff88") if is_buy else QColor("#ff4d4f"))
+                    y_s = k_to_y(sig_p)
 
-                y_s = k_to_y(sig_p)
+                    sig_hm = sig_t_raw.split()[-1][:5] if " " in sig_t_raw else sig_t_raw[:5]
+                    sig_d = sig_t_raw[:10] if len(sig_t_raw) >= 10 else sig_t_raw
 
-                sig_hm = sig_t_raw.split()[-1][:5] if " " in sig_t_raw else sig_t_raw[:5]
-                sig_d = sig_t_raw[:10] if len(sig_t_raw) >= 10 else sig_t_raw
-
-                idx_k = self._map_signal_to_visible_index(sig, df_view, start_i, end_i)
-                if idx_k is None:
-                    if self.period_mode in ["day", "2d", "2k", "3k", "week", "month"]:
-                        for ki, tk in enumerate(times_k):
-                            if str(tk).startswith(sig_d):
-                                idx_k = ki
-                                break
-                    else:
-                        for ki, tk in enumerate(times_k):
-                            if str(tk).startswith(sig_d) and sig_hm in str(tk):
-                                idx_k = ki
-                                break
-
-                if idx_k is None or idx_k < 0 or idx_k >= n:
-                    continue
-
-                if 0 <= idx_k < n:
-                    x_k = k_to_x(idx_k)
-                    y_hi_k = k_to_y(highs[idx_k])
-                    y_lo_k = k_to_y(lows[idx_k])
-
-                    pnl_pct_v = sig.get("pnl_pct") if isinstance(sig, dict) else getattr(sig, "pnl_pct", None)
-
-                    # 💡 【买卖点自适应简略显示】：未选中时采用紧凑格式，选中时展开完整详情，大幅减少像素宽度
-                    if is_selected_trade:
-                        if not is_buy and pnl_pct_v is not None:
-                            lbl_text = f"🔴 卖:{sig_p:.2f} ({float(pnl_pct_v):+.1f}%)"
+                    idx_k = self._map_signal_to_visible_index(sig, df_view, start_i, end_i)
+                    if idx_k is None:
+                        if self.period_mode in ["day", "2d", "2k", "3k", "week", "month"]:
+                            for ki, tk in enumerate(times_k):
+                                if str(tk).startswith(sig_d):
+                                    idx_k = ki
+                                    break
                         else:
-                            lbl_text = f"🟢 买:{sig_p:.2f}"
-                    else:
-                        # 简略紧凑模式：买点显示 买:价格(保留1位)；卖点突出收益率(若有)或精简价格
-                        if is_buy:
-                            lbl_text = f"买:{sig_p:.1f}"
-                        else:
-                            if pnl_pct_v is not None:
-                                lbl_text = f"卖:{float(pnl_pct_v):+.1f}%"
+                            for ki, tk in enumerate(times_k):
+                                if str(tk).startswith(sig_d) and sig_hm in str(tk):
+                                    idx_k = ki
+                                    break
+
+                    if idx_k is None or idx_k < 0 or idx_k >= n:
+                        continue
+
+                    if 0 <= idx_k < n:
+                        x_k = k_to_x(idx_k)
+                        y_hi_k = k_to_y(highs[idx_k])
+                        y_lo_k = k_to_y(lows[idx_k])
+
+                        pnl_pct_v = sig.get("pnl_pct") if isinstance(sig, dict) else getattr(sig, "pnl_pct", None)
+
+                        # 💡 【买卖点自适应简略显示】：未选中时采用紧凑格式，选中时展开完整详情，大幅减少像素宽度
+                        if is_selected_trade:
+                            if not is_buy and pnl_pct_v is not None:
+                                lbl_text = f"🔴 卖:{sig_p:.2f} ({float(pnl_pct_v):+.1f}%)"
                             else:
-                                lbl_text = f"卖:{sig_p:.1f}"
+                                lbl_text = f"🟢 买:{sig_p:.2f}"
+                        else:
+                            # 简略紧凑模式：买点显示 买:价格(保留1位)；卖点突出收益率(若有)或精简价格
+                            if is_buy:
+                                lbl_text = f"买:{sig_p:.1f}"
+                            else:
+                                if pnl_pct_v is not None:
+                                    lbl_text = f"卖:{float(pnl_pct_v):+.1f}%"
+                                else:
+                                    lbl_text = f"卖:{sig_p:.1f}"
 
-                    painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
-                    fm = painter.fontMetrics()
-                    tw_k = fm.horizontalAdvance(lbl_text) + 8
-                    th_k = fm.height() + 4
+                        painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+                        fm = painter.fontMetrics()
+                        tw_k = fm.horizontalAdvance(lbl_text) + 8
+                        th_k = fm.height() + 4
 
-                    # 💡 【2D 包围盒真实防碰撞避让算法】：尝试避开K棒实体影线与上下错层
-                    target_x_base = x_k - tw_k / 2
-                    target_y_base = y_lo_k + 8 if is_buy else y_hi_k - th_k - 8
+                        # 💡 【2D 包围盒真实防碰撞避让算法】：尝试避开K棒实体影线与上下错层
+                        target_x_base = x_k - tw_k / 2
+                        target_y_base = y_lo_k + 8 if is_buy else y_hi_k - th_k - 8
 
-                    dy_layers = [0, 1, -1, 2, -2, 3, -3]
-                    dx_offsets = [0, 10, -10, 20, -20]
-                    found_rect = None
-                    is_micro_mode = False
+                        dy_layers = [0, 1, -1, 2, -2, 3, -3]
+                        dx_offsets = [0, 10, -10, 20, -20]
+                        found_rect = None
+                        is_micro_mode = False
 
-                    for dy_l in dy_layers:
-                        for dx_o in dx_offsets:
-                            cand_y = int(target_y_base + dy_l * (th_k + 4))
-                            cand_x = int(target_x_base + dx_o)
-                            cand_x = int(max(margin_left + 2, min(margin_left + chart_w - tw_k - 2, cand_x)))
-                            cand_y = int(max(margin_top + 2, min(margin_top + main_h - th_k - 2, cand_y)))
-                            cand_rect = QRect(cand_x, cand_y, tw_k, th_k)
+                        for dy_l in dy_layers:
+                            for dx_o in dx_offsets:
+                                cand_y = int(target_y_base + dy_l * (th_k + 4))
+                                cand_x = int(target_x_base + dx_o)
+                                cand_x = int(max(margin_left + 2, min(margin_left + chart_w - tw_k - 2, cand_x)))
+                                cand_y = int(max(margin_top + 2, min(margin_top + main_h - th_k - 2, cand_y)))
+                                cand_rect = QRect(cand_x, cand_y, tw_k, th_k)
 
-                            # 检查与已放置矩形是否碰撞 (预留 2px 呼吸间距)
-                            padded = cand_rect.adjusted(-2, -2, 2, 2)
-                            if not any(padded.intersects(box) for box in placed_boxes):
-                                found_rect = cand_rect
+                                # 检查与已放置矩形是否碰撞 (预留 2px 呼吸间距)
+                                padded = cand_rect.adjusted(-2, -2, 2, 2)
+                                if not any(padded.intersects(box) for box in placed_boxes):
+                                    found_rect = cand_rect
+                                    break
+                            if found_rect:
                                 break
-                        if found_rect:
-                            break
 
-                    if not found_rect:
-                        # 极端拥挤场景：降级为微型紧凑圆标 Micro-Badge (16x16px)
-                        is_micro_mode = True
                         mb_w, mb_h = 16, 16
-                        mb_x = int(max(margin_left + 2, min(margin_left + chart_w - mb_w - 2, x_k - mb_w / 2)))
-                        mb_y = int(max(margin_top + 2, min(margin_top + main_h - mb_h - 2, target_y_base)))
-                        found_rect = QRect(mb_x, mb_y, mb_w, mb_h)
+                        if not found_rect:
+                            # 极端拥挤场景：降级为微型紧凑圆标 Micro-Badge (16x16px)
+                            is_micro_mode = True
+                            mb_x = int(max(margin_left + 2, min(margin_left + chart_w - mb_w - 2, x_k - mb_w / 2)))
+                            mb_y = int(max(margin_top + 2, min(margin_top + main_h - mb_h - 2, target_y_base)))
+                            found_rect = QRect(mb_x, mb_y, mb_w, mb_h)
 
-                    placed_boxes.append(found_rect)
-                    tag_kx, tag_ky = found_rect.x(), found_rect.y()
-                    tw_actual, th_actual = found_rect.width(), found_rect.height()
+                        placed_boxes.append(found_rect)
 
-                    # 注册点击区域
-                    self._signal_hit_boxes.append({
-                        "rect": found_rect,
-                        "trade_id": trade_id_val,
-                        "sig": sig,
-                        "x": x_k,
-                        "y": y_s,
-                        "is_buy": is_buy
-                    })
+                        # 注册点击区域
+                        hit_box = {
+                            "rect": found_rect,
+                            "trade_id": trade_id_val,
+                            "sig": sig,
+                            "x": x_k,
+                            "y": y_s,
+                            "is_buy": is_buy
+                        }
+                        cached_hit_boxes.append(hit_box)
+                        self._signal_hit_boxes.append(hit_box)
 
-                    # 1. 绘制垂直贯穿虚线
-                    painter.setPen(QPen(QColor(border_color.red(), border_color.green(), border_color.blue(), 90), 1, Qt.PenStyle.DotLine))
-                    painter.drawLine(int(x_k), int(margin_top + main_h), int(x_k), int(margin_top))
+                        layout_items.append({
+                            "found_rect": found_rect,
+                            "x_k": x_k,
+                            "y_s": y_s,
+                            "is_buy": is_buy,
+                            "is_selected_trade": is_selected_trade,
+                            "lbl_text": lbl_text,
+                            "border_color": border_color,
+                            "bg_color": bg_color,
+                            "fg_color": fg_color,
+                            "dot_color": dot_color,
+                            "is_micro_mode": is_micro_mode,
+                            "mb_w": mb_w,
+                            "mb_h": mb_h,
+                        })
 
-                    # 2. 从标签框连接到实际成交价的精巧微引线
-                    painter.setPen(QPen(QColor(border_color.red(), border_color.green(), border_color.blue(), 170), 1, Qt.PenStyle.SolidLine))
-                    painter.drawLine(int(x_k), int(y_s), int(tag_kx + tw_actual / 2), int(tag_ky + th_actual if tag_ky < y_s else tag_ky))
+                self._cached_kline_layout_token = layout_token
+                self._cached_kline_layout_items = layout_items
+                self._cached_kline_hit_boxes = cached_hit_boxes
 
-                    # 3. 实际成交价处的精巧圆点
-                    painter.setPen(QPen(QColor("#ffffff") if not is_selected_trade else QColor("#FFD700"), 1.2))
-                    painter.setBrush(QBrush(dot_color))
-                    painter.drawEllipse(int(x_k - 3), int(y_s - 3), 6, 6)
+            # 批量绘制所有 K 线信号标签
+            painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+            for item in layout_items:
+                found_rect = item["found_rect"]
+                x_k = item["x_k"]
+                y_s = item["y_s"]
+                is_buy = item["is_buy"]
+                is_selected_trade = item["is_selected_trade"]
+                lbl_text = item["lbl_text"]
+                border_color = item["border_color"]
+                bg_color = item["bg_color"]
+                fg_color = item["fg_color"]
+                dot_color = item["dot_color"]
+                is_micro_mode = item["is_micro_mode"]
+                tag_kx, tag_ky = found_rect.x(), found_rect.y()
+                tw_actual, th_actual = found_rect.width(), found_rect.height()
 
-                    # 4. 绘制标签实体 (微型徽章模式 vs 紧凑胶囊模式)
-                    if is_micro_mode:
-                        painter.setPen(QPen(border_color, 1.5 if is_selected_trade else 1.0))
-                        painter.setBrush(QBrush(bg_color))
-                        painter.drawEllipse(tag_kx, tag_ky, mb_w, mb_h)
-                        painter.setPen(QPen(fg_color))
-                        painter.drawText(found_rect, Qt.AlignmentFlag.AlignCenter, "▲" if is_buy else "▼")
-                    else:
-                        painter.setPen(QPen(border_color, 1.8 if is_selected_trade else 1.2))
-                        painter.setBrush(QBrush(bg_color))
-                        painter.drawRoundedRect(tag_kx, tag_ky, tw_actual, th_actual, 3, 3)
-                        painter.setPen(QPen(fg_color))
-                        painter.drawText(tag_kx + 4, tag_ky + th_actual - 4, lbl_text)
+                # 1. 绘制垂直贯穿虚线
+                painter.setPen(QPen(QColor(border_color.red(), border_color.green(), border_color.blue(), 90), 1, Qt.PenStyle.DotLine))
+                painter.drawLine(int(x_k), int(margin_top + main_h), int(x_k), int(margin_top))
+
+                # 2. 从标签框连接到实际成交价的精巧微引线
+                painter.setPen(QPen(QColor(border_color.red(), border_color.green(), border_color.blue(), 170), 1, Qt.PenStyle.SolidLine))
+                painter.drawLine(int(x_k), int(y_s), int(tag_kx + tw_actual / 2), int(tag_ky + th_actual if tag_ky < y_s else tag_ky))
+
+                # 3. 实际成交价处的精巧圆点
+                painter.setPen(QPen(QColor("#ffffff") if not is_selected_trade else QColor("#FFD700"), 1.2))
+                painter.setBrush(QBrush(dot_color))
+                painter.drawEllipse(int(x_k - 3), int(y_s - 3), 6, 6)
+
+                # 4. 绘制标签实体 (微型徽章模式 vs 紧凑胶囊模式)
+                if is_micro_mode:
+                    painter.setPen(QPen(border_color, 1.5 if is_selected_trade else 1.0))
+                    painter.setBrush(QBrush(bg_color))
+                    painter.drawEllipse(tag_kx, tag_ky, item["mb_w"], item["mb_h"])
+                    painter.setPen(QPen(fg_color))
+                    painter.drawText(found_rect, Qt.AlignmentFlag.AlignCenter, "▲" if is_buy else "▼")
+                else:
+                    painter.setPen(QPen(border_color, 1.8 if is_selected_trade else 1.2))
+                    painter.setBrush(bg_color)
+                    painter.drawRoundedRect(tag_kx, tag_ky, tw_actual, th_actual, 3, 3)
+                    painter.setPen(QPen(fg_color))
+                    painter.drawText(tag_kx + 4, tag_ky + th_actual - 4, lbl_text)
 
             # 绘制当前选中的回测交易收益光束与详情卡片
             if self.selected_trade_id is not None:
@@ -5242,7 +5373,7 @@ class SBCIntradayChartDialog(QWidget):
             SBCWindowMemoryManager.get_instance().update_period(self.code, mode_clean)
         except Exception:
             pass
-        if getattr(self, '_dispatcher_enabled', False) and self.isVisible():
+        if getattr(self, '_dispatcher_enabled', False):
             SBCGlobalDispatcher.get_instance().subscribe(self)
 
         # 同步更新顶部按钮组的 checked 高亮状态并使当前按钮获得焦点
@@ -6594,28 +6725,57 @@ class SBCIntradayChartDialog(QWidget):
         if n_bars < 5:
             return []
 
+        # 🚀 极致性能优化 (NumPy 向量化提取)：一次性解包为 C 连续 1D 数组，彻底消灭循环内 2400 次 df.iloc 切片
+        closes_arr = df_bars["close"].to_numpy(dtype=float) if "close" in df_bars.columns else np.zeros(n_bars, dtype=float)
+        vwaps_arr = df_bars["vwap"].to_numpy(dtype=float) if "vwap" in df_bars.columns else closes_arr
+        opens_arr = df_bars["open"].to_numpy(dtype=float) if "open" in df_bars.columns else closes_arr
+        highs_arr = df_bars["high"].to_numpy(dtype=float) if "high" in df_bars.columns else closes_arr
+        lows_arr = df_bars["low"].to_numpy(dtype=float) if "low" in df_bars.columns else closes_arr
+        if "vol" in df_bars.columns:
+            vols_arr = df_bars["vol"].to_numpy(dtype=float)
+        elif "volume" in df_bars.columns:
+            vols_arr = df_bars["volume"].to_numpy(dtype=float)
+        else:
+            vols_arr = np.zeros(n_bars, dtype=float)
+
+        time_keys = [str(x) for x in df_bars.index]
+        # 🚀 严格保持原逐行优先级 (date -> datetime -> index -> "day_0")，彻底杜绝空 date 引发的信号漂移
+        has_date_col = "date" in df_bars.columns
+        has_dt_col = "datetime" in df_bars.columns
+        date_series = [str(x).strip() for x in df_bars["date"]] if has_date_col else None
+        dt_series = [str(x).strip() for x in df_bars["datetime"]] if has_dt_col else None
+
+        bar_dates = []
+        for i in range(n_bars):
+            d_val = date_series[i] if date_series is not None else ""
+            if d_val and d_val not in ("nan", "None", "0"):
+                bar_dates.append(d_val)
+                continue
+            dt_val = dt_series[i] if dt_series is not None else ""
+            if dt_val and dt_val not in ("nan", "None", "0") and len(dt_val) >= 10 and ("-" in dt_val[:10] or "/" in dt_val[:10]):
+                bar_dates.append(dt_val[:10])
+                continue
+            tk = time_keys[i]
+            if " " in tk:
+                bar_dates.append(tk.split()[0])
+            else:
+                bar_dates.append("day_0")
+
         for idx in range(n_bars):
-            row = df_bars.iloc[idx]
-            close_p = float(row.get("close", 0.0))
+            close_p = float(closes_arr[idx])
             if close_p <= 0.0:
                 continue
-            vwap_p = float(row.get("vwap", close_p))
-            open_p = float(row.get("open", close_p))
-            high_p = float(row.get("high", close_p))
-            low_p = float(row.get("low", close_p))
-            vol_p = float(row.get("vol", row.get("volume", 0.0)))
-            time_key = str(row.name)
+            vwap_p = float(vwaps_arr[idx])
+            open_p = float(opens_arr[idx])
+            high_p = float(highs_arr[idx])
+            low_p = float(lows_arr[idx])
+            vol_p = float(vols_arr[idx])
+            time_key = time_keys[idx]
 
             # ── 1. 交易日标识提取 (适配多日分时与单日分时) ──
-            bar_date = str(row.get("date", "")).strip()
+            bar_date = bar_dates[idx]
             if not bar_date:
-                dt_val = str(row.get("datetime", "")).strip()
-                if len(dt_val) >= 10 and ("-" in dt_val[:10] or "/" in dt_val[:10]):
-                    bar_date = dt_val[:10]
-                elif " " in time_key:
-                    bar_date = time_key.split()[0]
-                else:
-                    bar_date = "day_0"
+                bar_date = time_key.split()[0] if " " in time_key else "day_0"
 
             if not unique_dates_seen or unique_dates_seen[-1] != bar_date:
                 unique_dates_seen.append(bar_date)
@@ -7927,11 +8087,16 @@ def sync_all_open_sbc_period(target_mode: str, trigger_dlg: Optional[SBCIntraday
     if count == 0:
         return 0
 
-    # 1. 0 毫秒立即同步内存元数据与顶部 UI 按钮状态
+    # 1. 0 毫秒立即同步内存元数据、顶部 UI 按钮状态与全局调度器订阅关系
     for w in active_dialogs:
         try:
-            w._current_period_mode = mode_clean
-            mgr.update_period(getattr(w, "code", ""), mode_clean)
+            if hasattr(w, "set_period_mode"):
+                w.set_period_mode(mode_clean, reload=False, save=False)
+            else:
+                w._current_period_mode = mode_clean
+                mgr.update_period(getattr(w, "code", ""), mode_clean)
+                if getattr(w, '_dispatcher_enabled', False):
+                    SBCGlobalDispatcher.get_instance().subscribe(w)
             if hasattr(w, "btn_group_period") and w.btn_group_period:
                 for btn in w.btn_group_period.buttons():
                     btn_mode = (btn.property("period_mode") or "").strip().lower()
@@ -8701,71 +8866,50 @@ def rearrange_all_sbc_windows(parent_win=None):
         except Exception:
             return False
 
-    active_dialogs = []
+    # 1. 优先从内存注册中心 (SBCWindowMemoryManager) 0ms 精准获取当前进程内纳管的全部活跃窗口
+    mem_mgr = SBCWindowMemoryManager.get_instance()
+    active_dialogs = mem_mgr.get_active_dialogs()
 
-    # 1. 优先从 parent_win 的 _sbc_dialogs 收集
+    # 2. 从 parent_win 与全局 topLevelWidgets 补充兜底收集当前进程内的可见窗口
     if parent_win and hasattr(parent_win, '_sbc_dialogs') and isinstance(parent_win._sbc_dialogs, dict):
         for d in parent_win._sbc_dialogs.values():
-            if d is not None and not _safe_isdeleted(d) and d.isVisible():
-                if d not in active_dialogs:
-                    active_dialogs.append(d)
+            if d is not None and not _safe_isdeleted(d) and d.isVisible() and d not in active_dialogs:
+                active_dialogs.append(d)
 
-    # 2. 从全局 topLevelWidgets 补充收集当前进程内所有可见的 SBCIntradayChartDialog
     for w in QApplication.topLevelWidgets():
-        if isinstance(w, SBCIntradayChartDialog) and not _safe_isdeleted(w) and w.isVisible():
-            if w not in active_dialogs:
-                active_dialogs.append(w)
+        if isinstance(w, SBCIntradayChartDialog) and not _safe_isdeleted(w) and w.isVisible() and w not in active_dialogs:
+            active_dialogs.append(w)
 
-    # 区分调用源与分组目标：
-    is_in_launcher = (os.environ.get("SBC_IS_HOLDINGS_LAUNCHER") == "1")
-    current_pid = os.getpid()
-
-    # 尝试获取持仓盯盘启动器子进程 PID (如果在 ATS 主进程中运行)
-    launcher_pid = None
-    if not is_in_launcher:
-        try:
-            from ats.ui.sbc_launcher import SBCProcessManager
-            mgr = SBCProcessManager.get_instance()
-            proc = mgr._procs.get("__holdings_launcher__")
-            if proc and proc.poll() is None:
-                launcher_pid = proc.pid
-        except Exception:
-            pass
-
-    # 3. 构造统一代理列表：若在 Launcher 进程内且已有活跃窗口，直接复用，彻底跳过漫长的 Win32 全机窗口枚举
+    # 3. 构造本进程分组代理列表
     active_proxies: List[_SBCWindowProxy] = [_SBCWindowProxy(dlg=d) for d in active_dialogs]
-    known_hwnds = {p.hwnd for p in active_proxies if p.hwnd}
 
-    # 仅在非 Launcher 或当前进程内尚未收集到窗口时，才跨进程枚举
-    if sys.platform == "win32" and not (is_in_launcher and len(active_proxies) > 0):
+    # 💡 【核心分组隔离与 0ms 纯内存调度】：
+    # ATS 内打开的 SBC 窗口与盯盘独立进程打开的窗口属于两个独立分组，互不干扰、各自重排！
+    # 只要当前进程已收集到活跃窗口 (len(active_proxies) > 0)，直接执行就地网格平铺，彻底跳过漫长耗时的 Win32 EnumWindows！
+    if not active_proxies and sys.platform == "win32":
         try:
             import win32gui
             import win32process
+            current_pid = os.getpid()
+            is_in_launcher = (os.environ.get("SBC_IS_HOLDINGS_LAUNCHER") == "1")
+
             def _enum_cb(hwnd, _):
-                if win32gui.IsWindowVisible(hwnd) and hwnd not in known_hwnds:
+                if win32gui.IsWindowVisible(hwnd):
                     title = win32gui.GetWindowText(hwnd)
-                    # 识别 SBC 实盘分时窗口特征
                     if "SBC 实盘分时走势" in title or "关键阶梯基准图" in title:
                         try:
                             _, w_pid = win32process.GetWindowThreadProcessId(hwnd)
                         except Exception:
                             w_pid = 0
-                        # 💡 核心分组隔离：
-                        if is_in_launcher:
-                            # 1. 若当前在 Launcher 进程中，只重排本持仓进程窗口，绝不干扰 ATS 窗口
-                            if w_pid == current_pid:
-                                active_proxies.append(_SBCWindowProxy(hwnd=hwnd, title=title))
-                                known_hwnds.add(hwnd)
-                        else:
-                            # 2. 若当前在 ATS 主进程中，严格剔除 Launcher 的持仓窗口，仅重排 ATS 自身的窗口
-                            if launcher_pid and w_pid == launcher_pid:
-                                return True
+                        # 仅收集同进程或指定分组的窗口
+                        if is_in_launcher and w_pid == current_pid:
                             active_proxies.append(_SBCWindowProxy(hwnd=hwnd, title=title))
-                            known_hwnds.add(hwnd)
+                        elif not is_in_launcher and w_pid == current_pid:
+                            active_proxies.append(_SBCWindowProxy(hwnd=hwnd, title=title))
                 return True
             win32gui.EnumWindows(_enum_cb, None)
         except Exception as win_err:
-            logger.debug(f"[SBC重排] Win32 跨进程枚举提示: {win_err}")
+            logger.debug(f"[SBC重排] Win32 兜底枚举提示: {win_err}")
 
     if not active_proxies:
         if parent_win and not os.environ.get("PYTEST_CURRENT_TEST"):
@@ -9893,7 +10037,7 @@ class IntegratedTradingStrategyPanel(QWidget):
         if issue_p <= 0:
             try:
                 from ats.new_stock_fetcher import NewStockFetcher
-                ipo_dict = NewStockFetcher.get_instance().fetch_ipo_calendar()
+                ipo_dict = getattr(NewStockFetcher.get_instance(), '_cached_ipo_dict', {}) or {}
                 if code in ipo_dict:
                     issue_p = float(ipo_dict[code].get("issue_price", 0.0) or 0.0)
             except Exception:
@@ -10107,11 +10251,110 @@ class IntegratedTradingStrategyPanel(QWidget):
         self.manual_score_signal.emit()
 
 
+def fetch_stock_realtime_data_headless(
+    code_str: str,
+    engine: Any = None,
+    tdx_fetcher: Any = None,
+    data_source: str = "TDX_REALTIME",
+    manual_params: Optional[Dict[str, float]] = None,
+    parent_window: Optional[Any] = None,
+    latest_df: Optional[pd.DataFrame] = None
+) -> Tuple[float, float, float, float, float, float, float, float, str, bool, float]:
+    """
+    【🛡️ 线程绝对安全：无 GUI 纯数据获取方法 (SRP/Thread-Safe)】
+    绝对不调用任何 QWidget 的 getter/setter (如 isChecked, setValue, blockSignals, setText)！
+    仅依赖纯 Python 对象计算与网络接口调用，可安全在后台工作线程执行。
+    """
+    c_clean = str(code_str).zfill(6)
+    resolved_name = resolve_stock_name(c_clean)
+    if parent_window and hasattr(parent_window, 'get_stock_name'):
+        try:
+            p_name = parent_window.get_stock_name(c_clean)
+            if p_name and p_name != "未知" and p_name != c_clean:
+                resolved_name = p_name
+        except Exception:
+            pass
+
+    spec = engine.get_stock_ladder_spec(c_clean) if engine else {}
+    float_mv_yi = float(spec.get("float_mv_yi", 15.0))
+
+    # 0. 检测待上市新股
+    is_unlisted = engine.is_stock_unlisted(c_clean) if engine else False
+    issue_p = float(spec.get("issue_price", 0.0) or 0.0)
+    if issue_p <= 0:
+        try:
+            from ats.new_stock_fetcher import NewStockFetcher
+            ipo_dict = getattr(NewStockFetcher.get_instance(), '_cached_ipo_dict', {})
+            if c_clean in ipo_dict:
+                issue_p = float(ipo_dict[c_clean].get("issue_price", 0.0) or 0.0)
+        except Exception:
+            pass
+
+    # 1. 手动估价模式 (由主线程预先提取好的 manual_params 字典驱动)
+    if manual_params and data_source == "MANUAL_EVAL":
+        op = float(manual_params.get("open", 0.0))
+        tp = float(manual_params.get("price", 0.0))
+        to_rate = float(manual_params.get("turnover", 0.0))
+        hp = max(op, tp, op * 1.13)
+        lp = min(op, tp)
+        vw = (op + tp) / 2.0
+        amt = float(to_rate / 100.0 * float_mv_yi * 1e8)
+        b1 = tp
+        lc = op
+        return op, tp, hp, lp, vw, to_rate, amt, b1, resolved_name, is_unlisted, lc
+
+    # 2. 待上市新股
+    if is_unlisted:
+        op_base = issue_p if issue_p > 0 else 60.0
+        return op_base, op_base, op_base, op_base, op_base, 0.0, 0.0, op_base, resolved_name, True, op_base
+
+    # 3. TDX 直连
+    if data_source == "TDX_REALTIME" and tdx_fetcher:
+        try:
+            tdx_snap = tdx_fetcher.fetch_stock_snapshot(c_clean)
+            if tdx_snap and float(tdx_snap.get("price", 0.0)) > 0:
+                op = float(tdx_snap.get("open_price", tdx_snap.get("price", 0.0)))
+                tp = float(tdx_snap.get("price", 0.0))
+                hp = float(tdx_snap.get("high_price", tp))
+                lp = float(tdx_snap.get("low_price", tp))
+                vw = float(tdx_snap.get("vwap", tp))
+                to_rate = float(tdx_snap.get("turnover_rate", 0.0))
+                amt = float(tdx_snap.get("amount", 0.0))
+                b1 = float(tdx_snap.get("bid1_price", tp))
+                lc = float(tdx_snap.get("last_close", op))
+                return op, tp, hp, lp, vw, to_rate, amt, b1, resolved_name, False, lc
+        except Exception as e:
+            logger.debug(f"TDX 获取 {c_clean} 异常: {e}")
+
+    # 4. ATS IPC 或本地行情快照
+    if latest_df is not None and not latest_df.empty:
+        try:
+            row = latest_df.iloc[-1]
+            op = float(latest_df.iloc[0].get('open', 0.0) or 0.0)
+            tp = float(row.get('close', 0.0) or row.get('trade', 0.0) or 0.0)
+            hp = float(latest_df['high'].max() if 'high' in latest_df.columns else tp)
+            lp = float(latest_df['low'].min() if 'low' in latest_df.columns else tp)
+            vw = float(row.get('vwap', (hp + lp + tp) / 3.0) or tp)
+            to_rate = float(row.get('turnover_rate', 0.0) or 0.0)
+            amt = float(row.get('amount', 0.0) or 0.0)
+            b1 = float(row.get('bid1_price', tp) or tp)
+            lc = op
+            return op, tp, hp, lp, vw, to_rate, amt, b1, resolved_name, False, lc
+        except Exception:
+            pass
+
+    # 兜底默认值
+    return 10.0, 10.0, 10.0, 10.0, 10.0, 0.0, 0.0, 10.0, resolved_name, False, 10.0
+
+
 class PinzhunLadderStandaloneWindow(QMainWindow):
     """
     频准激光 8/18 专属上市盯盘与分时阶梯交易策略独立主窗口
     具备完全独立的窗口生命周期、窗口置顶、最大化最小化、多屏支持、TDX 极速秒级直连与估价自动评分能力
     """
+    # 异步取数完成信号 (data_tuple, df_intraday, req_code, req_strat_id, req_version)
+    _tick_data_ready = pyqtSignal(object, object, str, str, int)
+
     def __init__(self, code: Optional[str] = None, name: Optional[str] = None, parent=None):
         super().__init__(parent)
         self.engine = IntradayStrategyEngine.get_instance()
@@ -10120,6 +10363,10 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         self.selected_data_source: str = "TDX_REALTIME"  # TDX_REALTIME | ATS_IPC | MANUAL_EVAL
         self._is_stay_on_top = False
         self.tdx_log_dialog = None
+        self._request_version = 0
+        self._is_tick_fetching = False
+        self._is_closing = False
+        self._tick_data_ready.connect(self._on_tick_data_received, Qt.ConnectionType.QueuedConnection)
 
         if isinstance(code, bool) or not code:
             json_codes = self.engine.get_all_target_codes()
@@ -10917,160 +11164,69 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         super().keyPressEvent(event)
 
     def _get_stock_realtime_data_for_code(self, code_str: str) -> Tuple[float, float, float, float, float, float, float, float, str, bool, float]:
-        """全自动从 TDX 秒级直连、手动估价输入、self._latest_df 或行情快照解析全量字段"""
+        """全自动从 TDX 秒级直连、手动估价输入、self._latest_df 或行情快照解析全量字段 (线程安全兼容包装)"""
         c_clean = str(code_str).zfill(6)
-        resolved_name = resolve_stock_name(c_clean)
-        parent = self.parent()
-        if parent and hasattr(parent, 'get_stock_name'):
-            p_name = parent.get_stock_name(c_clean)
-            if p_name and p_name != "未知" and p_name != c_clean:
-                resolved_name = p_name
+        from PyQt6.QtCore import QThread
+        is_main_thread = (QThread.currentThread() == QApplication.instance().thread())
 
-        spec = self.engine.get_stock_ladder_spec(c_clean)
-        float_mv_yi = float(spec.get("float_mv_yi", 15.0))
+        manual_params = None
+        if is_main_thread and hasattr(self, "chk_manual_eval") and self.chk_manual_eval.isChecked() and getattr(self, "selected_data_source", "") == "MANUAL_EVAL":
+            manual_params = {
+                "open": self.spin_eval_open.value(),
+                "price": self.spin_eval_price.value(),
+                "turnover": self.spin_eval_turnover.value()
+            }
 
-        # 0. 权威检测该标的是否为尚未挂牌交易的【待上市新股】
-        is_unlisted = self.engine.is_stock_unlisted(c_clean)
-        issue_p = float(spec.get("issue_price", 0.0) or 0.0)
-        if issue_p <= 0:
-            try:
-                from ats.new_stock_fetcher import NewStockFetcher
-                ipo_dict = getattr(NewStockFetcher.get_instance(), '_cached_ipo_dict', {})
-                if c_clean in ipo_dict:
-                    issue_p = float(ipo_dict[c_clean].get("issue_price", 0.0) or 0.0)
-            except Exception:
-                pass
+        res = fetch_stock_realtime_data_headless(
+            c_clean,
+            engine=self.engine,
+            tdx_fetcher=self.tdx_fetcher,
+            data_source=getattr(self, "selected_data_source", "TDX_REALTIME"),
+            manual_params=manual_params,
+            parent_window=self.parent(),
+            latest_df=self._latest_df
+        )
 
-        # 1. 只有当用户显式勾选了【✍️ 开启手动估价/异常推演 (默认关闭)】复选框时，才由手动 SpinBox 驱动
-        if hasattr(self, "chk_manual_eval") and self.chk_manual_eval.isChecked() and getattr(self, "selected_data_source", "") == "MANUAL_EVAL":
-            op = self.spin_eval_open.value()
-            tp = self.spin_eval_price.value()
-            to_rate = self.spin_eval_turnover.value()
-            hp = max(op, tp, op * 1.13)
-            lp = min(op, tp)
-            vw = (op + tp) / 2.0
-            amt = float(to_rate / 100.0 * float_mv_yi * 1e8)
-            b1 = tp
-            lc = op
-            return op, tp, hp, lp, vw, to_rate, amt, b1, resolved_name, is_unlisted, lc
+        # 仅在主线程且为当前查看代码时，安全同步界面估价控件
+        if is_main_thread and c_clean == getattr(self, "code", ""):
+            open_p, trade_p, _, _, _, to_r, _, _, _, is_unlisted, _ = res
+            self._apply_realtime_data_to_spins(open_p, trade_p, to_r, is_unlisted)
 
-        # 2. 🛡️ 待上市新股权威保护：若标的尚未挂牌交易，自动以发行价估价阶梯呈现，坚决过滤撮合测试脏数据 (如 0.01元/1.08元)
+        return res
+
+    def _get_stock_realtime_data(self):
+        return self._get_stock_realtime_data_for_code(self.code)
+
+    def _apply_realtime_data_to_spins(self, open_price: float, trade_price: float, to_rate: float, is_unlisted: bool):
+        """【主线程专属】安全同步估价 SpinBox 与状态 Badge"""
+        is_manual = hasattr(self, "chk_manual_eval") and self.chk_manual_eval.isChecked()
         if is_unlisted:
-            op_base = issue_p if issue_p > 0 else 60.0
-            op = op_base
-            tp = op_base
-            hp = op_base
-            lp = op_base
-            vw = op_base
-            to_rate = 0.0
-            amt = 0.0
-            b1 = op_base
-            lc = op_base
             if hasattr(self, 'lbl_tdx_status'):
                 self.lbl_tdx_status.setText("💡 待上市新股 (估价模型)")
                 self.lbl_tdx_status.show()
-            if hasattr(self, 'spin_eval_open') and not getattr(self.chk_manual_eval, "isChecked", lambda: False)():
+            if hasattr(self, 'spin_eval_open') and not is_manual:
                 self.spin_eval_open.blockSignals(True)
                 self.spin_eval_price.blockSignals(True)
                 self.spin_eval_turnover.blockSignals(True)
-                self.spin_eval_open.setValue(op)
-                self.spin_eval_price.setValue(round(op * 1.10, 2))
+                self.spin_eval_open.setValue(open_price)
+                self.spin_eval_price.setValue(round(open_price * 1.10, 2))
                 self.spin_eval_turnover.setValue(60.0)
                 self.spin_eval_open.blockSignals(False)
                 self.spin_eval_price.blockSignals(False)
                 self.spin_eval_turnover.blockSignals(False)
-            return op, tp, hp, lp, vw, to_rate, amt, b1, resolved_name, True, lc
-
-        # 3. 优先从 TDX 极速秒级直连获取
-        if getattr(self, "selected_data_source", "TDX_REALTIME") == "TDX_REALTIME":
-            try:
-                tdx_snap = self.tdx_fetcher.fetch_stock_snapshot(c_clean)
-                if tdx_snap and float(tdx_snap.get("price", 0.0)) > 0:
-                    op = float(tdx_snap.get("open_price", tdx_snap.get("price", 0.0)))
-                    tp = float(tdx_snap.get("price", 0.0))
-                    hp = float(tdx_snap.get("high_price", tp))
-                    lp = float(tdx_snap.get("low_price", tp))
-                    vw = float(tdx_snap.get("vwap", tp))
-                    to_rate = float(tdx_snap.get("turnover_rate", 0.0))
-                    amt = float(tdx_snap.get("amount", 0.0))
-                    b1 = float(tdx_snap.get("bid1_price", tp))
-                    lc = float(tdx_snap.get("last_close", op))
-                    self._update_tdx_status_badge()
-
-                    # 首次加载或切换标的时，不受非交易时段限制，强力获取 TDX 今日 1分钟 K线全量回溯早盘节点 (09:25, 09:40, 10:00, 11:00 等)
-                    st_state = self.engine._get_stock_state(c_clean, op)
-                    intraday_bars = self.tdx_fetcher.fetch_intraday_bars(c_clean)
-                    if not intraday_bars.empty:
-                        self.engine.hydrate_from_intraday_df(c_clean, intraday_bars, op)
-
-                    # 同步到界面估价框中方便观察
+        else:
+            if getattr(self, "selected_data_source", "TDX_REALTIME") == "TDX_REALTIME":
+                self._update_tdx_status_badge()
+                if hasattr(self, 'spin_eval_open') and not is_manual:
                     self.spin_eval_open.blockSignals(True)
                     self.spin_eval_price.blockSignals(True)
                     self.spin_eval_turnover.blockSignals(True)
-                    self.spin_eval_open.setValue(op)
-                    self.spin_eval_price.setValue(tp)
+                    self.spin_eval_open.setValue(open_price)
+                    self.spin_eval_price.setValue(trade_price)
                     self.spin_eval_turnover.setValue(to_rate)
                     self.spin_eval_open.blockSignals(False)
                     self.spin_eval_price.blockSignals(False)
                     self.spin_eval_turnover.blockSignals(False)
-                    return op, tp, hp, lp, vw, to_rate, amt, b1, resolved_name, False, lc
-            except Exception as e:
-                logger.debug(f"TDX 获取 {c_clean} 异常: {e}")
-
-        # 4. 若 TDX 秒级快照未能获取，从 1 分钟 K 线历史或 ATS 推送 df 解析
-        curr_df = self._latest_df
-        if curr_df is None and parent is not None and hasattr(parent, 'current_df') and parent.current_df is not None:
-            curr_df = parent.current_df
-
-        try:
-            bars_df = self.tdx_fetcher.fetch_intraday_bars(c_clean)
-            if bars_df is not None and not bars_df.empty:
-                self.engine.hydrate_from_intraday_df(c_clean, bars_df)
-        except Exception:
-            pass
-
-        snap = self.engine.extract_market_snapshot_from_df(curr_df, c_clean)
-        open_price = snap["open_price"]
-        trade_price = snap["price"]
-        high_price = snap["high_price"]
-        low_price = snap["low_price"]
-        vwap_price = snap["vwap"]
-        turnover_rate = snap["turnover_rate"]
-        amount_val = snap["amount"]
-        bid1_price = snap["bid1_price"]
-        last_close = snap.get("last_close", open_price)
-
-        # 5. 若行情与 K线 历史均尚未产生，且用户显式勾选了手动估价，由界面估价 SpinBox 驱动
-        if open_price <= 0 and trade_price <= 0:
-            if hasattr(self, "chk_manual_eval") and self.chk_manual_eval.isChecked():
-                open_price = self.spin_eval_open.value()
-                trade_price = self.spin_eval_price.value()
-                turnover_rate = self.spin_eval_turnover.value()
-                high_price = max(open_price, trade_price)
-                low_price = min(open_price, trade_price)
-                amount_val = float(turnover_rate / 100.0 * float_mv_yi * 1e8)
-                bid1_price = trade_price
-                vwap_price = round((open_price + trade_price) / 2.0, 2)
-                last_close = open_price
-            else:
-                st_state = self.engine._get_stock_state(c_clean, 0.0)
-                open_price = st_state.get("open_price", 0.0)
-                trade_price = st_state.get("max_price", open_price)
-                high_price = st_state.get("max_price", open_price)
-                low_price = st_state.get("min_price", open_price)
-                vwap_price = open_price
-                last_close = open_price
-        elif open_price <= 0 and trade_price > 0:
-            open_price = trade_price
-            high_price = max(high_price, trade_price)
-            low_price = min(low_price, trade_price) if low_price > 0 else trade_price
-            vwap_price = trade_price if vwap_price <= 0 else vwap_price
-            last_close = open_price if last_close <= 0 else last_close
-
-        return open_price, trade_price, high_price, low_price, vwap_price, turnover_rate, amount_val, bid1_price, resolved_name, is_unlisted, last_close
-
-    def _get_stock_realtime_data(self):
-        return self._get_stock_realtime_data_for_code(self.code)
 
     def _on_open_editor(self):
         dlg = IntradayStrategyEditDialog(parent=self, initial_strategy_id=self.selected_strategy_id, current_code=self.code)
@@ -11080,74 +11236,153 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
             self._populate_code_combo()
             self._load_mock_or_live_data()
 
-    def _load_mock_or_live_data(self):
-        open_price, trade_price, high_price, low_price, vwap_price, to_rate, amt_val, bid1_price, real_name, is_unlisted, last_close = self._get_stock_realtime_data()
-        self.name = real_name
-        self.open_price = open_price
+    def request_refresh_data(self, hydrate_intraday: bool = False):
+        """
+        【⚡ 统一异步非阻塞取数通道 (P0 彻底终结 UI 卡顿与网络假死)】
+        首开、换代码、换数据源、IPC 刷新与 3 秒定时轮询统一汇聚于此。
+        主线程前置捕获入参，后台守护线程只做纯数据 I/O，通过 pyqtSignal 回到主线程装载。
+        """
+        if getattr(self, "_is_closing", False):
+            return
 
-        # 1. 尝试从 TDX 极速行情拉取全量 240 分钟分时 K 线，驱动策略全量分时反演与买卖点流水挂单生成
-        if getattr(self, "selected_data_source", "TDX_REALTIME") == "TDX_REALTIME":
+        self._is_tick_fetching = True
+        self._request_version = getattr(self, "_request_version", 0) + 1
+        req_version = self._request_version
+        cur_code = self.code
+        cur_strat_id = self.selected_strategy_id
+        cur_source = getattr(self, "selected_data_source", "TDX_REALTIME")
+
+        # 主线程安全提取手动参数与环境引用
+        manual_params = None
+        if hasattr(self, "chk_manual_eval") and self.chk_manual_eval.isChecked() and cur_source == "MANUAL_EVAL":
+            manual_params = {
+                "open": self.spin_eval_open.value(),
+                "price": self.spin_eval_price.value(),
+                "turnover": self.spin_eval_turnover.value()
+            }
+        parent_win = self.parent()
+        engine = self.engine
+        tdx_fetcher = self.tdx_fetcher
+        latest_df = self._latest_df
+
+        def _bg_worker():
+            data_tuple = None
+            df_intraday = None
             try:
-                df_intraday = self.tdx_fetcher.fetch_intraday_bars(self.code)
-                if df_intraday is not None and not df_intraday.empty:
-                    self._latest_df = df_intraday
+                data_tuple = fetch_stock_realtime_data_headless(
+                    cur_code,
+                    engine=engine,
+                    tdx_fetcher=tdx_fetcher,
+                    data_source=cur_source,
+                    manual_params=manual_params,
+                    parent_window=parent_win,
+                    latest_df=latest_df
+                )
+                if cur_source == "TDX_REALTIME" and hydrate_intraday and tdx_fetcher:
+                    try:
+                        df_intraday = tdx_fetcher.fetch_intraday_bars(cur_code)
+                    except Exception as e_hyd:
+                        logger.debug(f"异步加载 TDX 分时反演流异常: {e_hyd}")
+            except Exception as e:
+                logger.debug(f"[PinzhunWorkbench] 异步取数异常: {e}")
+            finally:
+                # 无论成功或失败，通过信号槽安全投递回主线程
+                try:
+                    self._tick_data_ready.emit(data_tuple, df_intraday, cur_code, cur_strat_id or "", req_version)
+                except Exception:
+                    pass
+
+        threading.Thread(target=_bg_worker, daemon=True, name=f"PinzhunFetchWorker_{cur_code}").start()
+
+    def _on_tick_data_received(self, data_tuple, df_intraday, req_code, req_strat_id, req_version):
+        """主线程安全接收并装载异步取数结果"""
+        try:
+            # 守卫：丢弃过时版本、窗口已关闭或标的已切换的结果
+            if getattr(self, "_is_closing", False):
+                return
+            if req_version != getattr(self, "_request_version", 0):
+                return
+            if req_code != getattr(self, "code", ""):
+                return
+            if data_tuple is None:
+                return
+
+            open_price, trade_price, high_price, low_price, vwap_price, to_rate, amt_val, bid1_price, real_name, is_unlisted, last_close = data_tuple
+            self.name = real_name
+            self.open_price = open_price
+
+            # 装载分时反演流
+            if df_intraday is not None and not df_intraday.empty:
+                self._latest_df = df_intraday
+                try:
                     self.engine.hydrate_from_intraday_df(self.code, df_intraday, open_price=self.open_price)
-            except Exception as e_hyd:
-                logger.debug(f"加载 TDX 分时反演流异常: {e_hyd}")
+                except Exception as e_hyd:
+                    logger.debug(f"hydrate_from_intraday_df 异常: {e_hyd}")
 
-        now_time_str = datetime.now().strftime("%H:%M:%S")
+            now_str = datetime.now().strftime("%H:%M:%S")
+            strategy = None
+            if req_strat_id:
+                strategy = self.engine.get_strategy_by_id(req_strat_id)
+            if not strategy:
+                strategy = self.engine.auto_select_strategy(self.open_price, code=self.code)
 
-        strategy = None
-        if self.selected_strategy_id:
-            strategy = self.engine.get_strategy_by_id(self.selected_strategy_id)
-        if not strategy:
-            strategy = self.engine.auto_select_strategy(self.open_price, code=self.code)
+            tick_row = {"trade": trade_price, "close": trade_price}
+            self.engine.evaluate_tick(
+                code=self.code,
+                tick_row=tick_row,
+                open_price=self.open_price,
+                current_time_str=now_str,
+                bid1_price=bid1_price if bid1_price > 0 else trade_price
+            )
 
-        tick_row = {"trade": trade_price, "close": trade_price}
-        self.engine.evaluate_tick(
-            code=self.code,
-            tick_row=tick_row,
-            open_price=self.open_price,
-            current_time_str=now_time_str,
-            bid1_price=bid1_price if bid1_price > 0 else trade_price
-        )
+            # 刷新 Tab 1
+            self.integrated_panel.update_data(
+                code=self.code,
+                open_price=self.open_price,
+                price=trade_price,
+                high_price=high_price,
+                low_price=low_price,
+                vwap=vwap_price,
+                turnover_rate=to_rate,
+                amount=amt_val,
+                bid1_price=bid1_price,
+                current_time_str=now_str,
+                strategy=strategy,
+                is_unlisted=is_unlisted,
+                last_close=last_close
+            )
 
-        # 刷新 Tab 1
-        self.integrated_panel.update_data(
-            code=self.code,
-            open_price=self.open_price,
-            price=trade_price,
-            high_price=high_price,
-            low_price=low_price,
-            vwap=vwap_price,
-            turnover_rate=to_rate,
-            amount=amt_val,
-            bid1_price=bid1_price,
-            current_time_str=now_time_str,
-            strategy=strategy,
-            is_unlisted=is_unlisted,
-            last_close=last_close
-        )
+            # 刷新 Tab 3
+            self.pinzhun_monitor_panel.update_monitor_data(
+                code=self.code,
+                open_price=self.open_price,
+                price=trade_price,
+                high_price=high_price,
+                low_price=low_price,
+                vwap=vwap_price,
+                turnover_rate=to_rate,
+                amount=amt_val,
+                current_time_str=now_str
+            )
 
-        # 刷新 Tab 3
-        self.pinzhun_monitor_panel.update_monitor_data(
-            code=self.code,
-            open_price=self.open_price,
-            price=trade_price,
-            high_price=high_price,
-            low_price=low_price,
-            vwap=vwap_price,
-            turnover_rate=to_rate,
-            amount=amt_val,
-            current_time_str=now_time_str
-        )
+            # 主线程安全更新估价框与状态 Badge
+            self._apply_realtime_data_to_spins(open_price, trade_price, to_rate, is_unlisted)
+
+        finally:
+            self._is_tick_fetching = False
+
+    def _load_mock_or_live_data(self):
+        """【统一异步通道】加载或刷新数据：全量收敛为非阻塞异步，UI 绝对 0 冻结"""
+        self.request_refresh_data(hydrate_intraday=True)
 
     def _on_tick_update(self):
         # 若正在进行模拟回放，则不被真实时钟覆盖
         if hasattr(self, 'sim_panel') and self.sim_panel.replay_timer.isActive():
             return
+        if getattr(self, "_is_tick_fetching", False):
+            return
 
-        # 保留手动估价；其他模式休市时停止 TDX/IPC 自动轮询，避免旧行情反复评分。
+        # 保留手动估价；其他模式休市时停止 TDX/IPC 自动轮询，避免旧行情反复评分
         manual_mode = (
             getattr(self, "selected_data_source", "") == "MANUAL_EVAL"
             and hasattr(self, "chk_manual_eval")
@@ -11168,65 +11403,17 @@ class PinzhunLadderStandaloneWindow(QMainWindow):
         elif hasattr(self, "timer") and self.timer.interval() != 3000:
             self.timer.setInterval(3000)
 
-        open_price, trade_price, high_price, low_price, vwap_price, to_rate, amt_val, bid1_price, real_name, is_unlisted, last_close = self._get_stock_realtime_data()
-        self.name = real_name
-        self.open_price = open_price
-
-        now_str = datetime.now().strftime("%H:%M:%S")
-        strategy = None
-        if self.selected_strategy_id:
-            strategy = self.engine.get_strategy_by_id(self.selected_strategy_id)
-        if not strategy:
-            strategy = self.engine.auto_select_strategy(self.open_price, code=self.code)
-
-        tick_row = {"trade": trade_price, "close": trade_price}
-        self.engine.evaluate_tick(
-            code=self.code,
-            tick_row=tick_row,
-            open_price=self.open_price,
-            current_time_str=now_str,
-            bid1_price=bid1_price if bid1_price > 0 else trade_price
-        )
-
-        # 刷新 Tab 1
-        self.integrated_panel.update_data(
-            code=self.code,
-            open_price=self.open_price,
-            price=trade_price,
-            high_price=high_price,
-            low_price=low_price,
-            vwap=vwap_price,
-            turnover_rate=to_rate,
-            amount=amt_val,
-            bid1_price=bid1_price,
-            current_time_str=now_str,
-            strategy=strategy,
-            is_unlisted=is_unlisted,
-            last_close=last_close
-        )
-
-        # 刷新 Tab 3
-        self.pinzhun_monitor_panel.update_monitor_data(
-            code=self.code,
-            open_price=self.open_price,
-            price=trade_price,
-            high_price=high_price,
-            low_price=low_price,
-            vwap=vwap_price,
-            turnover_rate=to_rate,
-            amount=amt_val,
-            current_time_str=now_str
-        )
+        self.request_refresh_data(hydrate_intraday=False)
 
     def closeEvent(self, event):
         """窗口关闭时停止所有后台定时器并释放资源，确保应用彻底安全退出"""
+        self._is_closing = True
         try:
             if hasattr(self, 'timer') and self.timer.isActive():
                 self.timer.stop()
             if hasattr(self, 'sim_panel') and hasattr(self.sim_panel, 'replay_timer') and self.sim_panel.replay_timer.isActive():
                 self.sim_panel.replay_timer.stop()
-            if hasattr(self, 'tdx_fetcher') and self.tdx_fetcher:
-                self.tdx_fetcher.disconnect()
+            # 🛡️ 绝不随意 disconnect 全局共享单例 fetcher，避免阻塞连接锁或影响其他看盘窗口
             if hasattr(self, 'engine') and self.engine:
                 self.engine.save_intraday_cache(force=False)
         except Exception as e:
@@ -11249,6 +11436,8 @@ class AllCodesStrategyEvalDialog(QDialog):
     6. 实时关键词过滤（代码/名称/策略/形态/动作）
     7. 支持双击行或点击【🎯 查看此标的】直接穿透切换主工作台当前标的
     """
+    _eval_finished = pyqtSignal(list, str, str)  # (cards_data, res_summary, now_time_str)
+
     TABLE_HEADERS = [
         "#", "代码", "名称", "⭐ 综合评分", "形态分类", "所属策略",
         "现价(元)", "涨跌幅", "开盘基准", "VWAP", "换手率", "成交额",
@@ -11264,6 +11453,8 @@ class AllCodesStrategyEvalDialog(QDialog):
         self.full_report_text = ""
         self.current_sort_key = "score_desc"  # 默认按综合评分降序
         self.current_view_mode = "table"  # 默认全内容表格视图
+        self._is_evaluating = False
+        self._eval_finished.connect(self._on_eval_finished, Qt.ConnectionType.QueuedConnection)
         
         # 联动与防抖状态
         self._pending_linkage_row = -1
@@ -11645,7 +11836,9 @@ class AllCodesStrategyEvalDialog(QDialog):
         super().closeEvent(event)
 
     def run_evaluation(self):
-        """执行全量标的实时策略评估并构建双视图数据"""
+        """执行全量标的实时策略评估并构建双视图数据 (后台工作线程安全异步化，UI 零冻结)"""
+        if getattr(self, "_is_evaluating", False):
+            return
         target_codes = self.engine.get_all_target_codes()
         # 过滤非法代码占位
         valid_codes = [c for c in target_codes if c and c not in ["000000", "000123"]]
@@ -11653,101 +11846,132 @@ class AllCodesStrategyEvalDialog(QDialog):
             self.lbl_meta.setText("未配置有效的 target_codes 目标代码")
             return
 
+        self._is_evaluating = True
         now_time_str = datetime.now().strftime("%H:%M:%S")
-        self.lbl_meta.setText(f"📊 共 {len(valid_codes)} 只标的 | 评估时间: {now_time_str}")
+        self.lbl_meta.setText(f"⏳ 正在后台评估 {len(valid_codes)} 只标的... ({now_time_str})")
 
-        self.cards_data.clear()
-        res_summary = f"=== ⚡ 全量 Code 分时阶梯策略自动检测评估报告 ({now_time_str}) ===\n\n"
+        engine = self.engine
+        tdx_fetcher = getattr(self.workbench, "tdx_fetcher", None) if self.workbench else None
+        parent_win = self.workbench.parent() if self.workbench else None
 
-        for c in valid_codes:
+        def _bg_eval():
+            collected_cards = []
+            res_summary = f"=== ⚡ 全量 Code 分时阶梯策略自动检测评估报告 ({now_time_str}) ===\n\n"
+
             try:
-                st = self.engine.auto_select_strategy(0.0, code=c)
-                c_name = resolve_stock_name(c)
-                parent = self.workbench.parent() if self.workbench else None
-                if parent and hasattr(parent, 'get_stock_name'):
-                    p_name = parent.get_stock_name(c)
-                    if p_name and p_name != "未知" and p_name != c:
-                        c_name = p_name
+                for c in valid_codes:
+                    try:
+                        st = engine.auto_select_strategy(0.0, code=c)
+                        c_name = resolve_stock_name(c)
+                        if parent_win and hasattr(parent_win, 'get_stock_name'):
+                            p_name = parent_win.get_stock_name(c)
+                            if p_name and p_name != "未知" and p_name != c:
+                                c_name = p_name
 
-                open_p, trade_p, high_p, low_p, vwap_p, to_rate, amt_val, bid1_p, _, is_unlisted, last_close = self.workbench._get_stock_realtime_data_for_code(c)
-                tick_row = {"trade": trade_p, "close": trade_p}
-                sigs = self.engine.evaluate_tick(
-                    code=c, tick_row=tick_row, open_price=open_p, current_time_str=now_time_str, bid1_price=bid1_p
-                )
-                eval_res = self.engine.evaluate_seven_nodes(
-                    code=c, current_time_str=now_time_str, open_price=open_p, price=trade_p, high_price=high_p,
-                    low_price=low_p, vwap=vwap_p, turnover_rate=to_rate, amount=amt_val
-                )
+                        # 🛡️ 纯数据获取，绝对不碰任何 QWidget 控件 (彻底根除跨线程控件读写与工作台估价框被篡改)
+                        data_tuple = fetch_stock_realtime_data_headless(
+                            c,
+                            engine=engine,
+                            tdx_fetcher=tdx_fetcher,
+                            data_source="TDX_REALTIME",
+                            parent_window=parent_win
+                        )
+                        open_p, trade_p, high_p, low_p, vwap_p, to_rate, amt_val, bid1_p, _, is_unlisted, last_close = data_tuple
 
-                score_val = float(eval_res.get('total_weighted_score', 0.0))
-                # 涨跌幅计算（基于开盘或昨收）
-                ref_base = last_close if (last_close and last_close > 0) else open_p
-                pct_val = ((trade_p - ref_base) / ref_base * 100.0) if ref_base > 0 else 0.0
+                        tick_row = {"trade": trade_p, "close": trade_p}
+                        sigs = engine.evaluate_tick(
+                            code=c, tick_row=tick_row, open_price=open_p, current_time_str=now_time_str, bid1_price=bid1_p
+                        )
+                        eval_res = engine.evaluate_seven_nodes(
+                            code=c, current_time_str=now_time_str, open_price=open_p, price=trade_p, high_price=high_p,
+                            low_price=low_p, vwap=vwap_p, turnover_rate=to_rate, amount=amt_val
+                        )
 
-                item_info = {
-                    "code": c,
-                    "name": c_name,
-                    "strategy_name": st.get('name', '通用分时阶梯策略'),
-                    "open_p": open_p,
-                    "trade_p": trade_p,
-                    "high_p": high_p,
-                    "low_p": low_p,
-                    "vwap_p": vwap_p,
-                    "turnover_rate": to_rate,
-                    "amt_val": amt_val,
-                    "last_close": last_close,
-                    "pct": pct_val,
-                    "score": score_val,
-                    "pattern": eval_res.get('pattern', '--'),
-                    "action_text": eval_res.get('action_execution_text', ''),
-                    "signals": sigs,
-                    "is_unlisted": is_unlisted,
-                    "is_error": False,
-                    "error_msg": ""
-                }
+                        score_val = float(eval_res.get('total_weighted_score', 0.0))
+                        # 涨跌幅计算（基于开盘或昨收）
+                        ref_base = last_close if (last_close and last_close > 0) else open_p
+                        pct_val = ((trade_p - ref_base) / ref_base * 100.0) if ref_base > 0 else 0.0
 
-                # 拼接文本报告
-                if is_unlisted:
-                    res_summary += f"📌 【{c} {c_name}】 -> 策略: {item_info['strategy_name']} [💡 待上市新股]\n"
-                    res_summary += f"   发行价: {open_p:.2f}元 | 状态: 待上市挂牌 | 形态: 【待上市估价】 (模型得分: {score_val:.2f}分)\n"
-                    res_summary += f"   实操指引: {item_info['action_text']}\n"
-                    res_summary += "--------------------------------------------------\n"
-                else:
-                    res_summary += f"📌 【{c} {c_name}】 -> 策略: {item_info['strategy_name']}\n"
-                    res_summary += f"   开盘: {open_p:.2f}元 | 现价: {trade_p:.2f}元 ({pct_val:+.2f}%) | 综合得分: {score_val:.2f}分 ({item_info['pattern']})\n"
-                    res_summary += f"   实操指引: {item_info['action_text']}\n"
-                    for sig in sigs:
-                        res_summary += f"   🔴 {sig.reason} (建议价: {getattr(sig, 'suggested_price', sig.price):.2f})\n"
-                    res_summary += "--------------------------------------------------\n"
+                        item_info = {
+                            "code": c,
+                            "name": c_name,
+                            "strategy_name": st.get('name', '通用分时阶梯策略'),
+                            "open_p": open_p,
+                            "trade_p": trade_p,
+                            "high_p": high_p,
+                            "low_p": low_p,
+                            "vwap_p": vwap_p,
+                            "turnover_rate": to_rate,
+                            "amt_val": amt_val,
+                            "last_close": last_close,
+                            "pct": pct_val,
+                            "score": score_val,
+                            "pattern": eval_res.get('pattern', '--'),
+                            "action_text": eval_res.get('action_execution_text', ''),
+                            "signals": sigs,
+                            "is_unlisted": is_unlisted,
+                            "is_error": False,
+                            "error_msg": ""
+                        }
 
-            except Exception as e:
-                item_info = {
-                    "code": c,
-                    "name": resolve_stock_name(c),
-                    "strategy_name": "未知",
-                    "open_p": 0.0,
-                    "trade_p": 0.0,
-                    "high_p": 0.0,
-                    "low_p": 0.0,
-                    "vwap_p": 0.0,
-                    "turnover_rate": 0.0,
-                    "amt_val": 0.0,
-                    "last_close": 0.0,
-                    "pct": 0.0,
-                    "score": 0.0,
-                    "pattern": "异常",
-                    "action_text": f"评估异常: {e}",
-                    "signals": [],
-                    "is_unlisted": False,
-                    "is_error": True,
-                    "error_msg": str(e)
-                }
-                res_summary += f"⚠️ 【{c}】 评估异常: {e}\n--------------------------------------------------\n"
+                        # 拼接文本报告
+                        if is_unlisted:
+                            res_summary += f"📌 【{c} {c_name}】 -> 策略: {item_info['strategy_name']} [💡 待上市新股]\n"
+                            res_summary += f"   发行价: {open_p:.2f}元 | 状态: 待上市挂牌 | 形态: 【待上市估价】 (模型得分: {score_val:.2f}分)\n"
+                            res_summary += f"   实操指引: {item_info['action_text']}\n"
+                            res_summary += "--------------------------------------------------\n"
+                        else:
+                            res_summary += f"📌 【{c} {c_name}】 -> 策略: {item_info['strategy_name']}\n"
+                            res_summary += f"   开盘: {open_p:.2f}元 | 现价: {trade_p:.2f}元 ({pct_val:+.2f}%) | 综合得分: {score_val:.2f}分 ({item_info['pattern']})\n"
+                            res_summary += f"   实操指引: {item_info['action_text']}\n"
+                            for sig in sigs:
+                                res_summary += f"   🔴 {sig.reason} (建议价: {getattr(sig, 'suggested_price', sig.price):.2f})\n"
+                            res_summary += "--------------------------------------------------\n"
 
-            self.cards_data.append(item_info)
+                    except Exception as e:
+                        item_info = {
+                            "code": c,
+                            "name": resolve_stock_name(c),
+                            "strategy_name": "未知",
+                            "open_p": 0.0,
+                            "trade_p": 0.0,
+                            "high_p": 0.0,
+                            "low_p": 0.0,
+                            "vwap_p": 0.0,
+                            "turnover_rate": 0.0,
+                            "amt_val": 0.0,
+                            "last_close": 0.0,
+                            "pct": 0.0,
+                            "score": 0.0,
+                            "pattern": "异常",
+                            "action_text": f"评估异常: {e}",
+                            "signals": [],
+                            "is_unlisted": False,
+                            "is_error": True,
+                            "error_msg": str(e)
+                        }
+                        res_summary += f"⚠️ 【{c}】 评估异常: {e}\n--------------------------------------------------\n"
 
-        self.full_report_text = res_summary
-        self._apply_sort_and_render()
+                    collected_cards.append(item_info)
+            finally:
+                # 无论成功或捕获异常，通过 pyqtSignal 发射到主线程槽函数，确保释放 busy 状态
+                try:
+                    self._eval_finished.emit(collected_cards, res_summary, now_time_str)
+                except Exception:
+                    pass
+
+        threading.Thread(target=_bg_eval, daemon=True, name="AllCodesEvalWorker").start()
+
+    def _on_eval_finished(self, collected_cards: list, res_summary: str, now_time_str: str):
+        """【主线程专属槽函数】安全装载评估结果，释放 busy 状态并渲染双视图"""
+        try:
+            self._is_evaluating = False
+            self.cards_data = collected_cards
+            self.full_report_text = res_summary
+            self.lbl_meta.setText(f"📊 共 {len(collected_cards)} 只标的 | 评估时间: {now_time_str}")
+            self._apply_sort_and_render()
+        finally:
+            self._is_evaluating = False
 
     def _apply_sort_and_render(self):
         """根据当前选中的排序规则对数据排序并同步渲染表格与卡片"""
@@ -12440,7 +12664,7 @@ class PinzhunLaserMonitorWidget(QWidget):
         if issue_p <= 0:
             try:
                 from ats.new_stock_fetcher import NewStockFetcher
-                ipo_dict = NewStockFetcher.get_instance().fetch_ipo_calendar()
+                ipo_dict = getattr(NewStockFetcher.get_instance(), '_cached_ipo_dict', {}) or {}
                 if c_clean in ipo_dict:
                     issue_p = float(ipo_dict[c_clean].get("issue_price", 0.0) or 0.0)
             except Exception:
@@ -12800,7 +13024,7 @@ class IntradaySimulationWidget(QWidget):
         if issue_p <= 0:
             try:
                 from ats.new_stock_fetcher import NewStockFetcher
-                ipo_dict = NewStockFetcher.get_instance().fetch_ipo_calendar()
+                ipo_dict = getattr(NewStockFetcher.get_instance(), '_cached_ipo_dict', {}) or {}
                 if cur_code in ipo_dict:
                     issue_p = float(ipo_dict[cur_code].get("issue_price", 0.0) or 0.0)
             except Exception:

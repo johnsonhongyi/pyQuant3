@@ -5,10 +5,14 @@
 !tests/test_trade_visualizer_performance.py
 !tests/visualizer_test_support.py
 !docs/TRADE_VISUALIZER_BENCHMARK_20261004.json
+!docs/TRADE_VISUALIZER_REVIEW_BENCHMARK_20261004.json
 !tests/test_ats_performance_contracts.py
 !tests/test_ats_shutdown_exit.py
 !tests/test_ats_incremental_gui_contract.py
 !tests/test_ats_capacity_equivalence.py
+!tests/test_sbc_extreme_perf_optimization.py
+!tests/test_sbc_async_load_dispatcher_and_dirty_check.py
+!tests/test_sbc_zoom_right_anchor.py
 !trading_kernel/tests/test_replay_equivalence.py
 !trading_kernel/tests/test_reconciliation_rotation.py
 !trading_kernel/tests/test_journal_contract.py
@@ -50,3 +54,4 @@ data/ipo_learning/shadow_observations.sqlite
 
 !docs/ats_closed_loop/performance_ab_20261003.json
 !docs/ats_closed_loop/implementation_evidence_20261003.json
+!instock-pyinstall-batch.cmd
