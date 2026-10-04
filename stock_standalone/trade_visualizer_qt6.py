@@ -19,6 +19,9 @@ import logging
 import platform
 import threading
 import queue
+import hashlib
+import weakref
+from collections import OrderedDict
 from queue import Queue, Empty, Full
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -478,18 +481,30 @@ class VoiceProcess:
 VoiceThread = VoiceProcess
 
 
+class _ChartCurve(pg.PlotDataItem):
+    def getViewBox(self):
+        # pyqtgraph 0.13.3 may return GraphicsView while attaching/removing an item.
+        view = super().getViewBox()
+        return view if isinstance(view, pg.ViewBox) else None
+
+
 class CandlestickItem(pg.GraphicsObject):
     # ⚡ [PERF] 静态 Pen / Brush 缓存池，彻底消除千级 K 线绘制时的重复对象构造
-    _pen_cache = {}
+    _pen_cache = OrderedDict()
     _brush_cache = {}
+    _chunk_size = 128
 
     def __init__(self, data=None, theme='dark'):
         super().__init__()
-        self.data = np.asarray(data) if data is not None else np.array([])
+        self.data = np.empty((0, 5), dtype=float)
+        self.bar_colors = None
         self.theme = theme
-        self.picture = pg.QtGui.QPicture()
+        self._chunks = []
+        self._bounds = QRectF()
+        self._picture = None
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemUsesExtendedStyleOption)
         self._gen_colors()
-        self.generatePicture()
+        self.setData(data)
 
     def _gen_colors(self):
         if self.theme == 'dark':
@@ -506,36 +521,71 @@ class CandlestickItem(pg.GraphicsObject):
             self.wick_pen = pg.mkPen(QColor(80, 80, 80))
 
     def setData(self, data, colors=None):
-        self.data = np.asarray(data) if data is not None else np.array([])
-        self.bar_colors = colors # Optional array of QColor or color strings
+        values = np.asarray(data, dtype=float) if data is not None else np.empty((0, 5))
+        values = values[:, :5] if values.size else np.empty((0, 5), dtype=float)
+        color_keys = tuple(self._color_key(c) for c in colors) if colors is not None and len(colors) == len(values) else None
+        if np.array_equal(values, self.data, equal_nan=True) and color_keys == self.bar_colors:
+            return
+        # 独立快照保证上游原地修改 OHLC/颜色时仍能识别变化。
+        self.data = values.copy()
+        self.bar_colors = color_keys
         self.generatePicture()
-        self.prepareGeometryChange()
         self.update()
+
+    @staticmethod
+    def _color_key(color_spec):
+        if isinstance(color_spec, QColor):
+            return ('rgba', color_spec.rgba())
+        return tuple(color_spec) if isinstance(color_spec, list) else color_spec
 
     def _get_cached_pen_brush(self, color_spec):
         """极速获取缓存的 Pen 与 Brush"""
         if color_spec not in self._pen_cache:
-            col = pg.mkColor(color_spec)
-            self._pen_cache[color_spec] = pg.mkPen(col)
-            self._brush_cache[color_spec] = pg.mkBrush(col)
+            col = QColor.fromRgba(color_spec[1]) if isinstance(color_spec, tuple) and color_spec[0] == 'rgba' else pg.mkColor(color_spec)
+            pen, brush = pg.mkPen(col), pg.mkBrush(col)
+            if len(self._pen_cache) >= 256:
+                expired, _ = self._pen_cache.popitem(last=False)
+                self._brush_cache.pop(expired, None)
+            self._pen_cache[color_spec] = pen
+            self._brush_cache[color_spec] = brush
+        else:
+            self._pen_cache.move_to_end(color_spec)
         return self._pen_cache[color_spec], self._brush_cache[color_spec]
 
     def generatePicture(self):
-        self.picture = pg.QtGui.QPicture()
-        if len(self.data) == 0:
-            return
+        chunks = []
+        bounds = QRectF()
+        for start in range(0, len(self.data), self._chunk_size):
+            rows = self.data[start:start + self._chunk_size]
+            colors = self.bar_colors[start:start + self._chunk_size] if self.bar_colors is not None else None
+            pos = start // self._chunk_size
+            old = self._chunks[pos] if pos < len(self._chunks) else None
+            if old is not None and old[1] == colors and np.array_equal(old[0], rows, equal_nan=True):
+                chunk = old
+            else:
+                picture = self._draw_picture(rows, colors)
+                chunk = (rows.copy(), colors, picture, QRectF(picture.boundingRect()))
+            chunks.append(chunk)
+            bounds = bounds.united(chunk[3])
+        if bounds != self._bounds:
+            self.prepareGeometryChange()
+            self._bounds = bounds
+            self.informViewBoundsChanged()
+        self._chunks = chunks
+        self._picture = None
 
-        p = pg.QtGui.QPainter(self.picture)
+    def _draw_picture(self, rows, bar_colors):
+        picture = pg.QtGui.QPicture()
+        p = pg.QtGui.QPainter(picture)
         w = 0.4
-
-        has_custom_colors = hasattr(self, 'bar_colors') and self.bar_colors is not None and len(self.bar_colors) == len(self.data)
-        bar_colors = self.bar_colors if has_custom_colors else None
         up_pen, up_brush = self.up_pen, self.up_brush
         down_pen, down_brush = self.down_pen, self.down_brush
         wick_pen = self.wick_pen
         get_cached = self._get_cached_pen_brush
 
-        for i, row in enumerate(self.data):
+        for i, row in enumerate(rows):
+            if not np.isfinite(row).all():
+                continue
             t, open_, close, low, high = row[:5]
             custom_c = bar_colors[i] if bar_colors is not None else None
             
@@ -561,28 +611,49 @@ class CandlestickItem(pg.GraphicsObject):
             p.drawRect(pg.QtCore.QRectF(t - w, open_, w * 2, close - open_))
 
         p.end()
+        return picture
+
+    @property
+    def picture(self):
+        """兼容旧调用者，整幅 QPicture 仅在显式读取时合成。"""
+        if self._picture is None:
+            self._picture = pg.QtGui.QPicture()
+            painter = pg.QtGui.QPainter(self._picture)
+            for _, _, picture, _ in self._chunks:
+                painter.drawPicture(0, 0, picture)
+            painter.end()
+        return self._picture
 
     def setTheme(self, theme):
         if theme != self.theme:
             self.theme = theme
             self._gen_colors()
+            self._chunks = []
             self.generatePicture()
             self.update()
 
     def paint(self, p, *args):
-        if self.picture:
-            p.drawPicture(0, 0, self.picture)
+        exposed = getattr(args[0], 'exposedRect', None) if args else None
+        for _, _, picture, bounds in self._chunks:
+            if exposed is None or bounds.intersects(exposed):
+                p.drawPicture(0, 0, picture)
 
     def boundingRect(self):
-        return pg.QtCore.QRectF(self.picture.boundingRect())
+        return QRectF(self._bounds)
 
 class DateAxis(pg.AxisItem):
     def __init__(self, dates, orientation='bottom'):
         super().__init__(orientation=orientation)
+        self._dates_index = pd.Index(dates).copy()
         self.dates = list(dates)
 
     def updateDates(self, dates):
+        dates_index = pd.Index(dates)
+        if self._dates_index.equals(dates_index):
+            return
+        self._dates_index = dates_index.copy()
         self.dates = list(dates)
+        self.picture = None
         self.update()
 
     def tickStrings(self, values, scale, spacing):
@@ -612,7 +683,11 @@ class TimeAxis(pg.AxisItem):
         # 依靠精简后的日期格式 (%d %H:%M) 节省空间。
 
     def updateTimes(self, times):
-        self.times = list(times)
+        new_times = list(times)
+        if self.times == new_times:
+            return
+        self.times = new_times
+        self.picture = None
         self.update()
 
     # def tickStrings(self, values, scale, spacing):
@@ -690,11 +765,19 @@ class SignalOverlay:
         # 按图表分开管理文本，防止跨图表覆盖
         self.text_items = {'kline': [], 'tick': []}
         self._text_pool = {'kline': [], 'tick': []}
+        self._label_font = QFont('Arial', 12, QFont.Weight.Bold)
+        self._transparent_brush = pg.mkBrush((0, 0, 0, 0))
+        self._transparent_pen = pg.mkPen((0, 0, 0, 0))
+        self._no_pen = pg.mkPen(None)
+        self._signal_brushes = {}
 
     def _get_text_item(self, target='kline') -> pg.TextItem:
         """从对应池中获取或新建 TextItem"""
         if self._text_pool[target]:
             t = self._text_pool[target].pop()
+            plot = self.kline_plot if target == 'kline' else self.tick_plot
+            if t not in plot.items:
+                plot.addItem(t)
             t.show()
             return t
         
@@ -806,8 +889,6 @@ class SignalOverlay:
             self.text_items[target].clear()
             return
 
-        xs, ys, brushes, symbols, sizes, data = [], [], [], [], [], []
-
         xs, ys, brushes, symbols, sizes, data, pens = [], [], [], [], [], [], []
 
         # 回收旧文本
@@ -852,18 +933,24 @@ class SignalOverlay:
                 
                 xs.append(x_pos)
                 ys.append(y_pos)
-                brushes.append(pg.mkBrush((0,0,0,0)))
+                brushes.append(self._transparent_brush)
                 symbols.append('o') 
                 sizes.append(sig.size)
-                pens.append(pg.mkPen((0,0,0,0)))
+                pens.append(self._transparent_pen)
                 data.append(sig.to_visual_hit()['meta'])
             else:
                 xs.append(x_pos)
                 ys.append(y_pos)
-                brushes.append(pg.mkBrush(sig.color))
+                color = pg.mkColor(sig.color)
+                color_key = color.rgba()
+                if color_key not in self._signal_brushes:
+                    if len(self._signal_brushes) >= 128:
+                        self._signal_brushes.clear()
+                    self._signal_brushes[color_key] = pg.mkBrush(color)
+                brushes.append(self._signal_brushes[color_key])
                 symbols.append(sig.symbol)
                 sizes.append(sig.size)
-                pens.append(pg.mkPen(None))
+                pens.append(self._no_pen)
                 data.append(sig.to_visual_hit()['meta'])
 
             if target == 'kline':
@@ -884,14 +971,12 @@ class SignalOverlay:
                 
                 if label_text:
                     txt = self._get_text_item(target)
-                    font = QFont('Arial', 12)     # 将字号调大到 12 以提升可视度
-                    font.setBold(True)
                     anchor = (0.5, 1.4)           # 物理位置置于点上方
                     
                     txt.setText(label_text)
                     txt.setAnchor(anchor)
                     txt.setColor(text_color)
-                    txt.setFont(font)
+                    txt.setFont(self._label_font)
                     txt.setPos(x_pos, y_pos)
                     self.text_items[target].append(txt)
             else:
@@ -1749,6 +1834,48 @@ def _normalize_dataframe(df: pd.DataFrame, normalize: bool = True) -> pd.DataFra
             df.drop(columns=col, inplace=True)
 
     return df
+
+
+def _prepare_chart_dataframe(df, normalize=True):
+    """标准索引只复制一次，保留加载缓存与原始历史快照的隔离。"""
+    index = df.index
+    if (isinstance(index, pd.DatetimeIndex) and not index.hasnans
+            and index.is_monotonic_increasing and 'code' in df.columns
+            and 'date' not in df.columns and 'ticktime' not in df.columns
+            and (not normalize or index.equals(index.normalize()))):
+        result = df.copy()
+        result.index = index.rename('date')
+        return result
+    result = _normalize_dataframe(df, normalize=normalize).set_index('date')
+    return result if result.index.is_monotonic_increasing else result.sort_index()
+
+
+def _frame_signature(df):
+    """覆盖全部行与列的内容签名，防止同长度历史/分时修订命中旧缓存。"""
+    if df is None:
+        return None
+    try:
+        values = pd.util.hash_pandas_object(df, index=True).values
+    except TypeError:
+        # 可选元数据含 list/dict 时仍覆盖内容，避免中断 GUI 刷新。
+        values = pd.util.hash_pandas_object(df.astype(str), index=True).values
+    return (tuple(df.columns), tuple(str(t) for t in df.dtypes),
+            tuple(df.index.names), str(df.index.dtype),
+            hashlib.blake2b(values.tobytes(), digest_size=16).digest())
+
+
+def _tick_plot_arrays(tick_df):
+    """均价在原始行上计算，绘图和光标分别使用同一坐标体系。"""
+    prices = pd.to_numeric(tick_df['close'], errors='coerce').to_numpy(dtype=float)
+    if 'amount' in tick_df.columns and 'volume' in tick_df.columns:
+        amount = pd.to_numeric(tick_df['amount'], errors='coerce').cumsum().to_numpy(dtype=float)
+        volume = pd.to_numeric(tick_df['volume'], errors='coerce').cumsum().to_numpy(dtype=float)
+        average = prices.copy()
+        np.divide(amount, volume, out=average,
+                  where=(volume > 0) & np.isfinite(volume) & np.isfinite(amount))
+    else:
+        average = pd.Series(prices).replace([np.inf, -np.inf], np.nan).expanding().mean().to_numpy()
+    return prices, average, np.isfinite(prices)
 
 
 from PyQt6 import QtCore, QtWidgets
@@ -3821,6 +3948,8 @@ class KLineDetailWindow(QtWidgets.QFrame):
 
 
 class MainWindow(QMainWindow, WindowMixin):
+    _chart_analysis_ready = pyqtSignal(object)
+
     def __init__(self, stop_flag=None, log_level=None, debug_realtime=False, command_conn=None):
         super().__init__()
         # 初始化语音线程
@@ -3927,6 +4056,16 @@ class MainWindow(QMainWindow, WindowMixin):
         # ⚡ [OPTIMIZATION] Signal calculation caches for extreme performance
         self._strategy_cache = {} # code -> (input_key, signals)
         self._sbc_cache = {}      # code -> (input_key, signals)
+        self._chart_value_cache = {}
+        self._sbc_future = None
+        self._sbc_inflight_key = None
+        self._sbc_pending_request = None
+        self._chart_analysis_ready.connect(self._on_chart_analysis_ready, Qt.ConnectionType.QueuedConnection)
+        self._pending_chart_render = None
+        self._chart_render_timer = QTimer(self)
+        self._chart_render_timer.setSingleShot(True)
+        self._chart_render_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._chart_render_timer.timeout.connect(self._flush_chart_render)
         
         # 加载形态检测配置
         self.pattern_config = self._load_pattern_config()
@@ -3936,13 +4075,19 @@ class MainWindow(QMainWindow, WindowMixin):
         self._table_refresh_timer.setSingleShot(True)
         self._table_refresh_timer.timeout.connect(self._flush_table_updates)
         self._pending_changed_codes = set()
+        self._filter_refresh_timer = QTimer(self)
+        self._filter_refresh_timer.setSingleShot(True)
+        self._filter_refresh_timer.timeout.connect(self._flush_filter_refresh)
+        self._filter_query_timer = QTimer(self)
+        self._filter_query_timer.setSingleShot(True)
+        self._filter_query_timer.timeout.connect(self._flush_filter_query)
 
         # ⚡ [NEW] 列宽变动防抖定时器，用于异步持久化列宽配置
         self._resize_timer = QTimer(self)
         self._resize_timer.setSingleShot(True)
         self._resize_timer.timeout.connect(self._save_visualizer_config)
         self._last_table_update_time = 0
-        self._table_update_interval = 1.5  # 1.5s 刷新一次界面，单位秒 (与 time.time() 对比)
+        self._table_update_interval = 1.5  # 秒；使用 monotonic 避免系统时间调整影响节流
 
         # ⚡ [NEW] 用户交互锁定计时：记录用户最后一次操作界面的时间
         # 用于播报反馈同步时判断是否强行滚动 (避免“拉回”效应)
@@ -5677,7 +5822,8 @@ class MainWindow(QMainWindow, WindowMixin):
             
         # 初始化翻转线曲线
         if not hasattr(self, 'reversal_line_curve'):
-            self.reversal_line_curve = self.kline_plot.plot(pen=pg.mkPen(QColor(255, 255, 0), width=1.5), name="Reversal Line")
+            self.reversal_line_curve = self._plot_chart_curve(self.kline_plot, pen=pg.mkPen(QColor(255, 255, 0), width=1.5),
+                                                             connect='finite', name="Reversal Line")
             self.reversal_line_curve.hide() # 默认隐藏，由渲染逻辑控制
 
     def _update_tick_shadow_signal(self, code, tick_df, shadow_decision, x_axis=None):
@@ -7636,10 +7782,13 @@ class MainWindow(QMainWindow, WindowMixin):
         updates_batch = {}  # key: code, value: (tick_df, today_bar)
         
         # 🔄 聚合本周轮所有更新，只保留最新的
-        while True:
+        drain_deadline = time.perf_counter() + 0.004
+        for _ in range(256):
             try:
                 code, tick_df, today_bar = self.realtime_queue.get_nowait()
                 updates_batch[code] = (tick_df, today_bar)
+                if time.perf_counter() >= drain_deadline:
+                    break
             except Empty:
                 break
             except (EOFError, OSError):
@@ -7906,12 +8055,13 @@ class MainWindow(QMainWindow, WindowMixin):
                             self.df_all = df_new
                             self.df_cache = self.df_all
                             self._pending_table_refresh = True
+                            self._pending_changed_codes.add('ALL')
                             data_updated = True
                     elif p_type == 'UPDATE_DF_DIFF':
                         diff_data = payload.get('data')
                         if diff_data is not None and not diff_data.empty:
                             data_updated = self.apply_df_diff(diff_data, skip_table_request=True)
-                            self._pending_table_refresh = data_updated
+                            self._pending_table_refresh = getattr(self, '_pending_table_refresh', False) or data_updated
                     elif 'code' in payload and 'data' in payload:
                         self._handle_update_df_data(payload)
                         data_updated = True
@@ -7950,7 +8100,7 @@ class MainWindow(QMainWindow, WindowMixin):
             
             # 🚀 [Batch UI Update] 处理完所有指令后，统一触发一次表格刷新
             if getattr(self, '_pending_table_refresh', False):
-                self.request_table_update()
+                self.request_table_update(changed_codes=self._pending_changed_codes.copy())
                 self._pending_table_refresh = False
 
             # --- 统一执行本轮最后的有效切换意图 ---
@@ -8333,7 +8483,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def _update_tick_crosshair_ui(self, idx, y_price=None):
         """更新分时图十字光标 UI (1.2)"""
-        if len(self.tick_prices) == 0 or idx < 0 or idx >= len(self.tick_prices):
+        if len(self.tick_prices) == 0 or idx < 0 or idx >= len(self.tick_prices) or not np.isfinite(self.tick_prices[idx]):
             self._hide_tick_crosshair()
             return
         
@@ -8352,8 +8502,10 @@ class MainWindow(QMainWindow, WindowMixin):
         pct = (price / pre_close - 1) * 100 if pre_close > 0 else 0
         
         # 获取当日分时累计振幅
-        y_max = getattr(self, 'tick_high_max', self.tick_prices.max() if self.tick_prices.size > 0 else 0)
-        y_min = getattr(self, 'tick_low_min', self.tick_prices.min() if self.tick_prices.size > 0 else 0)
+        y_max = getattr(self, 'tick_high_max', None)
+        y_min = getattr(self, 'tick_low_min', None)
+        if y_max is None: y_max = float(np.nanmax(self.tick_prices))
+        if y_min is None: y_min = float(np.nanmin(self.tick_prices))
         amplitude = (y_max - y_min) / pre_close * 100 if pre_close > 0 else 0
 
         # 颜色逻辑
@@ -9345,11 +9497,9 @@ class MainWindow(QMainWindow, WindowMixin):
             today_bar_aligned = today_bar.reindex(columns=self.day_df.columns, fill_value=0)
             self.day_df.loc[target_idx] = today_bar_aligned.iloc[0]
 
-        # 5. ⚡ 节流渲染
-        now = time.time()
-        if now - self._last_kline_render_time.get(code, 0) >= self._render_throttle_interval:
-            self.render_charts(code, self.day_df, tick_df)
-            self._last_kline_render_time[code] = now
+        # 统一入口合并请求并补发末包，避免双层节流丢失最后一次更新。
+        self.render_charts(code, self.day_df, tick_df)
+        self._last_kline_render_time[code] = time.time()
 
     def on_realtime_update_slow(self, code, tick_df, today_bar):
         """处理实时分时与幽灵 K 线更新"""
@@ -10153,18 +10303,29 @@ class MainWindow(QMainWindow, WindowMixin):
         start_time = time.time()
 
         if df is None or df.empty:
+            sorting = (self._table_sorting_enabled if getattr(self, '_table_update_active', False)
+                       else self.stock_table.isSortingEnabled())
+            self._chunk_seq = getattr(self, '_chunk_seq', 0) + 1
+            self._table_update_active = False
             self.stock_table.setRowCount(0)
             self._table_item_map = {}  # 重置映射
+            self.stock_table.setSortingEnabled(sorting)
             return
         
         n_rows = len(df)
+        if not force_full and changed_codes is not None and self._update_stock_table_incremental(df, changed_codes):
+            return
         
         # 🚀 [CRITICAL] 凡是大规模更新，强制进入 V4 异步渲染引擎，消灭主线程阻塞感
-        if n_rows > 300 or force_full or not getattr(self, '_table_item_map', {}):
+        if (n_rows > 300 or force_full or not getattr(self, '_table_item_map', {})
+                or n_rows != self.stock_table.rowCount() or getattr(self, '_table_update_active', False)):
             self._update_table_in_chunks_v4(df, force_full=force_full)
             return
 
         # --- 300行以下小量更新：同步路径 ---
+        was_blocked = self.stock_table.signalsBlocked()
+        was_enabled = self.stock_table.updatesEnabled()
+        was_sorting = self.stock_table.isSortingEnabled()
         self.stock_table.blockSignals(True)
         self.stock_table.setUpdatesEnabled(False) 
         self.stock_table.setSortingEnabled(False)
@@ -10193,12 +10354,83 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.info(f"[TableUpdate] Synchronous Fast update: {n_rows} rows in {duration:.3f}s")
             
         finally:
-            self.stock_table.setSortingEnabled(True)
+            self.stock_table.setSortingEnabled(was_sorting)
             # [CRITICAL] 排序可能导致物理行变动，必须在排序后重建映射
             self._rebuild_item_map_from_table()
-            self.stock_table.setUpdatesEnabled(True)
-            self.stock_table.blockSignals(False)
             self._apply_cat_filter_logic()
+            self.stock_table.setUpdatesEnabled(was_enabled)
+            self.stock_table.blockSignals(was_blocked)
+
+    def _update_stock_table_incremental(self, df, changed_codes):
+        """仅触及变更行；股票集合或来源索引不匹配时交由全量路径处理。"""
+        table = self.stock_table
+        item_map = self._table_item_map
+        if (getattr(self, '_table_update_active', False) or table.rowCount() != len(df)
+                or len(item_map) != len(df)):
+            return False
+        codes = list(dict.fromkeys(str(code) for code in changed_codes))
+        if not codes:
+            return True
+        if any(code not in item_map for code in codes):
+            return False
+        cols_in_df = {str(c).lower(): c for c in df.columns}
+        source_index = pd.Index(df[cols_in_df['code']]) if 'code' in cols_in_df else df.index
+        if not source_index.is_unique:
+            return False
+        positions = source_index.get_indexer(codes)
+        if np.any(positions < 0):
+            return False
+        selected = df.iloc[positions]
+        optional_cols_real = [(col, cols_in_df.get(col.lower()))
+                              for col in self.headers if col.lower() not in ('code', 'name')]
+        optional_data = {col: selected[real].values if real is not None else np.zeros(len(codes))
+                         for col, real in optional_cols_real}
+        names = selected[cols_in_df['name']].values if 'name' in cols_in_df else [''] * len(codes)
+        was_blocked = table.signalsBlocked()
+        was_enabled = table.updatesEnabled()
+        was_sorting = table.isSortingEnabled()
+        sort_col = table.horizontalHeader().sortIndicatorSection()
+        sort_changed = False
+        if was_sorting and sort_col >= 1:
+            for i, code in enumerate(codes):
+                if sort_col == 1:
+                    name = str(names[i]) if pd.notnull(names[i]) else ''
+                    value = f"🔔{name}" if get_alert_manager().is_alerted(code) else name
+                elif sort_col - 2 < len(optional_cols_real):
+                    value = self._table_display_value(optional_data[optional_cols_real[sort_col - 2][0]][i])
+                else:
+                    sort_changed = True
+                    break
+                item = table.item(item_map[code], sort_col)
+                if item is None or item.data(Qt.ItemDataRole.DisplayRole) != value:
+                    sort_changed = True
+                    break
+        saved_v = table.verticalScrollBar().value()
+        saved_h = table.horizontalScrollBar().value()
+        table.blockSignals(True)
+        table.setUpdatesEnabled(False)
+        if sort_changed:
+            table.setSortingEnabled(False)
+        color_cache = (QColor('red'), QColor('green'), QColor('black'))
+        succeeded = True
+        try:
+            for i, code in enumerate(codes):
+                name = str(names[i]) if pd.notnull(names[i]) else ''
+                self._set_table_row_fast(item_map[code], code, name, optional_cols_real,
+                                         optional_data, data_idx=i, color_cache=color_cache)
+        except Exception as exc:
+            succeeded = False
+            logger.warning(f"[TableUpdate] Incremental update failed, rebuilding: {exc}")
+        finally:
+            if sort_changed:
+                table.setSortingEnabled(was_sorting)
+                self._rebuild_item_map_from_table()
+            table.verticalScrollBar().setValue(saved_v)
+            table.horizontalScrollBar().setValue(saved_h)
+            table.setUpdatesEnabled(was_enabled)
+            table.blockSignals(was_blocked)
+        self._apply_cat_filter_logic()
+        return succeeded
 
     def _limit_table_column_widths(self):
         """限制表格列宽，防止过宽列挤压其他内容"""
@@ -10280,6 +10512,14 @@ class MainWindow(QMainWindow, WindowMixin):
             for c in range(n_cols):
                 self._get_or_create_item(r, c)
 
+    @staticmethod
+    def _table_display_value(raw_val):
+        if not pd.notnull(raw_val):
+            return 0.0
+        if isinstance(raw_val, (int, float, np.integer, np.floating)):
+            return float(raw_val)
+        return str(raw_val)
+
     def _set_table_row_fast(self, row_idx, stock_code, stock_name, 
                            optional_cols_real, optional_data_arrays, data_idx=None,
                            color_cache=None):
@@ -10293,30 +10533,26 @@ class MainWindow(QMainWindow, WindowMixin):
         # 1. Code & Name 列 (脏检测，使用安全获取助手)
         is_alerted = get_alert_manager().is_alerted(stock_code)
         display_name = f"🔔{stock_name}" if is_alerted else stock_name
-        alert_bg = QColor("#4B0082") if is_alerted else None
-        alert_fg = QColor("#FFFFFF") if is_alerted else None
+        if not hasattr(self, '_table_alert_colors'):
+            self._table_alert_colors = (QColor("#4B0082"), QColor("#FFFFFF"), QColor(0, 0, 0, 0))
+        alert_bg, alert_fg, clear_bg = self._table_alert_colors
 
         item0 = self._get_or_create_item(row_idx, 0)
         # 强制更新 alerted 状态下的背景，即使代码没变也可能 alert 状态变了
-        if is_alerted:
-            item0.setBackground(alert_bg)
+        if getattr(item0, '_visualizer_alerted', None) != is_alerted:
+            item0.setBackground(alert_bg if is_alerted else clear_bg)
             item0.setForeground(alert_fg)
-        else:
-            item0.setBackground(QColor(0,0,0,0))
-            # 恢复默认颜色
-            item0.setForeground(Qt.GlobalColor.white)
+            item0._visualizer_alerted = is_alerted
 
         if item0.text() != stock_code: 
             item0.setText(stock_code)
             item0.setData(Qt.ItemDataRole.UserRole, stock_code)
 
         item1 = self._get_or_create_item(row_idx, 1)
-        if is_alerted:
-            item1.setBackground(alert_bg)
+        if getattr(item1, '_visualizer_alerted', None) != is_alerted:
+            item1.setBackground(alert_bg if is_alerted else clear_bg)
             item1.setForeground(alert_fg)
-        else:
-            item1.setBackground(QColor(0,0,0,0))
-            item1.setForeground(Qt.GlobalColor.white)
+            item1._visualizer_alerted = is_alerted
 
         if item1.text() != display_name:
             item1.setText(display_name)
@@ -10328,13 +10564,7 @@ class MainWindow(QMainWindow, WindowMixin):
             raw_val = optional_data_arrays[col_name][data_idx]
             
             # 兼容 PyQt6：确保 numpy 类型被转换为 Python 原生类型
-            if pd.notnull(raw_val):
-                if isinstance(raw_val, (int, float, np.integer, np.floating)):
-                    new_val = float(raw_val)
-                else:
-                    new_val = str(raw_val)
-            else:
-                new_val = 0.0
+            new_val = self._table_display_value(raw_val)
                 
             item = self._get_or_create_item(row_idx, col_idx)
             
@@ -10394,8 +10624,8 @@ class MainWindow(QMainWindow, WindowMixin):
         """分块异步更新表格 V4 — 工业级极限优化版
 
         1. [结构复用] 废弃 setRowCount(0)，只在长度变化时进行物理扩容（性能分水岭）。
-        2. [Item池化] 启动时一次性填满 QTableWidgetItem，后续只改 Text/Data。
-        3. [快门刷新] 开启 UpdatesEnabled(True) -> update() -> False 循环。
+        2. [Item复用] 每批按需创建 QTableWidgetItem，后续只改 Text/Data。
+        3. [预算刷新] 每批最多 200 行，CPU 时间预算约 8ms。
         4. [脏检测] 仅在数据真实变化时触发 UI 设置（setData）。
         """
         n_rows = len(df)
@@ -10403,6 +10633,11 @@ class MainWindow(QMainWindow, WindowMixin):
         if not hasattr(self, '_chunk_seq'): self._chunk_seq = 0
         self._chunk_seq += 1
         current_seq = self._chunk_seq
+        if not getattr(self, '_table_update_active', False):
+            self._table_sorting_enabled = self.stock_table.isSortingEnabled()
+            self._table_signals_blocked = self.stock_table.signalsBlocked()
+            self._table_updates_enabled = self.stock_table.updatesEnabled()
+        self._table_update_active = True
         
         # 0. 预存 UI 状态
         saved_v_scroll = self.stock_table.verticalScrollBar().value()
@@ -10410,17 +10645,13 @@ class MainWindow(QMainWindow, WindowMixin):
         header = self.stock_table.horizontalHeader()
         saved_sort_col = header.sortIndicatorSection()
         saved_sort_order = header.sortIndicatorOrder()
-        target_code = getattr(self, 'current_code', None)
 
         # 1. 内存数据准备 (规避主线程 CPU Spike)
         cols_in_df = {c.lower(): c for c in df.columns}
         optional_cols = [col for col in self.headers if col.lower() not in ['code', 'name']]
         optional_cols_real = [(col, cols_in_df.get(col.lower())) for col in optional_cols]
-        codes = df[cols_in_df['code']].values if 'code' in cols_in_df else df.index.values
-        names = df[cols_in_df['name']].values if 'name' in cols_in_df else [''] * n_rows
-        # 1. 内存数据向量化准备 (在主线程外预处理类型，消灭循环内 if/else)
-        codes = df[cols_in_df['code']].values if 'code' in cols_in_df else df.index.values
-        names = df[cols_in_df['name']].values if 'name' in cols_in_df else [''] * n_rows
+        codes = (df[cols_in_df['code']].values if 'code' in cols_in_df else df.index.values).copy()
+        names = df[cols_in_df['name']].values.copy() if 'name' in cols_in_df else [''] * n_rows
         
         optional_data_arrays = {}
         for col_name, real_col in optional_cols_real:
@@ -10428,9 +10659,9 @@ class MainWindow(QMainWindow, WindowMixin):
                 col_vals = df[real_col]
                 # 🚀 向量化推断类型：如果是数值且包含 None，提前处理为 float64
                 if pd.api.types.is_numeric_dtype(col_vals):
-                    optional_data_arrays[col_name] = col_vals.fillna(0.0).values
+                    optional_data_arrays[col_name] = col_vals.fillna(0.0).values.copy()
                 else:
-                    optional_data_arrays[col_name] = col_vals.astype(str).values
+                    optional_data_arrays[col_name] = col_vals.values.copy()
             else:
                 optional_data_arrays[col_name] = [0.0] * n_rows
         
@@ -10442,26 +10673,29 @@ class MainWindow(QMainWindow, WindowMixin):
         def _deferred_setup():
             nonlocal net_render_time
             setup_start = time.time()
-            if self._chunk_seq != current_seq: return
+            if self._chunk_seq != current_seq or self._closing: return
             try: _ = self.stock_table.rowCount()
             except RuntimeError: return
 
-            self.stock_table.blockSignals(True)
-            self.stock_table.setUpdatesEnabled(False)
-            self.stock_table.setSortingEnabled(False)
-            
-            _h = self.stock_table.horizontalHeader()
-            for i in range(self.stock_table.columnCount()):
-                _h.setSectionResizeMode(i, QHeaderView.ResizeMode.Fixed)
-                
-            if self.stock_table.rowCount() != n_rows:
-                self.stock_table.setRowCount(n_rows)
-            
-            self._ensure_table_item_pool(n_rows)
-            self._table_item_map = {}
-            
-            self.stock_table.setUpdatesEnabled(True)
-            self.stock_table.blockSignals(False)
+            try:
+                self.stock_table.blockSignals(True)
+                self.stock_table.setUpdatesEnabled(False)
+                self.stock_table.setSortingEnabled(False)
+
+                _h = self.stock_table.horizontalHeader()
+                for i in range(self.stock_table.columnCount()):
+                    _h.setSectionResizeMode(i, QHeaderView.ResizeMode.Fixed)
+                if self.stock_table.rowCount() != n_rows:
+                    self.stock_table.setRowCount(n_rows)
+                self._table_item_map = {}
+            except Exception as exc:
+                logger.warning(f"[TableUpdate] Setup failed: {exc}")
+                self.stock_table.setSortingEnabled(self._table_sorting_enabled)
+                self._table_update_active = False
+                return
+            finally:
+                self.stock_table.setUpdatesEnabled(self._table_updates_enabled)
+                self.stock_table.blockSignals(self._table_signals_blocked)
             
             net_render_time += (time.time() - setup_start)
             QtCore.QTimer.singleShot(0, lambda: _process_chunk(0, is_first=True))
@@ -10470,41 +10704,36 @@ class MainWindow(QMainWindow, WindowMixin):
             """分块渲染核心 logic (快门模式)"""
             nonlocal net_render_time
             chunk_start = time.time()
-            if self._chunk_seq != current_seq: return
+            if self._chunk_seq != current_seq or self._closing: return
             try: _ = self.stock_table.rowCount()
             except RuntimeError: return
 
-            # [PERF] 提升块大小至 500，减少 Timer 切换损耗
-            chunk_size = 50 if is_first else 500 
-            end_idx = min(start_idx + chunk_size, n_rows)
+            # 每批最多 200 行且 CPU 时间约 8ms，单元格按本批创建。
+            chunk_size = 50 if is_first else 200
+            limit_idx = min(start_idx + chunk_size, n_rows)
+            deadline = time.perf_counter() + 0.008
+            end_idx = start_idx
             
             self.stock_table.blockSignals(True)
             self.stock_table.setUpdatesEnabled(False)
             
-            for i in range(start_idx, end_idx):
+            for i in range(start_idx, limit_idx):
                 try:
                     s_code = str(codes[i])
                     s_name = str(names[i]) if pd.notnull(names[i]) else ''
                     self._set_table_row_fast(i, s_code, s_name, optional_cols_real, optional_data_arrays, color_cache=color_cache)
                     self._table_item_map[s_code] = i
-                except Exception: continue
+                except Exception as exc:
+                    logger.debug(f"[TableUpdate] Row {i} skipped: {exc}")
+                end_idx = i + 1
+                if (end_idx - start_idx) % 8 == 0 and time.perf_counter() >= deadline:
+                    break
                 
-            self.stock_table.setUpdatesEnabled(True)
+            self.stock_table.setUpdatesEnabled(self._table_updates_enabled)
             self.stock_table.viewport().update()
-            self.stock_table.blockSignals(False)
+            self.stock_table.blockSignals(self._table_signals_blocked)
             
-            if is_first:
-                QtWidgets.QApplication.processEvents()
-
             net_render_time += (time.time() - chunk_start)
-                
-            # [Shutter Control] 开启快门 -> 发起 update -> 立即关闭
-            self.stock_table.setUpdatesEnabled(True)
-            self.stock_table.viewport().update()
-            self.stock_table.blockSignals(False)
-            
-            if is_first:
-                QtWidgets.QApplication.processEvents()
 
             if end_idx < n_rows:
                 QtCore.QTimer.singleShot(1, lambda: _process_chunk(end_idx, is_first=False))
@@ -10513,6 +10742,8 @@ class MainWindow(QMainWindow, WindowMixin):
 
         def _finalize():
             """所有分块完成后一次性收尾"""
+            if self._chunk_seq != current_seq or self._closing:
+                return
             try:
                 self.stock_table.blockSignals(True)
                 _h = self.stock_table.horizontalHeader()
@@ -10528,13 +10759,13 @@ class MainWindow(QMainWindow, WindowMixin):
                         _h.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
                 _h.setStretchLastSection(True)
                 
-                self.stock_table.setSortingEnabled(True)
                 self.stock_table.horizontalHeader().setSortIndicator(saved_sort_col, saved_sort_order)
+                self.stock_table.setSortingEnabled(self._table_sorting_enabled)
                 # [CRITICAL] 必须在设置排序指示器（触发排序）后再重建映射
                 self._rebuild_item_map_from_table()
                 
-                if target_code:
-                    c_str = str(target_code)
+                if self.current_code:
+                    c_str = str(self.current_code)
                     if c_str in self._table_item_map:
                         self.stock_table.setCurrentCell(self._table_item_map[c_str], 0)
                 
@@ -10551,23 +10782,23 @@ class MainWindow(QMainWindow, WindowMixin):
                 if saved_sw:
                     self._apply_saved_column_widths(self.stock_table, saved_sw)
 
-                self.stock_table.blockSignals(False)
-                
                 # 最后一次性精准应用板块过滤
                 self._apply_cat_filter_logic()
                 
                 # [CRITICAL] 整个流程唯一的一次重绘：开启 updates 并强制触发一次 repaint
-                self.stock_table.setUpdatesEnabled(True)
+                self.stock_table.setUpdatesEnabled(self._table_updates_enabled)
                 self.stock_table.viewport().update()
-                self.stock_table.blockSignals(False)
                 
                 wall_time = time.time() - start_time_all
                 # 对齐用户之前的感官：这里 Net 代表 CPU 纯渲染耗时，Wall 代表包含异步间隔的总耗时
                 logger.warning(f"[TableUpdate] V4 Extreme finished: {n_rows} rows. [Net: {net_render_time:.3f}s, Wall: {wall_time:.3f}s]")
             except Exception as e:
                 logger.error(f"[TableUpdate] V4 Finalize Error: {e}")
-                self.stock_table.setUpdatesEnabled(True)
-                self.stock_table.blockSignals(False)
+            finally:
+                self.stock_table.setSortingEnabled(self._table_sorting_enabled)
+                self.stock_table.setUpdatesEnabled(self._table_updates_enabled)
+                self.stock_table.blockSignals(self._table_signals_blocked)
+                self._table_update_active = False
 
         QtCore.QTimer.singleShot(0, _deferred_setup)
 
@@ -10575,12 +10806,15 @@ class MainWindow(QMainWindow, WindowMixin):
         """[PERF] 板块可见性过滤脏检测版"""
         active_codes = getattr(self, '_cat_filter_visible_codes', None)
         if active_codes is not None and hasattr(self, '_table_item_map'):
+            was_enabled = self.stock_table.updatesEnabled()
             self.stock_table.setUpdatesEnabled(False)
-            for code, row_idx in self._table_item_map.items():
-                should_hide = code not in active_codes
-                if self.stock_table.isRowHidden(row_idx) != should_hide:
-                    self.stock_table.setRowHidden(row_idx, should_hide)
-            self.stock_table.setUpdatesEnabled(True)
+            try:
+                for code, row_idx in self._table_item_map.items():
+                    should_hide = code not in active_codes
+                    if self.stock_table.isRowHidden(row_idx) != should_hide:
+                        self.stock_table.setRowHidden(row_idx, should_hide)
+            finally:
+                self.stock_table.setUpdatesEnabled(was_enabled)
 
     def _update_table_in_chunks_v3(self, df, force_full=True):
         """[重定向] 使用工业级极限优化 V4 版"""
@@ -11429,21 +11663,7 @@ class MainWindow(QMainWindow, WindowMixin):
                     logger.debug(f"[_delayed_gap_check] Error: {e}")
             QtCore.QTimer.singleShot(500, _delayed_gap_check)
 
-            # ⚡ [NEW] 如果 Filter Panel 可见，则自动刷新 Filter 结果
-            def _delayed_filter_refresh():
-                try:
-                    if not hasattr(self, 'main_splitter'): return
-                    sizes = self.main_splitter.sizes()
-                    # Check visibility safely
-                    is_presently_visible = True if (len(sizes) > 2 and sizes[2] > 0) else False
-                    
-                    if hasattr(self, 'filter_panel') and is_presently_visible:
-                         logger.debug("[_process_df_all_update] Triggering delayed filter refresh")
-                         self.load_history_filters()
-                except Exception as e:
-                    logger.error(f"[_delayed_filter_refresh] Error: {e}")
-
-            QtCore.QTimer.singleShot(400, _delayed_filter_refresh)
+            self._schedule_filter_refresh(400)
             
             logger.debug("[_process_df_all_update] END: All tasks dispatched successfully")
                 
@@ -11522,14 +11742,17 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def _flush_table_updates(self):
         """节流器回调：正式执行缓存的表格更新"""
-        if self.df_all is None or self.df_all.empty:
+        if self._closing or self.df_all is None or self.df_all.empty or not self._pending_changed_codes:
             return
-            
-        now = time.time()
-        
-        # 确保最小间隔
-        if now - self._last_table_update_time < 0.8:
-            self._table_refresh_timer.start(500)
+
+        # 完成现有分块后再消费增量，避免高频请求使全量批次一直重启。
+        if getattr(self, '_table_update_active', False):
+            self._table_refresh_timer.start(50)
+            return
+        now = time.monotonic()
+        remaining = 0.8 - (now - self._last_table_update_time)
+        if remaining > 0:
+            self._table_refresh_timer.start(max(1, int(remaining * 1000) + 1))
             return
 
         codes = self._pending_changed_codes.copy()
@@ -11544,8 +11767,49 @@ class MainWindow(QMainWindow, WindowMixin):
         if not codes and not force_full:
             return
             
-        self.update_stock_table(self.df_all, force_full=force_full, changed_codes=None if force_full else codes)
+        self._table_refresh_timer.stop()
+        try:
+            self.update_stock_table(self.df_all, force_full=force_full, changed_codes=None if force_full else codes)
+        except Exception as exc:
+            self._pending_changed_codes.update(codes)
+            if force_full:
+                self._pending_changed_codes.add('ALL')
+            self._table_refresh_timer.start(500)
+            logger.warning(f"[TableThrottle] Update failed, retrying: {exc}")
+            return
         self._last_table_update_time = now
+        self._schedule_filter_refresh()
+
+    def _is_filter_panel_visible(self):
+        if self._closing or not hasattr(self, 'filter_panel') or not hasattr(self, 'main_splitter'):
+            return False
+        try:
+            sizes = self.main_splitter.sizes()
+            return len(sizes) > 2 and sizes[2] > 0
+        except RuntimeError:
+            return False
+
+    def _schedule_filter_refresh(self, delay=200):
+        if self._is_filter_panel_visible():
+            # 各入口共享最早期限，持续行情不能把过滤刷新一直推迟。
+            if not self._filter_refresh_timer.isActive() or self._filter_refresh_timer.remainingTime() > delay:
+                self._filter_refresh_timer.start(delay)
+
+    def _flush_filter_refresh(self):
+        if not self._is_filter_panel_visible():
+            return
+        try:
+            self.load_history_filters()
+        except Exception as exc:
+            logger.warning(f"[FilterRefresh] History reload failed: {exc}")
+
+    def _flush_filter_query(self):
+        if not self._is_filter_panel_visible():
+            return
+        try:
+            self.on_filter_combo_changed(self.filter_combo.currentIndex())
+        except Exception as exc:
+            logger.warning(f"[FilterRefresh] Query refresh failed: {exc}")
 
     def update_df_all(self, df=None, changed_codes=None):
         """
@@ -11559,38 +11823,39 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def request_table_update(self, changed_codes=None):
         """请求刷新表格 (带节流)"""
-        if changed_codes:
-            self._pending_changed_codes.update(changed_codes)
-        else:
+        if self._closing:
+            return
+        if changed_codes is None:
             self._pending_changed_codes.add("ALL")
+        else:
+            self._pending_changed_codes.update(changed_codes)
+        if not self._pending_changed_codes:
+            return
             
-        now = time.time()
+        now = time.monotonic()
         
         # ⚡ [OPTIMIZATION] 针对 5000+ 行的大数据列表，强行拉长刷新间隔
         actual_interval = self._table_update_interval
         n_rows = len(self.df_all) if self.df_all is not None else 0
-        if n_rows > 3000:
+        sparse_update = ("ALL" not in self._pending_changed_codes
+                         and len(self._pending_changed_codes) <= 200
+                         and bool(self._table_item_map))
+        if sparse_update:
+            actual_interval = min(actual_interval, 0.8)
+        elif n_rows > 3000:
             # 极大数据量下，刷新频率降低到 10s 一次，优先保证 K 线渲染和 UI 响应
             actual_interval = max(actual_interval, 10.0) 
         elif n_rows > 1000:
             actual_interval = max(actual_interval, 3.0)
             
         # 立即更新或延迟
-        if now - self._last_table_update_time > (actual_interval * 1.5):
+        elapsed = now - self._last_table_update_time
+        if elapsed >= actual_interval:
             self._flush_table_updates()
-        elif not self._table_refresh_timer.isActive():
-            delay = max(50, int((actual_interval - (now - self._last_table_update_time)) * 1000))
-            self._table_refresh_timer.start(delay)
-
-
-
-        # ⚡ [NEW] 如果 Filter Panel 可见，则自动刷新 Filter 结果
-        sizes = self.main_splitter.sizes()
-        # 当前是否可见
-        is_presently_visible = True if sizes[2] > 0 else False
-        if hasattr(self, 'filter_panel') and is_presently_visible:
-             QtCore.QTimer.singleShot(200, self.load_history_filters)
-
+        else:
+            delay = max(1, int((actual_interval - elapsed) * 1000) + 1)
+            if not self._table_refresh_timer.isActive() or self._table_refresh_timer.remainingTime() > delay:
+                self._table_refresh_timer.start(delay)
 
     def _capture_view_state(self):
         """在切换数据前，精准捕获当前的可见窗口"""
@@ -11744,12 +12009,15 @@ class MainWindow(QMainWindow, WindowMixin):
         try:
             # 1. 确定数据源与极限值
             if tick_df is not None and not tick_df.empty:
-                prices = tick_df['close'].values
-                # 提取有效的 high/low 数据（过滤 NaN）
-                valid_high = tick_df['high'].dropna()
-                valid_low = tick_df['low'].dropna()
-                
-                if not valid_high.empty and not valid_low.empty:
+                prices = pd.to_numeric(tick_df['close'], errors='coerce').to_numpy(dtype=float)
+                prices = prices[np.isfinite(prices)]
+                if not len(prices):
+                    return
+                high = pd.to_numeric(tick_df.get('high', tick_df['close']), errors='coerce').to_numpy(dtype=float)
+                low = pd.to_numeric(tick_df.get('low', tick_df['close']), errors='coerce').to_numpy(dtype=float)
+                valid_high = high[np.isfinite(high)]
+                valid_low = low[np.isfinite(low)]
+                if len(valid_high) and len(valid_low):
                     y_max = float(valid_high.max())
                     y_min = float(valid_low.min())
                 else:
@@ -11775,7 +12043,7 @@ class MainWindow(QMainWindow, WindowMixin):
             if pre_close is None:
                 pre_close = getattr(self, 'current_pre_close', 0)
             
-            if pre_close <= 0:
+            if not np.isfinite(pre_close) or pre_close <= 0:
                 # 最后的兜底：如果完全没数据，不重置
                 if x_count == 0: return
                 pre_close = y_max if y_max > 0 else 1.0
@@ -12536,26 +12804,17 @@ class MainWindow(QMainWindow, WindowMixin):
         # 故不论列是否存在，均强制对其进行实时重算，保证最新的一根实时K线得到 100% 准确的平台顶底与突破计算
         try:
             import stock_logic_utils
-            # ⚡ [PERF] 平台突破计算结果缓存
-            if not hasattr(self, '_platform_breakout_cache'):
-                self._platform_breakout_cache = {}
+            dynamic_lookback = max(15, int(len(day_df) * 0.4))
+            inputs = day_df[[c for c in day_df.columns
+                             if c.lower() in ('high', 'low', 'close', 'vol', 'volume', 'ma5d', 'ma20d')]]
+            cache_key = (_frame_signature(inputs), dynamic_lookback)
 
-            last_close = round(float(day_df['close'].iloc[-1]), 2) if len(day_df) > 0 else 0
-            cache_key = (getattr(self, 'current_code', ''), len(day_df), day_df.index[-1] if len(day_df) > 0 else None, last_close)
-            cached_res = self._platform_breakout_cache.get(cache_key)
-
-            if cached_res is not None:
-                day_df['ptop'], day_df['pbottom'], day_df['pbreak'], day_df['pdays'] = cached_res
-            else:
-                dynamic_lookback = max(15, int(len(day_df) * 0.4))
+            def calculate_platform():
                 calc_df = stock_logic_utils.calc_platform_breakout(day_df, lookback=dynamic_lookback)
-                if 'ptop' in calc_df.columns:
-                    ptop_v = calc_df['ptop'].values
-                    pbottom_v = calc_df['pbottom'].values
-                    pbreak_v = calc_df['pbreak'].values
-                    pdays_v = calc_df['pdays'].values
-                    day_df['ptop'], day_df['pbottom'], day_df['pbreak'], day_df['pdays'] = ptop_v, pbottom_v, pbreak_v, pdays_v
-                    self._platform_breakout_cache[cache_key] = (ptop_v, pbottom_v, pbreak_v, pdays_v)
+                return tuple(calc_df[c].to_numpy(copy=True) for c in ('ptop', 'pbottom', 'pbreak', 'pdays'))
+
+            values = self._cached_chart_value('platform', cache_key, calculate_platform)
+            day_df['ptop'], day_df['pbottom'], day_df['pbreak'], day_df['pdays'] = values
         except Exception as e:
             logger.error(f"Error calculating platform breakout for visualization: {e}")
             return
@@ -12576,14 +12835,14 @@ class MainWindow(QMainWindow, WindowMixin):
         pbottom_pen = pg.mkPen(color=(0, 255, 255, 180), width=1.5, style=QtCore.Qt.PenStyle.DashLine)
         
         if not hasattr(self, 'ptop_curve') or self.ptop_curve not in self.kline_plot.items:
-            self.ptop_curve = self.kline_plot.plot(x_axis, ptop_vals, pen=ptop_pen, connect='finite', name="Platform_Top")
+            self.ptop_curve = self._plot_chart_curve(self.kline_plot, x_axis, ptop_vals, pen=ptop_pen, connect='finite', name="Platform_Top")
         else:
             self.ptop_curve.setData(x_axis, ptop_vals)
             self.ptop_curve.setPen(ptop_pen)
             self.ptop_curve.show()
             
         if not hasattr(self, 'pbottom_curve') or self.pbottom_curve not in self.kline_plot.items:
-            self.pbottom_curve = self.kline_plot.plot(x_axis, pbottom_vals, pen=pbottom_pen, connect='finite', name="Platform_Bottom")
+            self.pbottom_curve = self._plot_chart_curve(self.kline_plot, x_axis, pbottom_vals, pen=pbottom_pen, connect='finite', name="Platform_Bottom")
         else:
             self.pbottom_curve.setData(x_axis, pbottom_vals)
             self.pbottom_curve.setPen(pbottom_pen)
@@ -13009,7 +13268,128 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception as e:
             logger.error(f"[_check_market_gaps] Error: {e}")
 
+    def _plot_chart_curve(self, plot, *args, **kwargs):
+        curve = _ChartCurve(*args, **kwargs)
+        plot.addItem(curve)
+        # PlotItem.addItem applies its menu defaults, so enable these afterwards.
+        # Explicit finite connections contain intentional gaps; keep their points.
+        curve.setDownsampling(auto=kwargs.get('connect') != 'finite', method='peak')
+        curve.setClipToView(True)
+        return curve
+
+    def _cached_chart_value(self, name, key, calculate):
+        cached = self._chart_value_cache.get(name)
+        if cached is None or cached[0] != key:
+            cached = (key, calculate())
+            self._chart_value_cache[name] = cached
+        return cached[1]
+
+    def _clear_tick_data(self, title='No Tick Data'):
+        self.tick_prices = np.array([])
+        self.tick_avg_prices = np.array([])
+        self.tick_times = []
+        self.tick_high_max = self.tick_low_min = self.current_pre_close = 0
+        for attr in ('tick_curve', 'avg_curve', 'vwap_press_curve'):
+            if hasattr(self, attr): getattr(self, attr).clear()
+        for attr in ('pre_close_line', 'ppre_avg_line'):
+            if hasattr(self, attr): getattr(self, attr).hide()
+        if hasattr(self, 'tick_axis'):
+            self.tick_axis.updateTimes([])
+            self.tick_axis.setTicks([[], []])
+        self.signal_overlay.clear(target='tick')
+        self._hide_tick_crosshair()
+        self.tick_plot.setTitle(title)
+
+    def _flush_chart_render(self):
+        request = self._pending_chart_render
+        self._pending_chart_render = None
+        if request is None or self._closing:
+            return
+        key, day_df, tick_df = request
+        if key != (self.current_code, self.resample, self._render_seq):
+            return
+        self.render_charts(key[0], day_df, tick_df)
+
+    def _request_sbc_analysis(self, code, day_df, tick_df):
+        key = (code, self.resample, self._render_seq,
+               _frame_signature(day_df), _frame_signature(tick_df))
+        cached = self._sbc_cache.get(code)
+        if cached is not None and cached[0] == key:
+            self._sbc_pending_request = None
+            return cached[1]
+        if key == self._sbc_inflight_key:
+            self._sbc_pending_request = None
+        elif self._sbc_pending_request is None or self._sbc_pending_request[0] != key:
+            request = (key, code, day_df.copy(), tick_df.copy())
+            if self._sbc_future is None:
+                self._submit_sbc_analysis(request)
+            else:
+                self._sbc_pending_request = request
+        return cached[1] if cached is not None and cached[0][:3] == key[:3] else []
+
+    def _submit_sbc_analysis(self, request):
+        key, code, day_df, tick_df = request
+        if self._closing:
+            return
+        try:
+            future = self.executor.submit(sbc_core.run_sbc_analysis_core, code, day_df, tick_df,
+                                          verbose=self.verbose_log_enabled)
+        except Exception as exc:
+            logger.warning(f"[SBC] Background submission failed: {exc}")
+            return
+        self._sbc_future = future
+        self._sbc_inflight_key = key
+        window_ref = weakref.ref(self)
+
+        def deliver(result):
+            try:
+                payload = {'key': key, 'signals': result.result().get('signals', []), 'error': None}
+            except Exception as exc:
+                payload = {'key': key, 'signals': [], 'error': f'{type(exc).__name__}: {exc}'}
+            window = window_ref()
+            if window is not None:
+                try:
+                    window._chart_analysis_ready.emit(payload)
+                except RuntimeError:
+                    pass  # Qt 窗口已销毁；回调不操作任何 QWidget。
+
+        future.add_done_callback(deliver)
+
+    def _on_chart_analysis_ready(self, payload):
+        if self._closing or payload['key'] != self._sbc_inflight_key:
+            return
+        self._sbc_future = None
+        self._sbc_inflight_key = None
+        key = payload['key']
+        is_current = key[:3] == (self.current_code, self.resample, self._render_seq)
+        if payload['error']:
+            logger.warning(f"[SBC] Background analysis failed: {payload['error']}")
+        elif is_current:
+            self._sbc_cache[key[0]] = (key, payload['signals'])
+            while len(self._sbc_cache) > 16:
+                self._sbc_cache.pop(next(iter(self._sbc_cache)))
+        pending = self._sbc_pending_request
+        self._sbc_pending_request = None
+        if pending is not None and pending[0][:3] == (self.current_code, self.resample, self._render_seq):
+            self._submit_sbc_analysis(pending)
+        elif is_current and not payload['error'] and not self.day_df.empty:
+            self.render_charts(self.current_code, self.day_df, self.tick_df)
+
     def render_charts(self, code, day_df, tick_df, force=False):
+        if self._closing:
+            return
+        key = (code, self.resample, self._render_seq)
+        now = time.monotonic()
+        remaining = 0.150 - (now - getattr(self, '_last_render_time', 0))
+        if not force and remaining > 0 and getattr(self, '_last_render_key', None) == key:
+            self._pending_chart_render = (key, day_df, tick_df)
+            if not self._chart_render_timer.isActive():
+                self._chart_render_timer.start(max(1, int(remaining * 1000) + 1))
+            return
+        self._chart_render_timer.stop()
+        self._pending_chart_render = None
+        self._last_render_time = now
+        self._last_render_key = key
         # 🚀 [ATOMIC] 开启原子渲染模式，采用嵌套感应锁定
         was_enabled = self.updatesEnabled()
         if was_enabled: self.setUpdatesEnabled(False)
@@ -13051,22 +13431,12 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def _render_charts_logic(self, code, day_df, tick_df, force=False):
         """
-        [极限性能版] 渲染完整图表 (带有 150ms 频率节流与对象复用)
+        渲染完整图表；入口统一合并刷新请求，图元与计算结果按输入复用。
         """
         # ⚡ [NEW] 渲染任务保护序列号 (Sequence Protection)
         current_seq = self._render_seq
 
-        # 🛡️ [PERF/Throttle] 渲染频率限制：150ms 内不重复渲染相同代码 (排除强制重绘的情况)
         now = time.time()
-        last_t = getattr(self, '_last_render_time', 0)
-        
-        # [FIX] 如果是切换股票，应该允许立即渲染，所以检查 code
-        if not force and (now - last_t < 0.150) and getattr(self, '_last_rendered_code', None) == code:
-             return
-             
-        # 状态记录 (放到这里，确保后续 setXRange 等触发的二次渲染能被隔离)
-        self._last_render_time = now
-        self._last_rendered_code = code
         # ⚡ [PERF] 缓存容量管理：防止长时间运行内存泄露
         if len(self._sbc_cache) > 100:
             self._sbc_cache.clear()
@@ -13086,21 +13456,23 @@ class MainWindow(QMainWindow, WindowMixin):
             return
 
         # ⚡ [CRITICAL] 提前数据标准化与排序，确保后续所有逻辑基于一致的坐标系
-        day_df = _normalize_dataframe(day_df, normalize=(self.resample == 'd'))
-        if 'date' in day_df.columns:
-            day_df = day_df.set_index('date')
-        day_df = day_df.sort_index()
+        day_df = _prepare_chart_dataframe(day_df, normalize=(self.resample == 'd'))
+        if day_df.empty:
+            return
 
         # ----------------- 0. 数据同步与视角处理 (🛡️ 提前至渲染前，解决重置擦除问题) -----------------
         is_resetting = getattr(self, '_is_resetting_charts', False)
-        is_new_stock = not hasattr(self, '_last_rendered_code') or self._last_rendered_code != code
+        is_new_stock = getattr(self, '_chart_stock_code', None) != code
         
         # 同步归一化后的数据
         self.day_df = day_df
         # 🚀 [IPC/FIXED] 强制构建当前股票的最权威日期索引映射，彻底根治无历史信号股票的联动缺失 Bug
         dates = day_df.index
-        self._cached_date_map = {_to_date_str_safe(d): i for i, d in enumerate(dates)}
+        if not dates.equals(getattr(self, '_date_map_index', None)):
+            self._cached_date_map = {_to_date_str_safe(d): i for i, d in enumerate(dates)}
+            self._date_map_index = dates.copy()
         self._last_rendered_code = code
+        self._chart_stock_code = code
         self.tick_df = tick_df
         if is_new_stock:
             self.last_shadow_decision = None
@@ -13115,6 +13487,8 @@ class MainWindow(QMainWindow, WindowMixin):
             if hasattr(self, '_archived_strat_cache'):
                 self._archived_strat_cache.clear()
             self._fib_last_range = None
+            if tick_df is None or tick_df.empty:
+                self._clear_tick_data()
 
         # [UPGRADE] 精细化视口重置与恢复 (右侧对齐优先)
         last_resample = getattr(self, "_last_resample", None)
@@ -13290,12 +13664,12 @@ class MainWindow(QMainWindow, WindowMixin):
 
         pre_close_color = '#FF0000'
         
-        # ⚡ [DEBUG] Check OHLC data integrity
+        # 调试输出仅在 DEBUG 开启时构造，避免每轮格式化 DataFrame。
         try:
             if not day_df.empty:
                 cols_to_check = [c for c in ['open', 'close', 'high', 'low'] if c in day_df.columns]
-                tail_data = day_df[cols_to_check].tail(2)
-                logger.debug(f"[RT] day_df OHLC tail:\n{tail_data}")
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("[RT] day_df OHLC tail:\n%s", day_df[cols_to_check].tail(2))
                 if day_df[cols_to_check].isnull().values.any():
                     logger.warning(f"[RT] day_df contains NaNs:\n{day_df[cols_to_check].isnull().sum()}")
         except Exception as e:
@@ -13321,22 +13695,22 @@ class MainWindow(QMainWindow, WindowMixin):
         ))
 
         if not hasattr(self, 'candle_item') or self.candle_item not in self.kline_plot.items:
-            self.candle_item = CandlestickItem(ohlc_data, theme=self.qt_theme)
+            self.candle_item = CandlestickItem(theme=self.qt_theme)
             self.kline_plot.addItem(self.candle_item)
         else:
             self.candle_item.setTheme(self.qt_theme)
-            self.candle_item.setData(ohlc_data)
 
         # --- MA5 / MA10 / MA20 / MA60 ---
-        ma5  = day_df['close'].rolling(5).mean().values
-        ma10 = day_df['close'].rolling(10).mean().values
-        # ma20 = day_df['close'].rolling(20).mean().values
-        # ma60 = day_df['close'].rolling(60).mean().values
-        # ma20 = day_df['close'].ewm(span=26, adjust=False).mean().values
-        # ma60 = day_df['close'].ewm(span=60, adjust=False).mean().values
+        price_df = day_df[['open', 'close', 'low', 'high']]
+        price_key = _frame_signature(price_df)
 
-        ma20 = tdd.ema_tdx_numpy(day_df['close'], timeperiod=20)
-        ma60 = tdd.ema_tdx_numpy(day_df['close'], timeperiod=60)
+        def calculate_ma():
+            close = day_df['close']
+            return (close.rolling(5).mean().values, close.rolling(10).mean().values,
+                    tdd.ema_tdx_numpy(close, timeperiod=20), tdd.ema_tdx_numpy(close, timeperiod=60),
+                    close.rolling(20).std().values)
+
+        ma5, ma10, ma20, ma60, std20 = self._cached_chart_value('ma', price_key, calculate_ma)
         
         # 保存指标到 day_df 以便十字光标获取 (跟通达信一致)
         day_df['ma5'] = ma5
@@ -13357,7 +13731,7 @@ class MainWindow(QMainWindow, WindowMixin):
             pen = pg.mkPen(color, width=1, style=style)
 
             if not hasattr(self, attr) or getattr(self, attr) not in self.kline_plot.items:
-                setattr(self, attr, self.kline_plot.plot(x_axis, series, pen=pen))
+                setattr(self, attr, self._plot_chart_curve(self.kline_plot, x_axis, series, pen=pen))
             else:
                 curve = getattr(self, attr)
                 curve.setData(x_axis, series)
@@ -13392,7 +13766,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
             # 1. Base Green Line
             if not hasattr(self, 'ema20_trend_curve') or self.ema20_trend_curve not in self.kline_plot.items:
-                self.ema20_trend_curve = self.kline_plot.plot(x_axis, ema20_trend, pen=green_pen_w3, name="EMA20_Trend")
+                self.ema20_trend_curve = self._plot_chart_curve(self.kline_plot, x_axis, ema20_trend, pen=green_pen_w3, name="EMA20_Trend")
             else:
                 self.ema20_trend_curve.setData(x_axis, ema20_trend)
                 self.ema20_trend_curve.setPen(green_pen_w3)
@@ -13400,7 +13774,7 @@ class MainWindow(QMainWindow, WindowMixin):
             # 2. Yellow Overlay (Up-trend)
             # 使用 connect='finite' 自动处理 NaN
             if not hasattr(self, 'ema20_up_curve') or self.ema20_up_curve not in self.kline_plot.items:
-                self.ema20_up_curve = self.kline_plot.plot(x_axis, ema20_up, pen=yellow_pen_w3, connect='finite', name="EMA20_Up")
+                self.ema20_up_curve = self._plot_chart_curve(self.kline_plot, x_axis, ema20_up, pen=yellow_pen_w3, connect='finite', name="EMA20_Up")
             else:
                 self.ema20_up_curve.setData(x_axis, ema20_up)
                 self.ema20_up_curve.setPen(yellow_pen_w3)
@@ -13410,7 +13784,6 @@ class MainWindow(QMainWindow, WindowMixin):
 
 
         # --- Bollinger ---
-        std20 = day_df['close'].rolling(20).std().values
         upper_band = ma20 + 2*std20
         lower_band = ma20 - 2*std20
         
@@ -13421,23 +13794,23 @@ class MainWindow(QMainWindow, WindowMixin):
         for attr, series, color in [('upper_curve', upper_band, bollinger_colors['upper']),
                                     ('lower_curve', lower_band, bollinger_colors['lower'])]:
             if not hasattr(self, attr) or getattr(self, attr) not in self.kline_plot.items:
-                setattr(self, attr, self.kline_plot.plot(x_axis, series, pen=pg.mkPen(color, width=2)))
+                setattr(self, attr, self._plot_chart_curve(self.kline_plot, x_axis, series, pen=pg.mkPen(color, width=2)))
             else:
                 getattr(self, attr).setData(x_axis, series)
                 getattr(self, attr).setPen(pg.mkPen(color, width=2))
 
         # --- Upgraded Tdx Indicators (九转, 买卖, 翻转线, K线染色) ---
+        custom_colors = None
         if getattr(self, 'show_td_sequential', True):
             try:
                 # 1. 计算核心指标
-                df_custom = calc_tdx_indicators(day_df)
+                df_custom = self._cached_chart_value('tdx', price_key, lambda: calc_tdx_indicators(price_df))
                 
                 if df_custom.empty:
                     logger.warning(f"[INDICATOR] calc_tdx_indicators returned empty for {code}")
                     return
                 
                 # 2. K 线染色 (VAR1:Red, VARD:Silver, 主力买:Yellow, 主力卖:Magenta)
-                custom_colors = []
                 is_red = df_custom['is_red_hold'].values
                 is_cyan = df_custom['is_cyan_watch'].values
                 main_buy = df_custom['main_buy'].values
@@ -13447,35 +13820,21 @@ class MainWindow(QMainWindow, WindowMixin):
                 open_vals = day_df['open'].values
                 close_vals = day_df['close'].values
 
-                for i in range(len(df_custom)):
-                    # 判定是否为下跌 K 线（阴线）
-                    is_falling = close_vals[i] < open_vals[i]
-
-                    if main_buy[i]:
-                        custom_colors.append('#00FFFF') # Yellow-Cyan (主力买入)
-                    elif main_sell[i]:
-                        custom_colors.append('#FF00FF') # Magenta (主力卖出)
-                    elif is_red[i]:
-                        # ⚡ [FIX] 下跌 K 线（大阴线/杀跌）禁止显示红色，避免误导
-                        if is_falling:
-                            custom_colors.append(None) # 还原为默认阴线颜色（绿色/紫色主卖）
-                        else:
-                            custom_colors.append('#FF0000') # Red (红色持股)
-                    elif is_cyan[i]:
-                        custom_colors.append('#C0C0C0') # Silver (青色观望/灰色)
-                    else:
-                        custom_colors.append(None) # Default
-                
-                # 应用染色到 CandlestickItem
-                self.candle_item.setData(ohlc_data, colors=custom_colors)
+                custom_colors = np.select(
+                    [main_buy, main_sell, is_red & (close_vals >= open_vals), is_cyan & ~is_red],
+                    ['#00FFFF', '#FF00FF', '#FF0000', '#C0C0C0'], default=None).tolist()
                 
                 # 3. 绘制翻转线 (Reversal Line)
-                if hasattr(self, 'reversal_line_curve'):
-                    rev_data = df_custom['reversal_line'].values
+                rev_data = df_custom['reversal_line'].values
+                if not hasattr(self, 'reversal_line_curve') or self.reversal_line_curve not in self.kline_plot.items:
+                    self.reversal_line_curve = self._plot_chart_curve(
+                        self.kline_plot, x_axis, rev_data, pen=pg.mkPen(QColor(255, 255, 0), width=1.5),
+                        connect='finite', name="Reversal Line")
+                else:
                     self.reversal_line_curve.setData(x_axis, rev_data)
-                    self.reversal_line_curve.show()
-                    # 保存翻转线指标到 day_df
-                    day_df['reversal_line'] = rev_data
+                self.reversal_line_curve.show()
+                # 保存翻转线指标到 day_df
+                day_df['reversal_line'] = rev_data
                 
                 # 4. 绘制标签 (九转序列 1-9, 主力买卖文字)
                 # 使用专门的对象池 custom_indicator_pool
@@ -13562,9 +13921,8 @@ class MainWindow(QMainWindow, WindowMixin):
             if hasattr(self, 'reversal_line_curve'):
                 self.reversal_line_curve.hide()
             
-            # 3. 重置 K 线颜色为默认 (传入 colors=None)
-            if hasattr(self, 'candle_item'):
-                self.candle_item.setData(ohlc_data, colors=None)
+        # 每轮仅提交一次最终 OHLC/颜色，避免默认色与指标色重复生成。
+        self.candle_item.setData(ohlc_data, colors=custom_colors)
 
         # [NEW] 绘制跳空缺口 (最近 5 个)
         self._draw_price_gaps(x_axis, day_df)
@@ -13575,7 +13933,8 @@ class MainWindow(QMainWindow, WindowMixin):
         # --- ⚡ [NEW] 自动画通道绘制 ---
         if getattr(self, 'show_auto_channel', True):
             try:
-                mid_data, up_data, dn_data, chan_k, idx_far = calc_auto_channel(day_df)
+                mid_data, up_data, dn_data, chan_k, idx_far = self._cached_chart_value(
+                    'channel', price_key, lambda: calc_auto_channel(day_df))
                 
                 # 写入 day_df 以便十字光标获取值 (跟通达信一致)
                 day_df['chan_mid'] = mid_data
@@ -13590,7 +13949,9 @@ class MainWindow(QMainWindow, WindowMixin):
                 limit_low = np.min(lows[-100:]) * 0.90 if n >= 100 else np.min(lows) * 0.90
                 
                 # 计算多条独立的 KX 趋势线
-                kx_lines_data = calc_kx_trend_lines_list(day_df, limit_low, limit_high, idx_far)
+                kx_lines_data = self._cached_chart_value(
+                    'kx', (price_key, float(limit_low), float(limit_high), idx_far),
+                    lambda: calc_kx_trend_lines_list(day_df, limit_low, limit_high, idx_far))
                 
                 # 回填 day_df 叠加缓存以便十字光标能读取数值
                 kx_combined = np.full(n, np.nan)
@@ -13628,7 +13989,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 
                 # 绘制或更新中轨线
                 if not hasattr(self, 'mid_curve') or self.mid_curve not in self.kline_plot.items:
-                    self.mid_curve = self.kline_plot.plot(x_axis, mid_data, pen=mid_pen, name="Channel_Mid", connect='finite')
+                    self.mid_curve = self._plot_chart_curve(self.kline_plot, x_axis, mid_data, pen=mid_pen, name="Channel_Mid", connect='finite')
                 else:
                     self.mid_curve.setData(x_axis, mid_data)
                     self.mid_curve.setPen(mid_pen)
@@ -13636,7 +13997,7 @@ class MainWindow(QMainWindow, WindowMixin):
                     
                 # 绘制或更新上轨线
                 if not hasattr(self, 'up_curve') or self.up_curve not in self.kline_plot.items:
-                    self.up_curve = self.kline_plot.plot(x_axis, up_data, pen=up_pen, name="Channel_Up", connect='finite')
+                    self.up_curve = self._plot_chart_curve(self.kline_plot, x_axis, up_data, pen=up_pen, name="Channel_Up", connect='finite')
                 else:
                     self.up_curve.setData(x_axis, up_data)
                     self.up_curve.setPen(up_pen)
@@ -13644,7 +14005,7 @@ class MainWindow(QMainWindow, WindowMixin):
                     
                 # 绘制或更新下轨线
                 if not hasattr(self, 'dn_curve') or self.dn_curve not in self.kline_plot.items:
-                    self.dn_curve = self.kline_plot.plot(x_axis, dn_data, pen=dn_pen, name="Channel_Dn", connect='finite')
+                    self.dn_curve = self._plot_chart_curve(self.kline_plot, x_axis, dn_data, pen=dn_pen, name="Channel_Dn", connect='finite')
                 else:
                     self.dn_curve.setData(x_axis, dn_data)
                     self.dn_curve.setPen(dn_pen)
@@ -13687,7 +14048,8 @@ class MainWindow(QMainWindow, WindowMixin):
         if getattr(self, 'show_chan', True):
             try:
                 # 1. 核心计算 (Numba 加速) - 返回 (chanK, results) 元组
-                chanK, results = my_chan2.get_chan_analysis_fast(day_df)
+                chan_key = (price_key, _frame_signature(day_df[['vol', 'amount']]))
+                chanK, results = self._cached_chart_value('chan', chan_key, lambda: my_chan2.get_chan_analysis_fast(day_df))
                 
                 # 0. 准备 X 轴日期映射
                 date_to_x = {d: i for i, d in enumerate(day_df.index)}
@@ -13830,7 +14192,7 @@ class MainWindow(QMainWindow, WindowMixin):
             # 5日均量线
             ma5_vol = pd.Series(amounts).rolling(5).mean().values
             if not hasattr(self, 'vol_ma5_curve') or self.vol_ma5_curve not in self.volume_plot.items:
-                self.vol_ma5_curve = self.volume_plot.plot(x_axis, ma5_vol, pen=pg.mkPen(vol_ma_color, width=1.5))
+                self.vol_ma5_curve = self._plot_chart_curve(self.volume_plot, x_axis, ma5_vol, pen=pg.mkPen(vol_ma_color, width=1.5))
             else:
                 self.vol_ma5_curve.setData(x_axis, ma5_vol)
                 self.vol_ma5_curve.setPen(pg.mkPen(vol_ma_color, width=1.5))
@@ -13846,7 +14208,6 @@ class MainWindow(QMainWindow, WindowMixin):
             if self.signal_overlay.tick_scatter not in t_items:
                 self.tick_plot.addItem(self.signal_overlay.tick_scatter)
                 
-        self.signal_overlay.clear(target='kline')
         kline_signals = []
 
         # 1. 历史模拟信号 (优化版：只处理最近 50 行)
@@ -13859,7 +14220,8 @@ class MainWindow(QMainWindow, WindowMixin):
             
             # A. 处理历史信号 (除今日外)
             # hist_key 这里排除正在变动的最后一根 Bar
-            hist_key = (code, self.resample, len(day_df) - 1, day_df.index[-2] if len(day_df) > 1 else None)
+            hist_key = (code, self.resample, tuple(sorted(self.strategy_controller.get_enabled_strategies())),
+                        _frame_signature(day_df.iloc[:-1]))
             
             if not hasattr(self, '_archived_strat_cache'):
                 self._archived_strat_cache = {}
@@ -13872,6 +14234,8 @@ class MainWindow(QMainWindow, WindowMixin):
                     # 仅回测到昨日收盘
                     hist_signals = self.strategy_controller.evaluate_historical_signals(code, day_df.iloc[:-1])
                     self._archived_strat_cache[hist_key] = hist_signals
+                    while len(self._archived_strat_cache) > 8:
+                        self._archived_strat_cache.pop(next(iter(self._archived_strat_cache)))
                     kline_signals = list(hist_signals)
             
             # B. 处理当日实时决策 (Live Signal)
@@ -14122,33 +14486,9 @@ class MainWindow(QMainWindow, WindowMixin):
             # ⚡ [PROTECTION] 中断判定
             if self._render_seq != current_seq: return
 
-            # ⚡ [OPTIMIZATION] SBC Cache Check (Static History Basis)
-            today_str = datetime.now().strftime('%Y%m%d')
-            
             # 使用原始日线作为 SBC 基准
             day_df_for_sbc = self.daily_df_raw if not self.daily_df_raw.empty else day_df
-            
-            # 💥 [CRITICAL FIX] 移除 last_tick_p 和 tick_df 长度
-            # SBC 缓存只应基于“已经定型的日线数据”
-            sbc_key = (code, len(day_df_for_sbc), today_str)
-            
-            cached_sbc = self._sbc_cache.get(code)
-            if cached_sbc and cached_sbc[0] == sbc_key:
-                self.all_today_sbc_signals = cached_sbc[1]
-                # logger.debug(f"[PERF] SBC Static Cache HIT for {code}")
-            else:
-                with timed_ctx("sbc_core_analysis", warn_ms=600):
-                    try:
-                        # run_sbc_analysis_core 内部会自动处理 tick_df 叠加
-                        sbc_results = sbc_core.run_sbc_analysis_core(
-                            code, day_df_for_sbc, tick_df, verbose=self.verbose_log_enabled,
-                            engine=self.decision_engine, 
-                            baseline_loader=self.sbc_baseline_loader
-                        )
-                        self.all_today_sbc_signals = sbc_results.get("signals", [])
-                        self._sbc_cache[code] = (sbc_key, self.all_today_sbc_signals)
-                    except Exception as e:
-                        logger.debug(f"SBC integration error: {e}")
+            self.all_today_sbc_signals = self._request_sbc_analysis(code, day_df_for_sbc, tick_df)
 
             # [SYNC] 将分点转换为当前视图的 K 线坐标
             for s in self.all_today_sbc_signals:
@@ -14162,10 +14502,6 @@ class MainWindow(QMainWindow, WindowMixin):
                         source=s.source, debug_info=s.debug_info
                     ))
             
-            self.signal_overlay.update_signals(self.all_today_sbc_signals, target='tick')
-        else:
-            self.signal_overlay.update_signals([], target='tick')
-
         # ⚡ [PROTECTION] 最终渲染前再次检查中断
         if self._render_seq != current_seq: return
         
@@ -14307,13 +14643,16 @@ class MainWindow(QMainWindow, WindowMixin):
         if tick_df is not None and not tick_df.empty:
 
             # 取收盘价和索引
-            _prices = tick_df['close'].values
+            _prices, _avg_prices, valid_mask = _tick_plot_arrays(tick_df)
             _x_ticks = np.arange(len(_prices))
 
             # 找到非 NaN 的位置
-            valid_mask = ~np.isnan(_prices)
             prices = _prices[valid_mask]
             x_ticks = _x_ticks[valid_mask]
+            avg_prices = _avg_prices[valid_mask]
+            if not len(prices):
+                self._clear_tick_data('No Valid Tick Data')
+                return
 
             # ⭐ 准确获取昨日收盘价作为百分比基准 (解决百分比不对齐问题)
             pre_close = 0
@@ -14322,6 +14661,8 @@ class MainWindow(QMainWindow, WindowMixin):
             elif 'pre_close' in tick_df.columns and tick_df['pre_close'].iloc[-1] > 0:
                 pre_close = tick_df['pre_close'].iloc[-1]
             
+            if not np.isfinite(pre_close):
+                pre_close = 0.0
             # 如果 tick_df 里没有，从历史日线 day_df 获取
             if pre_close <= 0 and day_df is not None and not day_df.empty:
                 # 判断最后一行是否是今天
@@ -14333,31 +14674,25 @@ class MainWindow(QMainWindow, WindowMixin):
                     pre_close = float(day_df.iloc[-1]['close'])
             
             # 最终兜底
-            if pre_close <= 0:
+            if not np.isfinite(pre_close) or pre_close <= 0:
                 pre_close = prices[0] if len(prices) > 0 else 1.0
 
             if hasattr(self, 'tick_pct_axis'):
                 self.tick_pct_axis.set_base_price(pre_close)
 
             if not hasattr(self, 'tick_curve') or self.tick_curve not in self.tick_plot.items:
-                self.tick_curve = self.tick_plot.plot(x_ticks, prices, pen=pg.mkPen(tick_curve_color, width=2))
+                self.tick_curve = self._plot_chart_curve(self.tick_plot, x_ticks, prices, pen=pg.mkPen(tick_curve_color, width=2))
             else:
                 self.tick_curve.setData(x_ticks, prices)
                 self.tick_curve.setPen(pg.mkPen(tick_curve_color, width=2))
-
-            # 均价线
-            if 'amount' in tick_df.columns and 'volume' in tick_df.columns:
-                cum_amount = tick_df['amount'].cumsum()
-                cum_volume = tick_df['volume'].cumsum()
-                avg_prices = np.where(cum_volume>0, cum_amount/cum_volume, prices)
-            else:
-                avg_prices = pd.Series(prices).expanding().mean().values
+                self.tick_curve.show()
 
             if not hasattr(self, 'avg_curve') or self.avg_curve not in self.tick_plot.items:
-                self.avg_curve = self.tick_plot.plot(x_ticks, avg_prices, pen=pg.mkPen(tick_avg_color, width=1.5))
+                self.avg_curve = self._plot_chart_curve(self.tick_plot, x_ticks, avg_prices, pen=pg.mkPen(tick_avg_color, width=1.5))
             else:
                 self.avg_curve.setData(x_ticks, avg_prices)
                 self.avg_curve.setPen(pg.mkPen(tick_avg_color, width=1.5))
+                self.avg_curve.show()
 
             # ----- ⚡ [NEW] 绘制反弹不上 VWAP 红色压制段 -----
             vwap_break_ts = 0.0
@@ -14368,8 +14703,8 @@ class MainWindow(QMainWindow, WindowMixin):
             if vwap_break_ts > 0 and len(prices) > 0 and prices[-1] < avg_prices[-1]:
                 try:
                     # 1. 提取时间序列
-                    if hasattr(self, 'tick_times') and self.tick_times:
-                        raw_t = self.tick_times
+                    if 'time' in tick_df.columns:
+                        raw_t = tick_df['time'].tolist()
                     elif 'ticktime' in tick_df.index.names:
                         raw_t = tick_df.index.get_level_values('ticktime').tolist()
                     else:
@@ -14388,7 +14723,7 @@ class MainWindow(QMainWindow, WindowMixin):
                     ts_arr = np.array(ts_list)
 
                     # 3. 筛选并重叠绘制受均线压制下跌的价格线
-                    press_mask = ts_arr >= vwap_break_ts
+                    press_mask = ts_arr[valid_mask] >= vwap_break_ts
                     if np.any(press_mask):
                         press_x = x_ticks[press_mask]
                         press_y = prices[press_mask]
@@ -14410,8 +14745,8 @@ class MainWindow(QMainWindow, WindowMixin):
                     self.vwap_press_curve.hide()
 
             # ⭐ 保存分时数据供十字光标使用 (1.2)
-            self.tick_prices = prices
-            self.tick_avg_prices = avg_prices
+            self.tick_prices = _prices
+            self.tick_avg_prices = _avg_prices
             self.tick_times = tick_df['time'].tolist() if 'time' in tick_df.columns else []
 
             # --- 分时图参考线 ---
@@ -14421,6 +14756,7 @@ class MainWindow(QMainWindow, WindowMixin):
             else:
                 self.pre_close_line.setValue(pre_close)
                 self.pre_close_line.setPen(pg.mkPen(pre_close_color, width=2, style=Qt.PenStyle.DashLine))
+                self.pre_close_line.show()
 
             # 2. 前日均价
             ppre_drawn = False
@@ -14650,8 +14986,10 @@ class MainWindow(QMainWindow, WindowMixin):
 
                         tick_signals_to_draw.append(tick_sig)
 
-                if tick_signals_to_draw:
-                    self.signal_overlay.update_signals(tick_signals_to_draw, target='tick')
+            self.signal_overlay.update_signals(tick_signals_to_draw, target='tick')
+
+        else:
+            self.signal_overlay.clear('tick')
 
         # --- 绘制热点/跟单标记 ---
         self._draw_hotspot_markers(code, x_axis, day_df)
@@ -15706,15 +16044,20 @@ class MainWindow(QMainWindow, WindowMixin):
     def load_history_filters(self):
         from tk_gui_modules.gui_config import SEARCH_HISTORY_FILE
 
-        self.filter_combo.blockSignals(True)
+        selected_query = self.filter_combo.currentData()
+        self._filter_query_timer.stop()
+        was_blocked = self.filter_combo.blockSignals(True)
         self.filter_combo.clear()
-        self.load_cat_filter_history5() # ✅ 同步刷新左侧板块过滤下拉框
+        try:
+            self.load_cat_filter_history5() # ✅ 同步刷新左侧板块过滤下拉框
+        except Exception as exc:
+            logger.warning(f"[FilterRefresh] Category history reload failed: {exc}")
 
         history_path = SEARCH_HISTORY_FILE
 
         if not os.path.exists(history_path):
             self.filter_combo.addItem("History file not found")
-            self.filter_combo.blockSignals(False)
+            self.filter_combo.blockSignals(was_blocked)
             return
 
         try:
@@ -15737,11 +16080,15 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception as e:
             self.filter_combo.addItem(f"Error: {e}")
 
-        self.filter_combo.blockSignals(False)
+        if selected_query is not None:
+            index = self.filter_combo.findData(selected_query)
+            if index >= 0:
+                self.filter_combo.setCurrentIndex(index)
+        self.filter_combo.blockSignals(was_blocked)
 
         # ⭐ 延迟刷新 ComboBox 触发的 tree 填充
         if self.filter_combo.count() > 0:
-            QTimer.singleShot(100, lambda: self.on_filter_combo_changed(self.filter_combo.currentIndex()))
+            self._filter_query_timer.start(100)
 
 
     def load_cat_filter_history5(self):
@@ -16763,6 +17110,12 @@ class MainWindow(QMainWindow, WindowMixin):
     def closeEvent(self, event):
         """窗口关闭统一退出清理"""
         self._closing = True
+        self._pending_chart_render = None
+        self._sbc_pending_request = None
+        self._chunk_seq = getattr(self, '_chunk_seq', 0) + 1
+        if self._sbc_future is not None:
+            self._sbc_future.cancel()
+        self.executor.shutdown(wait=False, cancel_futures=True)
 
         # 0.0️⃣ ⭐ [FIX] 立即停止语音系统（最高优先级，防止退出过程中继续播报）
         # 必须在停止所有 QTimer 之前，确保 voice_batch_timer 不再触发新任务

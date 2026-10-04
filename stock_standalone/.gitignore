@@ -2,6 +2,9 @@
 .pytest_cache/
 .pytest_tmp/
 !tests/test_hdf_lock_deadline.py
+!tests/test_trade_visualizer_performance.py
+!tests/visualizer_test_support.py
+!docs/TRADE_VISUALIZER_BENCHMARK_20261004.json
 !tests/test_ats_performance_contracts.py
 !tests/test_ats_incremental_gui_contract.py
 !tests/test_ats_capacity_equivalence.py

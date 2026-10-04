@@ -1,0 +1,41 @@
+{
+  "python": "3.9.13",
+  "pyqtgraph": "0.13.3",
+  "repeats": 9,
+  "current": {
+    "candle_4096": {
+      "identical_ms": 0.082,
+      "tail_ms": 2.985,
+      "paint_150_ms": 1.014
+    },
+    "candle_20000": {
+      "identical_ms": 1.068,
+      "tail_ms": 4.551,
+      "paint_150_ms": 0.989
+    },
+    "table_5000_changed_5_ms": 1.457,
+    "filter_tasks_after_1000_requests": 1,
+    "table_flushes_after_1000_requests": 1,
+    "hot_pen_creations_under_1024_cold_colors": 1
+  },
+  "baseline_commit": "59ad26ece0e5d849f885163778a2ab88fd009611",
+  "baseline_blob": "2fdc34f8199068e50707e159065ab5bdb51a1ccc",
+  "baseline_index": {
+    "candle_4096": {
+      "identical_ms": 0.081,
+      "tail_ms": 3.239,
+      "paint_150_ms": 0.97
+    },
+    "candle_20000": {
+      "identical_ms": 0.352,
+      "tail_ms": 3.7,
+      "paint_150_ms": 0.985
+    },
+    "table_5000_changed_5_ms": 1.408,
+    "filter_tasks_after_1000_requests": 1000,
+    "table_flushes_after_1000_requests": 1,
+    "hot_pen_creations_under_1024_cold_colors": 5
+  },
+  "same_candle_pixels": true,
+  "same_theme_and_color_pixels": true
+}
