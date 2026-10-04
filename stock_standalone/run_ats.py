@@ -158,6 +158,8 @@ def main():
     from ats.qt_interrupt import install_qt_keyboard_interrupt_handler
     keyboard_interrupt_guard = install_qt_keyboard_interrupt_handler(app, window)
     def flush_archives():
+        if getattr(window, '_exit_cleanup_complete', False):
+            return
         import threading
         from ats.bounded_evaluation_store import evaluation_store
         threading.Thread(target=evaluation_store.flush, name='ATS-ArchiveClose', daemon=False).start()

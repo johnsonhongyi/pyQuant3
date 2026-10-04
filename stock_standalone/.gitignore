@@ -6,6 +6,7 @@
 !tests/visualizer_test_support.py
 !docs/TRADE_VISUALIZER_BENCHMARK_20261004.json
 !tests/test_ats_performance_contracts.py
+!tests/test_ats_shutdown_exit.py
 !tests/test_ats_incremental_gui_contract.py
 !tests/test_ats_capacity_equivalence.py
 !trading_kernel/tests/test_replay_equivalence.py

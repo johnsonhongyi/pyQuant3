@@ -185,8 +185,13 @@ def _worker_entry(connection, root):
         signal.signal(signal.SIGINT, signal.SIG_IGN)
     except (AttributeError, ValueError, OSError):
         pass
+    parent = multiprocessing.parent_process()
     try:
-        while True:
+        while parent is None or parent.is_alive():
+            # Windows console/pipe handles may outlive the GUI parent. Do not
+            # depend solely on EOF or a shutdown message to retire an idle worker.
+            if not connection.poll(0.5):
+                continue
             request = connection.recv()
             if request is None:
                 break

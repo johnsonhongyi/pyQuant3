@@ -7155,7 +7155,8 @@ class ATSMainWindow(QMainWindow):
             except Exception as err:
                 logger.warning(f"[ATS] 后台关闭 IPO 检测器失败: {err}")
         import threading
-        threading.Thread(target=close_detector, daemon=False, name="ATS-IPOClose").start()
+        self._ipo_close_thread = threading.Thread(target=close_detector, daemon=False, name="ATS-IPOClose")
+        self._ipo_close_thread.start()
 
 
     def _begin_shutdown_drain(self):
@@ -7254,8 +7255,79 @@ class ATSMainWindow(QMainWindow):
             timer.start()
         self._resume_close_watchers()
 
+    def _complete_shutdown(self, event):
+        """Drain saves submitted by child-window closure before ending the process."""
+        from ats.shutdown import (ShutdownDrain, wait_for_threads,
+                                  reap_multiprocessing_children, start_exit_watchdog)
+        from ats.bounded_evaluation_store import evaluation_store, recovery_journal_path
+        from ats.ui.styles import flush_config_writer
+        from ats.ui.sbc_launcher import SBCProcessManager
+        from sys_utils import get_app_root, is_packaged_env
+
+        drain = getattr(self, '_exit_cleanup_drain', None)
+        if drain is None:
+            deadline = time.monotonic() + 30.0
+            self._exit_cleanup_deadline = deadline
+            threads = [getattr(self, '_ipo_close_thread', None),
+                       getattr(self, '_next_day_close_thread', None)]
+            threads.extend(SBCProcessManager.get_instance()._close_workers)
+
+            def flush_archives():
+                if evaluation_store.flush(timeout_sec=max(0.0, deadline - time.monotonic()),
+                                          require_clean=True, force=True):
+                    return True
+                return evaluation_store.persist_recovery(
+                    recovery_journal_path(get_app_root()),
+                    timeout_sec=max(0.0, deadline - time.monotonic()))
+
+            tasks = [('subprocess cleanup', lambda: wait_for_threads(threads, deadline)),
+                     ('multiprocessing cleanup', lambda: reap_multiprocessing_children(deadline)),
+                     ('final config', lambda: flush_config_writer(
+                         timeout_sec=max(0.0, deadline - time.monotonic()))),
+                     ('final archives', flush_archives)]
+            self._exit_cleanup_drain = ShutdownDrain(tasks, deadline)
+            event.ignore()
+            QTimer.singleShot(25, self._retry_close_after_workers)
+            return
+        if not drain.done.is_set():
+            event.ignore()
+            if time.monotonic() >= self._exit_cleanup_deadline:
+                logger.error('ATS final cleanup timed out; preserving main window')
+                self.status_bar.showMessage('退出收尾超时：保留主窗口及待保存状态，可稍后重试关闭', 15000)
+                return
+            QTimer.singleShot(25, self._retry_close_after_workers)
+            return
+        if drain.errors:
+            event.ignore()
+            self._exit_cleanup_drain = None
+            logger.error('ATS final cleanup failed: %s', drain.errors)
+            self.status_bar.showMessage('退出收尾失败：保留主窗口及待保存状态，可重试关闭', 15000)
+            return
+
+        self._exit_cleanup_complete = True
+        if is_packaged_env():
+            self._exit_watchdog = start_exit_watchdog()
+        print('[ATSMainWindow] 退出收尾完成：数据已持久化，子进程关闭任务已回收。')
+        # Arm the watchdog before stopping logging: QueueListener.stop() also joins
+        # without a timeout and can block on a console/file handler.
+        try:
+            from JohnsonUtil.LoggerFactory import stopLogger
+            stopLogger()
+        except Exception:
+            pass
+        super().closeEvent(event)
+        app = QApplication.instance()
+        if app:
+            app.quit()
+
     def closeEvent(self, event):
         """主窗口关闭退出时，自动跟随关闭所有独立的 TopLevel 子窗口、对话框、保存全量布局配置及安全回收后台线程"""
+        if getattr(self, '_exit_cleanup_complete', False):
+            event.accept()
+            return
+        if getattr(self, '_final_close_started', False):
+            self._complete_shutdown(event)
+            return
         if not getattr(self, '_close_requested', False):
             self._close_requested = True
             self._close_deadline = time.monotonic() + 30.0
@@ -7322,7 +7394,8 @@ class ATSMainWindow(QMainWindow):
         service = getattr(self, '_next_day_watch_process', None)
         if service is not None:
             import threading
-            threading.Thread(target=service.close, name="ATS-NextDayClose", daemon=False).start()
+            self._next_day_close_thread = threading.Thread(target=service.close, name="ATS-NextDayClose", daemon=False)
+            self._next_day_close_thread.start()
 
         # 0. 🚀【原子持久化打开的磁吸/监控窗口状态】：在子窗口被 close() 前优先保存 is_open: True
         try:
@@ -7515,7 +7588,7 @@ class ATSMainWindow(QMainWindow):
                     self.ipo_detector_dialog.close()
                 except Exception:
                     pass
-            print("[ATSMainWindow] 新股次新超短检测工具已统一安全退出!")
+            print("[ATSMainWindow] 已提交新股次新超短检测工具后台保存与退出任务。")
         except Exception as ex_ipo:
             print(f"[ATSMainWindow] 关闭新股超短检测工具异常: {ex_ipo}")
 
@@ -7590,25 +7663,8 @@ class ATSMainWindow(QMainWindow):
         except Exception as e:
             print(f"[ATSMainWindow] Error shutting down AlertNotifier: {e}")
 
-        # ✅ 【最后一步】主动停止日志队列监听线程，防止 atexit 阶段 QueueListener._thread.join()
-        # 在 Python 解释器关闭时永久阻塞（_monitor 线程向被替换的 sys.stdout 写日志触发死锁）。
-        # 必须在 super().closeEvent() 之前执行，确保日志系统在 Qt 清理之前干净关闭。
-        try:
-            from JohnsonUtil.LoggerFactory import stopLogger
-            stopLogger()
-        except Exception:
-            pass
-
-        super().closeEvent(event)
-
-        # 确保主窗口关闭后，通知 Qt 应用退出事件循环
-        try:
-            from PyQt6.QtWidgets import QApplication
-            app = QApplication.instance()
-            if app:
-                app.quit()
-        except Exception:
-            pass
+        self._final_close_started = True
+        self._complete_shutdown(event)
 
 
     def _on_favorites_changed(self):
