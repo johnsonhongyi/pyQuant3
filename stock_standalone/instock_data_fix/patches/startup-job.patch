@@ -1,0 +1,5 @@
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -15,1 +15,2 @@
+ RUN chmod 600 /var/spool/cron/crontabs/root
++RUN sed -i '/^\[program:run_job\]/a autostart=false' /data/InStock/supervisor/supervisord.conf

@@ -27,6 +27,7 @@ def save_nph_stock_spot_data(date, before=True):
     try:
         data = stock_data(date).get_data()
         if data is None or len(data.index) == 0:
+            logging.error("basic_data_daily_job没有获取到%s股票行情，保留原有数据", date)
             return
 
         stf.backfill_tdx_daily_data(data, date)
@@ -53,6 +54,7 @@ def save_nph_etf_spot_data(date, before=True):
     try:
         data = stf.fetch_etfs(date)
         if data is None or len(data.index) == 0:
+            logging.error("basic_data_daily_job没有获取到%s ETF行情，保留原有数据", date)
             return
 
         table_name = tbs.TABLE_CN_ETF_SPOT['name']

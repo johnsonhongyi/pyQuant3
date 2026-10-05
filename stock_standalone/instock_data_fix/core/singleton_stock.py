@@ -27,12 +27,17 @@ class stock_data(metaclass=singleton_type):
 
 # 读取股票历史数据
 class stock_hist_data(metaclass=singleton_type):
-    def __init__(self, date=None, stocks=None, workers=16):
+    def __init__(self, date=None, stocks=None, workers=2):
         if stocks is None:
-            _subset = stock_data(date).get_data()[list(tbs.TABLE_CN_STOCK_FOREIGN_KEY['columns'])]
+            snapshot = stock_data(date).get_data()
+            if snapshot is None or snapshot.empty:
+                logging.error("singleton.stock_hist_data没有%s的股票行情列表", date)
+                self.data = None
+                return
+            _subset = snapshot[list(tbs.TABLE_CN_STOCK_FOREIGN_KEY['columns'])]
             stocks = [tuple(x) for x in _subset.values]
             #import pdb;pdb.set_trace()
-        if stocks is None:
+        if stocks is None or len(stocks) == 0:
             self.data = None
             return
         date_start, is_cache = trd.get_trade_hist_interval(stocks[0][0])  # 提高运行效率，只运行一次
@@ -52,7 +57,9 @@ class stock_hist_data(metaclass=singleton_type):
                         logging.error(f"singleton.stock_hist_data处理异常：{stock[1]}代码{e}")
         except Exception as e:
             logging.error(f"singleton.stock_hist_data处理异常：{e}")
-        if not _data:
+        minimum = max(1, int(len(stocks) * 0.7))
+        if len(_data) < minimum:
+            logging.error("singleton.stock_hist_data TDX历史数据覆盖不足: %s/%s", len(_data), len(stocks))
             self.data = None
         else:
             self.data = _data
