@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import logging
-import os.path
+import os
 import sys
 import pandas as pd
 
@@ -25,7 +25,7 @@ def save_nph_stock_spot_data(date, before=True):
         return
     # 股票列表
     try:
-        data = stock_data(date).get_data()
+        data = stock_data(date).get_data(date)
         if data is None or len(data.index) == 0:
             logging.error("basic_data_daily_job没有获取到%s股票行情，保留原有数据", date)
             return
@@ -74,7 +74,8 @@ def save_nph_etf_spot_data(date, before=True):
 
 def main():
     runt.run_with_args(save_nph_stock_spot_data)
-    runt.run_with_args(save_nph_etf_spot_data)
+    if os.environ.get("INSTOCK_STOCK_SPOT_ONLY") != "1":
+        runt.run_with_args(save_nph_etf_spot_data)
 
 
 # main函数入口

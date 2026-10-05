@@ -7,6 +7,8 @@ import pandas as pd
 import os
 import os.path
 import sys
+from itertools import islice
+import time
 
 
 cpath_current = os.path.dirname(os.path.dirname(__file__))
@@ -27,7 +29,7 @@ import instock.job.backtest_data_daily_job_edit as bk_job_edit
 
 def prepare(date, strategy):
     try:
-        stocks_data = stock_hist_data(date=date).get_data()
+        stocks_data = stock_hist_data(date=date).get_data(date)
         if stocks_data is None:
             return
         table_name = strategy['name']
@@ -68,6 +70,7 @@ def pandas_df(conn, sql):
     return df
 
 def stocks_data_to_realtime(date,stocks_data,realdf):
+    realdf = realdf.copy()
     realdf['open'] = realdf['open_price']
     realdf['high'] = realdf['high_price']
     realdf['low'] = realdf['low_price']
@@ -83,17 +86,22 @@ def stocks_data_to_realtime(date,stocks_data,realdf):
     h_col = tuple(tbs.CN_STOCK_HIST_DATA['columns'])
     # h_col.append('p_change')
     # ('2023-05-11', '603058', '永吉股份')
-    stocks_data2={}
     rundate = str(date.strftime("%Y-%m-%d"))
+    realdf['code'] = realdf['code'].astype(str).str.split('.').str[0].str.zfill(6)
+    realdf = realdf.drop_duplicates('code', keep='last').set_index('code', drop=False)
     # rundate = date
-    for key in stocks_data:
+    for key in list(stocks_data):
         # date1 = key[0]
-        code  = key[1]
+        code = str(key[1]).split('.')[0].zfill(6)
         name = key[2]
-        pr_value = stocks_data[key]
+        pr_value = stocks_data.pop(key)
         pr_value = pr_value[pr_value.date < str(date)[:10]]
         # scol = stocks_data[key].columns.values
-        data = realdf.loc[realdf.code==code,h_col]
+        new_key = (rundate,code,name)
+        if code not in realdf.index:
+            stocks_data[new_key] = pr_value
+            continue
+        data = realdf.loc[[code],h_col]
         # pr_value = pr_value.append(data).reset_index(drop=True)
         
         #debug realtime
@@ -103,9 +111,9 @@ def stocks_data_to_realtime(date,stocks_data,realdf):
         pr_value = _normalize_talib_columns(pr_value)
         pr_value.loc[:, 'p_change'] = tl.ROC(pr_value['close'].to_numpy(dtype='float64'), 1)
         pr_value['date'] = pd.to_datetime(pr_value.date, format='%Y-%m-%d')
-        stocks_data2[(rundate,code,name)] = pr_value
+        stocks_data[new_key] = pr_value
         
-    return stocks_data2
+    return stocks_data
 
 def filter_code_to_stock_data(stocks_data,codelist):
     stocks_data2 = {}
@@ -117,44 +125,49 @@ def filter_code_to_stock_data(stocks_data,codelist):
 
 global stockdata
 stockdata = None
-def prepareRealtime(date, strategy):
-    try:
-        stocks_data = stock_hist_data(date=date).get_data()
-        if not stocks_data:
-            raise RuntimeError(f"{date}的TDX历史数据为空或覆盖不足")
-        
+def build_strategy_snapshot(date):
+    cycle_started = time.perf_counter()
+    stocks_data = stock_hist_data(date=date).get_data(date)
+    if not stocks_data:
+        raise RuntimeError(f"{date}的TDX历史数据为空或覆盖不足")
+    logging.info("strategy snapshot history ready: date=%s stocks=%s elapsed=%.1fs",
+                 date, len(stocks_data), time.perf_counter() - cycle_started)
 
-        #debug
-        # code_list=['600258']
-        # stocks_data = filter_code_to_stock_data(stocks_data,code_list) 
-        
+    now_time = datetime.datetime.now()
+    run_date = now_time.date()
+    requested_date = date.date() if isinstance(date, datetime.datetime) else date
+    if (requested_date == run_date and trd.is_trade_date(run_date)
+            and trd.is_open(now_time) and not trd.is_close(now_time)):
+        logging.info("strategy_enter_readldf：%s", date)
+        real_table_name = 'cn_stock_spot'
+        read_sql = f"SELECT * FROM `{real_table_name}` where `date` = '{date}'"
+        realdf = pandas_df(mdb.engine(), read_sql)
+        if realdf is None or realdf.empty:
+            realdf = fetch_stocks(date)
+        if realdf is None or realdf.empty:
+            raise RuntimeError(f"{date}的实时行情接口没有返回股票数据")
+        stocks_data = stocks_data_to_realtime(date, stocks_data, realdf)
+        if not stocks_data:
+            raise RuntimeError(f"{date}实时行情与TDX历史数据无法匹配")
+        logging.info("realtime_enter_readldf：%s", next(iter(stocks_data)))
+    else:
+        for frame in stocks_data.values():
+            if frame is not None and 'date' in frame.columns:
+                frame['date'] = pd.to_datetime(frame['date'], format='%Y-%m-%d', errors='coerce')
+    return stocks_data
+
+
+def prepareRealtime(date, strategy, stocks_data=None):
+    try:
+        if stocks_data is None:
+            stocks_data = build_strategy_snapshot(date)
+        if not stocks_data:
+            raise RuntimeError(f"{date}的策略行情快照为空")
+
         global stockdata
         stockdata = stocks_data
-        now_time = datetime.datetime.now()
-        run_date = now_time.date()
-        # run_date = date + datetime.timedelta(days=1)
         table_name = strategy['name']
         strategy_func = strategy['func']
-        
-        # if trd.is_trade_date(run_date) :
-        if trd.is_trade_date(run_date) and trd.is_open(now_time) and not trd.is_close(now_time):
-            
-            date = run_date
-            logging.info(f"strategy_enter_readldf：{date}")
-            real_table_name = 'cn_stock_spot'
-            read_sql = f"SELECT * FROM `{real_table_name}` where `date` = '{date}'"
-            realdf = pandas_df(mdb.engine(),read_sql)
-            if len(realdf) == 0:
-                logging.info(f"strategy_enter_readldf.prepare处理异常：{date}")
-                realdf = fetch_stocks(date)
-            if realdf is None or realdf.empty:
-                raise RuntimeError(f"{date}的实时行情接口没有返回股票数据")
-            stocks_data = stocks_data_to_realtime(date,stocks_data,realdf)
-            if not stocks_data:
-                raise RuntimeError(f"{date}实时行情与TDX历史数据无法匹配")
-            stockdata = stocks_data
-            logging.info(f"realtime_enter_readldf：{list(stocks_data.keys())[0]}")
-            
         results = run_check(strategy_func, table_name, stocks_data, date)
         if results is None:
             return
@@ -206,22 +219,37 @@ def run_check(strategy_fun, table_name, stocks, date, workers=2):
     
     error_count = 0
     future_count = 0
+    worker_count = max(1, min(int(workers), 2))
+    batch_size = worker_count * 4
+    scan_started = time.perf_counter()
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            if is_check_high_tight:
-                future_to_data = {executor.submit(strategy_fun, k, stocks[k], date=date, istop=(k[1] in stock_tops)): k for k in stocks}
-            else:
-                future_to_data = {executor.submit(strategy_fun, k, stocks[k], date=date): k for k in stocks}
-            future_count = len(future_to_data)
-            for future in concurrent.futures.as_completed(future_to_data):
-                stock = future_to_data[future]
-                try:
-                    if future.result():
-                        data.append(stock)
-                except Exception as e:
-                    error_count += 1
-                    if error_count <= 10:
-                        logging.error(f"strategy_data_daily_job.run_check处理异常：{stock[1]}代码{e}策略{table_name}")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+            stock_iter = iter(stocks.items())
+            while True:
+                batch = list(islice(stock_iter, batch_size))
+                if not batch:
+                    break
+                future_to_data = {}
+                for stock, frame in batch:
+                    # Strategy checks mutate dates and live volume fields; isolate those edits
+                    # so every strategy reads the same cycle snapshot.
+                    stock_frame = frame.copy(deep=True)
+                    if is_check_high_tight:
+                        future = executor.submit(strategy_fun, stock, stock_frame, date=date,
+                                                 istop=(stock[1] in stock_tops))
+                    else:
+                        future = executor.submit(strategy_fun, stock, stock_frame, date=date)
+                    future_to_data[future] = stock
+                future_count += len(future_to_data)
+                for future in concurrent.futures.as_completed(future_to_data):
+                    stock = future_to_data[future]
+                    try:
+                        if future.result():
+                            data.append(stock)
+                    except Exception as e:
+                        error_count += 1
+                        if error_count <= 10:
+                            logging.error(f"strategy_data_daily_job.run_check处理异常：{stock[1]}代码{e}策略{table_name}")
     except Exception as e:
         logging.exception(f"strategy_data_daily_job.run_check处理异常：{e}策略{table_name}")
         raise
@@ -229,6 +257,8 @@ def run_check(strategy_fun, table_name, stocks, date, workers=2):
         logging.error("%s逐股计算异常 %s/%s", table_name, error_count, future_count)
     if future_count and error_count > max(5, int(future_count * 0.01)):
         raise RuntimeError(f"{table_name}逐股计算失败过多：{error_count}/{future_count}")
+    logging.info("strategy scan complete: strategy=%s checked=%s matched=%s errors=%s elapsed=%.1fs",
+                 table_name, future_count, len(data), error_count, time.perf_counter() - scan_started)
     return data
 
 
@@ -263,10 +293,11 @@ def strategy_enter(small_strategies_only=False):
         raise RuntimeError("指定范围内没有交易日")
     failures = []
     for run_date in run_dates:
+        stocks_snapshot = build_strategy_snapshot(run_date)
         for strategy in [tbs.TABLE_CN_STOCK_STRATEGIES[0], tbs.TABLE_CN_STOCK_STRATEGIES[1]]:
             logging.info(f"start strategyrealtime:{strategy['cn']} {strategy['name']} {run_date}")
             try:
-                prepareRealtime(run_date, strategy)
+                prepareRealtime(run_date, strategy, stocks_data=stocks_snapshot)
             except Exception as e:
                 failures.append(f"{strategy['name']} {run_date}: {e}")
     if failures:
@@ -277,4 +308,8 @@ def strategy_enter(small_strategies_only=False):
         bk_job_edit.prepareRealTime(stocks_data=stockdata)
 # main函数入口
 if __name__ == '__main__':
+    if (os.environ.get("INSTOCK_REQUIRE_TRADE_DATE") == "1"
+            and not trd.is_trade_date(datetime.date.today())):
+        logging.info("skip scheduled strategy scan on non-trading date: %s", datetime.date.today())
+        sys.exit(0)
     strategy_enter(small_strategies_only=os.environ.get("INSTOCK_SMALL_STRATEGIES_ONLY") == "1")

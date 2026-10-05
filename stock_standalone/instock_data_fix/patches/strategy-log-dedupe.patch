@@ -1,0 +1,34 @@
+--- a/enter.py
++++ b/enter.py
+@@ -34,5 +34,9 @@
+-handler = logging.StreamHandler()
+-ch_formatter = logging.Formatter("[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s");
+-handler.setFormatter(ch_formatter)
+-logging.getLogger().addHandler(handler)
+-logging.getLogger().setLevel(logging.INFO)
++root_logger = logging.getLogger()
++if not any(isinstance(existing, logging.StreamHandler)
++           and not isinstance(existing, logging.FileHandler)
++           for existing in root_logger.handlers):
++    handler = logging.StreamHandler()
++    ch_formatter = logging.Formatter("[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s")
++    handler.setFormatter(ch_formatter)
++    root_logger.addHandler(handler)
++root_logger.setLevel(logging.INFO)
+--- a/keep_increasing.py
++++ b/keep_increasing.py
+@@ -34,5 +34,9 @@
+-handler = logging.StreamHandler()
+-ch_formatter = logging.Formatter("[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s");
+-handler.setFormatter(ch_formatter)
+-logging.getLogger().addHandler(handler)
+-logging.getLogger().setLevel(logging.INFO)
++root_logger = logging.getLogger()
++if not any(isinstance(existing, logging.StreamHandler)
++           and not isinstance(existing, logging.FileHandler)
++           for existing in root_logger.handlers):
++    handler = logging.StreamHandler()
++    ch_formatter = logging.Formatter("[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s")
++    handler.setFormatter(ch_formatter)
++    root_logger.addHandler(handler)
++root_logger.setLevel(logging.INFO)

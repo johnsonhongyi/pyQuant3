@@ -7,6 +7,7 @@ import datetime
 import os
 import re
 import tempfile
+import pickle
 from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
@@ -31,9 +32,37 @@ __date__ = '2023/3/10 '
 
 # 设置基础目录，每次加载使用。
 cpath_current = os.path.dirname(os.path.dirname(__file__))
-stock_hist_cache_path = os.path.join(cpath_current, 'cache', 'hist')
+stock_hist_cache_path = os.environ.get(
+    'INSTOCK_HISTORY_CACHE_DIR',
+    os.path.join(cpath_current, 'cache', 'hist'),
+)
 if not os.path.exists(stock_hist_cache_path):
-    os.makedirs(stock_hist_cache_path)  # 创建多个文件夹结构。
+    os.makedirs(stock_hist_cache_path, exist_ok=True)
+
+
+def _tdx_history_source(code):
+    digits = ''.join(re.findall(r'\d', str(code)))
+    if len(digits) < 6:
+        return None, None, None
+    symbol = digits[-6:]
+    if symbol.startswith(('6', '9')):
+        exchange = 'SH'
+    elif symbol.startswith(('4', '8', '92')):
+        exchange = 'BJ'
+    else:
+        exchange = 'SZ'
+    forward_dir = os.environ.get('TDX_FORWARDP_DIR', '/data/InStock/instock/forwardp')
+    candidates = [os.path.join(forward_dir, exchange + symbol + suffix) for suffix in ('.TXT', '.txt')]
+    candidates.extend(os.path.join(forward_dir, symbol + suffix) for suffix in ('.TXT', '.txt'))
+    source_path = next((path for path in candidates if os.path.isfile(path)), None)
+    if source_path is None:
+        return symbol, None, None
+    try:
+        stat = os.stat(source_path)
+        fingerprint = (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+        return symbol, source_path, fingerprint
+    except OSError:
+        return symbol, source_path, None
 
 
 # 600 601 603 605开头的股票是上证A股
@@ -356,6 +385,27 @@ def fetch_stock_hist(data_base, date_start=None, is_cache=True):
 
 # 增加读取股票缓存方法。加快处理速度。多线程解决效率
 def stock_hist_cache(code, date_start, date_end=None, is_cache=True, adjust=''):
+    symbol, source_path, source_fingerprint = _tdx_history_source(code)
+    cache_fingerprint = None
+    cache_path = None
+    if source_path and source_fingerprint:
+        cache_fingerprint = (
+            str(date_start or ''), str(date_end or ''), str(adjust or ''),
+            tuple(tbs.CN_STOCK_HIST_DATA['columns']), source_path, source_fingerprint,
+        )
+        cache_name = re.sub(r'[^A-Za-z0-9_.-]', '_', str(adjust or 'raw'))
+        cache_path = os.path.join(stock_hist_cache_path, '%s-%s.pkl' % (symbol, cache_name))
+        try:
+            payload = pd.read_pickle(cache_path)
+            if (isinstance(payload, dict) and payload.get('version') == 1
+                    and payload.get('fingerprint') == cache_fingerprint
+                    and isinstance(payload.get('data'), pd.DataFrame)):
+                return payload['data']
+        except (OSError, EOFError, ValueError, TypeError, pickle.UnpicklingError):
+            logging.debug('TDX history cache miss for %s', symbol)
+        except Exception as e:
+            logging.debug('TDX history cache read failed for %s: %s', symbol, e)
+
     try:
         stock = get_tdx_Exp_day_to_df(code, start=date_start, end=date_end, dl=10000, fastohlc=True)
         if stock is None or stock.empty:
@@ -370,7 +420,30 @@ def stock_hist_cache(code, date_start, date_end=None, is_cache=True, adjust=''):
         stock['ups_downs'] = (stock['close'] - previous).fillna(0)
         stock['turnover'] = 0.0
         stock = _normalize_talib_columns(stock)
-        return stock[list(tbs.CN_STOCK_HIST_DATA['columns'])]
+        result = stock[list(tbs.CN_STOCK_HIST_DATA['columns'])]
+        if cache_path and cache_fingerprint:
+            _, current_path, current_source_fingerprint = _tdx_history_source(code)
+            if current_path == source_path and current_source_fingerprint == source_fingerprint:
+                temporary = None
+                try:
+                    os.makedirs(stock_hist_cache_path, exist_ok=True)
+                    fd, temporary = tempfile.mkstemp(prefix=symbol + '.', suffix='.tmp',
+                                                     dir=stock_hist_cache_path)
+                    with os.fdopen(fd, 'wb') as stream:
+                        pd.to_pickle({
+                            'version': 1,
+                            'fingerprint': cache_fingerprint,
+                            'data': result,
+                        }, stream)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    os.replace(temporary, cache_path)
+                except Exception as e:
+                    logging.debug('TDX history cache write failed for %s: %s', symbol, e)
+                finally:
+                    if temporary and os.path.exists(temporary):
+                        os.unlink(temporary)
+        return result
     except Exception as e:
         logging.error(f"stockfetch.stock_hist_cache处理异常：{code}代码{e}")
     return None
@@ -386,6 +459,8 @@ def backfill_tdx_daily_data(data, date):
             return 0
         forward_dir = os.environ.get('TDX_FORWARDP_DIR', '/data/InStock/instock/forwardp')
         os.makedirs(forward_dir, exist_ok=True)
+        eligible = 0
+        unchanged = 0
         written = 0
         failed = 0
         for row in data.itertuples(index=False):
@@ -397,6 +472,7 @@ def backfill_tdx_daily_data(data, date):
             numbers = [float(value) for value in values]
             if not np.isfinite(numbers).all() or numbers[0] <= 0 or numbers[1] <= 0 or numbers[2] <= 0 or numbers[3] <= 0:
                 continue
+            eligible += 1
             line = target_date + ',' + ','.join(format(value, '.10g') for value in numbers) + '\n'
             exchange = ('SH' if code.startswith(('6', '9')) else
                         'BJ' if code.startswith(('4', '8', '92')) else 'SZ')
@@ -412,15 +488,22 @@ def backfill_tdx_daily_data(data, date):
                     old_lines = []
                 merged = []
                 replaced = False
+                date_matches = 0
+                same_record = False
                 for old_line in old_lines:
                     if old_line.split(',', 1)[0].strip() == target_date:
+                        date_matches += 1
                         if not replaced:
                             merged.append(line)
                             replaced = True
+                            same_record = old_line.rstrip('\r\n') == line.rstrip('\n')
                     else:
                         merged.append(old_line if old_line.endswith(('\n', '\r')) else old_line + '\n')
                 if not replaced:
                     merged.append(line)
+                if date_matches == 1 and same_record:
+                    unchanged += 1
+                    continue
                 fd, temporary = tempfile.mkstemp(prefix=code + '.', suffix='.tmp', dir=forward_dir)
                 try:
                     with os.fdopen(fd, 'w', encoding='utf-8', newline='') as destination:
@@ -439,7 +522,8 @@ def backfill_tdx_daily_data(data, date):
             except Exception as e:
                 failed += 1
                 logging.error('TDX close backfill failed for %s: %s', code, e)
-        logging.info('TDX close backfill completed: date=%s written=%s failed=%s', target_date, written, failed)
+        logging.info('TDX close backfill completed: date=%s eligible=%s written=%s unchanged=%s failed=%s',
+                     target_date, eligible, written, unchanged, failed)
         return written
     except Exception as e:
         logging.error('stockfetch.backfill_tdx_daily_data处理异常：%s', e)
