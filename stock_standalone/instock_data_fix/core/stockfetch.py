@@ -24,6 +24,7 @@ import instock.core.crawling.stock_dzjy_em as sde
 import instock.core.crawling.stock_hist_em as she
 import instock.core.crawling.stock_fund_em as sff
 import instock.core.crawling.stock_fhps_em as sfe
+from instock.core.eastmoney_daily import fetch_etf_spot_once, fetch_stock_fund_flow_once
 
 __author__ = 'myh '
 __date__ = '2023/3/10 '
@@ -75,6 +76,17 @@ def _format_trade_date(date):
     return value[:10]
 
 
+def _normalize_talib_columns(data):
+    """Make TDX/AkShare numeric series safe for TA-Lib's double-only inputs."""
+    for column in ('open', 'high', 'low', 'close', 'volume', 'amount', 'turnover'):
+        if column in data.columns:
+            values = pd.to_numeric(data[column], errors='coerce')
+            if column in ('volume', 'amount', 'turnover'):
+                values = values.fillna(0)
+            data[column] = values.astype(np.float64)
+    return data
+
+
 # 读取股票交易日历数据
 def fetch_stocks_trade_date():
     try:
@@ -91,16 +103,7 @@ def fetch_stocks_trade_date():
 # 读取当天股票数据
 def fetch_etfs(date):
     try:
-        data = fee.fund_etf_spot_em()
-        if data is None or len(data.index) == 0:
-            return None
-        if date is None:
-            data.insert(0, 'date', datetime.datetime.now().strftime("%Y-%m-%d"))
-        else:
-            data.insert(0, 'date', date.strftime("%Y-%m-%d"))
-        data.columns = list(tbs.TABLE_CN_ETF_SPOT['columns'])
-        data = data.loc[data['new_price'].apply(is_open)]
-        return data
+        return fetch_etf_spot_once(date)
     except Exception as e:
         logging.error(f"stockfetch.fetch_etfs处理异常：{e}")
     return None
@@ -187,15 +190,9 @@ def fetch_stock_selection():
 
 
 # 读取股票资金流向
-def fetch_stocks_fund_flow(index):
+def fetch_stocks_fund_flow(index, date=None):
     try:
-        cn_flow = tbs.CN_STOCK_FUND_FLOW[index]
-        data = sff.stock_individual_fund_flow_rank(indicator=cn_flow['cn'])
-        if data is None or len(data.index) == 0:
-            return None
-        data.columns = list(cn_flow['columns'])
-        data = data.loc[data['code'].apply(is_a_stock)].loc[data['new_price'].apply(is_open_with_line)]
-        return data
+        return fetch_stock_fund_flow_once(index, date)
     except Exception as e:
         logging.error(f"stockfetch.fetch_stocks_fund_flow处理异常：{e}")
     return None
@@ -326,8 +323,9 @@ def fetch_etf_hist(data_base, date_start=None, date_end=None, adjust='qfq'):
             return None
         data.columns = tuple(tbs.CN_STOCK_HIST_DATA['columns'])
         data = data.sort_index()  # 将数据按照日期排序下。
+        data = _normalize_talib_columns(data)
         if data is not None:
-            data.loc[:, 'p_change'] = tl.ROC(data['close'].values, 1)
+            data.loc[:, 'p_change'] = tl.ROC(data['close'].to_numpy(dtype=np.float64), 1)
             data['p_change'].values[np.isnan(data['p_change'].values)] = 0.0
             data["volume"] = data['volume'].values.astype('double') * 100  # 成交量单位从手变成股。
         return data
@@ -347,7 +345,8 @@ def fetch_stock_hist(data_base, date_start=None, is_cache=True):
     try:
         data = stock_hist_cache(code, date_start, None, is_cache, 'qfq')
         if data is not None:
-            data.loc[:, 'p_change'] = tl.ROC(data['close'].values, 1)
+            data = _normalize_talib_columns(data)
+            data.loc[:, 'p_change'] = tl.ROC(data['close'].to_numpy(dtype=np.float64), 1)
             data['p_change'].values[np.isnan(data['p_change'].values)] = 0.0
         return data
     except Exception as e:
@@ -362,6 +361,7 @@ def stock_hist_cache(code, date_start, date_end=None, is_cache=True, adjust=''):
         if stock is None or stock.empty:
             return None
         stock = stock.reset_index().rename(columns={'vol': 'volume'})
+        stock = _normalize_talib_columns(stock)
         previous = stock['close'].shift(1)
         stock['amplitude'] = np.where(previous.fillna(0) != 0,
                                       (stock['high'] - stock['low']) / previous * 100, 0)
@@ -369,6 +369,7 @@ def stock_hist_cache(code, date_start, date_end=None, is_cache=True, adjust=''):
                                          (stock['close'] - previous) / previous * 100, 0)
         stock['ups_downs'] = (stock['close'] - previous).fillna(0)
         stock['turnover'] = 0.0
+        stock = _normalize_talib_columns(stock)
         return stock[list(tbs.CN_STOCK_HIST_DATA['columns'])]
     except Exception as e:
         logging.error(f"stockfetch.stock_hist_cache处理异常：{code}代码{e}")

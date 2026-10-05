@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE=instock:johnson250103-manual-refresh-20261004
+IMAGE=${IMAGE:-instock:johnson250103-manual-refresh-$(date +%Y%m%d)}
 STAMP=$(date +%Y%m%d%H%M%S)
 ROLLBACK=inStock-rollback-$STAMP
 FAILED=inStock-failed-tdx-$STAMP
@@ -29,6 +29,7 @@ docker rename inStock "$ROLLBACK"
 
 if ! docker run -dit --name inStock --link=mariadb \
     --restart=always --log-opt max-size=10m --log-opt max-file=2 \
+    --cpus=2 --memory=1280m --memory-swap=1280m --pids-limit=128 \
     -p 9988:9988 \
     -v "$STOCK_ROOT/log:/data/InStock/instock/log" \
     -v "$STOCK_ROOT/instockcache:/data/InStock/instock/cache" \

@@ -1,5 +1,10 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](stock_standalone/design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-04 17:15 【MUSE 策略全面深度审计与 ATS SBC 及底层策略引擎对接架构】(`stock_standalone/docs/STOCK_STRATEGY_MUSE_ANALYSIS_AND_AUTOMATION_20261004.md`, `stock_standalone/20261004_1715_task.md`, `trading_kernel/contracts.py`, `trading_kernel/gateway.py`, `ats/ui/intraday_strategy_dialog.py`, `ats/strategy/gate_orchestrator.py`)
+- [x] **【策略全面审计与工程穿透】**：深度剖析五层策略（环境 P1-P5/P26、入场 P8/P9/P24/P25、持仓 P7/P11/P12/P15、退出 P6/P16-P20/P23、周期/空头 P30/S-P）；对四项优先缺陷（YAML 结构 P28/P29 重复键、参数生效脱钩硬编码、评分门区分度失真、模拟真实性倒置）制定最小修复与标准化门禁；
+- [x] **【对接 ATS SBC (分时阶梯策略 & 7 节点评估工作台)】**：确立 SBC 客户端只读与本地内存缓存原则，实现 1/3/5 日 VWAP、突破线、偏离警戒带与价格笼子的毫秒级图元渲染；将 MUSE P 系列规则无缝编排入 7 节点时序评估工作台；
+- [x] **【对接底层策略引擎 (TradingKernel & GateOrchestrator)】**：确立远程 Docker MUSE（研究/漏斗/复盘）与本地 ATS/TK（唯一仲裁/账户 SSOT/T+1 持仓守护）职责分界；通过 `KernelGateway.submit(DecisionRequest)` 幂等决策契约打通六门仲裁（`GatePassport`）与硬风控红线，支持 `EXIT_DEFERRED_T1` 延期退出状态机与 PAPER 隔离演练。
+
 ## 2026-10-03 14:38 Nuitka 批量全编译调度中心 (instock-nuitka-batch.cmd) 落地闭环
 - [x] **【对齐instock-pyinstall-batch高规格标准、onefile_spec参数穿透免5秒等待全无人值守、编译前后7天版本自动归档自愈、单项与总体耗时精确核算与报表持久化】(`instock-nuitka-batch.cmd`, `C:\Users\Johnson\instock-nuitka-batch.cmd`, `tools/generate_nuitka_batch.py`, `stock_standalone/20261003_1438_task.md`)**：
     - [x] **模块映射与产物标准对齐 [Architecture]**：完整整合 `ats` (`nuitka_build_ats_console_onlyClang.bat` -> `build\ATS_Terminal.exe`)、`tk` (`nuitka_build_console_onlyClang.bat` -> `build\instock_MonitorTK_Nuita.exe`) 与 `multi` (`nuitka_build_multi_period_dialog_onlyClang.bat` -> `build\MultiPeriodTester.exe`) 三大 Nuitka 全编译脚本；

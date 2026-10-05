@@ -1,0 +1,8 @@
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -1,1 +1,1 @@
+-FROM instock:johnson250103
++FROM instock:johnson250103-manual-refresh-20261004
+@@ -15,1 +15,1 @@
+-RUN sed -i '/^\[program:run_job\]/a autostart=false' /data/InStock/supervisor/supervisord.conf
++RUN sed -i '/^\[program:run_job\]/,/^\[/{/^autostart=/d;}' /data/InStock/supervisor/supervisord.conf && sed -i '/^\[program:run_job\]/a autostart=false' /data/InStock/supervisor/supervisord.conf

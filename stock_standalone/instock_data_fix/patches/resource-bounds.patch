@@ -1,0 +1,57 @@
+--- a/job/indicators_data_daily_job.py
++++ b/job/indicators_data_daily_job.py
+@@ -61,1 +61,1 @@
+-def run_check(stocks, date=None, workers=40):
++def run_check(stocks, date=None, workers=2):
+--- a/job/klinepattern_data_daily_job.py
++++ b/job/klinepattern_data_daily_job.py
+@@ -59,1 +59,1 @@
+-def run_check(stocks, date=None, workers=40):
++def run_check(stocks, date=None, workers=2):
+--- a/job/strategy_data_daily_job.py
++++ b/job/strategy_data_daily_job.py
+@@ -57,1 +57,1 @@
+-def run_check(strategy_fun, table_name, stocks, date, workers=40):
++def run_check(strategy_fun, table_name, stocks, date, workers=2):
+@@ -87,3 +87,2 @@
+-    with concurrent.futures.ThreadPoolExecutor() as executor:
+-        for strategy in tbs.TABLE_CN_STOCK_STRATEGIES:
+-            executor.submit(runt.run_with_args, prepare, strategy)
++    for strategy in tbs.TABLE_CN_STOCK_STRATEGIES:
++        runt.run_with_args(prepare, strategy)
+--- a/job/backtest_data_daily_job.py
++++ b/job/backtest_data_daily_job.py
+@@ -40,1 +40,1 @@
+-    with concurrent.futures.ThreadPoolExecutor() as executor:
++    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+@@ -79,1 +79,1 @@
+-def run_check(stocks, data_all, date, backtest_column, workers=40):
++def run_check(stocks, data_all, date, backtest_column, workers=2):
+--- a/job/backtest_data_daily_job_edit.py
++++ b/job/backtest_data_daily_job_edit.py
+@@ -40,1 +40,1 @@
+-    with concurrent.futures.ThreadPoolExecutor() as executor:
++    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+@@ -194,1 +194,1 @@
+-    with concurrent.futures.ThreadPoolExecutor() as executor:
++    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+@@ -239,1 +239,1 @@
+-def run_check(stocks, data_all, date, backtest_column, workers=40):
++def run_check(stocks, data_all, date, backtest_column, workers=2):
+--- a/job/execute_daily_job.py
++++ b/job/execute_daily_job.py
+@@ -42,9 +42,5 @@
+-        with concurrent.futures.ThreadPoolExecutor() as executor:
+-            # # 第3.1步创建股票其它基础数据表
+-            executor.submit(hdtj.main)
+-            # # 第3.2步创建股票指标数据表
+-            executor.submit(gdj.main)
+-            # # # # 第4步创建股票k线形态表
+-            executor.submit(kdj.main)
+-            # # # # 第5步创建股票策略数据表
+-            executor.submit(sdj.main)
++        # 串行刷新数据集，避免低内存主机同时启动多套全市场任务。
++        hdtj.main()
++        gdj.main()
++        kdj.main()
++        sdj.main()
