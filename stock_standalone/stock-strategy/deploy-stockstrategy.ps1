@@ -13,10 +13,10 @@ if ($Server -notmatch '^[A-Za-z0-9.-]+$') {
 $source = (Resolve-Path -LiteralPath $SourceRoot).Path
 $serviceSource = Join-Path $source 'easy-stock-service'
 $webSource = Join-Path $source 'easy-stock-web'
-$backendBinary = Join-Path $serviceSource 'bin\easy-stock-backend'
+$backendSource = Join-Path $source 'easy-stock-analysis\backend'
 $assetRoot = Join-Path $PSScriptRoot 'docker'
 
-foreach ($path in @($serviceSource, $webSource, $backendBinary, (Join-Path $assetRoot 'install.sh'), (Join-Path $assetRoot 'backend.Dockerfile'), (Join-Path $assetRoot 'web.Dockerfile'), (Join-Path $assetRoot 'nginx.conf'), (Join-Path $assetRoot 'web-entrypoint.sh'))) {
+foreach ($path in @($serviceSource, $webSource, (Join-Path $backendSource 'go.mod'), (Join-Path $backendSource 'cmd\server\main.go'), (Join-Path $assetRoot 'install.sh'), (Join-Path $assetRoot 'backend.Dockerfile'), (Join-Path $assetRoot 'web.Dockerfile'), (Join-Path $assetRoot 'nginx.conf'), (Join-Path $assetRoot 'web-entrypoint.sh'))) {
     if (-not (Test-Path -LiteralPath $path)) {
         throw "Required deployment input is missing: $path"
     }
@@ -74,7 +74,7 @@ try {
     $target = "root@$Server"
     Write-Host "Uploading release $releaseId to $target. Enter the SSH password when prompted."
     $remoteArchive = $target + ':/tmp/' + $archiveName
-    & $scp -o ConnectTimeout=15 -o ServerAliveInterval=30 $archive $remoteArchive
+    & $scp -o HostKeyAlgorithms=ecdsa-sha2-nistp256 -o ConnectTimeout=15 -o ServerAliveInterval=30 $archive $remoteArchive
     if ($LASTEXITCODE -ne 0) {
         throw "SCP upload failed (exit $LASTEXITCODE)."
     }
@@ -94,7 +94,7 @@ exit "$result"
 '@
     $remoteCommand = $remoteCommand.Replace('STAGE_NAME', $stageName).Replace('ARCHIVE_NAME', $archiveName)
     Write-Host 'Building and starting the Docker containers on the server.'
-    & $ssh -o ConnectTimeout=15 -o ServerAliveInterval=30 $target $remoteCommand
+    & $ssh -o HostKeyAlgorithms=ecdsa-sha2-nistp256 -o ConnectTimeout=15 -o ServerAliveInterval=30 $target $remoteCommand
     if ($LASTEXITCODE -ne 0) {
         throw "Remote Docker deployment failed (exit $LASTEXITCODE)."
     }
