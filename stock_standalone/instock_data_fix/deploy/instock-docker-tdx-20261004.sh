@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE=${IMAGE:-instock:johnson250103-manual-refresh-$(date +%Y%m%d)}
+IMAGE=${IMAGE:-instock:johnson250103-balanced-fastscan-$(date +%Y%m%d)}
 STAMP=$(date +%Y%m%d%H%M%S)
 ROLLBACK=inStock-rollback-$STAMP
 FAILED=inStock-failed-tdx-$STAMP
@@ -22,6 +22,12 @@ fi
 docker inspect inStock --format '{{range .Config.Env}}{{println .}}{{end}}' > "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 trap 'rm -f "$ENV_FILE"' EXIT
+
+exec 9>"$STOCK_ROOT/instockcache/strategy_enter.lock"
+if ! /usr/bin/flock -w 3600 -E 75 9; then
+    echo "Timed out waiting for the active InStock job lock; deployment was not started." >&2
+    exit 75
+fi
 
 docker update --restart=no inStock >/dev/null
 docker stop inStock >/dev/null
