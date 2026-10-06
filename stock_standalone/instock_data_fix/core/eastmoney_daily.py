@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import os
+import re
 import tempfile
 import threading
 import time
@@ -150,7 +151,7 @@ def _mark_provider_success(state, elapsed):
     state.pop("last_error_at", None)
 
 
-def _request_json(url, params, referer):
+def _request_json(url, params, referer, validate_clist=True):
     """Make one paced request. There are deliberately no automatic retries."""
     with _file_lock("http"):
         state = _read_policy()
@@ -197,12 +198,16 @@ def _request_json(url, params, referer):
                 raise EastmoneyBlockedError(reason) from exc
 
             data = payload.get("data") if isinstance(payload, dict) else None
-            if (
-                not isinstance(data, dict)
-                or "total" not in data
-                or "diff" not in data
-                or payload.get("rc") not in (None, 0)
-            ):
+            invalid_payload = not isinstance(payload, dict)
+            if validate_clist:
+                invalid_payload = (
+                    invalid_payload
+                    or not isinstance(data, dict)
+                    or "total" not in data
+                    or "diff" not in data
+                    or payload.get("rc") not in (None, 0)
+                )
+            if invalid_payload:
                 reason = "unrecognized or rejected JSON payload"
                 _record_failure(state, reason)
                 _atomic_json(_policy_path(), state)
@@ -219,6 +224,16 @@ def _request_json(url, params, referer):
             _record_failure(state, "%s: %s" % (type(exc).__name__, exc))
             _atomic_json(_policy_path(), state)
             raise EastmoneyBlockedError(type(exc).__name__) from exc
+
+
+def request_eastmoney_json(url, params, referer, required_key=None):
+    """Fetch one arbitrary Eastmoney JSON page with the shared limiter and breaker."""
+    payload = _request_json(url, params, referer, validate_clist=False)
+    if required_key and required_key not in payload:
+        reason = 'Eastmoney payload missing %s' % required_key
+        _mark_provider_failure(reason)
+        raise EastmoneyBlockedError(reason)
+    return payload
 
 
 def _diff_rows(payload):
@@ -283,10 +298,41 @@ def _is_after_close_today(date_key):
     )
 
 
-def _daily_fetch(dataset, date_key, fetcher):
-    if not _is_after_close_today(date_key):
+def _call_eastmoney(fetcher):
+    """Pace one AkShare/Eastmoney operation through the shared provider circuit breaker."""
+    with _file_lock('http'):
+        state = _read_policy()
+        now = time.time()
+        blocked_until = float(state.get('blocked_until', 0))
+        if blocked_until > now:
+            raise EastmoneyBlockedError(
+                'provider cooldown active for %.0f more seconds' % (blocked_until - now)
+            )
+        gap = max(_MIN_GAP_SECONDS, int(state.get('min_gap_seconds', _MIN_GAP_SECONDS)))
+        delay = float(state.get('last_request_at', 0)) + gap - now
+        if delay > 0:
+            time.sleep(delay)
+        started = time.monotonic()
+        try:
+            result = fetcher()
+            state['last_request_at'] = time.time()
+            _mark_provider_success(state, time.monotonic() - started)
+            _atomic_json(_policy_path(), state)
+            return result
+        except EastmoneyBlockedError:
+            raise
+        except Exception as exc:
+            state['last_request_at'] = time.time()
+            _record_failure(state, '%s: %s' % (type(exc).__name__, exc))
+            _atomic_json(_policy_path(), state)
+            raise EastmoneyBlockedError('%s: %s' % (type(exc).__name__, exc)) from exc
+
+
+def _daily_fetch(dataset, date_key, fetcher, after_close=True, eastmoney=False):
+    if after_close and not _is_after_close_today(date_key):
         return None
 
+    dataset = re.sub(r'[^A-Za-z0-9_.-]', '_', str(dataset))
     os.makedirs(_CACHE_DIR, exist_ok=True)
     cache_path = os.path.join(_CACHE_DIR, "%s-%s.pkl" % (dataset, date_key))
     marker_path = os.path.join(_CACHE_DIR, "%s-%s.state" % (dataset, date_key))
@@ -300,7 +346,7 @@ def _daily_fetch(dataset, date_key, fetcher):
         if os.path.exists(marker_path):
             return None
 
-        remaining = _provider_cooldown_remaining()
+        remaining = _provider_cooldown_remaining() if eastmoney else 0
         if remaining > 0:
             _atomic_json(marker_path, {"status": "deferred", "date": date_key})
             logging.warning(
@@ -313,11 +359,12 @@ def _daily_fetch(dataset, date_key, fetcher):
 
         _atomic_json(marker_path, {"status": "started", "date": date_key})
         try:
-            data = fetcher()
+            data = _call_eastmoney(fetcher) if eastmoney else fetcher()
             if (
                 data is None
                 or isinstance(data, pd.DataFrame) and data.empty
                 or isinstance(data, dict) and not data
+                or isinstance(data, (list, tuple, set)) and not data
             ):
                 raise EastmoneyDataError("no usable records")
             temp_path = cache_path + ".tmp"
@@ -329,10 +376,25 @@ def _daily_fetch(dataset, date_key, fetcher):
             _atomic_json(marker_path, {"status": "blocked", "date": date_key})
             logging.warning("Eastmoney %s blocked for %s: %s", dataset, date_key, exc)
         except Exception as exc:
-            _mark_provider_failure("%s: %s" % (type(exc).__name__, exc))
+            if eastmoney:
+                _mark_provider_failure("%s: %s" % (type(exc).__name__, exc))
             _atomic_json(marker_path, {"status": "failed", "date": date_key})
-            logging.error("Eastmoney %s failed for %s: %s", dataset, date_key, exc)
+            logging.error("External dataset %s failed for %s: %s", dataset, date_key, exc)
         return None
+
+
+def fetch_external_once(dataset, date, fetcher, after_close=True, eastmoney=False):
+    """Persist one daily external dataset result and optionally pace Eastmoney access."""
+    return _daily_fetch(dataset, _date_key(date), fetcher,
+                        after_close=after_close, eastmoney=eastmoney)
+
+
+def fetch_etf_history_once(code, date, date_start, date_end, adjust, fetcher):
+    date_key = _date_key(date)
+    query_key = '%s-%s-%s-%s' % (code, date_start or 'all', date_end or 'latest', adjust or 'raw')
+    today_key = datetime.datetime.now(_TIMEZONE).date().isoformat()
+    return _daily_fetch('etf-history-' + query_key, date_key, fetcher,
+                        after_close=(date_key == today_key), eastmoney=True)
 
 
 _ETF_FIELD_MAP = {

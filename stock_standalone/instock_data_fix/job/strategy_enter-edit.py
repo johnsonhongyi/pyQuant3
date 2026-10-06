@@ -17,8 +17,12 @@ sys.path.append(cpath)
 import instock.lib.run_template as runt
 import instock.core.tablestructure as tbs
 import instock.lib.database as mdb
-from instock.core.singleton_stock import stock_hist_data
-from instock.core.stockfetch import fetch_stock_top_entity_data,fetch_stocks,_normalize_talib_columns
+from instock.core.singleton_stock import stock_data, stock_hist_data
+from instock.core.stockfetch import (
+    fetch_stock_top_entity_data,
+    _normalize_talib_columns,
+    apply_dynamic_volume_ratio,
+)
 
 __author__ = 'myh '
 __date__ = '2023/3/10 '
@@ -70,6 +74,7 @@ def pandas_df(conn, sql):
     return df
 
 def stocks_data_to_realtime(date,stocks_data,realdf):
+    stocks_data = dict(stocks_data)
     realdf = realdf.copy()
     realdf['open'] = realdf['open_price']
     realdf['high'] = realdf['high_price']
@@ -80,8 +85,9 @@ def stocks_data_to_realtime(date,stocks_data,realdf):
     realdf['close'] = realdf['new_price']
     realdf['amount'] = realdf['deal_amount']
     realdf['turnover'] = realdf['turnoverrate']
-    realdf['volume'] = pd.to_numeric(realdf['volume'], errors='coerce').fillna(0).astype('float64') * 100
-    realdf['amount'] = pd.to_numeric(realdf['amount'], errors='coerce').fillna(0).astype('float64') * 100
+    # Sina and TDX daily files both report volume in shares and amount in yuan.
+    realdf['volume'] = pd.to_numeric(realdf['volume'], errors='coerce').fillna(0).astype('float64')
+    realdf['amount'] = pd.to_numeric(realdf['amount'], errors='coerce').fillna(0).astype('float64')
     
     h_col = tuple(tbs.CN_STOCK_HIST_DATA['columns'])
     # h_col.append('p_change')
@@ -95,13 +101,17 @@ def stocks_data_to_realtime(date,stocks_data,realdf):
         code = str(key[1]).split('.')[0].zfill(6)
         name = key[2]
         pr_value = stocks_data.pop(key)
-        pr_value = pr_value[pr_value.date < str(date)[:10]]
+        target_day = pd.Timestamp(date).normalize()
+        history_days = pd.to_datetime(pr_value['date'], errors='coerce')
+        pr_value = pr_value.loc[history_days < target_day]
         # scol = stocks_data[key].columns.values
         new_key = (rundate,code,name)
         if code not in realdf.index:
-            stocks_data[new_key] = pr_value
+            # A missing live quote must not silently reuse yesterday's close intraday.
             continue
-        data = realdf.loc[[code],h_col]
+        data = realdf.loc[[code],h_col].copy()
+        if 'volume_ratio' in realdf.columns:
+            data['volume_ratio'] = realdf.loc[code, 'volume_ratio']
         # pr_value = pr_value.append(data).reset_index(drop=True)
         
         #debug realtime
@@ -127,33 +137,45 @@ global stockdata
 stockdata = None
 def build_strategy_snapshot(date):
     cycle_started = time.perf_counter()
-    stocks_data = stock_hist_data(date=date).get_data(date)
-    if not stocks_data:
-        raise RuntimeError(f"{date}的TDX历史数据为空或覆盖不足")
-    logging.info("strategy snapshot history ready: date=%s stocks=%s elapsed=%.1fs",
-                 date, len(stocks_data), time.perf_counter() - cycle_started)
-
     now_time = datetime.datetime.now()
     run_date = now_time.date()
     requested_date = date.date() if isinstance(date, datetime.datetime) else date
     if (requested_date == run_date and trd.is_trade_date(run_date)
             and trd.is_open(now_time) and not trd.is_close(now_time)):
         logging.info("strategy_enter_readldf：%s", date)
-        real_table_name = 'cn_stock_spot'
-        read_sql = f"SELECT * FROM `{real_table_name}` where `date` = '{date}'"
-        realdf = pandas_df(mdb.engine(), read_sql)
+        realdf = stock_data(date).get_data(date, refresh=True)
         if realdf is None or realdf.empty:
-            realdf = fetch_stocks(date)
-        if realdf is None or realdf.empty:
-            raise RuntimeError(f"{date}的实时行情接口没有返回股票数据")
+            raise RuntimeError(f"{date}的Sina实时行情接口没有返回股票数据")
+        stock_columns = list(tbs.TABLE_CN_STOCK_FOREIGN_KEY['columns'])
+        live_stocks = [tuple(row) for row in realdf[stock_columns].values]
+        stocks_data = stock_hist_data(date=date, stocks=live_stocks).get_data(
+            date, stocks=live_stocks)
+        if not stocks_data:
+            raise RuntimeError(f"{date}的TDX历史数据为空或覆盖不足")
+        history_by_code = {}
+        target_day = pd.Timestamp(date).normalize()
+        for key, frame in stocks_data.items():
+            if frame is not None and 'volume' in frame.columns and 'date' in frame.columns:
+                code = str(key[1]).split('.')[0].zfill(6)
+                history_dates = pd.to_datetime(frame['date'], errors='coerce')
+                previous = frame.loc[history_dates < target_day, 'volume']
+                history_by_code[code] = pd.to_numeric(
+                    previous, errors='coerce'
+                ).dropna().tail(5).tolist()
+        realdf = apply_dynamic_volume_ratio(realdf, history_by_code, now=now_time)
         stocks_data = stocks_data_to_realtime(date, stocks_data, realdf)
         if not stocks_data:
             raise RuntimeError(f"{date}实时行情与TDX历史数据无法匹配")
         logging.info("realtime_enter_readldf：%s", next(iter(stocks_data)))
     else:
+        stocks_data = stock_hist_data(date=date).get_data(date)
+        if not stocks_data:
+            raise RuntimeError(f"{date}的TDX历史数据为空或覆盖不足")
         for frame in stocks_data.values():
             if frame is not None and 'date' in frame.columns:
                 frame['date'] = pd.to_datetime(frame['date'], format='%Y-%m-%d', errors='coerce')
+    logging.info("strategy snapshot ready: date=%s stocks=%s elapsed=%.1fs",
+                 date, len(stocks_data), time.perf_counter() - cycle_started)
     return stocks_data
 
 

@@ -27,22 +27,33 @@ class stock_data(metaclass=singleton_type):
     def _date_key(date):
         return date.strftime("%Y-%m-%d") if hasattr(date, "strftime") else str(date)[:10]
 
-    def _load(self, date):
+    def _load(self, date, refresh=False):
         date_key = self._date_key(date)
         with self._lock:
-            if self._loaded and self._loaded_date == date_key:
+            if not refresh and self._loaded and self._loaded_date == date_key:
                 return
-            self._loaded = True
-            self._loaded_date = date_key
+            if self._loaded_date != date_key:
+                self.data = None
+                self._loaded = False
             try:
-                self.data = stf.fetch_stocks(date)
+                result = stf.fetch_stocks(date)
+                if result is not None and not result.empty:
+                    self.data = result
+                    self._loaded = True
+                    self._loaded_date = date_key
+                elif refresh:
+                    self.data = None
+                    self._loaded = False
+                    logging.error('singleton.stock_data fresh Sina snapshot unavailable for %s', date_key)
             except Exception as e:
                 logging.error(f"singleton.stock_data处理异常：{e}")
-                self.data = None
+                if refresh:
+                    self.data = None
+                    self._loaded = False
 
-    def get_data(self, date=None):
+    def get_data(self, date=None, refresh=False):
         if date is not None:
-            self._load(date)
+            self._load(date, refresh=refresh)
         return self.data
 
 
