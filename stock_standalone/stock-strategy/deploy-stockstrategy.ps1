@@ -16,10 +16,15 @@ $webSource = Join-Path $source 'easy-stock-web'
 $backendSource = Join-Path $source 'easy-stock-analysis\backend'
 $assetRoot = Join-Path $PSScriptRoot 'docker'
 
-foreach ($path in @($serviceSource, $webSource, (Join-Path $backendSource 'go.mod'), (Join-Path $backendSource 'cmd\server\main.go'), (Join-Path $assetRoot 'install.sh'), (Join-Path $assetRoot 'backend.Dockerfile'), (Join-Path $assetRoot 'web.Dockerfile'), (Join-Path $assetRoot 'nginx.conf'), (Join-Path $assetRoot 'web-entrypoint.sh'))) {
+foreach ($path in @($serviceSource, (Join-Path $serviceSource 'trading-calendar.json'), $webSource, (Join-Path $backendSource 'go.mod'), (Join-Path $backendSource 'cmd\server\main.go'), (Join-Path $assetRoot 'install.sh'), (Join-Path $assetRoot 'backend.Dockerfile'), (Join-Path $assetRoot 'web.Dockerfile'), (Join-Path $assetRoot 'nginx.conf'), (Join-Path $assetRoot 'web-entrypoint.sh'))) {
     if (-not (Test-Path -LiteralPath $path)) {
         throw "Required deployment input is missing: $path"
     }
+}
+
+$calendar = Get-Content -LiteralPath (Join-Path $serviceSource 'trading-calendar.json') -Raw | ConvertFrom-Json
+if ($calendar.schema_version -ne 1 -or $null -eq $calendar.markets) {
+    throw 'Trading calendar JSON has an unsupported schema.'
 }
 
 $ssh = (Get-Command ssh.exe -ErrorAction Stop).Source

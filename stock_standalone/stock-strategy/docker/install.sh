@@ -11,6 +11,8 @@ WEB_DIST="$DATA_ROOT/app/web-dist/$BUILD_TAG"
 SHARED_DB="$DATA_ROOT/data/easy-stock/stock-data.db"
 MANAGED_LABEL=io.easy-stock.managed
 SERVICE="$PROJECT/source/easy-stock-service"
+CALENDAR_SOURCE="$STAGE/source/easy-stock-service/trading-calendar.json"
+CALENDAR_FILE="$DATA_ROOT/config/trading-calendar.json"
 WEB_SOURCE="$PROJECT/source/easy-stock-web"
 GO_BACKEND_SOURCE="$PROJECT/source/easy-stock-analysis/backend"
 
@@ -54,6 +56,11 @@ mkdir -p "$PROJECT/source" "$PROJECT/docker" "$DATA_ROOT/data/easy-stock" "$DATA
     "$DATA_ROOT/logs/web" "$DATA_ROOT/logs/service" \
     "$DATA_ROOT/config" "$DATA_ROOT/app/web-dist"
 
+[ -f "$CALENDAR_SOURCE" ] || fail "Trading calendar file is missing: $CALENDAR_SOURCE"
+if [ "$STAGE" != "$PROJECT" ] || [ ! -f "$CALENDAR_FILE" ]; then
+    install -m 0644 "$CALENDAR_SOURCE" "$CALENDAR_FILE"
+fi
+
 if [ "$STAGE" != "$PROJECT" ]; then
     cp -a "$STAGE/source/." "$PROJECT/source/"
     cp -a "$STAGE/docker/." "$PROJECT/docker/"
@@ -94,6 +101,9 @@ for pair in "data:$DATA_ROOT/data/service" "logs:$DATA_ROOT/logs/service" \
     fi
     ln -sfn "$target" "$path"
 done
+
+rm -f "$SERVICE/trading-calendar.json"
+ln -sfn "$CALENDAR_FILE" "$SERVICE/trading-calendar.json"
 
 if [ ! -f "$DATA_ROOT/config/backend.env" ]; then
     cat > "$DATA_ROOT/config/backend.env" <<'EOF'
@@ -169,6 +179,7 @@ docker run -d \
     -e A_STOCK_ADDR=0.0.0.0:20081 \
     -e A_STOCK_APP_VERSION="$BUILD_TAG" \
     -e A_STOCK_DATA_ROOT=/data \
+    -e A_STOCK_TRADING_CALENDAR=/data/config/trading-calendar.json \
     -e A_STOCK_DATA_DB=/data/easy-stock/stock-data.db \
     -e A_STOCK_LOG_DIR=/logs/backend \
     -e A_STOCK_SETTINGS_PATH=/data/easy-stock/settings.json \
