@@ -14,6 +14,19 @@ import pandas as pd
 _memory = OrderedDict()
 _lock = threading.RLock()
 _priority_codes = None
+_statistics = dict(memory_hits=0, shared_hits=0, source_reads=0,
+                   cache_errors=0, evictions=0, bypasses=0)
+
+
+def _count(name):
+    with _lock:
+        _statistics[name] += 1
+
+
+def cache_statistics():
+    with _lock:
+        return dict(_statistics, memory_entries=len(_memory),
+                    memory_bytes=sum(entry[2] for entry in _memory.values()))
 
 
 def set_priority_codes(codes):
@@ -27,13 +40,18 @@ def load_history(path, loader):
     key = os.path.abspath(path)
     budget = max(0, int(os.environ.get('INSTOCK_HISTORY_CACHE_MB', '32'))) * 1024 * 1024
     if not budget:
+        _count('bypasses')
+        _count('source_reads')
         return loader()
     digits = re.findall(r'\d{6}', os.path.basename(path))
     if _priority_codes is not None and (not digits or digits[-1] not in _priority_codes):
+        _count('bypasses')
+        _count('source_reads')
         return loader()
     with _lock:
         entry = _memory.get(key)
         if entry and entry[0] == version:
+            _count('memory_hits')
             _memory.move_to_end(key)
             return entry[1].copy(deep=True)
     frame = None
@@ -45,12 +63,14 @@ def load_history(path, loader):
                 db.execute('CREATE TABLE IF NOT EXISTS cache (path TEXT PRIMARY KEY, version TEXT, payload BLOB, bytes INTEGER, touched REAL)')
                 row = db.execute('SELECT payload FROM cache WHERE path=? AND version=?', (key, version)).fetchone()
                 if row:
+                    _count('shared_hits')
                     with np.load(BytesIO(row[0]), allow_pickle=False) as arrays:
                         frame = pd.DataFrame({name: arrays['c%s' % index]
                                               for index, name in enumerate(arrays['columns'])},
                                              index=arrays['index'])
                     db.execute('UPDATE cache SET touched=? WHERE path=?', (time.time(), key))
                 else:
+                    _count('source_reads')
                     frame = loader()
                     buffer = BytesIO()
                     np.savez(buffer, columns=np.asarray(frame.columns, dtype='U'),
@@ -66,12 +86,15 @@ def load_history(path, loader):
                             if total + size <= budget:
                                 break
                             db.execute('DELETE FROM cache WHERE path=?', (old_key,))
+                            _count('evictions')
                             total -= old_size
                         db.execute('INSERT INTO cache VALUES (?,?,?,?,?)', (key, version, payload, size, time.time()))
         except (OSError, sqlite3.Error, ValueError, KeyError, TypeError) as exc:
+            _count('cache_errors')
             logging.debug('history shared cache unavailable: %s', exc)
             frame = None
     if frame is None:
+        _count('source_reads')
         frame = loader()
     # Never retain data read across a concurrent TDX replacement/append.
     after = os.stat(path)
@@ -82,6 +105,7 @@ def load_history(path, loader):
         _memory.pop(key, None)
         total = sum(entry[2] for entry in _memory.values())
         while _memory and total + size > budget:
+            _count('evictions')
             total -= _memory.popitem(last=False)[1][2]
         if size <= budget:
             _memory[key] = (version, frame.copy(deep=True), size)

@@ -9,6 +9,9 @@ import os.path
 import subprocess
 import sys
 import threading
+import time
+import uuid
+import sqlite3
 from abc import ABC
 import tornado.escape
 from tornado import gen
@@ -32,6 +35,9 @@ import instock.web.dataTableHandler as dataTableHandler
 import instock.web.dataIndicatorsHandler as dataIndicatorsHandler
 import instock.web.base as webBase
 import instock.core.singleton_stock_web_module_data as sswmd
+from instock.job.run_statistics import history, save, now
+from instock.job.strategy_selection import selection, validate_selection
+import instock.core.tablestructure as tbs
 
 __author__ = 'myh '
 __date__ = '2023/3/10 '
@@ -50,6 +56,7 @@ class Application(tornado.web.Application):
             (r"/instock/data/indicators", dataIndicatorsHandler.GetDataIndicatorsHandler),
             (r"/instock/manual-strategy-refresh", ManualStrategyRefreshPageHandler),
             (r"/instock/api/manual-strategy-refresh", ManualStrategyRefreshHandler),
+            (r"/instock/api/selected-strategies", SelectedStrategyRunHandler),
         ]
         settings = dict(  # 配置
             template_path=os.path.join(os.path.dirname(__file__), "templates"),
@@ -90,19 +97,30 @@ class ManualStrategyRefreshPageHandler(webBase.BaseHandler, ABC):
 
 
 class ManualStrategyRefreshHandler(webBase.BaseHandler, ABC):
+    run_mode = 'small'
+    def _wait_for_refresh(self, process, run_id, started):
+        return_code = process.wait()
+        state = 'success' if return_code == 0 else 'busy' if return_code == 75 else 'failed'
+        record = save(run_id, getattr(self, 'run_mode', 'small'), state=state, finished_at=now(),
+                      return_code=return_code,
+                      duration_seconds=round(time.perf_counter() - started, 3))
+        with self.application.manual_strategy_refresh_lock:
+            if self.application.manual_strategy_refresh_process is process:
+                self.application.manual_strategy_refresh_status = record
+
     def _status(self):
         with self.application.manual_strategy_refresh_lock:
             process = self.application.manual_strategy_refresh_process
             status = dict(self.application.manual_strategy_refresh_status)
-            if status["state"] == "running" and process is not None:
-                return_code = process.poll()
-                if return_code is not None:
-                    status.update({
-                        "state": "success" if return_code == 0 else "busy" if return_code == 75 else "failed",
-                        "finished_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "return_code": return_code
-                    })
-                    self.application.manual_strategy_refresh_status = status
+            records = history()
+            if status['state'] != 'running' and records[self.run_mode]:
+                status = dict(records[self.run_mode][0])
+            if status['state'] == 'running':
+                started = status.get('started_at')
+                if started:
+                    status['duration_seconds'] = max(0, (datetime.datetime.now() -
+                        datetime.datetime.strptime(started, '%Y-%m-%d %H:%M:%S')).total_seconds())
+            status['history'] = records
             return status
 
     def get(self):
@@ -111,6 +129,21 @@ class ManualStrategyRefreshHandler(webBase.BaseHandler, ABC):
 
     def post(self):
         self.set_header("Content-Type", "application/json;charset=UTF-8")
+        names = None
+        if self.run_mode == 'selected':
+            try:
+                body = json.loads(self.request.body)
+                if not isinstance(body, dict) or body.get('action', 'run') not in ('run', 'save'):
+                    raise ValueError('无效操作')
+                names = ([] if body.get('action') == 'save' and body.get('strategies') == []
+                         else validate_selection(body.get('strategies'), tbs.TABLE_CN_STOCK_STRATEGIES))
+                if body.get('action') == 'save':
+                    self.write({'saved': True, 'selected': selection(tbs.TABLE_CN_STOCK_STRATEGIES, names)})
+                    return
+            except (ValueError, OSError, sqlite3.Error) as exc:
+                self.set_status(400 if isinstance(exc, ValueError) else 500)
+                self.write({'state': 'failed', 'message': str(exc)})
+                return
         with self.application.manual_strategy_refresh_lock:
             process = self.application.manual_strategy_refresh_process
             if process is not None and process.poll() is None:
@@ -119,7 +152,20 @@ class ManualStrategyRefreshHandler(webBase.BaseHandler, ABC):
                 return
 
             env = os.environ.copy()
-            env["INSTOCK_SMALL_STRATEGIES_ONLY"] = "1"
+            env.pop('INSTOCK_SELECTED_STRATEGIES', None)
+            env['INSTOCK_SMALL_STRATEGIES_ONLY'] = '1' if self.run_mode == 'small' else '0'
+            if names is not None:
+                try:
+                    names = selection(tbs.TABLE_CN_STOCK_STRATEGIES, names)
+                except (OSError, sqlite3.Error) as exc:
+                    self.set_status(500)
+                    self.write({'state': 'failed', 'message': str(exc)})
+                    return
+                env['INSTOCK_SELECTED_STRATEGIES'] = json.dumps(names)
+            run_id = uuid.uuid4().hex
+            env['INSTOCK_RUN_ID'] = run_id
+            started = time.perf_counter()
+            started_at = now()
             script_path = os.path.join(cpath_current, "job", "strategy_enter-edit.py")
             lock_path = os.path.join(cpath_current, "cache", "strategy_enter.lock")
             log_file = os.path.join(log_path, "manual_strategy_refresh.log")
@@ -139,13 +185,35 @@ class ManualStrategyRefreshHandler(webBase.BaseHandler, ABC):
                 return
 
             status = {
-                "state": "running", "started_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "state": "running", "started_at": started_at,
                 "finished_at": None, "return_code": None, "pid": process.pid
             }
+            status = save(run_id, self.run_mode, strategies=names, **status)
             self.application.manual_strategy_refresh_process = process
             self.application.manual_strategy_refresh_status = status
+            threading.Thread(target=self._wait_for_refresh,
+                             args=(process, run_id, started), daemon=True).start()
         self.set_status(202)
         self.write(json.dumps(status, ensure_ascii=False))
+
+
+class SelectedStrategyRunHandler(ManualStrategyRefreshHandler):
+    run_mode = 'selected'
+
+    def get(self):
+        self.set_header('Content-Type', 'application/json;charset=UTF-8')
+        try:
+            status = self._status()
+            if status.get('mode') != 'selected' and status['state'] != 'running':
+                status.update(state='idle', started_at=None, finished_at=None,
+                              duration_seconds=0, return_code=None)
+            status['options'] = [{'name': item['name'], 'label': item['cn']}
+                                 for item in tbs.TABLE_CN_STOCK_STRATEGIES[2:]]
+            status['selected'] = selection(tbs.TABLE_CN_STOCK_STRATEGIES)
+            self.write(status)
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            self.set_status(500)
+            self.write({'state': 'failed', 'message': str(exc)})
 
 
 def main():
