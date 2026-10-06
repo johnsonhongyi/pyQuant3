@@ -69,3 +69,9 @@
 - 当前 Docker 实测总占用约 498MiB：inStock 254MiB/1.25GiB，MariaDB 156MiB，API 35MiB，Portainer 40MiB，Web 13MiB。此刻实际负载可运行，不能由此保证所有来宾同时达到上限时仍有宿主机余量。
 - 复测 PVE available 约 1.3GiB、Swap 已用约 0.95GiB；vmstat blocked=0、iowait=0，I/O PSI avg10 已降至约 2%。PID 258588 的 tsc 阻塞进程已消失；构建没有在本次监控中重新启动。
 - swap=2048MiB 是 LXC 可用交换空间上限，不是新增物理 RAM；其消耗仍会落到 PVE 主机的 swap/存储上。inStock 容器原 1.25GiB 上限保持不变。
+
+### 临时内存配置已应用
+
+- 用户授权后将 LXC102 memory 调至 1792MiB，保留 swap=2048MiB、cores=2；VM100 800MiB、VM101 608MiB 未改，inStock Docker 容器仍为 2 CPU/1.25GiB。
+- PVE 宿主机 cgroup 已实时生效 memory.max=1879048192（1792MiB），memory.current 约 1446MiB；memory.events 的 oom/oom_kill 均为 0。LXC102 继续运行，未重启。
+- 按三项内存上限合计 3200MiB（约 3.13GiB），相对 PVE 可见 3.7GiB 约留 0.56GiB 给宿主机；仍需观察全量策略运行峰值，升级至 8GB RAM 后再重新调优。

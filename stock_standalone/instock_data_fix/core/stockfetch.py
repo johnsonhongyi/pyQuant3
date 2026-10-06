@@ -45,9 +45,9 @@ __date__ = '2023/3/10 '
 # 设置基础目录，每次加载使用。
 cpath_current = os.path.dirname(os.path.dirname(__file__))
 stock_hist_cache_path = os.environ.get(
-    'INSTOCK_HISTORY_CACHE_DIR',
+    'INSTOCK_PREPARED_HISTORY_CACHE_DIR', os.environ.get('INSTOCK_HISTORY_CACHE_DIR',
     os.path.join(cpath_current, 'cache', 'hist'),
-)
+))
 _TDX_BACKFILL_LOCAL_LOCK = threading.RLock()
 
 
@@ -701,7 +701,8 @@ def fetch_stock_hist(data_base, date_start=None, is_cache=True):
         date_start, is_cache = trd.get_trade_hist_interval(date)  # 提高运行效率，只运行一次
         # date_end = date_end.strftime("%Y%m%d")
     try:
-        data = stock_hist_cache(code, date_start, None, is_cache, 'qfq')
+        date_end = str(date)[:10] if os.environ.get('INSTOCK_COLUMNAR_HISTORY_CACHE') else None
+        data = stock_hist_cache(code, date_start, date_end, is_cache, 'qfq')
         if data is not None:
             data = _normalize_talib_columns(data)
             data.loc[:, 'p_change'] = tl.ROC(data['close'].to_numpy(dtype=np.float64), 1)
@@ -714,10 +715,21 @@ def fetch_stock_hist(data_base, date_start=None, is_cache=True):
 
 # 增加读取股票缓存方法。加快处理速度。多线程解决效率
 def stock_hist_cache(code, date_start, date_end=None, is_cache=True, adjust=''):
+    if os.environ.get('INSTOCK_PREPARED_HISTORY_CACHE_DIR'):
+        from JSONData.prepared_history import prepared_history
+        symbol, path, fingerprint = _tdx_history_source(code)
+        if path and fingerprint:
+            signature = (str(date_start or ''), str(date_end or ''), adjust, tuple(tbs.CN_STOCK_HIST_DATA['columns']), path, fingerprint)
+            cache_path = os.path.join(stock_hist_cache_path, symbol + '-' + (adjust or 'raw') + '.pkl')
+            return prepared_history(cache_path, signature, lambda: _stock_hist_cache_uncached(code, date_start, date_end, is_cache, adjust))
+    return _stock_hist_cache_uncached(code, date_start, date_end, is_cache, adjust)
+
+
+def _stock_hist_cache_uncached(code, date_start, date_end=None, is_cache=True, adjust=''):
     symbol, source_path, source_fingerprint = _tdx_history_source(code)
     cache_fingerprint = None
     cache_path = None
-    if source_path and source_fingerprint and not os.environ.get('INSTOCK_HISTORY_CACHE_DIR'):
+    if source_path and source_fingerprint and (os.environ.get('INSTOCK_PREPARED_HISTORY_CACHE_DIR') or not os.environ.get('INSTOCK_HISTORY_CACHE_DIR')):
         cache_fingerprint = (
             str(date_start or ''), str(date_end or ''), str(adjust or ''),
             tuple(tbs.CN_STOCK_HIST_DATA['columns']), source_path, source_fingerprint,
@@ -725,10 +737,12 @@ def stock_hist_cache(code, date_start, date_end=None, is_cache=True, adjust=''):
         cache_name = re.sub(r'[^A-Za-z0-9_.-]', '_', str(adjust or 'raw'))
         cache_path = os.path.join(stock_hist_cache_path, '%s-%s.pkl' % (symbol, cache_name))
         try:
-            payload = pd.read_pickle(cache_path)
+            payload = None if os.environ.get('INSTOCK_COLUMNAR_HISTORY_CACHE') else pd.read_pickle(cache_path)
             if (isinstance(payload, dict) and payload.get('version') == 1
                     and payload.get('fingerprint') == cache_fingerprint
                     and isinstance(payload.get('data'), pd.DataFrame)):
+                from JSONData.history_cache import _count
+                _count('prepared_hits')
                 return payload['data']
         except (OSError, EOFError, ValueError, TypeError, pickle.UnpicklingError):
             logging.debug('TDX history cache miss for %s', symbol)
@@ -736,7 +750,8 @@ def stock_hist_cache(code, date_start, date_end=None, is_cache=True, adjust=''):
             logging.debug('TDX history cache read failed for %s: %s', symbol, e)
 
     try:
-        stock = get_tdx_Exp_day_to_df(code, start=date_start, end=date_end, dl=10000, fastohlc=True)
+        rows = int(os.environ.get('INSTOCK_HIST_LOOKBACK_ROWS', '150')) + 1 if os.environ.get('INSTOCK_COLUMNAR_HISTORY_CACHE') else 10000
+        stock = get_tdx_Exp_day_to_df(code, start=date_start, end=date_end, dl=rows, fastohlc=True)
         if stock is None or stock.empty:
             return None
         stock = stock.reset_index().rename(columns={'vol': 'volume'})
@@ -750,7 +765,7 @@ def stock_hist_cache(code, date_start, date_end=None, is_cache=True, adjust=''):
         stock['turnover'] = 0.0
         stock = _normalize_talib_columns(stock)
         result = stock[list(tbs.CN_STOCK_HIST_DATA['columns'])]
-        if cache_path and cache_fingerprint:
+        if cache_path and cache_fingerprint and not os.environ.get('INSTOCK_COLUMNAR_HISTORY_CACHE'):
             _, current_path, current_source_fingerprint = _tdx_history_source(code)
             if current_path == source_path and current_source_fingerprint == source_fingerprint:
                 temporary = None

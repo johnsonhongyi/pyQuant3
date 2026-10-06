@@ -23,6 +23,8 @@ from instock.job.realtime_candidates import select_candidates
 from JSONData.history_cache import set_priority_codes
 from instock.job.run_statistics import RunStatistics
 from instock.job.strategy_selection import validate_selection
+from instock.job.streaming_scan import scan_batches, history_rows as strategy_history_rows
+from instock.core.stockfetch import fetch_stock_hist
 from instock.core.stockfetch import (
     fetch_stock_top_entity_data,
     _normalize_talib_columns,
@@ -210,33 +212,37 @@ def prepareRealtime(date, strategy, stocks_data=None):
         if results is None:
             return
 
-        # 删除老数据。
-        if mdb.checkTableIsExist(table_name):
-            del_sql = f"DELETE FROM `{table_name}` where `date` = '{date}'"
-            mdb.executeSql(del_sql)
-            cols_type = None
-        else:
-            cols_type = tbs.get_field_types(tbs.TABLE_CN_STOCK_STRATEGIES[0]['columns'])
-
-        if not results:
-            logging.info("%s在%s没有命中策略", table_name, date)
-            return
-
-        data = pd.DataFrame(results)
-        columns = tuple(tbs.TABLE_CN_STOCK_FOREIGN_KEY['columns'])
-        data.columns = columns
-        _columns_backtest = tuple(tbs.TABLE_CN_STOCK_BACKTEST_DATA['columns'])
-        data = pd.concat([data, pd.DataFrame(columns=_columns_backtest)])
-        # 单例，时间段循环必须改时间
-        date_str = date.strftime("%Y-%m-%d")
-        if date.strftime("%Y-%m-%d") != data.iloc[0]['date']:
-            data['date'] = date_str
-        mdb.insert_db_from_df(data, table_name, cols_type, False, "`date`,`code`")
+        _publish_results(date, strategy, results)
 
     except Exception as e:
         logging.exception(f"Strategy_enter-edit-_daily_job.prepareRealtime处理异常：{e}")
         raise
         
+def _publish_results(date, strategy, results):
+    table_name = strategy['name']
+    # 删除老数据。
+    if mdb.checkTableIsExist(table_name):
+        del_sql = f"DELETE FROM `{table_name}` where `date` = '{date}'"
+        mdb.executeSql(del_sql)
+        cols_type = None
+    else:
+        cols_type = tbs.get_field_types(tbs.TABLE_CN_STOCK_STRATEGIES[0]['columns'])
+
+    if not results:
+        logging.info("%s在%s没有命中策略", table_name, date)
+        return
+
+    data = pd.DataFrame(results)
+    columns = tuple(tbs.TABLE_CN_STOCK_FOREIGN_KEY['columns'])
+    data.columns = columns
+    _columns_backtest = tuple(tbs.TABLE_CN_STOCK_BACKTEST_DATA['columns'])
+    data = pd.concat([data, pd.DataFrame(columns=_columns_backtest)])
+    # 单例，时间段循环必须改时间
+    date_str = date.strftime("%Y-%m-%d")
+    if date.strftime("%Y-%m-%d") != data.iloc[0]['date']:
+        data['date'] = date_str
+    mdb.insert_db_from_df(data, table_name, cols_type, False, "`date`,`code`")
+
 _last_scan = {}
 
 
@@ -247,7 +253,8 @@ def run_check(strategy_fun, table_name, stocks, date, workers=2):
         raise RuntimeError(f"{table_name}没有可计算的股票历史数据")
     is_check_high_tight = False
     if strategy_fun.__name__ == 'check_high_tight':
-        stock_tops = fetch_stock_top_entity_data(date)
+        stock_tops = (globals().get('_cycle_top_codes') if globals().get('_cycle_top_date') == str(date)
+                      else fetch_stock_top_entity_data(date))
         if stock_tops is not None:
             is_check_high_tight = True
     data = []
@@ -332,8 +339,19 @@ def _strategy_run_dates():
 
 
 def strategy_enter(small_strategies_only=False):
+    if os.environ.get('INSTOCK_STREAM_STRATEGIES') == '1':
+        import instock.core.stockfetch as stf
+        cache_dir = os.environ.get('INSTOCK_STRATEGY_PREPARED_DIR', os.path.join(cpath_current, 'cache', 'hist'))
+        os.environ['INSTOCK_PREPARED_HISTORY_CACHE_DIR'] = cache_dir
+        os.environ['INSTOCK_COLUMNAR_HISTORY_CACHE'] = '1'
+        stf.stock_hist_cache_path = cache_dir
+        today = datetime.date.today()
+        epoch = today if trd.is_trade_date(today) else trd.get_trade_date_last()[0]
+        os.environ['INSTOCK_HISTORY_CACHE_EPOCH'] = str(epoch)
     selected = os.environ.get('INSTOCK_SELECTED_STRATEGIES')
-    stats = RunStatistics(small_strategies_only, mode='selected' if selected is not None else None)
+    stats = RunStatistics(small_strategies_only,
+                          entrypoint=os.environ.get('INSTOCK_STRATEGY_ENTRYPOINT', 'realtime'),
+                          mode='selected' if selected is not None else None)
     try:
         names = validate_selection(json.loads(selected), tbs.TABLE_CN_STOCK_STRATEGIES) if selected is not None else None
         _strategy_enter(small_strategies_only, stats, names)
@@ -344,7 +362,139 @@ def strategy_enter(small_strategies_only=False):
         stats.finish()
 
 
+def _stream_strategy_enter(small, stats, selected):
+    if not small and selected is None and os.environ.get('INSTOCK_DEFER_BACKTEST') != '1':
+        raise RuntimeError('Streaming full-strategy mode requires INSTOCK_DEFER_BACKTEST=1')
+    strategies = tbs.TABLE_CN_STOCK_STRATEGIES[:2] if small else tbs.TABLE_CN_STOCK_STRATEGIES
+    if selected is not None:
+        strategies = [item for item in strategies if item['name'] in selected]
+    base_rows = max(120, min(150, int(os.environ.get('INSTOCK_HIST_LOOKBACK_ROWS', '150'))))
+    history_rows = max(strategy_history_rows(item['name'], base_rows) for item in strategies)
+    os.environ['INSTOCK_HIST_LOOKBACK_ROWS'] = str(history_rows)
+    stats.config['effective_history_rows'] = history_rows
+    dates = _strategy_run_dates()
+    if not dates:
+        raise RuntimeError('指定范围内没有交易日')
+    epoch = os.environ.get('INSTOCK_HISTORY_CACHE_EPOCH')
+    latest = str(trd.get_trade_date_last()[0])
+    for date in dates:
+        previous = date - datetime.timedelta(days=1)
+        for _ in range(20):
+            if trd.is_trade_date(previous):
+                break
+            previous -= datetime.timedelta(days=1)
+        history_gaps = [0]
+        if str(date) == latest and epoch:
+            os.environ['INSTOCK_HISTORY_CACHE_EPOCH'] = epoch
+        else:
+            # Historical range scans must validate their own date bounds.
+            os.environ.pop('INSTOCK_HISTORY_CACHE_EPOCH', None)
+        now = datetime.datetime.now()
+        live = date == now.date() and trd.is_trade_date(date)
+        quotes = stock_data(date).get_data(date, refresh=live)
+        if quotes is None or quotes.empty:
+            raise RuntimeError('股票行情列表为空，保留已有策略结果')
+        if live and stats.config['entrypoint'] != 'daily':
+            quotes = select_candidates(quotes)
+        stocks = [tuple(row) for row in quotes[list(tbs.TABLE_CN_STOCK_FOREIGN_KEY['columns'])].values]
+        start_date, cached = trd.get_trade_hist_interval(str(date))
+        dependencies = {}
+        if any(item['name'] == 'cn_stock_strategy_high_tight_flag' for item in strategies):
+            from instock.job.static_strategy_cache import result_digest
+            global _cycle_top_date, _cycle_top_codes
+            _cycle_top_date, _cycle_top_codes = str(date), fetch_stock_top_entity_data(date)
+            tops = [(type(code).__name__, str(code)) for code in (_cycle_top_codes or ())]
+            dependencies['cn_stock_strategy_high_tight_flag'] = result_digest(tops)
+        writer = _publish_results if os.environ.get('INSTOCK_SCAN_DRY_RUN') != '1' else lambda *args: None
+        static_cache = None
+        if not live and os.environ.get('INSTOCK_STATIC_RESULT_CACHE') == '1':
+            import inspect
+            import instock.core.stockfetch as stf
+            from instock.job.static_strategy_cache import StaticResults, manifest, revision
+            directory = stf.stock_hist_cache_path
+            files = [__file__, stf.__file__, trd.__file__, tbs.__file__,
+                     inspect.getsourcefile(scan_batches), inspect.getsourcefile(StaticResults)]
+            files.extend(inspect.getsourcefile(item['func']) for item in tbs.TABLE_CN_STOCK_STRATEGIES)
+            code_revision = revision([path for path in files if path],
+                (os.environ.get('INSTOCK_PERF_VERSION'), pd.__version__, tl.__version__))
+            cache_key = lambda: manifest(directory, stocks, quotes, date, history_rows,
+                os.environ.get('INSTOCK_HISTORY_CACHE_EPOCH'), code_revision, stf._tdx_history_source)
+            static_cache = StaticResults(os.path.join(os.path.dirname(directory), 'strategy_results'))
+            started = time.perf_counter()
+            saved = static_cache.load(cache_key(), [item['name'] for item in strategies], dependencies)
+            if saved:
+                from JSONData.history_cache import _count
+                _count('result_hits')
+                history_gaps[0] = saved['gaps']
+                stats.stage('snapshot', started, date=str(date), stocks=saved['stocks'],
+                            requested=saved['requested'], result_cache=True)
+                for strategy in strategies:
+                    entry = saved['strategies'][strategy['name']]
+                    started = time.perf_counter()
+                    writer(date, strategy, entry['results'])
+                    metric = dict(entry['scan'], seconds=0., workers=0)
+                    stats.stage(strategy['name'], started, date=str(date), stocks=saved['stocks'],
+                                scan=metric, result_cache=True)
+                stats.progress(date=str(date), history_gap_stocks=history_gaps[0], result_cache=True)
+                continue
+
+        def load(batch):
+            frames = {}
+            for stock in batch:
+                frame = fetch_stock_hist(stock, start_date, cached)
+                if frame is not None and not frame.empty:
+                    frame['date'] = pd.to_datetime(frame['date'], errors='coerce')
+                    history_gaps[0] += int(frame['date'].max() < pd.Timestamp(previous))
+                    frames[stock] = frame
+            if live and frames:
+                codes = {str(stock[1]).split('.')[0].zfill(6) for stock in frames}
+                subset = quotes.loc[quotes.code.astype(str).str.split('.').str[0].str.zfill(6).isin(codes)].copy()
+                histories = {str(stock[1]).zfill(6): pd.to_numeric(frame.loc[
+                    frame.date < pd.Timestamp(date), 'volume'], errors='coerce').dropna().tail(5).tolist()
+                    for stock, frame in frames.items()}
+                subset = apply_dynamic_volume_ratio(subset, histories, now=now)
+                frames = stocks_data_to_realtime(date, frames, subset)
+            elif frames:
+                # A premarket baseline can end yesterday. On holidays/after close,
+                # append the persisted last trading bar without rebuilding history.
+                missing = {stock: frame for stock, frame in frames.items()
+                           if pd.Timestamp(previous) <= frame['date'].max() < pd.Timestamp(date)}
+                if missing:
+                    codes = {str(stock[1]).split('.')[0].zfill(6) for stock in missing}
+                    subset = quotes.loc[quotes.code.astype(str).str.split('.').str[0].str.zfill(6).isin(codes)].copy()
+                    for stock in missing:
+                        frames.pop(stock)
+                    frames.update(stocks_data_to_realtime(date, missing, subset))
+            return frames
+
+        def check(strategy, frames):
+            rows = strategy_history_rows(strategy['name'], base_rows)
+            scoped = {stock: frame.tail(rows) for stock, frame in frames.items()}
+            matches = run_check(strategy['func'], strategy['name'], scoped, date)
+            return matches, dict(_last_scan)
+
+        batch_size = max(8, min(128, int(os.environ.get('INSTOCK_SCAN_BATCH_SIZE', '64'))))
+        results = {}
+        def publish(date, strategy, matches):
+            results[strategy['name']] = matches
+            writer(date, strategy, matches)
+        loaded = scan_batches(stocks, strategies, load, check, publish, date, stats, batch_size)
+        if static_cache:
+            stages = {stage['name']: stage for stage in stats.stages
+                      if stage['name'] in results and stage.get('date') == str(date)}
+            entries = {name: dict(results=matches, scan=stages[name]['scan'], dependency=dependencies.get(name))
+                       for name, matches in results.items()}
+            static_cache.save(cache_key(), entries, loaded, len(stocks), history_gaps[0])
+        stats.progress(date=str(date), history_gap_stocks=history_gaps[0])
+    if not small and selected is None:
+        if os.environ.get('INSTOCK_DEFER_BACKTEST') == '1':
+            stats.progress(backtest_deferred=True, history_gap_stocks=history_gaps[0],
+                           message='Dedicated scheduled backtest job owns supplementation')
+
+
 def _strategy_enter(small_strategies_only, stats, selected=None):
+    if os.environ.get('INSTOCK_STREAM_STRATEGIES') == '1':
+        return _stream_strategy_enter(small_strategies_only, stats, selected)
     # Share one cycle snapshot; keep strategy-level concurrency bounded at one.
     run_dates = _strategy_run_dates()
     if not run_dates:

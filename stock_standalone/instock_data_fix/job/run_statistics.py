@@ -102,7 +102,10 @@ class RunStatistics:
         self.config = {key: os.environ.get(key) for key in
                        ('INSTOCK_HISTORY_CACHE_MB', 'INSTOCK_CACHE_HOT_STOCKS',
                         'INSTOCK_PREFILTER_ACTIVE_ONLY', 'OPENBLAS_NUM_THREADS',
-                        'OMP_NUM_THREADS', 'INSTOCK_HISTORY_CACHE_DIR', 'INSTOCK_PERF_VERSION')}
+                        'OMP_NUM_THREADS', 'INSTOCK_HISTORY_CACHE_DIR', 'INSTOCK_PERF_VERSION',
+                        'INSTOCK_STREAM_STRATEGIES', 'INSTOCK_SCAN_BATCH_SIZE',
+                        'INSTOCK_PREPARED_HISTORY_CACHE_DIR', 'INSTOCK_DEFER_BACKTEST',
+                        'INSTOCK_STATIC_RESULT_CACHE')}
         self.config['entrypoint'] = entrypoint
         self.config['selected_strategies'] = os.environ.get('INSTOCK_SELECTED_STRATEGIES')
         save(self.id, self.mode, state='running', job_started_at=now(),
@@ -113,12 +116,32 @@ class RunStatistics:
         save(self.id, self.mode, stages=self.stages,
              duration_seconds=round(time.perf_counter() - self.started, 3))
 
+    def progress(self, **details):
+        current = resources()
+        from JSONData.history_cache import cache_statistics
+        cache = cache_statistics()
+        for key in ('memory_hits', 'shared_hits', 'prepared_hits', 'result_hits', 'source_reads', 'cache_errors', 'evictions', 'bypasses'):
+            cache[key] = cache.get(key, 0) - self.cache_before.get(key, 0)
+        visible = list(self.stages)
+        if 'load_seconds' in details:
+            visible.append(dict(name='snapshot', seconds=details['load_seconds'],
+                                date=details['date'], stocks=details['loaded']))
+            visible.extend(dict(name=name, seconds=metric['seconds'], date=details['date'],
+                                stocks=details['loaded'], scan=dict(metric))
+                           for name, metric in details['scans'].items())
+        save(self.id, self.mode, progress=details,
+             duration_seconds=round(time.perf_counter() - self.started, 3),
+             resources_current=current, stages=visible, config=self.config,
+             peak_rss_mb=current.get('peak_rss_mb'), cache=cache,
+             io_delta={key: value - self.before.get('io', {}).get(key, 0)
+                       for key, value in current.get('io', {}).items()})
+
     def finish(self, error=None, return_code=None):
         after = resources()
         from JSONData.history_cache import cache_statistics
         cache = cache_statistics()
-        for key in ('memory_hits', 'shared_hits', 'source_reads', 'cache_errors', 'evictions', 'bypasses'):
-            cache[key] -= self.cache_before.get(key, 0)
+        for key in ('memory_hits', 'shared_hits', 'prepared_hits', 'result_hits', 'source_reads', 'cache_errors', 'evictions', 'bypasses'):
+            cache[key] = cache.get(key, 0) - self.cache_before.get(key, 0)
         cpu = max(0, after.get('cpu_seconds', 0) - self.before.get('cpu_seconds', 0))
         io = {key: value - self.before.get('io', {}).get(key, 0)
               for key, value in after.get('io', {}).items()}
@@ -127,5 +150,6 @@ class RunStatistics:
              duration_seconds=round(time.perf_counter() - self.started, 3),
              cpu_seconds=round(cpu, 3), peak_rss_mb=after.get('peak_rss_mb'),
              io_delta=io, resources_after=after, stages=self.stages,
+             config=self.config,
              cache=cache, return_code=(1 if error else 0) if return_code is None else return_code,
              error=str(error)[:500] if error else None)

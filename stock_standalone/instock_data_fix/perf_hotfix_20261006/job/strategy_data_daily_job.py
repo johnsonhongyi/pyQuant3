@@ -128,7 +128,32 @@ def run_check(strategy_fun, table_name, stocks, date, workers=2):
         return data
 
 
+def _streaming_daily():
+    import gc
+    import runpy
+    instance = vars(stock_hist_data).get('_instance')
+    if instance is not None:
+        with instance._lock:
+            instance.data = None
+            instance._loaded = False
+            instance._loaded_key = None
+    gc.collect()
+    key = 'INSTOCK_STRATEGY_ENTRYPOINT'
+    previous = os.environ.get(key)
+    os.environ[key] = 'daily'
+    try:
+        entry = runpy.run_path(os.path.join(cpath_current, 'strategy_enter-edit.py'), run_name='daily_stream')
+        entry['strategy_enter'](small_strategies_only=False)
+    finally:
+        if previous is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = previous
+
+
 def main():
+    if os.environ.get('INSTOCK_STREAM_STRATEGIES') == '1':
+        return _streaming_daily()
     global _run_stats
     _run_errors.clear()
     _run_stats = RunStatistics(False, entrypoint='daily')
