@@ -18,15 +18,30 @@ import instock.lib.database as mdb
 from instock.core.singleton_stock import stock_hist_data
 from instock.core.stockfetch import fetch_stock_top_entity_data
 from scan_helpers import bounded_results
+from instock.job.run_statistics import RunStatistics
+
+_run_stats = None
+_last_scan = {}
+_run_errors = []
 
 __author__ = 'myh '
 __date__ = '2023/3/10 '
 
 
 def prepare(date, strategy):
+    global _last_scan
+    _last_scan = {}
+    started = time.perf_counter()
+    strategy_started = None
+    error = None
     try:
         stocks_data = stock_hist_data(date=date).get_data()
+        if _run_stats:
+            _run_stats.stage('snapshot', started, date=str(date), stocks=len(stocks_data or {}))
+        strategy_started = time.perf_counter()
         if stocks_data is None:
+            error = 'No stock history snapshot'
+            _run_errors.append(error)
             return
         table_name = strategy['name']
         strategy_func = strategy['func']
@@ -54,10 +69,18 @@ def prepare(date, strategy):
         mdb.insert_db_from_df(data, table_name, cols_type, False, "`date`,`code`")
 
     except Exception as e:
+        error = str(e)[:300]
+        _run_errors.append(error)
         logging.error(f"strategy_data_daily_job.prepare处理异常：{str(strategy)[:50]}策略{e}")
+    finally:
+        if _run_stats:
+            _run_stats.stage(strategy['name'], strategy_started or started, date=str(date),
+                             scan=dict(_last_scan), error=error)
 
 
 def run_check(strategy_fun, table_name, stocks, date, workers=2):
+    global _last_scan
+    _last_scan = {}
     started = time.perf_counter()
     is_check_high_tight = False
     if strategy_fun.__name__ == 'check_high_tight':
@@ -95,6 +118,10 @@ def run_check(strategy_fun, table_name, stocks, date, workers=2):
     if error_counts:
         logging.error('strategy scan errors: strategy=%s types=%s samples=%s',
                       table_name, dict(error_counts), error_samples)
+    _last_scan = dict(checked=checked, matched=len(data), errors=sum(error_counts.values()),
+                      error_types=dict(error_counts), seconds=round(time.perf_counter() - started, 3), workers=workers)
+    if error_counts:
+        _run_errors.append('%s: %s stock errors' % (table_name, sum(error_counts.values())))
     if not data:
         return None
     else:
@@ -102,9 +129,19 @@ def run_check(strategy_fun, table_name, stocks, date, workers=2):
 
 
 def main():
-    # 使用方法传递。
-    for strategy in tbs.TABLE_CN_STOCK_STRATEGIES:
-        runt.run_with_args(prepare, strategy)
+    global _run_stats
+    _run_errors.clear()
+    _run_stats = RunStatistics(False, entrypoint='daily')
+    try:
+        for strategy in tbs.TABLE_CN_STOCK_STRATEGIES:
+            runt.run_with_args(prepare, strategy)
+    except BaseException as exc:
+        _run_stats.finish(exc)
+        raise
+    else:
+        _run_stats.finish('; '.join(_run_errors) if _run_errors else None, return_code=0)
+    finally:
+        _run_stats = None
 
 
 # main函数入口

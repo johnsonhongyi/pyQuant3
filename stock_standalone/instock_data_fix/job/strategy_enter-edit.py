@@ -9,6 +9,7 @@ import os.path
 import sys
 from itertools import islice
 import time
+import json
 
 
 cpath_current = os.path.dirname(os.path.dirname(__file__))
@@ -20,6 +21,8 @@ import instock.lib.database as mdb
 from instock.core.singleton_stock import stock_data, stock_hist_data
 from instock.job.realtime_candidates import select_candidates
 from JSONData.history_cache import set_priority_codes
+from instock.job.run_statistics import RunStatistics
+from instock.job.strategy_selection import validate_selection
 from instock.core.stockfetch import (
     fetch_stock_top_entity_data,
     _normalize_talib_columns,
@@ -234,7 +237,12 @@ def prepareRealtime(date, strategy, stocks_data=None):
         logging.exception(f"Strategy_enter-edit-_daily_job.prepareRealtime处理异常：{e}")
         raise
         
+_last_scan = {}
+
+
 def run_check(strategy_fun, table_name, stocks, date, workers=2):
+    global _last_scan
+    _last_scan = {}
     if not stocks:
         raise RuntimeError(f"{table_name}没有可计算的股票历史数据")
     is_check_high_tight = False
@@ -294,6 +302,8 @@ def run_check(strategy_fun, table_name, stocks, date, workers=2):
         raise RuntimeError(f"{table_name}逐股计算失败过多：{error_count}/{future_count}")
     logging.info("strategy scan complete: strategy=%s checked=%s matched=%s errors=%s elapsed=%.1fs",
                  table_name, future_count, len(data), error_count, time.perf_counter() - scan_started)
+    _last_scan = dict(checked=future_count, matched=len(data), errors=error_count,
+                      seconds=round(time.perf_counter() - scan_started, 3), workers=worker_count)
     return data
 
 
@@ -322,27 +332,52 @@ def _strategy_run_dates():
 
 
 def strategy_enter(small_strategies_only=False):
+    selected = os.environ.get('INSTOCK_SELECTED_STRATEGIES')
+    stats = RunStatistics(small_strategies_only, mode='selected' if selected is not None else None)
+    try:
+        names = validate_selection(json.loads(selected), tbs.TABLE_CN_STOCK_STRATEGIES) if selected is not None else None
+        _strategy_enter(small_strategies_only, stats, names)
+    except BaseException as exc:
+        stats.finish(exc)
+        raise
+    else:
+        stats.finish()
+
+
+def _strategy_enter(small_strategies_only, stats, selected=None):
     # Share one cycle snapshot; keep strategy-level concurrency bounded at one.
     run_dates = _strategy_run_dates()
     if not run_dates:
         raise RuntimeError("指定范围内没有交易日")
     failures = []
     for run_date in run_dates:
+        started = time.perf_counter()
         stocks_snapshot = build_strategy_snapshot(run_date)
+        stats.stage('snapshot', started, date=str(run_date), stocks=len(stocks_snapshot))
         strategies = (tbs.TABLE_CN_STOCK_STRATEGIES[:2] if small_strategies_only
                       else tbs.TABLE_CN_STOCK_STRATEGIES)
+        if selected is not None:
+            strategies = [item for item in tbs.TABLE_CN_STOCK_STRATEGIES if item['name'] in selected]
         for strategy in strategies:
             logging.info(f"start strategyrealtime:{strategy['cn']} {strategy['name']} {run_date}")
             try:
+                started = time.perf_counter()
                 prepareRealtime(run_date, strategy, stocks_data=stocks_snapshot)
+                stats.stage(strategy['name'], started, date=str(run_date), stocks=len(stocks_snapshot),
+                            scan=dict(_last_scan),
+                            result_write_seconds=round(max(0, time.perf_counter() - started -
+                                                       _last_scan.get('seconds', 0)), 3))
             except Exception as e:
+                stats.stage(strategy['name'], started, date=str(run_date), error=str(e)[:300])
                 failures.append(f"{strategy['name']} {run_date}: {e}")
     if failures:
         raise RuntimeError("手动策略刷新失败: " + "; ".join(failures))
-    if not small_strategies_only:
+    if not small_strategies_only and selected is None:
         logging.info("start bk job realtime:")
         global stockdata
+        started = time.perf_counter()
         bk_job_edit.prepareRealTime(stocks_data=stockdata)
+        stats.stage('backtest', started)
 # main函数入口
 if __name__ == '__main__':
     if (os.environ.get("INSTOCK_REQUIRE_TRADE_DATE") == "1"

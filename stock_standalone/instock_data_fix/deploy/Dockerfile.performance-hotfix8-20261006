@@ -1,0 +1,7 @@
+FROM instock:johnson250103-sina-runtime-perf-hotfix7-20261006-v3
+COPY JSONData/history_cache.py /data/InStock/JSONData/history_cache.py
+COPY job/run_statistics.py job/strategy_enter-edit.py /data/InStock/instock/job/
+COPY perf_hotfix_20261006/job/strategy_data_daily_job.py /data/InStock/instock/job/strategy_data_daily_job.py
+COPY web/web_service.py /data/InStock/instock/web/web_service.py
+COPY web/templates/manual_strategy_refresh.html /data/InStock/instock/web/templates/manual_strategy_refresh.html
+ENV INSTOCK_PERF_VERSION=hotfix8-20261006

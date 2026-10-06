@@ -9,6 +9,22 @@
     <button id="start-refresh" class="btn btn-primary" type="button">执行小策略刷新</button>
     <span id="refresh-state" role="status" aria-live="polite" style="margin-left:12px;">正在读取后台状态…</span>
     <p id="refresh-detail" style="margin-top:12px;"></p>
+    <h3>选择策略单独运行</h3>
+    <p>勾选一项或多项策略，选择会自动保存；仅更新所选策略数据，不执行回测补充。</p>
+    <div id="strategy-options"></div>
+    <button id="run-selected" class="btn btn-primary" type="button" disabled>运行所选策略</button>
+    <span id="selection-state" role="status" aria-live="polite" style="margin-left:12px;"></span>
+    <p id="selected-detail"></p>
+    <h3>所选策略：最近 10 次</h3>
+    <div id="selected-summary"></div>
+    <div id="selected-history" style="overflow-x:auto;"></div>
+    <h3>两项小策略：最近 10 次</h3>
+    <div id="small-summary"></div>
+    <div id="small-history" style="overflow-x:auto;"></div>
+    <h3>全策略：最近 10 次</h3>
+    <div id="all-summary"></div>
+    <div id="all-history" style="overflow-x:auto;"></div>
+    <p><a href="/instock/api/manual-strategy-refresh" target="_blank">查看完整性能统计 JSON</a></p>
     <p>运行日志：<code>/data/InStock/instock/log/manual_strategy_refresh.log</code></p>
 </div>
 <script>
@@ -17,12 +33,21 @@
     const button = document.getElementById("start-refresh");
     const stateText = document.getElementById("refresh-state");
     const detailText = document.getElementById("refresh-detail");
+    const selectedApi = '/instock/api/selected-strategies';
+    const selectedButton = document.getElementById('run-selected');
+    const selectionState = document.getElementById('selection-state');
+    const selectedDetail = document.getElementById('selected-detail');
+    let optionsLoaded = false;
+    let selectionSave = Promise.resolve();
+    let busy = false;
+    const strategyLabels = {};
     let pollTimer = null;
     const messages = {
         idle: "当前没有运行记录",
-        running: "后台正在执行两项小策略…",
+        running: "后台正在执行策略…",
         success: "策略刷新已完成",
         failed: "策略刷新失败，请查看运行日志",
+        interrupted: "运行中断，未取得完整结束统计",
         busy: "定时任务或另一项策略刷新正在运行，本次未启动"
     };
 
@@ -31,11 +56,18 @@
         const details = [];
         if (status.started_at) details.push("开始：" + status.started_at);
         if (status.finished_at) details.push("结束：" + status.finished_at);
+        if (status.duration_seconds !== undefined) details.push("用时：" + duration(status.duration_seconds));
         if (status.return_code !== null && status.return_code !== undefined) {
             details.push("退出码：" + status.return_code);
         }
         detailText.textContent = details.join("；");
         button.disabled = status.state === "running";
+        busy = status.state === 'running';
+        if (status.history) {
+            showHistory('small', status.history.small || []);
+            showHistory('all', status.history.all || []);
+            showHistory('selected', status.history.selected || []);
+        }
         if (status.state === "running" && pollTimer === null) {
             pollTimer = window.setInterval(readStatus, 3000);
         } else if (status.state !== "running" && pollTimer !== null) {
@@ -44,14 +76,130 @@
         }
     }
 
+    function duration(seconds) {
+        return Math.floor(seconds / 60) + '分' + (seconds % 60).toFixed(1) + '秒';
+    }
+
+    function showHistory(mode, rows) {
+        const container = document.getElementById(mode + '-history');
+        container.replaceChildren();
+        const complete = rows.filter(row => row.state === 'success' && !row.estimated && Number.isFinite(row.duration_seconds));
+        document.getElementById(mode + '-summary').textContent = complete.length
+            ? '已记录 ' + rows.length + ' 次；成功运行平均用时：' + duration(complete.reduce((sum, row) => sum + row.duration_seconds, 0) / complete.length)
+            : '尚无可比较的精确完成记录';
+        const table = document.createElement('table');
+        table.className = 'table table-striped';
+        const header = document.createElement('tr');
+        const headings = ['开始时间', '状态', '总用时', '较上次', '快照加载', '策略计算', '回测', '峰值内存', '缓存命中', '实际磁盘读取'];
+        if (mode === 'selected') headings.splice(1, 0, '所选策略');
+        headings.forEach(value => {
+            const cell = document.createElement('th'); cell.textContent = value; header.appendChild(cell);
+        });
+        table.appendChild(header);
+        rows.forEach((row, index) => {
+            const stages = row.stages || [];
+            const previous = rows.slice(index + 1).find(old => old.state === 'success' && !old.estimated &&
+                !row.estimated && old.config && row.config && JSON.stringify(old.config) === JSON.stringify(row.config) &&
+                stages.filter(stage => stage.name === 'snapshot').map(stage => stage.date + ':' + stage.stocks).join(',') ===
+                (old.stages || []).filter(stage => stage.name === 'snapshot').map(stage => stage.date + ':' + stage.stocks).join(','));
+            const sum = names => stages.filter(stage => names(stage.name)).reduce((value, stage) => value + stage.seconds, 0);
+            const cache = row.cache || {};
+            const hits = (cache.memory_hits || 0) + (cache.shared_hits || 0);
+            const requests = hits + (cache.source_reads || 0);
+            const values = [row.started_at || row.job_started_at || '—', messages[row.state] || row.state,
+                row.duration_seconds !== undefined ? duration(row.duration_seconds) + (row.estimated ? '（旧记录估算）' : '') : '—',
+                previous && row.state === 'success' && previous.duration_seconds > 0
+                    ? ((row.duration_seconds / previous.duration_seconds - 1) * 100).toFixed(1) + '%' : '—',
+                stages.length ? duration(sum(name => name === 'snapshot')) : '—',
+                stages.length ? duration(sum(name => name !== 'snapshot' && name !== 'backtest')) : '—',
+                stages.some(stage => stage.name === 'backtest') ? duration(sum(name => name === 'backtest')) : '—',
+                Number.isFinite(row.peak_rss_mb) ? row.peak_rss_mb + ' MB' : '—',
+                requests ? (hits / requests * 100).toFixed(1) + '%' : '—',
+                row.io_delta ? ((row.io_delta.read_bytes || 0) / 1048576).toFixed(1) + ' MB' : '—'];
+            const tr = document.createElement('tr');
+            if (mode === 'selected') values.splice(1, 0,
+                (row.strategies || []).map(name => strategyLabels[name] || name).join('、') || '—');
+            values.forEach(value => { const cell = document.createElement('td'); cell.textContent = value; tr.appendChild(cell); });
+            table.appendChild(tr);
+        });
+        container.appendChild(table);
+    }
+
     async function readStatus() {
         try {
-            const response = await fetch(apiUrl, {cache: "no-store"});
-            showStatus(await response.json());
+            const responses = await Promise.all([fetch(apiUrl, {cache: 'no-store'}),
+                                                 fetch(selectedApi, {cache: 'no-store'})]);
+            const selected = await responses[1].json();
+            if (!responses[1].ok) throw new Error(selected.message || '策略列表读取失败');
+            if (!optionsLoaded) {
+                const container = document.getElementById('strategy-options');
+                container.replaceChildren();
+                (selected.options || []).forEach(option => {
+                    strategyLabels[option.name] = option.label;
+                    const label = document.createElement('label');
+                    label.style.marginRight = '18px';
+                    const input = document.createElement('input');
+                    input.type = 'checkbox'; input.value = option.name;
+                    input.checked = (selected.selected || []).includes(option.name);
+                    input.addEventListener('change', saveSelection);
+                    label.appendChild(input);
+                    label.appendChild(document.createTextNode(' ' + option.label));
+                    container.appendChild(label);
+                });
+                optionsLoaded = true;
+            }
+            showStatus(await responses[0].json());
+            selectionState.textContent = selected.state === 'running' && selected.mode !== 'selected'
+                ? '其他策略任务正在运行' : messages[selected.state] || selected.state;
+            selectedDetail.textContent = selected.mode === 'selected'
+                ? [selected.started_at ? '开始：' + selected.started_at : '',
+                   selected.finished_at ? '结束：' + selected.finished_at : '',
+                   selected.duration_seconds !== undefined ? '用时：' + duration(selected.duration_seconds) : '']
+                  .filter(Boolean).join('；') : '';
+            selectedButton.disabled = busy || chosen().length === 0;
         } catch (error) {
             stateText.textContent = "无法连接后台状态接口";
+            selectionState.textContent = error.message;
         }
     }
+
+    function chosen() {
+        return Array.from(document.querySelectorAll('#strategy-options input:checked')).map(input => input.value);
+    }
+
+    function saveSelection() {
+        const strategies = chosen();
+        selectedButton.disabled = busy || !strategies.length;
+        if (!strategies.length) {
+            selectionState.textContent = '请至少选择一项策略';
+        }
+        selectionState.textContent = '正在保存选择…';
+        selectionSave = selectionSave.catch(() => {}).then(async () => {
+            const response = await fetch(selectedApi, {method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({action: 'save', strategies})});
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.message || '选择保存失败');
+            selectionState.textContent = '选择已自动保存';
+        });
+        selectionSave.catch(error => {selectionState.textContent = error.message;});
+    }
+
+    selectedButton.addEventListener('click', async () => {
+        selectedButton.disabled = true;
+        try {
+            await selectionSave;
+            const response = await fetch(selectedApi, {method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({action: 'run', strategies: chosen()})});
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.message || '策略启动失败');
+            await readStatus();
+        } catch (error) {
+            selectionState.textContent = error.message;
+            selectedButton.disabled = busy || !chosen().length;
+        }
+    });
 
     button.addEventListener("click", async function () {
         button.disabled = true;
