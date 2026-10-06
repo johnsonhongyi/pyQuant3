@@ -95,8 +95,7 @@ class stock_hist_data(metaclass=singleton_type):
                 return
 
             cache_key = (date_key, tuple(str(stock[1]) for stock in stocks))
-            if self._loaded and self._loaded_key == cache_key:
-                return
+            # Explicit live requests must revalidate TDX versions even for the same codes.
             self._loaded = True
             self._loaded_key = cache_key
             self._loaded_date = date_key

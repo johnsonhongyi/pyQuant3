@@ -717,7 +717,7 @@ def stock_hist_cache(code, date_start, date_end=None, is_cache=True, adjust=''):
     symbol, source_path, source_fingerprint = _tdx_history_source(code)
     cache_fingerprint = None
     cache_path = None
-    if source_path and source_fingerprint:
+    if source_path and source_fingerprint and not os.environ.get('INSTOCK_HISTORY_CACHE_DIR'):
         cache_fingerprint = (
             str(date_start or ''), str(date_end or ''), str(adjust or ''),
             tuple(tbs.CN_STOCK_HIST_DATA['columns']), source_path, source_fingerprint,

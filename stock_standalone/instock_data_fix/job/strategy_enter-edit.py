@@ -18,6 +18,8 @@ import instock.lib.run_template as runt
 import instock.core.tablestructure as tbs
 import instock.lib.database as mdb
 from instock.core.singleton_stock import stock_data, stock_hist_data
+from instock.job.realtime_candidates import select_candidates
+from JSONData.history_cache import set_priority_codes
 from instock.core.stockfetch import (
     fetch_stock_top_entity_data,
     _normalize_talib_columns,
@@ -146,6 +148,13 @@ def build_strategy_snapshot(date):
         realdf = stock_data(date).get_data(date, refresh=True)
         if realdf is None or realdf.empty:
             raise RuntimeError(f"{date}的Sina实时行情接口没有返回股票数据")
+        quote_count = len(realdf)
+        realdf = select_candidates(realdf)
+        logging.info('Sina prefilter: quotes=%s candidates=%s', quote_count, len(realdf))
+        if realdf.empty:
+            raise RuntimeError('Sina预筛选无有效股票，保留已有策略结果')
+        hot_limit = max(0, int(os.environ.get('INSTOCK_CACHE_HOT_STOCKS', '800')))
+        set_priority_codes(realdf['code'].head(hot_limit))
         stock_columns = list(tbs.TABLE_CN_STOCK_FOREIGN_KEY['columns'])
         live_stocks = [tuple(row) for row in realdf[stock_columns].values]
         stocks_data = stock_hist_data(date=date, stocks=live_stocks).get_data(
@@ -166,6 +175,10 @@ def build_strategy_snapshot(date):
         stocks_data = stocks_data_to_realtime(date, stocks_data, realdf)
         if not stocks_data:
             raise RuntimeError(f"{date}实时行情与TDX历史数据无法匹配")
+        priority = {str(code).split('.')[0].zfill(6): rank
+                    for rank, code in enumerate(realdf['code'])}
+        stocks_data = dict(sorted(stocks_data.items(), key=lambda item:
+                                 priority.get(str(item[0][1]).zfill(6), len(priority))))
         logging.info("realtime_enter_readldf：%s", next(iter(stocks_data)))
     else:
         stocks_data = stock_hist_data(date=date).get_data(date)
@@ -309,14 +322,16 @@ def _strategy_run_dates():
 
 
 def strategy_enter(small_strategies_only=False):
-    # 串行运行两项手动策略，避免小内存节点同时构造两套逐股任务。
+    # Share one cycle snapshot; keep strategy-level concurrency bounded at one.
     run_dates = _strategy_run_dates()
     if not run_dates:
         raise RuntimeError("指定范围内没有交易日")
     failures = []
     for run_date in run_dates:
         stocks_snapshot = build_strategy_snapshot(run_date)
-        for strategy in [tbs.TABLE_CN_STOCK_STRATEGIES[0], tbs.TABLE_CN_STOCK_STRATEGIES[1]]:
+        strategies = (tbs.TABLE_CN_STOCK_STRATEGIES[:2] if small_strategies_only
+                      else tbs.TABLE_CN_STOCK_STRATEGIES)
+        for strategy in strategies:
             logging.info(f"start strategyrealtime:{strategy['cn']} {strategy['name']} {run_date}")
             try:
                 prepareRealtime(run_date, strategy, stocks_data=stocks_snapshot)
