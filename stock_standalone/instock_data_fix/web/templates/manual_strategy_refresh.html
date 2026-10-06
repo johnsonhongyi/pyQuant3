@@ -104,9 +104,10 @@
                 (old.stages || []).filter(stage => stage.name === 'snapshot').map(stage => stage.date + ':' + stage.stocks).join(','));
             const sum = names => stages.filter(stage => names(stage.name)).reduce((value, stage) => value + stage.seconds, 0);
             const cache = row.cache || {};
-            const hits = (cache.memory_hits || 0) + (cache.shared_hits || 0);
+            const hits = (cache.memory_hits || 0) + (cache.shared_hits || 0) + (cache.prepared_hits || 0) + (cache.result_hits || 0);
             const requests = hits + (cache.source_reads || 0);
-            const values = [row.started_at || row.job_started_at || '—', messages[row.state] || row.state,
+            const values = [row.started_at || row.job_started_at || '—',
+                (messages[row.state] || row.state) + (cache.result_hits ? '（静态结果缓存）' : ''),
                 row.duration_seconds !== undefined ? duration(row.duration_seconds) + (row.estimated ? '（旧记录估算）' : '') : '—',
                 previous && row.state === 'success' && previous.duration_seconds > 0
                     ? ((row.duration_seconds / previous.duration_seconds - 1) * 100).toFixed(1) + '%' : '—',

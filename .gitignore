@@ -203,3 +203,4 @@ stock_standalone/config/new_stock_ipo_calendar.json.*
 stock_standalone/config/new_stock_data_cache.json.*
 stock_standalone/stock-strategy/source/*
 stock_standalone/tests/test_sbc_extreme_perf_optimization.py
+stock_standalone/stock-strategy/.build-cache/*
