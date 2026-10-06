@@ -14,13 +14,13 @@ import pandas as pd
 _memory = OrderedDict()
 _lock = threading.RLock()
 _priority_codes = None
-_statistics = dict(memory_hits=0, shared_hits=0, source_reads=0,
+_statistics = dict(memory_hits=0, shared_hits=0, prepared_hits=0, source_reads=0,
                    cache_errors=0, evictions=0, bypasses=0)
 
 
 def _count(name):
     with _lock:
-        _statistics[name] += 1
+        _statistics[name] = _statistics.get(name, 0) + 1
 
 
 def cache_statistics():

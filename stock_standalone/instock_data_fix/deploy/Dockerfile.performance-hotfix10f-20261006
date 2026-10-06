@@ -1,0 +1,8 @@
+FROM instock:johnson250103-sina-runtime-perf-hotfix9-20261006
+COPY JSONData/prepared_history.py JSONData/history_cache.py /data/InStock/JSONData/
+COPY core/stockfetch.py /data/InStock/instock/core/stockfetch.py
+COPY job/static_strategy_cache.py job/streaming_scan.py job/run_statistics.py job/strategy_enter-edit.py job/prewarm_history.py /data/InStock/instock/job/
+COPY perf_hotfix_20261006/job/strategy_data_daily_job.py /data/InStock/instock/job/strategy_data_daily_job.py
+COPY web/templates/manual_strategy_refresh.html /data/InStock/instock/web/templates/manual_strategy_refresh.html
+ENV INSTOCK_PERF_VERSION=hotfix10f-20261006 INSTOCK_STATIC_RESULT_CACHE=1 INSTOCK_STREAM_STRATEGIES=1 INSTOCK_HIST_LOOKBACK_ROWS=150 INSTOCK_SCAN_BATCH_SIZE=64 INSTOCK_HISTORY_CACHE_MB=0 INSTOCK_DEFER_BACKTEST=1 INSTOCK_STRATEGY_PREPARED_DIR=/data/InStock/instock/cache/hist
+RUN echo '20 8 * * 1-5 /usr/bin/flock -n -E 75 /data/InStock/instock/cache/strategy_enter.lock /usr/local/bin/python3 /data/InStock/instock/job/prewarm_history.py >> /data/InStock/instock/log/history_prewarm.log 2>&1' >> /var/spool/cron/crontabs/root
