@@ -253,6 +253,14 @@ for old_database in \
     link_shared_database "$old_database"
 done
 
+[ -f "$PROJECT/docker/market-append.sh" ] || fail 'Market append scheduler script is missing.'
+[ -f "$PROJECT/docker/stockstrategy-market-append.cron" ] || fail 'Market append cron schedule is missing.'
+chmod 0755 "$PROJECT/docker/market-append.sh"
+command -v flock >/dev/null 2>&1 || fail 'flock is required for safe market append scheduling.'
+command -v crontab >/dev/null 2>&1 || fail 'cron is required for market append scheduling.'
+install -m 0644 "$PROJECT/docker/stockstrategy-market-append.cron" /etc/cron.d/stockstrategy-market-append
+systemctl enable --now cron
+
 health=$(docker exec stockstrategy-web wget -q -T 10 -O - http://127.0.0.1/api/health)
 printf 'API health: %s\n' "$health"
 printf 'Web URL: http://192.168.50.60:20073\n'

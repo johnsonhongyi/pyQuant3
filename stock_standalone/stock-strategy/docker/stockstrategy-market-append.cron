@@ -1,0 +1,8 @@
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+
+CRON_TZ=Asia/Shanghai
+40 15 * * 1-5 root /root/johnson/stock-strategy/docker/market-append.sh cn
+
+CRON_TZ=Asia/Hong_Kong
+15 6 * * * root /root/johnson/stock-strategy/docker/market-append.sh us
