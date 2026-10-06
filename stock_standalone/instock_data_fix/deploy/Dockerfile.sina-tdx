@@ -1,4 +1,4 @@
-FROM instock:johnson250103-balanced-fastscan-20261005
+FROM instock:johnson250103-sina-runtime-perf-hotfix6-20261006
 
 ENV TDX_FORWARDP_DIR=/data/InStock/instock/forwardp
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE=${IMAGE:-instock:johnson250103-balanced-fastscan-$(date +%Y%m%d)}
+IMAGE=${IMAGE:-instock:johnson250103-sina-runtime-perf-hotfix6-20261006}
 STAMP=$(date +%Y%m%d%H%M%S)
 ROLLBACK=inStock-rollback-$STAMP
 FAILED=inStock-failed-tdx-$STAMP
