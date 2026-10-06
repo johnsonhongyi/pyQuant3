@@ -154,6 +154,12 @@ docker run --rm \
     node:24-alpine sh -ec 'mkdir -p /tmp/web && cp -a /source/. /tmp/web/ && cd /tmp/web && npm ci --no-audit --no-fund && npm run build && cp -a dist/. /output/'
 [ -s "$WEB_DIST/index.html" ] || fail 'Frontend build did not produce index.html.'
 
+export EASY_STOCK_DATA_DB="$SHARED_DB"
+if ! (cd "$SERVICE" && /usr/bin/python3 bars.py --universe >/dev/null && /usr/bin/python3 bars_us.py --universe >/dev/null); then
+    fail 'Unable to seed the shared database with the existing CN/US automatic update lists.'
+fi
+unset EASY_STOCK_DATA_DB
+
 chown -R 10001:10001 "$DATA_ROOT/data" "$DATA_ROOT/logs/backend" "$DATA_ROOT/logs/service"
 chown -R 101:101 "$DATA_ROOT/logs/web"
 

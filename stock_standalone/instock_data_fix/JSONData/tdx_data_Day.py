@@ -4,6 +4,7 @@ import os
 import re
 
 import pandas as pd
+from JSONData.history_cache import load_history
 
 
 _COLUMNS = ['date', 'open', 'high', 'low', 'close', 'vol', 'amount']
@@ -48,21 +49,23 @@ def get_tdx_Exp_day_to_df(
     if file_path is None:
         return pd.DataFrame()
 
-    try:
+    def read_normalized():
         frame = pd.read_csv(
             file_path, header=None, names=_COLUMNS, usecols=range(7),
             dtype={'date': str}, encoding='gb18030', on_bad_lines='skip',
         )
+        frame['date'] = pd.to_datetime(frame['date'].str.strip(), errors='coerce')
+        for column in _COLUMNS[1:]:
+            frame[column] = pd.to_numeric(frame[column], errors='coerce')
+        frame = frame.dropna(subset=_COLUMNS).drop_duplicates('date', keep='last')
+        return frame.loc[(frame['open'] > 0) & (frame['close'] > 0)]
+
+    try:
+        frame = load_history(file_path, read_normalized)
     except (OSError, UnicodeError, ValueError, pd.errors.ParserError):
         return pd.DataFrame()
     if frame.empty:
         return pd.DataFrame()
-
-    frame['date'] = pd.to_datetime(frame['date'].str.strip(), errors='coerce')
-    for column in _COLUMNS[1:]:
-        frame[column] = pd.to_numeric(frame[column], errors='coerce')
-    frame = frame.dropna(subset=_COLUMNS).drop_duplicates('date', keep='last')
-    frame = frame.loc[(frame['open'] > 0) & (frame['close'] > 0)]
 
     start_day, end_day = _day_string(start), _day_string(end)
     if start_day:

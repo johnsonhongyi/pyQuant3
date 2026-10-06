@@ -1,0 +1,6 @@
+FROM instock:johnson250103-sina-runtime-perf-hotfix7-20261006-v2
+COPY JSONData/history_cache.py JSONData/tdx_data_Day.py /data/InStock/JSONData/
+COPY core/singleton_stock.py /data/InStock/instock/core/singleton_stock.py
+COPY core/stockfetch.py /data/InStock/instock/core/stockfetch.py
+COPY job/strategy_enter-edit.py job/realtime_candidates.py /data/InStock/instock/job/
+RUN sed -i 's/INSTOCK_SMALL_STRATEGIES_ONLY=1 //g' /var/spool/cron/crontabs/root
