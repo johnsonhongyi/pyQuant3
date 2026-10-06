@@ -1,0 +1,10 @@
+FROM instock:johnson250103-sina-runtime-hotfix3-20261006
+
+ENV INSTOCK_MIN_DAILY_STOCK_ROWS=3000
+
+COPY job/basic_data_daily_job.py /data/InStock/instock/job/basic_data_daily_job.py
+COPY job/execute_daily_job.py /data/InStock/instock/job/execute_daily_job.py
+COPY cron/root /var/spool/cron/crontabs/root
+
+RUN chmod 600 /var/spool/cron/crontabs/root
+RUN sed -i '/^\[program:run_job\]/,/^\[/{/^autostart=/d;}' /data/InStock/supervisor/supervisord.conf && sed -i '/^\[program:run_job\]/a autostart=false' /data/InStock/supervisor/supervisord.conf

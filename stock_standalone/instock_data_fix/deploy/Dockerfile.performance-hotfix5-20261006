@@ -1,0 +1,6 @@
+FROM instock:johnson250103-sina-runtime-hotfix4-20261006
+
+COPY job/scan_helpers.py /data/InStock/instock/job/scan_helpers.py
+COPY job/strategy_data_daily_job.py /data/InStock/instock/job/strategy_data_daily_job.py
+COPY job/indicators_data_daily_job.py /data/InStock/instock/job/indicators_data_daily_job.py
+COPY job/klinepattern_data_daily_job.py /data/InStock/instock/job/klinepattern_data_daily_job.py

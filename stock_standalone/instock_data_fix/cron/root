@@ -2,9 +2,10 @@
 SHELL=/bin/sh
 PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 */5 9,10,11,13,14,15 * * 1-5 /bin/run-parts /etc/cron.hourly
-26 9 * * 1-5 /usr/bin/flock -n -E 75 /data/InStock/instock/cache/strategy_enter.lock /usr/local/bin/python3 /data/InStock/instock/job/strategy_enter-edit.py
-*/30 10,11,13,14 * * 1-5 /usr/bin/flock -n -E 75 /data/InStock/instock/cache/strategy_enter.lock /usr/local/bin/python3 /data/InStock/instock/job/strategy_enter-edit.py
-58 14 * * 1-5 /usr/bin/flock -n -E 75 /data/InStock/instock/cache/strategy_enter.lock /usr/local/bin/python3 /data/InStock/instock/job/backtest_data_daily_job_edit.py
-15 18 * * 1-5 /usr/bin/flock -n -E 75 /data/InStock/instock/cache/strategy_enter.lock /usr/local/bin/python3 /data/InStock/instock/job/backtest_data_daily_job.py
-25 18 * * 1-5 /usr/bin/flock -w 7200 /data/InStock/instock/cache/strategy_enter.lock /usr/local/bin/python3 /data/InStock/instock/job/backtest_data_daily_job_edit.py
-10 16 * * 1-5 /usr/bin/flock -w 7200 /data/InStock/instock/cache/strategy_enter.lock /usr/local/bin/python3 /data/InStock/instock/job/execute_daily_job.py > /proc/1/fd/1 2>&1
+26 9 * * 1-5 /usr/local/bin/python3 -c 'import datetime,sys;sys.path.append("/data/InStock");import instock.lib.trade_time as t;sys.exit(0 if t.is_trade_date(datetime.date.today()) else 1)' && env INSTOCK_REQUIRE_TRADE_DATE=1 INSTOCK_SMALL_STRATEGIES_ONLY=1 /usr/bin/flock -n -E 75 /data/InStock/instock/cache/strategy_enter.lock /usr/local/bin/python3 /data/InStock/instock/job/strategy_enter-edit.py
+*/30 10,11,13,14 * * 1-5 /usr/local/bin/python3 -c 'import datetime,sys;sys.path.append("/data/InStock");import instock.lib.trade_time as t;sys.exit(0 if t.is_trade_date(datetime.date.today()) else 1)' && env INSTOCK_REQUIRE_TRADE_DATE=1 INSTOCK_SMALL_STRATEGIES_ONLY=1 /usr/bin/flock -n -E 75 /data/InStock/instock/cache/strategy_enter.lock /usr/local/bin/python3 /data/InStock/instock/job/strategy_enter-edit.py
+58 14 * * 1-5 /usr/local/bin/python3 -c 'import datetime,sys;sys.path.append("/data/InStock");import instock.lib.trade_time as t;sys.exit(0 if t.is_trade_date(datetime.date.today()) else 1)' && /usr/bin/flock -n -E 75 /data/InStock/instock/cache/strategy_enter.lock /usr/local/bin/python3 /data/InStock/instock/job/backtest_data_daily_job_edit.py
+15 18 * * 1-5 /usr/local/bin/python3 -c 'import datetime,sys;sys.path.append("/data/InStock");import instock.lib.trade_time as t;sys.exit(0 if t.is_trade_date(datetime.date.today()) else 1)' && /usr/bin/flock -n -E 75 /data/InStock/instock/cache/strategy_enter.lock /usr/local/bin/python3 /data/InStock/instock/job/backtest_data_daily_job.py
+25 18 * * 1-5 /usr/local/bin/python3 -c 'import datetime,sys;sys.path.append("/data/InStock");import instock.lib.trade_time as t;sys.exit(0 if t.is_trade_date(datetime.date.today()) else 1)' && /usr/bin/flock -w 7200 /data/InStock/instock/cache/strategy_enter.lock /usr/local/bin/python3 /data/InStock/instock/job/backtest_data_daily_job_edit.py
+5,35 16 * * 1-5 /usr/bin/flock -w 300 /data/InStock/instock/cache/strategy_enter.lock /usr/local/bin/python3 /data/InStock/instock/job/basic_data_daily_job.py > /proc/1/fd/1 2>&1
+40 16 * * 1-5 /usr/bin/flock -w 300 /data/InStock/instock/cache/strategy_enter.lock /usr/local/bin/python3 /data/InStock/instock/job/execute_daily_job.py > /proc/1/fd/1 2>&1

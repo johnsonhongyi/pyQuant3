@@ -1,0 +1,21 @@
+FROM instock:johnson250103-balanced-fastscan-20261005
+
+ENV TDX_FORWARDP_DIR=/data/InStock/instock/forwardp
+
+COPY core/stockfetch.py /data/InStock/instock/core/stockfetch.py
+COPY core/singleton_stock.py /data/InStock/instock/core/singleton_stock.py
+COPY core/eastmoney_daily.py /data/InStock/instock/core/eastmoney_daily.py
+COPY core/crawling/stock_selection.py /data/InStock/instock/core/crawling/stock_selection.py
+COPY job/strategy_enter-edit.py /data/InStock/instock/job/strategy_enter-edit.py
+COPY job/basic_data_daily_job.py /data/InStock/instock/job/basic_data_daily_job.py
+COPY JSONData/sina_data.py /data/InStock/JSONData/sina_data.py
+COPY JSONData/tdx_data_Day.py /data/InStock/JSONData/tdx_data_Day.py
+COPY web/dataTableHandler.py /data/InStock/instock/web/dataTableHandler.py
+COPY web/web_service.py /data/InStock/instock/web/web_service.py
+COPY web/templates/manual_strategy_refresh.html /data/InStock/instock/web/templates/manual_strategy_refresh.html
+COPY web/trade_time.py /data/InStock/instock/lib/trade_time.py
+COPY web/stock_web.html /data/InStock/instock/web/templates/stock_web.html
+COPY cron/root /var/spool/cron/crontabs/root
+
+RUN chmod 600 /var/spool/cron/crontabs/root
+RUN sed -i '/^\[program:run_job\]/,/^\[/{/^autostart=/d;}' /data/InStock/supervisor/supervisord.conf && sed -i '/^\[program:run_job\]/a autostart=false' /data/InStock/supervisor/supervisord.conf

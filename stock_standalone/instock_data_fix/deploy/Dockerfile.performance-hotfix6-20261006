@@ -1,0 +1,4 @@
+FROM instock:johnson250103-sina-runtime-perf-hotfix5-20261006
+
+COPY cron/root /var/spool/cron/crontabs/root
+RUN chmod 600 /var/spool/cron/crontabs/root
