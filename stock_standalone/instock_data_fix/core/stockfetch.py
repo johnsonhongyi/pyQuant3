@@ -7,9 +7,11 @@ import datetime
 import os
 import re
 import tempfile
+import json
 import pickle
 import functools
 import threading
+import requests
 from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
@@ -219,6 +221,152 @@ def _format_trade_date(date):
     return value[:10]
 
 
+def _tdx_line_date(line):
+    value = line.split(',', 1)[0].strip()
+    if re.fullmatch(r'\d{8}', value):
+        return '%s-%s-%s' % (value[:4], value[4:6], value[6:8])
+    value = value[:10]
+    return value if re.fullmatch(r'\d{4}-\d{2}-\d{2}', value) else None
+
+
+def _tdx_history_gap_range(existing_dates, target_date, trade_dates):
+    previous_dates = [date for date in existing_dates if date < target_date]
+    if not previous_dates:
+        return None, None
+    latest_existing = max(previous_dates)
+    expected_dates = trade_dates
+    if expected_dates:
+        latest_expected = expected_dates[-1]
+        if latest_existing < latest_expected:
+            next_dates = [date for date in expected_dates if date > latest_existing]
+            return (next_dates[0], latest_expected) if next_dates else (None, None)
+
+        recent_dates = expected_dates[-60:]
+        run_start = None
+        run_length = 0
+        for date in recent_dates:
+            if date not in existing_dates:
+                if run_start is None:
+                    run_start = date
+                run_length += 1
+                if run_length >= 5:
+                    return run_start, latest_expected
+            else:
+                run_start = None
+                run_length = 0
+        return None, None
+
+    if (datetime.date.fromisoformat(target_date)
+            - datetime.date.fromisoformat(latest_existing)).days > 3:
+        start_date = (datetime.date.fromisoformat(latest_existing)
+                      + datetime.timedelta(days=1)).isoformat()
+        end_date = (datetime.date.fromisoformat(target_date)
+                    - datetime.timedelta(days=1)).isoformat()
+        return start_date, end_date
+    return None, None
+
+
+def _fetch_tencent_tdx_history_gap(code, start_date, end_date):
+    if code.startswith(('4', '8', '43', '83', '87', '92')):
+        exchange = 'bj'
+    elif code.startswith(('5', '6', '9')):
+        exchange = 'sh'
+    else:
+        exchange = 'sz'
+    symbol = exchange + code
+    url = 'https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get'
+    lines = []
+    seen_dates = set()
+    for year in range(int(start_date[:4]), int(end_date[:4]) + 1):
+        params = {
+            '_var': 'kline_day%s' % year,
+            'param': '%s,day,%s-01-01,%s-12-31,640,' % (symbol, year, year + 1),
+            'r': '0.8205512681390605',
+        }
+        response = requests.get(url, params=params, timeout=15)
+        response.raise_for_status()
+        json_start = response.text.find('={')
+        if json_start < 0:
+            raise ValueError('Tencent daily history response is not valid JSONP')
+        payload = json.loads(response.text[json_start + 1:].strip().rstrip(';'))
+        stock_data = payload.get('data', {}).get(symbol, {})
+        daily_rows = stock_data.get('day', [])
+        if not daily_rows:
+            raise ValueError('Tencent daily history is unavailable for %s in %s' % (symbol, year))
+
+        for row in daily_rows:
+            if len(row) < 9:
+                continue
+            bar_date = str(row[0])[:10]
+            if bar_date < start_date or bar_date > end_date or bar_date in seen_dates:
+                continue
+            try:
+                # Tencent returns main-board/ChiNext volume in lots and amount in 10k yuan;
+                # STAR Market volume is already shares. TDX files store shares and yuan.
+                volume_multiplier = 1 if symbol.startswith('sh688') else 100
+                numbers = [float(row[1]), float(row[3]), float(row[4]), float(row[2]),
+                           float(row[5]) * volume_multiplier, float(row[8]) * 10000]
+            except (TypeError, ValueError):
+                continue
+            if (not np.isfinite(numbers).all() or min(numbers[:4]) <= 0
+                    or numbers[4] < 0 or numbers[5] < 0):
+                continue
+            seen_dates.add(bar_date)
+            lines.append(bar_date + ',' + ','.join(format(value, '.10g') for value in numbers) + '\n')
+
+    if not lines:
+        raise ValueError('Tencent returned no usable daily bars for %s (%s..%s)' %
+                         (symbol, start_date, end_date))
+    return lines
+
+
+def _fetch_tdx_history_gap(code, start_date, end_date):
+    fetch_history = getattr(she, 'stock_zh_a_hist', None)
+    if not callable(fetch_history):
+        logging.info('Eastmoney history API unavailable; using Tencent for %s', code)
+        return _fetch_tencent_tdx_history_gap(code, start_date, end_date)
+    try:
+        history = fetch_history(
+            symbol=code, period='daily', start_date=start_date.replace('-', ''),
+            end_date=end_date.replace('-', ''), adjust='',
+        )
+        if history is None or history.empty:
+            logging.info('Eastmoney returned no history for %s; using Tencent', code)
+            return _fetch_tencent_tdx_history_gap(code, start_date, end_date)
+    except Exception as e:
+        logging.warning('Eastmoney history failed for %s; using Tencent: %s', code, e)
+        return _fetch_tencent_tdx_history_gap(code, start_date, end_date)
+
+    history = history.rename(columns={
+        '日期': 'date', '开盘': 'open', '最高': 'high', '最低': 'low',
+        '收盘': 'close', '成交量': 'volume', '成交额': 'amount',
+    })
+    required = ('date', 'open', 'high', 'low', 'close', 'volume', 'amount')
+    if any(column not in history.columns for column in required):
+        raise ValueError('historical quote response is missing daily bar columns')
+    history = history.loc[:, required].copy()
+    history['date'] = pd.to_datetime(history['date'], errors='coerce').dt.strftime('%Y-%m-%d')
+    for column in required[1:]:
+        history[column] = pd.to_numeric(history[column], errors='coerce')
+    history = history.dropna(subset=required)
+    # Eastmoney/AkShare reports stock volume in lots; TDX daily files store shares.
+    history['volume'] *= 100
+
+    lines = []
+    seen_dates = set()
+    for row in history.sort_values('date').itertuples(index=False):
+        bar_date = row.date
+        values = [row.open, row.high, row.low, row.close, row.volume, row.amount]
+        numbers = [float(value) for value in values]
+        if (not isinstance(bar_date, str) or bar_date < start_date or bar_date > end_date
+                or bar_date in seen_dates or not np.isfinite(numbers).all()
+                or min(numbers[:4]) <= 0 or numbers[4] < 0 or numbers[5] < 0):
+            continue
+        seen_dates.add(bar_date)
+        lines.append(bar_date + ',' + ','.join(format(value, '.10g') for value in numbers) + '\n')
+    return lines
+
+
 def _normalize_talib_columns(data):
     """Make TDX/AkShare numeric series safe for TA-Lib's double-only inputs."""
     for column in ('open', 'high', 'low', 'close', 'volume', 'amount', 'turnover'):
@@ -241,6 +389,124 @@ def fetch_stocks_trade_date():
     except Exception as e:
         logging.error(f"stockfetch.fetch_stocks_trade_date处理异常：{e}")
     return None
+
+
+@_tdx_backfill_serialized
+def repair_tdx_history_gaps(target_date=None, return_stats=True):
+    """Repair historical gaps in existing TDX stock files without writing today's quote."""
+    stats = {'scanned': 0, 'gaps_detected': 0, 'files_repaired': 0,
+             'gap_rows_filled': 0, 'gap_dates_missing': 0, 'gap_failed': 0,
+             'failed': 0, 'calendar_failed': 0}
+    try:
+        target_date = _format_trade_date(target_date)
+        trade_dates = fetch_stocks_trade_date()
+        if not trade_dates:
+            stats['calendar_failed'] = 1
+            logging.error('TDX history repair skipped because the trade-date calendar is unavailable')
+            return stats if return_stats else 0
+        trade_dates = sorted({
+            _format_trade_date(value) for value in trade_dates
+            if _format_trade_date(value) < target_date
+        })
+        if not trade_dates:
+            logging.info('TDX history repair found no completed trade dates before %s', target_date)
+            return stats if return_stats else 0
+
+        forward_dir = os.environ.get('TDX_FORWARDP_DIR', '/data/InStock/instock/forwardp')
+        if not os.path.isdir(forward_dir):
+            stats['failed'] = 1
+            logging.error('TDX history repair directory does not exist: %s', forward_dir)
+            return stats if return_stats else 0
+        with os.scandir(forward_dir) as entries:
+            paths = sorted(
+                (entry.path for entry in entries
+                 if entry.is_file() and entry.name.lower().endswith('.txt')),
+                key=str.lower,
+            )
+
+        for path in paths:
+            stem = os.path.splitext(os.path.basename(path))[0].upper()
+            match = re.fullmatch(r'(?:SH|SZ|BJ)?(\d{6})', stem)
+            if not match:
+                continue
+            code = match.group(1)
+            if not is_a_stock(code):
+                continue
+            stats['scanned'] += 1
+            try:
+                with open(path, 'r', encoding='gb18030', errors='replace', newline='') as source:
+                    old_lines = source.readlines()
+                existing_dates = {
+                    value for value in (_tdx_line_date(old_line) for old_line in old_lines)
+                    if value
+                }
+                gap_start, gap_end = _tdx_history_gap_range(
+                    existing_dates, target_date, trade_dates
+                )
+                if not gap_start or not gap_end or gap_start > gap_end:
+                    continue
+
+                stats['gaps_detected'] += 1
+                expected_missing = {
+                    value for value in trade_dates
+                    if gap_start <= value <= gap_end and value not in existing_dates
+                }
+                try:
+                    fetched_lines = _fetch_tdx_history_gap(code, gap_start, gap_end)
+                    gap_lines = {
+                        _tdx_line_date(line): line for line in fetched_lines
+                        if _tdx_line_date(line) in expected_missing
+                    }
+                except Exception as e:
+                    stats['gap_failed'] += 1
+                    stats['gap_dates_missing'] += len(expected_missing)
+                    logging.error('TDX history gap repair failed for %s (%s..%s): %s',
+                                  code, gap_start, gap_end, e)
+                    continue
+
+                stats['gap_rows_filled'] += len(gap_lines)
+                stats['gap_dates_missing'] += len(expected_missing - set(gap_lines))
+                if not gap_lines:
+                    continue
+
+                pending_dates = sorted(gap_lines)
+                merged = []
+                pending_index = 0
+                for old_line in old_lines:
+                    old_date = _tdx_line_date(old_line)
+                    while (pending_index < len(pending_dates) and old_date
+                           and pending_dates[pending_index] < old_date):
+                        merged.append(gap_lines[pending_dates[pending_index]])
+                        pending_index += 1
+                    merged.append(old_line if old_line.endswith(('\n', '\r')) else old_line + '\n')
+                merged.extend(gap_lines[value] for value in pending_dates[pending_index:])
+
+                fd, temporary = tempfile.mkstemp(prefix=code + '.', suffix='.tmp', dir=forward_dir)
+                try:
+                    with os.fdopen(fd, 'w', encoding='utf-8', newline='') as destination:
+                        destination.writelines(merged)
+                        destination.flush()
+                        os.fsync(destination.fileno())
+                    os.chmod(temporary, os.stat(path).st_mode & 0o777)
+                    os.replace(temporary, path)
+                finally:
+                    if os.path.exists(temporary):
+                        os.unlink(temporary)
+                stats['files_repaired'] += 1
+            except Exception as e:
+                stats['failed'] += 1
+                logging.error('TDX history repair failed for %s: %s', path, e)
+
+        logging.info('TDX history-only repair completed: target=%s scanned=%s gaps=%s repaired=%s '
+                     'rows_filled=%s dates_missing=%s gap_failed=%s failed=%s',
+                     target_date, stats['scanned'], stats['gaps_detected'],
+                     stats['files_repaired'], stats['gap_rows_filled'],
+                     stats['gap_dates_missing'], stats['gap_failed'], stats['failed'])
+        return stats if return_stats else stats['files_repaired']
+    except Exception as e:
+        logging.exception('stockfetch.repair_tdx_history_gaps处理异常：%s', e)
+        stats['failed'] += 1
+        return stats if return_stats else 0
 
 
 def _save_etf_codes(codes, date):
@@ -811,8 +1077,9 @@ def _stock_hist_cache_uncached(code, date_start, date_end=None, is_cache=True, a
 
 @_tdx_backfill_serialized
 def backfill_tdx_daily_data(data, date, return_stats=False, asset_type='stock'):
-    """Atomically upsert today's Sina close into the persistent TDX text files."""
-    stats = {'eligible': 0, 'written': 0, 'unchanged': 0, 'failed': 0, 'deferred': 0}
+    """Repair recent TDX stock-history gaps and atomically upsert today's Sina close."""
+    stats = {'eligible': 0, 'written': 0, 'unchanged': 0, 'failed': 0, 'deferred': 0,
+             'gaps_detected': 0, 'gap_rows_filled': 0, 'gap_failed': 0}
     try:
         target_date = _format_trade_date(date)
         now = datetime.datetime.now(ZoneInfo('Asia/Shanghai'))
@@ -822,6 +1089,15 @@ def backfill_tdx_daily_data(data, date, return_stats=False, asset_type='stock'):
             return stats if return_stats else 0
         if data is None or data.empty:
             return stats if return_stats else 0
+        trade_dates = set()
+        if asset_type != 'etf':
+            try:
+                trade_dates = sorted({
+                    _format_trade_date(value) for value in (fetch_stocks_trade_date() or set())
+                })
+                trade_dates = [value for value in trade_dates if value < target_date]
+            except Exception as e:
+                logging.warning('TDX history gap calendar unavailable: %s', e)
         forward_dir = os.environ.get('TDX_FORWARDP_DIR', '/data/InStock/instock/forwardp')
         os.makedirs(forward_dir, exist_ok=True)
         for row in data.itertuples(index=False):
@@ -849,17 +1125,38 @@ def backfill_tdx_daily_data(data, date, return_stats=False, asset_type='stock'):
                         old_lines = source.readlines()
                 else:
                     old_lines = []
+                existing_dates = {value for value in (_tdx_line_date(old_line) for old_line in old_lines)
+                                  if value}
+                gap_lines = []
+                if asset_type != 'etf':
+                    gap_start, gap_end = _tdx_history_gap_range(
+                        existing_dates, target_date, trade_dates
+                    )
+                    if gap_start and gap_end and gap_start <= gap_end:
+                        stats['gaps_detected'] += 1
+                        try:
+                            fetched_lines = _fetch_tdx_history_gap(code, gap_start, gap_end)
+                            gap_lines = [
+                                history_line for history_line in fetched_lines
+                                if _tdx_line_date(history_line) not in existing_dates
+                                and _tdx_line_date(history_line) != target_date
+                            ]
+                            stats['gap_rows_filled'] += len(gap_lines)
+                        except Exception as e:
+                            stats['gap_failed'] += 1
+                            logging.error('TDX history gap repair failed for %s (%s..%s): %s',
+                                          code, gap_start, gap_end, e)
                 merged = []
                 replaced = False
+                inserted_gap = False
                 date_matches = 0
                 same_record = False
                 for old_line in old_lines:
-                    old_date = old_line.split(',', 1)[0].strip()
-                    if re.fullmatch(r'\d{8}', old_date):
-                        old_date = '%s-%s-%s' % (old_date[:4], old_date[4:6], old_date[6:8])
-                    else:
-                        old_date = old_date[:10]
+                    old_date = _tdx_line_date(old_line)
                     if old_date == target_date:
+                        if not inserted_gap:
+                            merged.extend(gap_lines)
+                            inserted_gap = True
                         date_matches += 1
                         if not replaced:
                             merged.append(line)
@@ -867,9 +1164,11 @@ def backfill_tdx_daily_data(data, date, return_stats=False, asset_type='stock'):
                             same_record = old_line.rstrip('\r\n') == line.rstrip('\n')
                     else:
                         merged.append(old_line if old_line.endswith(('\n', '\r')) else old_line + '\n')
+                if not inserted_gap:
+                    merged.extend(gap_lines)
                 if not replaced:
                     merged.append(line)
-                if date_matches == 1 and same_record:
+                if date_matches == 1 and same_record and not gap_lines:
                     stats['unchanged'] += 1
                     continue
                 fd, temporary = tempfile.mkstemp(prefix=code + '.', suffix='.tmp', dir=forward_dir)
@@ -890,9 +1189,11 @@ def backfill_tdx_daily_data(data, date, return_stats=False, asset_type='stock'):
             except Exception as e:
                 stats['failed'] += 1
                 logging.error('TDX close backfill failed for %s: %s', code, e)
-        logging.info('TDX %s close backfill completed: date=%s eligible=%s written=%s unchanged=%s failed=%s',
+        logging.info('TDX %s close backfill completed: date=%s eligible=%s written=%s unchanged=%s '
+                     'gaps=%s gap_rows=%s gap_failed=%s failed=%s',
                      asset_type, target_date, stats['eligible'], stats['written'],
-                     stats['unchanged'], stats['failed'])
+                     stats['unchanged'], stats['gaps_detected'], stats['gap_rows_filled'],
+                     stats['gap_failed'], stats['failed'])
         return stats if return_stats else stats['written']
     except Exception as e:
         logging.error('stockfetch.backfill_tdx_daily_data处理异常：%s', e)

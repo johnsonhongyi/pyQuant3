@@ -18,8 +18,13 @@ case "${1:-}" in
         log_file="$LOG_ROOT/market-append-us.log"
         lock_file="$LOCK_ROOT/market-append-us.lock"
         ;;
+    crypto)
+        script=bars_crypto.py
+        log_file="$LOG_ROOT/market-append-crypto.log"
+        lock_file="$LOCK_ROOT/market-append-crypto.lock"
+        ;;
     *)
-        printf 'usage: %s {cn|us}\n' "$0" >&2
+        printf 'usage: %s {cn|us|crypto}\n' "$0" >&2
         exit 2
         ;;
 esac
@@ -39,7 +44,22 @@ mkdir -p "$LOG_ROOT" "$LOCK_ROOT"
 
     printf '[%s] %s append started\n' "$(date -Is)" "$1"
     cd "$SERVICE"
-    if /usr/bin/python3 "$SERVICE/$script" --append; then
+    universe_status=0
+    if [ "$1" = crypto ]; then
+        if nice -n 10 /usr/bin/python3 "$SERVICE/crypto_universe.py" --refresh; then
+            printf '[%s] crypto universe refresh finished\n' "$(date -Is)"
+        else
+            universe_status=$?
+            printf '[%s] crypto universe refresh failed (exit=%s); continuing with the last known tracked universe\n' \
+                "$(date -Is)" "$universe_status"
+        fi
+    fi
+    if nice -n 10 /usr/bin/python3 "$SERVICE/$script" --append; then
+        if [ "$universe_status" -ne 0 ]; then
+            printf '[%s] crypto append completed with stale universe (refresh exit=%s)\n' \
+                "$(date -Is)" "$universe_status"
+            exit "$universe_status"
+        fi
         printf '[%s] %s append finished\n' "$(date -Is)" "$1"
     else
         status=$?

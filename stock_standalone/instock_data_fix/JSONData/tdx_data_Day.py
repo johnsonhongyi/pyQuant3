@@ -136,9 +136,10 @@ def get_tdx_Exp_day_to_df(
         return pd.DataFrame()
 
     min_needed = max(int(dl or 600), 600)
+    start_day = _day_string(start)
 
     def read_normalized():
-        frame = _read_tdx_csv(file_path, min_rows=min_needed, start_date=_day_string(start))
+        frame = _read_tdx_csv(file_path, min_rows=min_needed, start_date=start_day)
         frame['date'] = pd.to_datetime(frame['date'].str.strip(), errors='coerce')
         for column in _COLUMNS[1:]:
             frame[column] = pd.to_numeric(frame[column], errors='coerce')
@@ -146,13 +147,13 @@ def get_tdx_Exp_day_to_df(
         return frame.loc[(frame['open'] > 0) & (frame['close'] > 0)]
 
     try:
-        frame = load_history(file_path, read_normalized)
+        frame = load_history(file_path, read_normalized, cache_variant=(min_needed, start_day))
     except (OSError, UnicodeError, ValueError, pd.errors.ParserError):
         return pd.DataFrame()
     if frame.empty:
         return pd.DataFrame()
 
-    start_day, end_day = _day_string(start), _day_string(end)
+    end_day = _day_string(end)
     if start_day:
         frame = frame.loc[frame['date'] >= pd.Timestamp(start_day)]
     if end_day:

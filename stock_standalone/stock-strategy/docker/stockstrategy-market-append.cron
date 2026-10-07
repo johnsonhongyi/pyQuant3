@@ -6,3 +6,6 @@ CRON_TZ=Asia/Shanghai
 
 CRON_TZ=Asia/Hong_Kong
 15 6 * * * root /root/johnson/stock-strategy/docker/market-append.sh us
+
+CRON_TZ=UTC
+15 0 * * * root /root/johnson/stock-strategy/docker/market-append.sh crypto
