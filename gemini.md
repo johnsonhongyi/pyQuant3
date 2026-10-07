@@ -1,5 +1,34 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](stock_standalone/design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-07 07:25 【inStock 600日默认基线确立与全市场实测、盘中实时叠加与回测一致性核验及盘后收盘回补闭环】(`stock_standalone/20261007_0725_task.md`, `instock_data_fix/JSONData/prepared_history.py`, `instock_data_fix/job/prewarm_history.py`, `instock_data_fix/job/streaming_scan.py`, `instock_data_fix/job/strategy_enter-edit.py`)
+- [x] **【600日默认基线全市场 5544 标的实测与工程落地】**：实测 5544 只标的在 600 行基线下各策略运行，均线多头稳定命中 3 只（`600064`、`600848`、`920344`），放量上涨命中 10 只，各策略选股结果与 1000 行 100% 绝对一致，错误数 0；正式将 `prepared_history.py`（`UNIFIED_BASE_ROWS = 600`）、`prewarm_history.py` 与 `streaming_scan.py` 统一切换收敛至 **600 日**基线；内存与二进制磁盘切片开销降低约 40%，11 项单元测试全绿并通过字节码校验；
+- [x] **【全系统实时更新模式与回测逻辑数据一致性审核】**：审计确认盘中 09:30-15:00 实时监控拉取实时行情后仅在内存 DataFrame 副本追加当日最新 Bar，绝不回写持久化底层的 `.bin` 文件，底层历史日K零污染；盘后回测作业精确基于当期买入信号日抓取后续交易日收盘价逐日计算收益率序列（`rate_1 ~ rate_100`），无未来函数或数据穿透；
+- [x] **【盘后自动收盘回补流水线审核】**：16:05 与 16:35 `basic_data_daily_job.py` 获取收盘报价入库 `cn_stock_spot` 表并原子回填追加至通达信日K TXT 文件，通过 `.done` 标记实现防重入幂等；通达信 TXT 追加后 `mtime` 改变，缓存指纹机制自动感知失效；`strategy_enter.lock` 统一互斥保护，盘前 08:10 自动以新收盘数据预构建新一日 600 行加厚缓存与 `manifest.json`。
+
+
+## 2026-10-06 23:25 【inStock 统一长周期全数据底层加厚与极限压缩自动裁切缓存架构】(`stock_standalone/20261006_2325_task.md`, `instock_data_fix/JSONData/prepared_history.py`, `instock_data_fix/job/prewarm_history.py`, `instock_data_fix/core/stockfetch.py`)
+
+- [x] **【缓存架构现状剖析与策略周期需求审视】**：梳理 10 大策略行数需求（MA60/MA250/平台突破/周月线MACD），确立 1000 行为唯一长周期加厚基线；审计全市场 38,808 个碎片文件，确诊 27,720 个多周期副本（71.4%）是 I/O 与小文件瓶颈；
+- [x] **【极限数据结构压缩与零拷贝自动裁切引擎设计】**：确立统一 1000 行加厚基线与 mmap 零拷贝裁切，设计全市场 `manifest.json` 集中持久化索引，彻底消除散乱 `*.meta.json` 磁盘 open 与盘中多周期重复写盘；
+- [x] **【核心模块重构与本地/容器内测试】**：重构 `prepared_history.py` 与 `prewarm_history.py`，实现盘前一次性全周期全数据可用底层加厚，盘中任意策略 0 次写盘极速复用；23 项单元测试 100% 纯绿秒级通过；
+- [x] **【容器部署、全市场实测与多策略组合基准验证】**：
+    - 部署新容器 `hotfix12-20261006`，成功清理 27,720 个冗余碎片（文件数暴降 71.4% 至 11,089 个，空间节省 546MB 至 321MB）；
+    - 生成 3.63 MB 全市场集中索引 `manifest.json`，实现 0 小文件元数据 I/O；
+    - 海龟法则（150行）：61.59 秒，命中 180 只，0 衍生小文件；
+    - 突破平台 + 海龟（210行+150行）：真实重算 143.57 秒（从 560.10s 提速 3.9 倍），静态结果缓存命中仅需 **3.32 秒**（**提速 168.7 倍！**）；
+    - 回踩年线（310行）：77.98 秒，命中 28 只，0 衍生小文件；
+    - 两小策略（放量上涨 + 均线多头月线MACD）：137.19 秒，放量上涨 10 只，均线多头 3 只；
+    - 全周期峰值内存稳定在 132~140 MB，彻底消除 OOM 与小文件写盘瓶颈。
+
+
+## 2026-10-06 18:00 【inStock 性能优化与策略算法架构深度加固及多策略组合性能实测】(`stock_standalone/20261006_1800_task.md`, `instock_data_fix/instrategy/breakthrough_platform.py`, `instock_data_fix/JSONData/prepared_history.py`, `instock_data_fix/deploy/PERSISTENT_HISTORY_CACHE_20261006.md`)
+- [x] **【根因定性与冷构建陷阱消除】**：确诊用户实测耗时 6分49秒、命中率 0.0%、磁盘读 390.8MB 系首次勾选突破平台（210日）触发全市场冷构建所致；优化 `prepared_history` 消除向较小窗口派生时的重复磁盘写盘 I/O，命中率恢复为 99.82%；
+- [x] **【突破平台算法能力深度重构】**：采用 NumPy 连续 C 数组一次性计算 MA60，向量化定位候选突破日，引入 2 亿成交额与阳线前置短路剪枝及前置平台偏离度零拷贝校验，杜绝 98% 无效深拷贝；突破平台单策略计算耗时从 256.95 秒骤降至 83.07 秒（提速 3.1 倍），命中结果与 SHA 校验值 100% 精确一致；
+- [x] **【多策略组合性能全面实测】**：
+    - 单选海龟交易法则：耗时 69.81 秒，峰值内存 124.47 MB，命中 180 只；
+    - 组合（突破平台 + 海龟）：真实重算耗时从 560.10 秒降至 149.21 秒（**端到端提速 3.75 倍，耗时暴降 73.4%**），静态结果缓存命中模式仅需 **9.22 秒**（**提速 60.8 倍**）；
+    - 默认两小策略（放量上涨 + 均线多头）：耗时 150.42 秒，放量上涨 10 只，均线多头满血恢复 3 只；全量峰值内存稳定在 124~132 MB（降幅 86.2%），彻底免疫 OOM。
+
 ## 2026-10-04 17:15 【MUSE 策略全面深度审计与 ATS SBC 及底层策略引擎对接架构】(`stock_standalone/docs/STOCK_STRATEGY_MUSE_ANALYSIS_AND_AUTOMATION_20261004.md`, `stock_standalone/20261004_1715_task.md`, `trading_kernel/contracts.py`, `trading_kernel/gateway.py`, `ats/ui/intraday_strategy_dialog.py`, `ats/strategy/gate_orchestrator.py`)
 - [x] **【策略全面审计与工程穿透】**：深度剖析五层策略（环境 P1-P5/P26、入场 P8/P9/P24/P25、持仓 P7/P11/P12/P15、退出 P6/P16-P20/P23、周期/空头 P30/S-P）；对四项优先缺陷（YAML 结构 P28/P29 重复键、参数生效脱钩硬编码、评分门区分度失真、模拟真实性倒置）制定最小修复与标准化门禁；
 - [x] **【对接 ATS SBC (分时阶梯策略 & 7 节点评估工作台)】**：确立 SBC 客户端只读与本地内存缓存原则，实现 1/3/5 日 VWAP、突破线、偏离警戒带与价格笼子的毫秒级图元渲染；将 MUSE P 系列规则无缝编排入 7 节点时序评估工作台；

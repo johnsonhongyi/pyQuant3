@@ -9,7 +9,7 @@ def history_rows(strategy_name, default=150):
     return {'cn_stock_strategy_backtrace_ma250': 310,
             'cn_stock_strategy_low_atr': 260,
             'cn_stock_strategy_breakthrough_platform': 210,
-            'cn_stock_strategy_keep_increasing': 1000}.get(strategy_name, default)
+            'cn_stock_strategy_keep_increasing': 600}.get(strategy_name, default)
 
 
 def scan_batches(stocks, strategies, load_batch, check, publish, date, stats, batch_size=64):
