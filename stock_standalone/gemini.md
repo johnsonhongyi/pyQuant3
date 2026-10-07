@@ -1,5 +1,16 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-07 22:35 【inStock 全面审计、差异对账与今日优化成果完全落地闭环】(`stock_standalone/20261007_2235_task.md`, `instock_data_fix/cron/root`, `instock_data_fix/job/strategy_enter-edit.py`, `ENVIRONMENT_HANDOFF.md`)
+- [x] **【全面差异核查与语义对账（零代码丢失确认）】**：
+    - 针对 Codex 在 `ENVIRONMENT_HANDOFF.md` 提出的备份差异逐行语义审计：查明备份文件系 10月7日更早压平镜像的旧状态，而今日 Antigravity 落地的所有关键成果（**600日统一基线**、**外置机械硬盘目录哈希索引消灭 2.2 万次 stat 磁盘遍历**、**反向 Seek 跳读削减 43.6% I/O**、**CPU 300% 门禁封顶 3-worker 保护 iKuai 软路由**、**流式扫描批次日志去刷屏与全局聚合**、**双层有效缓存自适应调度达成 1.46s 极速直出**、**盘前预热结构化账本与 prewarm_tuner 自适应调优**）不仅完好无缺，且已在生产容器运行层 100% 部署生效；
+    - 完整融合 Codex 提交的 TDX 历史缺口腾讯/东财兜底修复（解决 SZ000007 / SZ000029 等停牌/缺口断点问题）与币圈行情兜底；
+- [x] **【本地代码固化与 Git 提交闭环】**：
+    - 将 `instock_data_fix/cron/root`（08:10 触发预热，移除 small-only 限制全面放行全市场策略）与 `instock_data_fix/job/strategy_enter-edit.py`（128 批次保底，上限 256 防止上下文频繁切换）纳管并提交 Git；
+    - 维持嵌套仓库 `stock-strategy/source/` 原样不动，保持 `ENVIRONMENT_HANDOFF.md` 本地忽略不泄露凭据；
+- [x] **【全套自动化回归测试 100% 秒级全绿】**：
+    - 针对 instock 核心的 32 项自动化测试（prepared_history, static_cache, prewarm_tuner, tdx_disk_opt, priority_cache, run_statistics, selection）1.17 秒全部纯绿通过；
+    - ATS 跨日 VWAP 5 项回归测试全部纯绿通过；`git diff --check` 0 违规，UTF-8（无 BOM）保存。
+
 ## 2026-10-07 10:48 【inStock 非缓存机械硬盘I/O瓶颈根治与CPU 300%安全门禁落地】(`stock_standalone/20261007_1048_task.md`, `instock_data_fix/JSONData/tdx_data_Day.py`, `instock_data_fix/core/stockfetch.py`, `instock_data_fix/job/strategy_enter-edit.py`, `instock_data_fix/job/prewarm_history.py`)
 - [x] **【外置 USB 机械硬盘随机寻道与 I/O 放大瓶颈根治】**：
     - 内存目录哈希索引（`get_tdx_file_path`）：针对 `/data/InStock/instock/forwardp` 挂载在 WD Elements 4TB USB 机械硬盘（ROTA=1, 5400 RPM）的物理特性，引入基于目录 mtime 的全局单例索引，首次仅用 13.6ms 索引 11,185 个 key，彻底消灭全市场 5,544 只标的遍历时的 **22,176 次 `os.path.isfile` 磁盘 stat 寻道风暴**（降为 0 次，直接内存 $O(1)$ 查找）；
