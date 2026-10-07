@@ -1,5 +1,19 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](stock_standalone/design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-08 00:10 【inStock 本地独立版本库建立、GitHub推送闭环及生产Docker安全同步规范落地】(`stock_standalone/20261008_0010_task.md`, `D:\MacTools\WorkFile\WorkSpace\InStock\`, `stock_standalone/ENVIRONMENT_HANDOFF.md`)
+- [x] **【模块统一与独立 Git 仓库确立（SSOT）】**：
+    - 将 `JSONData` 核心模块全面迁入 `instock/JSONData/`，所有消费模块与测试自适应对接，注入向后兼容代理，单元测试 100% 纯绿通过；
+    - 在用户指定位置 `D:\MacTools\WorkFile\WorkSpace\InStock\` 建立本地独立 Git 仓库，作为唯一权威开发与提交源（SSOT）；
+    - 彻底从仓库中 `git rm -f JSONData` 清理掉根目录的残留符号链接文件，消除跨系统解析隐患；
+- [x] **【精细化过滤与纯净资产度量】**：
+    - 精确配置 `.gitignore`，保留 `instock/cache/` 目录中的受控配置（如 ETF 基础数据与 provider 状态）；
+    - 彻底排除通达信原始日K（593MB）、hist加厚缓存（398MB）、日志（254MB）、各类临时锁与数据库缓存等 **1.22 GB 非代码数据**；
+    - 纯代码资产仅 158 个文件（3.38 MB），`.git` 元数据 1.68 MB，实现极限轻量化版本控制；
+- [x] **【GitHub 远程同步与生产 Docker 安全铁律落地】**：
+    - 本地代码提交并成功推送到 GitHub 远程仓库 `https://github.com/johnsonhongyi/Instock`（commit `9602ac8`）；
+    - 容器内部同步清理了根目录 `JSONData` 软链接，工作区保持纯净；
+    - **铁腕遵守用户指令：严禁在生产 Docker 容器内直接执行 `git pull` 或自动更新**，彻底规避外网断流重试、分叉合并冲突及误覆写导致生产源文件与持久化数据丢失的风险；后续所有更新均遵循“本地修改测试 -> Git提交 -> 原子受控差分下发”的标准发布规范。
+
 ## 2026-10-07 10:48 【inStock 非缓存机械硬盘I/O瓶颈根治与CPU 300%安全门禁落地】(`stock_standalone/20261007_1048_task.md`, `instock_data_fix/JSONData/tdx_data_Day.py`, `instock_data_fix/core/stockfetch.py`, `instock_data_fix/job/strategy_enter-edit.py`, `instock_data_fix/job/prewarm_history.py`)
 - [x] **【外置 USB 机械硬盘随机寻道与 I/O 放大瓶颈根治】**：
     - 内存目录哈希索引（`get_tdx_file_path`）：针对 `/data/InStock/instock/forwardp` 挂载在 WD Elements 4TB USB 机械硬盘（ROTA=1, 5400 RPM）的物理特性，引入基于目录 mtime 的全局单例索引，首次仅用 13.6ms 索引 11,185 个 key，彻底消灭全市场 5,544 只标的遍历时的 **22,176 次 `os.path.isfile` 磁盘 stat 寻道风暴**（降为 0 次，直接内存 $O(1)$ 查找）；

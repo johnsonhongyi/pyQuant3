@@ -1,6 +1,16 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
-## 2026-10-07 23:05 【inStock 架构路径统一至 instock.JSONData 与本地独立 Git 版本库制作闭环】(`stock_standalone/20261007_2305_task.md`, `instock_data_fix/instock/JSONData/`, `instock_data_fix/core/stockfetch.py`, `instock_data_fix/job/strategy_enter-edit.py`, `stock_standalone/InStock/`)
+## 2026-10-07 23:58 【InStock 根目录软链接清理与 GitHub 官方版本库纯净同步闭环】(`D:\MacTools\WorkFile\WorkSpace\InStock\`, `https://github.com/johnsonhongyi/Instock`)
+- [x] **【彻底清理根目录 JSONData 符号链接】**：
+    - 响应用户指示，通过 `git rm -f JSONData` 彻底从版本库中移除根目录历史符号链接，保持仓库顶层目录结构纯净优雅（仅保留 `instock/`、`supervisor/`、`.gitignore`、`LICENSE`、`requirements.txt`）；
+    - 真正的 `JSONData` 核心适配模块已 100% 完整内嵌在标准路径 `instock/JSONData/` 内部；
+- [x] **【GitHub 远端与本地库纯净同步生效】**：
+    - 本地 `D:\MacTools\WorkFile\WorkSpace\InStock\` 提交 commit `9602ac8` 并成功推送至远程 `https://github.com/johnsonhongyi/Instock` master 分支；
+    - GitHub 页面刷新后根目录链接图标彻底消失，代码展示纯净规范；
+- [x] **【生产容器原子 Git Pull 同步完成】**：
+    - 在 PVE Docker 容器内通过 `git pull origin master` 秒级完成 Fast-forward 同步，双端 100% 对齐，`working tree clean`，实机 Python 模块导入健康检查 100% 通过。
+
+## 2026-10-07 23:05 【inStock 架构路径统一至 instock.JSONData 与本地独立 Git 版本库制作闭环】(`stock_standalone/20261007_2305_task.md`, `instock_data_fix/instock/JSONData/`, `instock_data_fix/core/stockfetch.py`, `instock_data_fix/job/strategy_enter-edit.py`, `D:\MacTools\WorkFile\WorkSpace\InStock\`)
 - [x] **【路径统一与 instock.JSONData 包架构落地】**：
     - 消除历史游离路径缺陷：将原本散落于项目外的 `JSONData` 规范移入 `instock/JSONData/`，建立双向兼容导出（`instock.JSONData` 正式包名 + `sys.modules['JSONData']` 兼容别名）；
     - 全面更新所有关联模块：`core/stockfetch.py`（Sina/tdx/prepared_history/history_cache）、`job/strategy_enter-edit.py`、`job/prewarm_history.py`、`job/run_statistics.py`（封装 `_get_cache_statistics` DRY 函数）及模块内部跨引用，优先自适应 `instock.JSONData` 导入；

@@ -2,13 +2,29 @@
 # InStock 生产环境 Git 忽略规则 (.gitignore)
 # =====================================================================
 
-# 1. 外部存储与持久化数据挂载目录 (Mounts)
+# 1. 外部大存储与持久化数据挂载目录
 /instock/forwardp/
-/instock/cache/
 /instock/log/
 /instock/core/strategy/
 
-# 2. 临时与归档大文件目录
+# 2. 运行时缓存、动态二进制与文件锁 (精细化控制 cache 目录，放行配置文件)
+/instock/cache/hist/
+/instock/cache/strategy_results/
+/instock/cache/forwardp/
+/instock/cache/close_finalize/
+/instock/cache/*.lock
+/instock/cache/**/*.lock
+/instock/cache/*.sqlite*
+/instock/cache/*.db
+/instock/cache/*.pkl
+/instock/cache/**/*.pkl
+/instock/cache/*.state
+/instock/cache/**/*.state
+/instock/cache/*.zip
+/instock/cache/*.bin
+/instock/cache/*.npy
+
+# 3. 临时与归档大文件目录
 /instock/core/temp/
 *.zip
 *.tar.gz
@@ -19,7 +35,7 @@
 *.swp
 *.swo
 
-# 3. 数据文件、缓存与二进制快照 (Data & Binaries)
+# 4. 数据文件与二进制快照 (全局屏蔽)
 *.bin
 *.pkl
 *.pickle
@@ -34,12 +50,12 @@
 *.feather
 *.done
 
-# 4. 日志文件与指标
+# 5. 日志文件与指标
 *.log
 *.log.*
 *.jsonl
 
-# 5. Python 编译产物与运行时临时目录
+# 6. Python 编译产物与运行时临时目录
 __pycache__/
 *.py[cod]
 *$py.class
@@ -52,7 +68,7 @@ build/
 .coverage
 htmlcov/
 
-# 6. 系统与编辑器文件
+# 7. 系统与编辑器文件
 .DS_Store
 Thumbs.db
 .idea/
