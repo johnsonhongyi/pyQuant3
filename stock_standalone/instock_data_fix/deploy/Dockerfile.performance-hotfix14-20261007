@@ -1,0 +1,4 @@
+FROM instock:johnson250103-sina-runtime-perf-hotfix13-20261007
+COPY JSONData/history_cache.py JSONData/tdx_data_Day.py /data/InStock/JSONData/
+COPY core/stockfetch.py /data/InStock/instock/core/stockfetch.py
+ENV INSTOCK_PERF_VERSION=hotfix14-20261007

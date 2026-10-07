@@ -34,10 +34,12 @@ def set_priority_codes(codes):
     _priority_codes = {str(code).split('.')[0].zfill(6) for code in codes}
 
 
-def load_history(path, loader):
+def load_history(path, loader, cache_variant=None):
     stat = os.stat(path)
     version = '%s:%s:%s' % (stat.st_mtime_ns, stat.st_size, stat.st_ino)
     key = os.path.abspath(path)
+    if cache_variant is not None:
+        key = '%s#%s' % (key, cache_variant)
     budget = max(0, int(os.environ.get('INSTOCK_HISTORY_CACHE_MB', '32'))) * 1024 * 1024
     if not budget:
         _count('bypasses')

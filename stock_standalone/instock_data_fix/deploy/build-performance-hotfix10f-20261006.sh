@@ -12,7 +12,7 @@ BUILD=$(mktemp -d /tmp/instock-stats-build.XXXXXX)
 trap 'rm -rf "$BUILD"' EXIT
 mkdir -p "$BUILD/core" "$BUILD/JSONData" "$BUILD/job" "$BUILD/web/templates" "$BUILD/perf_hotfix_20261006/job"
 cp "$ROOT/JSONData/prepared_history.py" "$ROOT/JSONData/history_cache.py" "$BUILD/JSONData/"
-cp "$ROOT/job/static_strategy_cache.py" "$ROOT/job/streaming_scan.py" "$ROOT/job/prewarm_history.py" "$ROOT/job/strategy_selection.py" "$ROOT/job/run_statistics.py" "$ROOT/job/strategy_enter-edit.py" "$BUILD/job/"
+cp "$ROOT/job/static_strategy_cache.py" "$ROOT/job/streaming_scan.py" "$ROOT/job/prewarm_history.py" "$ROOT/job/prewarm_tuner.py" "$ROOT/job/strategy_selection.py" "$ROOT/job/run_statistics.py" "$ROOT/job/strategy_enter-edit.py" "$BUILD/job/"
 cp "$ROOT/perf_hotfix_20261006/job/strategy_data_daily_job.py" "$BUILD/perf_hotfix_20261006/job/"
 cp "$ROOT/web/web_service.py" "$BUILD/web/"
 cp "$ROOT/web/templates/manual_strategy_refresh.html" "$BUILD/web/templates/"

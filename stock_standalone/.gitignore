@@ -55,3 +55,7 @@ data/ipo_learning/shadow_observations.sqlite
 !docs/ats_closed_loop/performance_ab_20261003.json
 !docs/ats_closed_loop/implementation_evidence_20261003.json
 !instock-pyinstall-batch.cmd
+
+# Local-only agent and environment handoff files.
+/AGENTS.md
+/ENVIRONMENT_HANDOFF.md

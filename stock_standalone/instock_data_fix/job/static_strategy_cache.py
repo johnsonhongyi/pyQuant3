@@ -49,7 +49,6 @@ def _manifest(directory, stocks, quotes, date, rows, epoch, revision, source_sig
         try:
             mstat = manifest_file.stat()
             digest.update(json.dumps(('manifest.json', mstat.st_size, mstat.st_mtime_ns)).encode('utf-8'))
-            return digest.hexdigest()
         except OSError:
             pass
 
