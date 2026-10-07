@@ -246,7 +246,7 @@ def _publish_results(date, strategy, results):
 _last_scan = {}
 
 
-def run_check(strategy_fun, table_name, stocks, date, workers=2):
+def run_check(strategy_fun, table_name, stocks, date, workers=2, log_summary=True):
     global _last_scan
     _last_scan = {}
     if not stocks:
@@ -307,8 +307,12 @@ def run_check(strategy_fun, table_name, stocks, date, workers=2):
         logging.error("%s逐股计算异常 %s/%s", table_name, error_count, future_count)
     if future_count and error_count > max(5, int(future_count * 0.01)):
         raise RuntimeError(f"{table_name}逐股计算失败过多：{error_count}/{future_count}")
-    logging.info("strategy scan complete: strategy=%s checked=%s matched=%s errors=%s elapsed=%.1fs",
-                 table_name, future_count, len(data), error_count, time.perf_counter() - scan_started)
+    if log_summary:
+        logging.info("strategy scan complete: strategy=%s checked=%s matched=%s errors=%s elapsed=%.1fs",
+                     table_name, future_count, len(data), error_count, time.perf_counter() - scan_started)
+    else:
+        logging.debug("strategy batch complete: strategy=%s checked=%s matched=%s errors=%s elapsed=%.1fs",
+                      table_name, future_count, len(data), error_count, time.perf_counter() - scan_started)
     _last_scan = dict(checked=future_count, matched=len(data), errors=error_count,
                       seconds=round(time.perf_counter() - scan_started, 3), workers=worker_count)
     return data
@@ -470,7 +474,7 @@ def _stream_strategy_enter(small, stats, selected):
         def check(strategy, frames):
             rows = strategy_history_rows(strategy['name'], base_rows)
             scoped = {stock: frame.tail(rows) for stock, frame in frames.items()}
-            matches = run_check(strategy['func'], strategy['name'], scoped, date)
+            matches = run_check(strategy['func'], strategy['name'], scoped, date, log_summary=False)
             return matches, dict(_last_scan)
 
         batch_size = max(8, min(128, int(os.environ.get('INSTOCK_SCAN_BATCH_SIZE', '64'))))
