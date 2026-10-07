@@ -482,7 +482,8 @@ def _stream_strategy_enter(small, stats, selected):
 
         default_batch = 128 if cache_ready else 64
         env_batch = os.environ.get('INSTOCK_SCAN_BATCH_SIZE')
-        batch_size = max(8, min(256, int(env_batch))) if env_batch else default_batch
+        # Ignore stale image defaults below 128; retain only safe upward tuning.
+        batch_size = max(128, min(256, int(env_batch))) if env_batch else max(128, default_batch)
 
         # 严格遵守安全门禁：CPU 占用必须控制在 300% 以下，保留至少 1 个完整物理核心给 PVE 和 iKuai 软路由
         cpu_total = os.cpu_count() or 4
