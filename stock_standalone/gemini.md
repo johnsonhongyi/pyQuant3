@@ -3,7 +3,8 @@
 ## 2026-10-07 07:25 【inStock 600日默认基线确立与全市场实测、盘中实时叠加与回测一致性核验及盘后收盘回补闭环】(`20261007_0725_task.md`, `instock_data_fix/JSONData/prepared_history.py`, `instock_data_fix/job/prewarm_history.py`, `instock_data_fix/job/streaming_scan.py`, `instock_data_fix/job/strategy_enter-edit.py`)
 - [x] **【600日默认基线全市场 5544 标的实测与工程落地】**：实测 5544 只标的在 600 行基线下各策略运行，均线多头稳定命中 3 只（`600064`、`600848`、`920344`），放量上涨命中 10 只，各策略选股结果与 1000 行 100% 绝对一致，错误数 0；正式将 `prepared_history.py`（`UNIFIED_BASE_ROWS = 600`）、`prewarm_history.py` 与 `streaming_scan.py` 统一切换收敛至 **600 日**基线；内存与二进制磁盘切片开销降低约 40%，11 项单元测试全绿并通过字节码校验；
 - [x] **【全系统实时更新模式与回测逻辑数据一致性审核】**：审计确认盘中 09:30-15:00 实时监控拉取实时行情后仅在内存 DataFrame 副本追加当日最新 Bar，绝不回写持久化底层的 `.bin` 文件，底层历史日K零污染；盘后回测作业精确基于当期买入信号日抓取后续交易日收盘价逐日计算收益率序列（`rate_1 ~ rate_100`），无未来函数或数据穿透；
-- [x] **【盘后自动收盘回补流水线审核】**：16:05 与 16:35 `basic_data_daily_job.py` 获取收盘报价入库 `cn_stock_spot` 表并原子回填追加至通达信日K TXT 文件，通过 `.done` 标记实现防重入幂等；通达信 TXT 追加后 `mtime` 改变，缓存指纹机制自动感知失效；`strategy_enter.lock` 统一互斥保护，盘前 08:10 自动以新收盘数据预构建新一日 600 行加厚缓存与 `manifest.json`。
+- [x] **【盘后自动收盘回补流水线审核】**：16:05 与 16:35 `basic_data_daily_job.py` 获取收盘报价入库 `cn_stock_spot` 表并原子回填追加至通达信日K TXT 文件，通过 `.done` 标记实现防重入幂等；通达信 TXT 追加后 `mtime` 改变，缓存指纹机制自动感知失效；`strategy_enter.lock` 统一互斥保护，盘前 08:10 自动以新收盘数据预构建新一日 600 行加厚缓存与 `manifest.json`；
+- [x] **【流式批次日志高频刷屏根治与策略完成日志聚合】**：定位并消除每批 64 只股票扫描均输出 `strategy scan complete: checked=64 matched=0 ...` 的批次刷屏缺陷；在 `strategy_enter-edit.py` 中引入 `log_summary` 守卫将批次过程降为 DEBUG，并在 `streaming_scan.py` 全市场所有批次跑完时仅聚合输出 **1 条** 真正的全局完成日志；**生产环境全市场 5544 只标的实测验证**：放量上涨（10只）与均线多头（3只）在 36~40 秒内完成，无任何批次刷屏日志，成功打印聚合汇总日志，彻底恢复整洁设计。
 
 
 ## 2026-10-06 23:25 【inStock 统一长周期全数据底层加厚与极限压缩自动裁切缓存架构】(`20261006_2325_task.md`, `instock_data_fix/JSONData/prepared_history.py`, `instock_data_fix/job/prewarm_history.py`, `instock_data_fix/core/stockfetch.py`)

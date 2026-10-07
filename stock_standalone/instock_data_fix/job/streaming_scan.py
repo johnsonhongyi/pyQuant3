@@ -2,6 +2,7 @@
 from itertools import islice
 import hashlib
 import json
+import logging
 import time
 
 
@@ -53,4 +54,7 @@ def scan_batches(stocks, strategies, load_batch, check, publish, date, stats, ba
             sort_keys=True).encode('utf-8')).hexdigest()
         stats.stages.append(dict(name=strategy['name'], seconds=round(metric['seconds'] +
             time.perf_counter() - started, 3), date=str(date), stocks=loaded, scan=metric))
+        logging.info("strategy scan complete: strategy=%s checked=%s matched=%s errors=%s elapsed=%.1fs",
+                     strategy['name'], metric['checked'], len(results[strategy['name']]),
+                     metric['errors'], metric['seconds'])
     return loaded
