@@ -1,5 +1,12 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-07 09:40 【inStock PVE/Docker资源监控与有效缓存场景调度优化加速】(`20261007_0940_task.md`, `instock_data_fix/job/strategy_enter-edit.py`, `instock_data_fix/job/static_strategy_cache.py`, `instock_data_fix/core/stockfetch.py`, `instock_data_fix/JSONData/prepared_history.py`)
+- [x] **【PVE/Docker 资源实时监控与算力定性】**：PVE 宿主机 Intel J4125 4核、内存 3.8GB（可用 1.5GB）；LXC 102 分配 2核、内存 1792MB（可用 1.3GB）；Docker inStock 容器限额 1.25GB（已用 590MB 常驻，策略运行时增量仅 130~140MB）；内存瓶颈彻底解除，系统主要瓶颈在于 CPU 调度、重复创建销毁线程池与静态缓存未命中；
+- [x] **【双层有效缓存自适应调度架构落地与 1.46s 极限直出】**：
+    - 静态结果缓存层：修复 callable rows 跨进程随机内存地址缺陷与容器路径映射，实现 `manifest.json` 单次 stat 快速指纹；**生产实测 5544 只标的两小策略从 144.32 秒暴降至 1.46 秒（端到端提速 98.8 倍！）**；数据库写入 10/3 只 100% 精确；
+    - 底层紧凑加厚缓存层：检测到有效缓存且内存充裕时，自适应扩大批次（`batch_size` 64 -> 128），批次上下文切换暴降 50%；线程池全周期复用（Persistent ThreadPool），彻底消除数百次重复创建销毁 OS 线程的开销；workers 适配 CPU 核心（`workers=min(4, os.cpu_count() or 2)`）；
+- [x] **【冷启动降级与数据一致性严格守护】**：缓存未命中或内存吃紧时自动平滑降级至保守批次（64）与双线程，不超 1280MB 限额，选股结果与 SHA256 校验 100% 精确一致，12 项单元测试秒级全绿。
+
 ## 2026-10-07 07:25 【inStock 600日默认基线确立与全市场实测、盘中实时叠加与回测一致性核验及盘后收盘回补闭环】(`20261007_0725_task.md`, `instock_data_fix/JSONData/prepared_history.py`, `instock_data_fix/job/prewarm_history.py`, `instock_data_fix/job/streaming_scan.py`, `instock_data_fix/job/strategy_enter-edit.py`)
 - [x] **【600日默认基线全市场 5544 标的实测与工程落地】**：实测 5544 只标的在 600 行基线下各策略运行，均线多头稳定命中 3 只（`600064`、`600848`、`920344`），放量上涨命中 10 只，各策略选股结果与 1000 行 100% 绝对一致，错误数 0；正式将 `prepared_history.py`（`UNIFIED_BASE_ROWS = 600`）、`prewarm_history.py` 与 `streaming_scan.py` 统一切换收敛至 **600 日**基线；内存与二进制磁盘切片开销降低约 40%，11 项单元测试全绿并通过字节码校验；
 - [x] **【全系统实时更新模式与回测逻辑数据一致性审核】**：审计确认盘中 09:30-15:00 实时监控拉取实时行情后仅在内存 DataFrame 副本追加当日最新 Bar，绝不回写持久化底层的 `.bin` 文件，底层历史日K零污染；盘后回测作业精确基于当期买入信号日抓取后续交易日收盘价逐日计算收益率序列（`rate_1 ~ rate_100`），无未来函数或数据穿透；

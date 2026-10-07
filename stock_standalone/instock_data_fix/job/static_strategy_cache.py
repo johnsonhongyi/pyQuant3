@@ -22,16 +22,43 @@ def manifest(directory, stocks, quotes, date, rows, epoch, revision, source_sign
         return None
 
 
+def _normalize_rows(rows):
+    if callable(rows):
+        try:
+            return {
+                'default': rows('default'),
+                'keep_increasing': rows('cn_stock_strategy_keep_increasing'),
+                'backtrace_ma250': rows('cn_stock_strategy_backtrace_ma250'),
+                'low_atr': rows('cn_stock_strategy_low_atr'),
+                'breakthrough_platform': rows('cn_stock_strategy_breakthrough_platform'),
+            }
+        except Exception:
+            return str(getattr(rows, '__name__', 'custom_rows'))
+    return rows
+
+
 def _manifest(directory, stocks, quotes, date, rows, epoch, revision, source_signature):
     digest = hashlib.sha256()
-    digest.update(json.dumps((str(date), rows, epoch, revision, list(quotes.columns)),
-                             default=str).encode('utf-8'))
+    norm_rows = _normalize_rows(rows)
+    digest.update(json.dumps((str(date), norm_rows, epoch, revision, list(quotes.columns)),
+                             sort_keys=True, default=str).encode('utf-8'))
     digest.update(pd.util.hash_pandas_object(quotes, index=False).values.tobytes())
+
+    manifest_file = Path(directory, 'manifest.json')
+    if manifest_file.exists():
+        try:
+            mstat = manifest_file.stat()
+            digest.update(json.dumps(('manifest.json', mstat.st_size, mstat.st_mtime_ns)).encode('utf-8'))
+            return digest.hexdigest()
+        except OSError:
+            pass
+
+    base_rows_num = norm_rows.get('default', 150) if isinstance(norm_rows, dict) else norm_rows
     for stock in stocks:
         symbol = str(stock[1]).split('.')[0].zfill(6)
         signatures = [source_signature(stock[1])]
         for suffix in ('.npy', '.meta.json'):
-            path = Path(directory, '%s-qfq-%s%s' % (symbol, rows, suffix))
+            path = Path(directory, '%s-qfq-%s%s' % (symbol, base_rows_num, suffix))
             try:
                 stat = path.stat()
                 signatures.append((stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))

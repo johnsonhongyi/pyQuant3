@@ -246,7 +246,7 @@ def _publish_results(date, strategy, results):
 _last_scan = {}
 
 
-def run_check(strategy_fun, table_name, stocks, date, workers=2, log_summary=True):
+def run_check(strategy_fun, table_name, stocks, date, workers=2, log_summary=True, executor=None):
     global _last_scan
     _last_scan = {}
     if not stocks:
@@ -269,37 +269,37 @@ def run_check(strategy_fun, table_name, stocks, date, workers=2, log_summary=Tru
     
     error_count = 0
     future_count = 0
-    worker_count = max(1, min(int(workers), 2))
-    batch_size = worker_count * 4
+    worker_count = max(1, min(int(workers or 2), 4))
     scan_started = time.perf_counter()
+
+    def _execute_with_pool(pool):
+        nonlocal future_count, error_count
+        future_to_data = {}
+        for stock, frame in stocks.items():
+            stock_frame = frame.copy(deep=True)
+            if is_check_high_tight:
+                future = pool.submit(strategy_fun, stock, stock_frame, date=date,
+                                     istop=(stock[1] in stock_tops))
+            else:
+                future = pool.submit(strategy_fun, stock, stock_frame, date=date)
+            future_to_data[future] = stock
+        future_count += len(future_to_data)
+        for future in concurrent.futures.as_completed(future_to_data):
+            stock = future_to_data[future]
+            try:
+                if future.result():
+                    data.append(stock)
+            except Exception as e:
+                error_count += 1
+                if error_count <= 10:
+                    logging.error(f"strategy_data_daily_job.run_check处理异常：{stock[1]}代码{e}策略{table_name}")
+
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
-            stock_iter = iter(stocks.items())
-            while True:
-                batch = list(islice(stock_iter, batch_size))
-                if not batch:
-                    break
-                future_to_data = {}
-                for stock, frame in batch:
-                    # Strategy checks mutate dates and live volume fields; isolate those edits
-                    # so every strategy reads the same cycle snapshot.
-                    stock_frame = frame.copy(deep=True)
-                    if is_check_high_tight:
-                        future = executor.submit(strategy_fun, stock, stock_frame, date=date,
-                                                 istop=(stock[1] in stock_tops))
-                    else:
-                        future = executor.submit(strategy_fun, stock, stock_frame, date=date)
-                    future_to_data[future] = stock
-                future_count += len(future_to_data)
-                for future in concurrent.futures.as_completed(future_to_data):
-                    stock = future_to_data[future]
-                    try:
-                        if future.result():
-                            data.append(stock)
-                    except Exception as e:
-                        error_count += 1
-                        if error_count <= 10:
-                            logging.error(f"strategy_data_daily_job.run_check处理异常：{stock[1]}代码{e}策略{table_name}")
+        if executor is not None:
+            _execute_with_pool(executor)
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as pool:
+                _execute_with_pool(pool)
     except Exception as e:
         logging.exception(f"strategy_data_daily_job.run_check处理异常：{e}策略{table_name}")
         raise
@@ -411,7 +411,8 @@ def _stream_strategy_enter(small, stats, selected):
             dependencies['cn_stock_strategy_high_tight_flag'] = result_digest(tops)
         writer = _publish_results if os.environ.get('INSTOCK_SCAN_DRY_RUN') != '1' else lambda *args: None
         static_cache = None
-        if not live and os.environ.get('INSTOCK_STATIC_RESULT_CACHE') == '1':
+        use_static_cache = (not live and os.environ.get('INSTOCK_STATIC_RESULT_CACHE', '1') == '1')
+        if use_static_cache:
             import inspect
             import instock.core.stockfetch as stf
             from instock.job.static_strategy_cache import StaticResults, manifest, revision
@@ -471,18 +472,37 @@ def _stream_strategy_enter(small, stats, selected):
                     frames.update(stocks_data_to_realtime(date, missing, subset))
             return frames
 
-        def check(strategy, frames):
-            rows = strategy_history_rows(strategy['name'], base_rows)
-            scoped = {stock: frame.tail(rows) for stock, frame in frames.items()}
-            matches = run_check(strategy['func'], strategy['name'], scoped, date, log_summary=False)
-            return matches, dict(_last_scan)
+        cache_ready = False
+        try:
+            import instock.core.stockfetch as stf
+            from instock.JSONData.prepared_history import is_history_cache_ready
+            cache_ready = is_history_cache_ready(directory=getattr(stf, 'stock_hist_cache_path', None))
+        except Exception:
+            pass
 
-        batch_size = max(8, min(128, int(os.environ.get('INSTOCK_SCAN_BATCH_SIZE', '64'))))
+        default_batch = 128 if cache_ready else 64
+        env_batch = os.environ.get('INSTOCK_SCAN_BATCH_SIZE')
+        batch_size = max(8, min(256, int(env_batch))) if env_batch else default_batch
+
+        default_workers = max(2, min(4, os.cpu_count() or 2))
+        env_workers = os.environ.get('INSTOCK_STRATEGY_WORKERS')
+        workers = max(1, min(8, int(env_workers))) if env_workers else default_workers
+
         results = {}
         def publish(date, strategy, matches):
             results[strategy['name']] = matches
             writer(date, strategy, matches)
-        loaded = scan_batches(stocks, strategies, load, check, publish, date, stats, batch_size)
+
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as shared_executor:
+            def check(strategy, frames):
+                rows = strategy_history_rows(strategy['name'], base_rows)
+                scoped = {stock: frame.tail(rows) for stock, frame in frames.items()}
+                matches = run_check(strategy['func'], strategy['name'], scoped, date,
+                                    workers=workers, log_summary=False, executor=shared_executor)
+                return matches, dict(_last_scan)
+
+            loaded = scan_batches(stocks, strategies, load, check, publish, date, stats, batch_size)
         if static_cache:
             stages = {stage['name']: stage for stage in stats.stages
                       if stage['name'] in results and stage.get('date') == str(date)}

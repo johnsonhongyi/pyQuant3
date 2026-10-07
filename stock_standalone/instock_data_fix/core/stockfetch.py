@@ -45,9 +45,13 @@ __date__ = '2023/3/10 '
 # 设置基础目录，每次加载使用。
 cpath_current = os.path.dirname(os.path.dirname(__file__))
 stock_hist_cache_path = os.environ.get(
-    'INSTOCK_PREPARED_HISTORY_CACHE_DIR', os.environ.get('INSTOCK_HISTORY_CACHE_DIR',
-    os.path.join(cpath_current, 'cache', 'hist'),
-))
+    'INSTOCK_STRATEGY_PREPARED_DIR',
+    os.environ.get(
+        'INSTOCK_PREPARED_HISTORY_CACHE_DIR',
+        os.environ.get('INSTOCK_HISTORY_CACHE_DIR',
+        os.path.join(cpath_current, 'cache', 'hist'),
+    ))
+)
 _TDX_BACKFILL_LOCAL_LOCK = threading.RLock()
 
 
