@@ -28,12 +28,12 @@ if quotes is None or quotes.empty:
     raise RuntimeError('Premarket history initialization: no stock list')
 stocks = [tuple(row) for row in quotes[list(tbs.TABLE_CN_STOCK_FOREIGN_KEY['columns'])].values]
 start_date, cached = trd.get_trade_hist_interval(str(date))
+os.environ['INSTOCK_HIST_LOOKBACK_ROWS'] = '600'
+
+
 def warm_stock(stock, date, start_date, cached, directory):
     symbol = str(stock[1]).split('.')[0].zfill(6)
-    profiles = [150] + [rows for rows in (210, 260, 310, 1000)
-                        if Path(directory, '%s-qfq-%s.npy' % (symbol, rows)).exists()]
-    largest = max(profiles)
-    os.environ['INSTOCK_HIST_LOOKBACK_ROWS'] = str(largest)
+    os.environ['INSTOCK_HIST_LOOKBACK_ROWS'] = '600'
     frame = stf.fetch_stock_hist(stock, start_date, cached)
     if frame is None or frame.empty:
         return False
@@ -41,11 +41,9 @@ def warm_stock(stock, date, start_date, cached, directory):
     if source and fingerprint:
         columns = list(tbs.CN_STOCK_HIST_DATA['columns'])
         signature = (str(start_date or ''), str(date), 'qfq', tuple(columns), source, fingerprint)
-        for rows in profiles:
-            if rows != largest:
-                os.environ['INSTOCK_HIST_LOOKBACK_ROWS'] = str(rows)
-                prepared_history(os.path.join(directory, symbol + '-qfq.pkl'), signature,
-                                 lambda: frame[columns])
+        prepared_history(os.path.join(directory, symbol + '-qfq.pkl'), signature,
+                         lambda: frame[columns])
+
     return True
 
 
@@ -53,5 +51,9 @@ started = time.perf_counter()
 loaded = sum(warm_stock(stock, date, start_date, cached, directory) for stock in stocks)
 if loaded < max(1, int(len(stocks) * .7)):
     raise RuntimeError('Premarket history coverage insufficient: %s/%s' % (loaded, len(stocks)))
+
+from JSONData.prepared_history import save_manifest
+manifest_file = save_manifest(directory)
+
 print(json.dumps(dict(epoch=str(today), stocks=len(stocks), seconds=round(time.perf_counter() - started, 3),
-                      cache=cache_statistics())))
+                      manifest=bool(manifest_file), cache=cache_statistics())))
