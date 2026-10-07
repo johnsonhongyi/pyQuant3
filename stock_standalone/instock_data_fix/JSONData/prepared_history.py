@@ -67,6 +67,20 @@ def save_manifest(directory):
         return None
 
 
+def is_history_cache_ready(directory=None, min_entries=3000):
+    """Check if the thick history cache manifest is ready and sufficiently warm."""
+    try:
+        if directory is None:
+            import instock.core.stockfetch as stf
+            directory = getattr(stf, 'stock_hist_cache_path', None)
+        if not directory:
+            return False
+        manifest = _load_manifest(directory)
+        return bool(manifest and len(manifest) >= min_entries)
+    except Exception:
+        return False
+
+
 def _load_metadata(metadata_path, symbol=None, parent=None):
     # 1. 优先从集中式 manifest 中获取（0 磁盘 I/O）
     if parent is not None and symbol is not None:

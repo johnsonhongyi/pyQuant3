@@ -63,5 +63,30 @@ class StaticCacheTests(unittest.TestCase):
             self.assertIsNone(store.load(key, ['a']))
 
 
+    def test_callable_rows_determinism_and_manifest_json_acceleration(self):
+        stocks = [('2026-09-30', '600001', 'name')]
+        quotes = pd.DataFrame({'code': ['600001'], 'price': [10.]})
+        # 两个独立的闭包函数，内存地址完全不同
+        fn1 = lambda name: {'cn_stock_strategy_keep_increasing': 600}.get(name, 150)
+        fn2 = lambda name: {'cn_stock_strategy_keep_increasing': 600}.get(name, 150)
+        self.assertNotEqual(id(fn1), id(fn2))
+
+        with tempfile.TemporaryDirectory() as directory:
+            key1 = cache.manifest(directory, stocks, quotes, '2026-09-30', fn1, 'epoch1', 'rev1', lambda c: [1])
+            key2 = cache.manifest(directory, stocks, quotes, '2026-09-30', fn2, 'epoch1', 'rev1', lambda c: [1])
+            self.assertEqual(key1, key2)
+
+            # 写入 manifest.json，测试零 I/O 加速指纹分支
+            manifest_file = Path(directory) / 'manifest.json'
+            manifest_file.write_text('{"600001": {}}')
+            key_manifest1 = cache.manifest(directory, stocks, quotes, '2026-09-30', fn1, 'epoch1', 'rev1', lambda c: [1])
+            self.assertNotEqual(key1, key_manifest1)
+
+            # 更新 manifest.json 触发失效
+            manifest_file.write_text('{"600001": {}, "600002": {}}')
+            key_manifest2 = cache.manifest(directory, stocks, quotes, '2026-09-30', fn1, 'epoch1', 'rev1', lambda c: [1])
+            self.assertNotEqual(key_manifest1, key_manifest2)
+
+
 if __name__ == '__main__':
     unittest.main()
