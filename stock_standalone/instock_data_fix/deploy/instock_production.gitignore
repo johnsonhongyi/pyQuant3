@@ -1,0 +1,60 @@
+# =====================================================================
+# InStock 生产环境 Git 忽略规则 (.gitignore)
+# =====================================================================
+
+# 1. 外部存储与持久化数据挂载目录 (Mounts)
+/instock/forwardp/
+/instock/cache/
+/instock/log/
+/instock/core/strategy/
+
+# 2. 临时与归档大文件目录
+/instock/core/temp/
+*.zip
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+*.bak
+*.swp
+*.swo
+
+# 3. 数据文件、缓存与二进制快照 (Data & Binaries)
+*.bin
+*.pkl
+*.pickle
+*.h5
+*.hdf5
+*.sqlite
+*.sqlite3
+*.db
+*.csv
+*.tsv
+*.parquet
+*.feather
+*.done
+
+# 4. 日志文件与指标
+*.log
+*.log.*
+*.jsonl
+
+# 5. Python 编译产物与运行时临时目录
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 6. 系统与编辑器文件
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.sublime-*
