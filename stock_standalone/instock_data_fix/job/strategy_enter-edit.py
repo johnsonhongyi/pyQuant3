@@ -269,7 +269,7 @@ def run_check(strategy_fun, table_name, stocks, date, workers=2, log_summary=Tru
     
     error_count = 0
     future_count = 0
-    worker_count = max(1, min(int(workers or 2), 4))
+    worker_count = max(1, min(int(workers or 2), 3))
     scan_started = time.perf_counter()
 
     def _execute_with_pool(pool):
@@ -484,9 +484,11 @@ def _stream_strategy_enter(small, stats, selected):
         env_batch = os.environ.get('INSTOCK_SCAN_BATCH_SIZE')
         batch_size = max(8, min(256, int(env_batch))) if env_batch else default_batch
 
-        default_workers = max(2, min(4, os.cpu_count() or 2))
+        # 严格遵守安全门禁：CPU 占用必须控制在 300% 以下，保留至少 1 个完整物理核心给 PVE 和 iKuai 软路由
+        cpu_total = os.cpu_count() or 4
+        max_safe_workers = max(1, min(3, cpu_total - 1))
         env_workers = os.environ.get('INSTOCK_STRATEGY_WORKERS')
-        workers = max(1, min(8, int(env_workers))) if env_workers else default_workers
+        workers = max(1, min(max_safe_workers, int(env_workers))) if env_workers else max_safe_workers
 
         results = {}
         def publish(date, strategy, matches):
