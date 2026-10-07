@@ -27,8 +27,12 @@ os.environ.update(INSTOCK_PREPARED_HISTORY_CACHE_DIR=directory, INSTOCK_COLUMNAR
 from instock.core.singleton_stock import stock_data
 import instock.core.tablestructure as tbs
 import instock.core.stockfetch as stf
-from JSONData.prepared_history import prepared_history
-from JSONData.history_cache import cache_statistics
+try:
+    from instock.JSONData.prepared_history import prepared_history
+    from instock.JSONData.history_cache import cache_statistics
+except ImportError:
+    from JSONData.prepared_history import prepared_history
+    from JSONData.history_cache import cache_statistics
 from pathlib import Path
 
 try:
@@ -98,7 +102,10 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
 if loaded < max(1, int(len(stocks) * .7)):
     raise RuntimeError('Premarket history coverage insufficient: %s/%s' % (loaded, len(stocks)))
 
-from JSONData.prepared_history import save_manifest
+try:
+    from instock.JSONData.prepared_history import save_manifest
+except ImportError:
+    from JSONData.prepared_history import save_manifest
 manifest_file = save_manifest(directory)
 
 total_elapsed = round(time.perf_counter() - started, 3)

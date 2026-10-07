@@ -4,7 +4,10 @@ import os
 import re
 
 import pandas as pd
-from JSONData.history_cache import load_history
+try:
+    from instock.JSONData.history_cache import load_history
+except ImportError:
+    from JSONData.history_cache import load_history
 
 
 import threading

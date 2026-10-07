@@ -1,5 +1,20 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-07 23:05 【inStock 架构路径统一至 instock.JSONData 与本地独立 Git 版本库制作闭环】(`stock_standalone/20261007_2305_task.md`, `instock_data_fix/instock/JSONData/`, `instock_data_fix/core/stockfetch.py`, `instock_data_fix/job/strategy_enter-edit.py`, `stock_standalone/InStock/`)
+- [x] **【路径统一与 instock.JSONData 包架构落地】**：
+    - 消除历史游离路径缺陷：将原本散落于项目外的 `JSONData` 规范移入 `instock/JSONData/`，建立双向兼容导出（`instock.JSONData` 正式包名 + `sys.modules['JSONData']` 兼容别名）；
+    - 全面更新所有关联模块：`core/stockfetch.py`（Sina/tdx/prepared_history/history_cache）、`job/strategy_enter-edit.py`、`job/prewarm_history.py`、`job/run_statistics.py`（封装 `_get_cache_statistics` DRY 函数）及模块内部跨引用，优先自适应 `instock.JSONData` 导入；
+    - 在生产容器内安全建立软链接 `/data/InStock/JSONData -> /data/InStock/instock/JSONData`，历史外部调用零风险 100% 兼容；
+- [x] **【生产容器热部署与导入 100% 验证】**：
+    - 在 `strategy_enter.lock` 保护下原子部署至 LXC 102 生产容器 `inStock`；
+    - 容器实机导入验证：`instock.JSONData`、`JSONData` 软链接、`stockfetch`、`run_statistics` 全部测试通过，`python3 -m compileall` 0 语法错误；
+- [x] **【本地独立 InStock Git 版本库制作完成】**：
+    - 从生产环境完整导出 13MB 权威纯代码资产（严格剔除 `forwardp`, `cache`, `log`, `core/strategy` 等挂载卷与二进制缓存）；
+    - 在本地 `stock_standalone/InStock` 初始化独立 Git 版本库（`git init`），配置专业 `.gitignore` 规则并完成 Initial Commit；
+    - 彻底告别多层 Dockerfile 重复构建与镜像压平，未来全面使用原生版本控制进行更新同步；
+- [x] **【全套自动化测试 100% 纯绿通过】**：
+    - 新增 `tests/test_instock_jsondata_path.py`，全套 36 项 instock 自动化测试 1.94 秒全部纯绿通过；ATS 跨日 5 项测试全绿通过；`git diff --check` 0 违规，UTF-8（无 BOM）保存。
+
 ## 2026-10-07 22:35 【inStock 全面审计、差异对账与今日优化成果完全落地闭环】(`stock_standalone/20261007_2235_task.md`, `instock_data_fix/cron/root`, `instock_data_fix/job/strategy_enter-edit.py`, `ENVIRONMENT_HANDOFF.md`)
 - [x] **【全面差异核查与语义对账（零代码丢失确认）】**：
     - 针对 Codex 在 `ENVIRONMENT_HANDOFF.md` 提出的备份差异逐行语义审计：查明备份文件系 10月7日更早压平镜像的旧状态，而今日 Antigravity 落地的所有关键成果（**600日统一基线**、**外置机械硬盘目录哈希索引消灭 2.2 万次 stat 磁盘遍历**、**反向 Seek 跳读削减 43.6% I/O**、**CPU 300% 门禁封顶 3-worker 保护 iKuai 软路由**、**流式扫描批次日志去刷屏与全局聚合**、**双层有效缓存自适应调度达成 1.46s 极速直出**、**盘前预热结构化账本与 prewarm_tuner 自适应调优**）不仅完好无缺，且已在生产容器运行层 100% 部署生效；

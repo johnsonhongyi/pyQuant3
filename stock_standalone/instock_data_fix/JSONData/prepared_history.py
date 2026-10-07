@@ -176,7 +176,10 @@ def prepared_history(cache_path, fingerprint, loader, *, _lookback=None, _allow_
                 if hasattr(mapped, '_mmap'):
                     mapped._mmap.close()
 
-            from JSONData.history_cache import _count
+            try:
+                from instock.JSONData.history_cache import _count
+            except ImportError:
+                from JSONData.history_cache import _count
             _count('prepared_hits')
             return frame
         except (OSError, ValueError, KeyError, TypeError) as exc:

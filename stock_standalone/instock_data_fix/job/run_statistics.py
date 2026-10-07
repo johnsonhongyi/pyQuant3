@@ -13,6 +13,18 @@ def now():
     return datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 
+def _get_cache_statistics():
+    try:
+        from instock.JSONData.history_cache import cache_statistics
+        return cache_statistics()
+    except ImportError:
+        try:
+            from JSONData.history_cache import cache_statistics
+            return cache_statistics()
+        except ImportError:
+            return {}
+
+
 def _path():
     return os.environ.get('INSTOCK_RUN_STATS_PATH',
         os.path.join(os.path.dirname(os.path.dirname(__file__)), 'cache', 'run_statistics.sqlite'))
@@ -96,8 +108,7 @@ class RunStatistics:
         self.id = os.environ.get('INSTOCK_RUN_ID') or uuid.uuid4().hex
         self.started = time.perf_counter()
         self.before = resources()
-        from JSONData.history_cache import cache_statistics
-        self.cache_before = cache_statistics()
+        self.cache_before = _get_cache_statistics()
         self.stages = []
         self.config = {key: os.environ.get(key) for key in
                        ('INSTOCK_HISTORY_CACHE_MB', 'INSTOCK_CACHE_HOT_STOCKS',
@@ -118,8 +129,7 @@ class RunStatistics:
 
     def progress(self, **details):
         current = resources()
-        from JSONData.history_cache import cache_statistics
-        cache = cache_statistics()
+        cache = _get_cache_statistics()
         for key in ('memory_hits', 'shared_hits', 'prepared_hits', 'result_hits', 'source_reads', 'cache_errors', 'evictions', 'bypasses'):
             cache[key] = cache.get(key, 0) - self.cache_before.get(key, 0)
         visible = list(self.stages)
@@ -138,8 +148,7 @@ class RunStatistics:
 
     def finish(self, error=None, return_code=None):
         after = resources()
-        from JSONData.history_cache import cache_statistics
-        cache = cache_statistics()
+        cache = _get_cache_statistics()
         for key in ('memory_hits', 'shared_hits', 'prepared_hits', 'result_hits', 'source_reads', 'cache_errors', 'evictions', 'bypasses'):
             cache[key] = cache.get(key, 0) - self.cache_before.get(key, 0)
         cpu = max(0, after.get('cpu_seconds', 0) - self.before.get('cpu_seconds', 0))
