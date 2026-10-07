@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 import talib as tl
 from JSONData.sina_data import Sina
-from JSONData.tdx_data_Day import get_tdx_Exp_day_to_df
+from JSONData.tdx_data_Day import get_tdx_Exp_day_to_df, get_tdx_file_path
 import instock.core.tablestructure as tbs
 import instock.lib.trade_time as trd
 import instock.core.crawling.trade_date_hist as tdh
@@ -86,9 +86,11 @@ def _tdx_history_source(code):
     else:
         exchange = 'SZ'
     forward_dir = os.environ.get('TDX_FORWARDP_DIR', '/data/InStock/instock/forwardp')
-    candidates = [os.path.join(forward_dir, exchange + symbol + suffix) for suffix in ('.TXT', '.txt')]
-    candidates.extend(os.path.join(forward_dir, symbol + suffix) for suffix in ('.TXT', '.txt'))
-    source_path = next((path for path in candidates if os.path.isfile(path)), None)
+    source_path = get_tdx_file_path(forward_dir, exchange, symbol)
+    if source_path is None:
+        candidates = [os.path.join(forward_dir, exchange + symbol + suffix) for suffix in ('.TXT', '.txt')]
+        candidates.extend(os.path.join(forward_dir, symbol + suffix) for suffix in ('.TXT', '.txt'))
+        source_path = next((path for path in candidates if os.path.isfile(path)), None)
     if source_path is None:
         return symbol, None, None
     try:
@@ -489,15 +491,25 @@ def fetch_stocks(date):
     return None
 
 
+_TDX_STOCK_CODES_CACHE = {}
+
+
 def _get_tdx_stock_codes():
     """Return the persistent TDX code universe for quote coverage validation."""
     forward_dir = os.environ.get('TDX_FORWARDP_DIR', '/data/InStock/instock/forwardp')
     try:
+        dir_stat = os.stat(forward_dir)
+        cache_key = (forward_dir, dir_stat.st_mtime_ns)
+        cached = _TDX_STOCK_CODES_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
         codes = set()
         for path in os.scandir(forward_dir):
             match = re.match(r'(?:SH|SZ|BJ)?([0-9]{6})\.txt$', path.name, re.IGNORECASE)
             if path.is_file() and match and is_a_stock(match.group(1)):
                 codes.add(match.group(1))
+        _TDX_STOCK_CODES_CACHE.clear()
+        _TDX_STOCK_CODES_CACHE[cache_key] = codes
         return codes
     except OSError:
         return set()

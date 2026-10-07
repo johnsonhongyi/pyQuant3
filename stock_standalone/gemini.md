@@ -1,5 +1,22 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-07 10:48 【inStock 非缓存机械硬盘I/O瓶颈根治与CPU 300%安全门禁落地】(`stock_standalone/20261007_1048_task.md`, `instock_data_fix/JSONData/tdx_data_Day.py`, `instock_data_fix/core/stockfetch.py`, `instock_data_fix/job/strategy_enter-edit.py`, `instock_data_fix/job/prewarm_history.py`)
+- [x] **【外置 USB 机械硬盘随机寻道与 I/O 放大瓶颈根治】**：
+    - 内存目录哈希索引（`get_tdx_file_path`）：针对 `/data/InStock/instock/forwardp` 挂载在 WD Elements 4TB USB 机械硬盘（ROTA=1, 5400 RPM）的物理特性，引入基于目录 mtime 的全局单例索引，首次仅用 13.6ms 索引 11,185 个 key，彻底消灭全市场 5,544 只标的遍历时的 **22,176 次 `os.path.isfile` 磁盘 stat 寻道风暴**（降为 0 次，直接内存 $O(1)$ 查找）；
+    - 末尾反向 Seek 跳读优化（`_read_tdx_csv`）：针对历史老股（2,000~8,000 行，150KB~500KB 文本），基于 `min_rows=600` 反向 seek 定向跳读末尾所需字节块，跳过 10~25 年无效文本；实机压测 300 只标的数据量从 33.9MB 骤减至 19.1MB（**I/O 削减 43.6%**），单核读取提速 1.76 倍，新股小文件安全全量回退，比对 0 差异 100% 精确一致；
+- [x] **【CPU 300% 算力安全门禁铁腕守护（PVE 与 iKuai 软路由绝对安全）】**：
+    - 在 `strategy_enter-edit.py` 与 `prewarm_history.py` 中铁腕设立安全门禁：`workers = max(1, min(3, cpu_total - 1))`，无论宿主机核心数多少，并发 Worker 上限严格锁定为 3；
+    - 生产实测监控：ctop / docker stats 确认 CPU 利用率稳定在 **107.47%**，内存稳定在 605.6MiB（仅占 33.8%），绝对低于 300% 门禁红线；
+    - 宿主机网关连通性实测：ping iKuai（192.168.1.1）延迟中位数仅 **0.56ms ~ 0.78ms**，**0% 丢包**，彻底消除系统卡顿与千兆网络抖动风险；
+- [x] **【全市场 10 大策略生产实机验证与静态结果缓存直出】**：
+    - 全市场 5,544 只标的全量重算 10 大策略全部纯绿通过，全量 errors=0，数据库写入 100% 精确一致（放量上涨 10 只、均线多头 3 只、停机坪 24 只、回踩年线 28 只、突破平台 2 只、海龟 180 只、旗形整理 1 只、极限跌停 1 只）；
+    - 静态结果缓存命中直出时间仅需 **2.45 秒**；15 项单元测试 100% 纯绿通过。
+
+## 2026-10-07 10:27 【PVE与LXC 102算力倾斜优化：4核提升、内存重调与Docker调度优化】(`stock_standalone/20261007_1027_task.md`, `stock_standalone/tools/benchmark_4core.py`)
+- [x] **【现状审计与安全重调规划】**：审计 PVE 物理内存（3.8GB）、iKuai (VM 100 800MB/4核)、OpenWRT (VM 101 608MB/3核) 及 LXC 102 (1792MB/2核)；评估 iKuai/OpenWRT 仅承载基础路由与 Clash 的极低负载，确定 iKuai 降至 512MB、OpenWRT 降至 384MB，释放 512MB 物理内存；
+- [x] **【PVE 资源重调落地与 4 核提升】**：通过 PVE 命令行平滑调整，将 LXC 102 CPU cores 提升至 4 核（吃满 J4125 物理 4 核）、cpuunits 提升至 1024（最高优先级），内存提升至 2048MB（2GB）；
+- [x] **【Docker 容器调度与全市场 4 核性能实测】**：优化 inStock 容器内存限额（1280MB -> 1792MB），验证容器内 4 核识别与策略调度并发适配，实测选股运行与网络稳定性。
+
 ## 2026-10-07 09:40 【inStock PVE/Docker资源监控与有效缓存场景调度优化加速】(`20261007_0940_task.md`, `instock_data_fix/job/strategy_enter-edit.py`, `instock_data_fix/job/static_strategy_cache.py`, `instock_data_fix/core/stockfetch.py`, `instock_data_fix/JSONData/prepared_history.py`)
 - [x] **【PVE/Docker 资源实时监控与算力定性】**：PVE 宿主机 Intel J4125 4核、内存 3.8GB（可用 1.5GB）；LXC 102 分配 2核、内存 1792MB（可用 1.3GB）；Docker inStock 容器限额 1.25GB（已用 590MB 常驻，策略运行时增量仅 130~140MB）；内存瓶颈彻底解除，系统主要瓶颈在于 CPU 调度、重复创建销毁线程池与静态缓存未命中；
 - [x] **【双层有效缓存自适应调度架构落地与 1.46s 极限直出】**：

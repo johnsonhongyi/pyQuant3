@@ -47,8 +47,13 @@ def warm_stock(stock, date, start_date, cached, directory):
     return True
 
 
+import concurrent.futures
+
+cpu_total = os.cpu_count() or 4
+workers = max(1, min(3, cpu_total - 1))
 started = time.perf_counter()
-loaded = sum(warm_stock(stock, date, start_date, cached, directory) for stock in stocks)
+with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+    loaded = sum(pool.map(lambda s: warm_stock(s, date, start_date, cached, directory), stocks))
 if loaded < max(1, int(len(stocks) * .7)):
     raise RuntimeError('Premarket history coverage insufficient: %s/%s' % (loaded, len(stocks)))
 
