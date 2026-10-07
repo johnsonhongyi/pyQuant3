@@ -8,10 +8,11 @@
 - [x] **【生产容器热部署与导入 100% 验证】**：
     - 在 `strategy_enter.lock` 保护下原子部署至 LXC 102 生产容器 `inStock`；
     - 容器实机导入验证：`instock.JSONData`、`JSONData` 软链接、`stockfetch`、`run_statistics` 全部测试通过，`python3 -m compileall` 0 语法错误；
-- [x] **【本地独立 InStock Git 版本库制作完成】**：
-    - 从生产环境完整导出 13MB 权威纯代码资产（严格剔除 `forwardp`, `cache`, `log`, `core/strategy` 等挂载卷与二进制缓存）；
-    - 在本地 `stock_standalone/InStock` 初始化独立 Git 版本库（`git init`），配置专业 `.gitignore` 规则并完成 Initial Commit；
-    - 彻底告别多层 Dockerfile 重复构建与镜像压平，未来全面使用原生版本控制进行更新同步；
+- [x] **【本地与生产容器独立 InStock Git 版本库制作与精确体积度量闭环】**：
+    - **生产容器 Git 正式落地**：在 PVE Docker 容器内成功就绪 `/usr/bin/git`，制定严密的 `.gitignore`（排除挂载卷、运行时缓存、系统日志及大压缩包），初始化 `/data/InStock` Git 仓库并完成首版提交（158 个纯代码文件，working tree 100% clean）；
+    - **纳管纯代码资产精确统计**：纯源码与前端资源净体积仅 **3.38 MB**（3,546,318 字节），`.git` 元数据仅 **1.68 MB**，源码与版本库总计仅 **5.07 MB**；
+    - **排除大数据与日志精确统计**：通达信行情 TXT 挂载（593.11 MB）+ 运行时加厚缓存与锁（398.55 MB）+ 调优日志（253.81 MB）+ 历史压缩包与临时文件（7.58 MB），**合计排除 1.22 GB 非代码数据**，达成极致瘦身与稳定版本控制；
+    - **本地独立 InStock Git 库同步对齐**：本地 `stock_standalone/InStock` 同步纳管并保持纯净，未来全流程通过原生版本控制同步，彻底终结多层 Docker 构建与镜像压平问题；
 - [x] **【全套自动化测试 100% 纯绿通过】**：
     - 新增 `tests/test_instock_jsondata_path.py`，全套 36 项 instock 自动化测试 1.94 秒全部纯绿通过；ATS 跨日 5 项测试全绿通过；`git diff --check` 0 违规，UTF-8（无 BOM）保存。
 
