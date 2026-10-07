@@ -16,8 +16,12 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 import talib as tl
-from JSONData.sina_data import Sina
-from JSONData.tdx_data_Day import get_tdx_Exp_day_to_df, get_tdx_file_path
+try:
+    from instock.JSONData.sina_data import Sina
+    from instock.JSONData.tdx_data_Day import get_tdx_Exp_day_to_df, get_tdx_file_path
+except ImportError:
+    from JSONData.sina_data import Sina
+    from JSONData.tdx_data_Day import get_tdx_Exp_day_to_df, get_tdx_file_path
 import instock.core.tablestructure as tbs
 import instock.lib.trade_time as trd
 import instock.core.crawling.trade_date_hist as tdh
@@ -998,7 +1002,10 @@ def fetch_stock_hist(data_base, date_start=None, is_cache=True):
 # 增加读取股票缓存方法。加快处理速度。多线程解决效率
 def stock_hist_cache(code, date_start, date_end=None, is_cache=True, adjust=''):
     if os.environ.get('INSTOCK_PREPARED_HISTORY_CACHE_DIR'):
-        from JSONData.prepared_history import prepared_history
+        try:
+            from instock.JSONData.prepared_history import prepared_history
+        except ImportError:
+            from JSONData.prepared_history import prepared_history
         symbol, path, fingerprint = _tdx_history_source(code)
         if path and fingerprint:
             signature = (str(date_start or ''), str(date_end or ''), adjust, tuple(tbs.CN_STOCK_HIST_DATA['columns']), path, fingerprint)
@@ -1023,7 +1030,10 @@ def _stock_hist_cache_uncached(code, date_start, date_end=None, is_cache=True, a
             if (isinstance(payload, dict) and payload.get('version') == 1
                     and payload.get('fingerprint') == cache_fingerprint
                     and isinstance(payload.get('data'), pd.DataFrame)):
-                from JSONData.history_cache import _count
+                try:
+                    from instock.JSONData.history_cache import _count
+                except ImportError:
+                    from JSONData.history_cache import _count
                 _count('prepared_hits')
                 return payload['data']
         except (OSError, EOFError, ValueError, TypeError, pickle.UnpicklingError):

@@ -20,7 +20,10 @@ import instock.core.tablestructure as tbs
 import instock.lib.database as mdb
 from instock.core.singleton_stock import stock_data, stock_hist_data
 from instock.job.realtime_candidates import select_candidates
-from JSONData.history_cache import set_priority_codes
+try:
+    from instock.JSONData.history_cache import set_priority_codes
+except ImportError:
+    from JSONData.history_cache import set_priority_codes
 from instock.job.run_statistics import RunStatistics
 from instock.job.strategy_selection import validate_selection
 from instock.job.streaming_scan import scan_batches, history_rows as strategy_history_rows
@@ -428,7 +431,10 @@ def _stream_strategy_enter(small, stats, selected):
             started = time.perf_counter()
             saved = static_cache.load(cache_key(), [item['name'] for item in strategies], dependencies)
             if saved:
-                from JSONData.history_cache import _count
+                try:
+                    from instock.JSONData.history_cache import _count
+                except ImportError:
+                    from JSONData.history_cache import _count
                 _count('result_hits')
                 history_gaps[0] = saved['gaps']
                 stats.stage('snapshot', started, date=str(date), stocks=saved['stocks'],

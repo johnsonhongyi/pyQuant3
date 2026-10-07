@@ -59,3 +59,5 @@ data/ipo_learning/shadow_observations.sqlite
 # Local-only agent and environment handoff files.
 /AGENTS.md
 /ENVIRONMENT_HANDOFF.md
+/instock_canonical_repo.tar.gz
+/InStock/
