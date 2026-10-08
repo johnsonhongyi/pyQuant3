@@ -266,11 +266,11 @@ class KLineSeries:
 
     def trim_old(self, num_to_trim: int):
         if num_to_trim > 0 and len(self._arr) > num_to_trim:
-            self._arr = self._arr[num_to_trim:]
+            self._arr = self._arr[num_to_trim:].copy()
 
     def keep_last(self, max_len: int):
         if len(self._arr) > max_len:
-            self._arr = self._arr[-max_len:]
+            self._arr = self._arr[-max_len:].copy()
 
 
 def _normalize_time_column(series: pd.Series) -> pd.Series:
@@ -678,7 +678,7 @@ class MinuteKlineCache:
                                 # sort by time
                                 combined = combined[np.argsort(combined['time'])]
                                 if len(combined) > limit_len:
-                                    combined = combined[-limit_len:]
+                                    combined = combined[-limit_len:].copy()
                                 shared_cache[code] = KLineSeries(combined)
                         else:
                             shared_cache[code] = KLineSeries(arr[-limit_len:] if len(arr) > limit_len else arr)
@@ -712,7 +712,8 @@ class MinuteKlineCache:
                 if isinstance(val, KLineSeries):
                     self._shared_cache[code_str] = val
                 elif isinstance(val, np.ndarray):
-                    self._shared_cache[code_str] = KLineSeries(val[-self._max_len:] if len(val) > self._max_len else val)
+                    self._shared_cache[code_str] = KLineSeries(
+                        val[-self._max_len:].copy() if len(val) > self._max_len else val)
                 elif isinstance(val, list):
                     series = KLineSeries.from_list(val)
                     if len(series) > self._max_len:
