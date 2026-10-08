@@ -7335,6 +7335,11 @@ class ATSMainWindow(QMainWindow):
         app = QApplication.instance()
         if app:
             app.quit()
+        if is_packaged_env():
+            try:
+                QTimer.singleShot(150, lambda: os._exit(0))
+            except Exception:
+                pass
 
     def closeEvent(self, event):
         """主窗口关闭退出时，自动跟随关闭所有独立的 TopLevel 子窗口、对话框、保存全量布局配置及安全回收后台线程"""

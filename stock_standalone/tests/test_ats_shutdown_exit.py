@@ -311,3 +311,110 @@ if component == 'logger':
                             capture_output=True, timeout=5)
     assert result.returncode == 0, result.stderr.decode('utf-8', errors='replace')
     assert saved.read_text(encoding='utf-8') == 'durable cleanup complete'
+
+
+def test_is_packaged_env_detection_matrix(monkeypatch):
+    import sys_utils
+
+    # 1. 默认 python.exe 开发环境 -> False
+    monkeypatch.delenv("NUITKA_ONEFILE_DIRECTORY", raising=False)
+    monkeypatch.delenv("NUITKA_ONEFILE_BINARY", raising=False)
+    monkeypatch.delenv("_MEIPASS", raising=False)
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    monkeypatch.setattr(sys, "executable", "C:\\Python39\\python.exe")
+    assert not sys_utils.is_packaged_env()
+
+    # 2. PyInstaller 模式 (sys.frozen = True) -> True
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    assert sys_utils.is_packaged_env()
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+
+    # 3. Nuitka Onefile 模式 (NUITKA_ONEFILE_DIRECTORY) -> True
+    monkeypatch.setenv("NUITKA_ONEFILE_DIRECTORY", "C:\\Temp\\ATS_Nuitka")
+    assert sys_utils.is_packaged_env()
+    monkeypatch.delenv("NUITKA_ONEFILE_DIRECTORY")
+
+    # 4. 独立二进制模式 (sys.executable 为 ATS_Terminal.exe) -> True
+    monkeypatch.setattr(sys, "executable", "D:\\Release\\ATS_Terminal.exe")
+    assert sys_utils.is_packaged_env()
+
+
+def test_reap_multiprocessing_children_terminates_descendants_tree(tmp_path):
+    """验证多进程具有子孙后代 (类似 Nuitka Onefile Bootstrap -> Payload) 时全树递归杀死."""
+    import multiprocessing
+    import psutil
+    from ats.shutdown import reap_multiprocessing_children
+
+    tree_script = tmp_path / "tree_worker.py"
+    tree_script.write_text("""
+import subprocess
+import sys
+import time
+
+if __name__ == '__main__':
+    # 派生孙子进程
+    sub = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    with open(sys.argv[1], "w") as f:
+        f.write(str(sub.pid))
+    time.sleep(30)
+""", encoding="utf-8")
+
+    sub_pid_file = tmp_path / "grandchild.pid"
+
+    context = multiprocessing.get_context("spawn")
+    # 直属子进程运行 tree_script
+    import subprocess
+    proc = context.Process(
+        target=subprocess.run,
+        args=([sys.executable, str(tree_script), str(sub_pid_file)],),
+        daemon=True,
+    )
+    proc.start()
+
+    # 等待孙子进程 pid 写入
+    deadline = time.monotonic() + 8.0
+    while not sub_pid_file.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+    assert sub_pid_file.exists()
+    grandchild_pid = int(sub_pid_file.read_text().strip())
+    assert psutil.pid_exists(grandchild_pid)
+
+    # 执行全树递归回收
+    assert reap_multiprocessing_children(time.monotonic() + 3.0)
+    assert not proc.is_alive()
+    # 验证孙子孤儿进程也已被递归杀死
+    time.sleep(0.3)
+    assert not psutil.pid_exists(grandchild_pid)
+
+
+def test_packaged_shutdown_schedules_quick_physical_exit(qapp, monkeypatch):
+    """验证打包环境下，退出收尾完成时安排 QTimer 物理退出 os._exit(0)."""
+    from ats.ui.main_window import ATSMainWindow
+    from PyQt6.QtWidgets import QMainWindow, QApplication
+    from PyQt6.QtGui import QCloseEvent
+    from PyQt6.QtCore import QTimer
+    from JohnsonUtil import LoggerFactory
+    import ats.shutdown as shutdown
+    import sys_utils
+
+    class BareWindow(ATSMainWindow):
+        def __init__(self):
+            QMainWindow.__init__(self)
+
+    timer_calls = []
+    window = BareWindow()
+    window._exit_cleanup_drain = completed_drain()
+    monkeypatch.setattr(sys_utils, "is_packaged_env", lambda: True)
+    monkeypatch.setattr(shutdown, "start_exit_watchdog", lambda **kwargs: None)
+    monkeypatch.setattr(LoggerFactory, "stopLogger", lambda: None)
+    monkeypatch.setattr(QMainWindow, "closeEvent", lambda self, event: event.accept())
+    monkeypatch.setattr(QApplication, "quit", lambda self=None: None)
+    monkeypatch.setattr(QTimer, "singleShot", lambda ms, cb: timer_calls.append((ms, cb)))
+
+    event = QCloseEvent()
+    window._complete_shutdown(event)
+    assert event.isAccepted()
+    # 验证安排了 150ms 物理退出单次定时器
+    assert any(ms == 150 for ms, _ in timer_calls)
+    window.deleteLater()

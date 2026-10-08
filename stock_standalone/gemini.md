@@ -1,5 +1,30 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-08 11:56 【ATS Nuitka 打包退出后控制台停住未自动释放根治与工业级物理终结闭环】(`stock_standalone/20261008_1156_task.md`, `ats/shutdown.py`, `ats/ui/main_window.py`, `run_ats.py`, `ats/main_ats.py`, `sys_utils.py`, `tests/test_ats_shutdown_exit.py`)
+- [x] **【根因穿透与 PyInstaller / Nuitka 差异定性】**：
+    - 查明 Nuitka Onefile 两层进程模型（Bootstrap 外壳 + Payload 核心）下，原 `reap_multiprocessing_children` 仅对直属 `multiprocessing.active_children()` 调 `terminate()`，只杀死外壳，而内层 Payload 孙子进程脱钩沦为孤儿进程；
+    - Windows 控制台在任何附着进程存活时绝不自动关闭，孤儿进程锁死 Console 窗口导致光标卡顿停住；
+    - 主程序在收尾完成后依赖软退出 `app.quit()` 和 `sys.exit()`，极易在 PyQt6 析构死锁、非 daemon 线程或 atexit 钩子（如 PyTables、socket）处卡死；原 watchdog 为 `daemon=True` 在解释器终结时易被系统冻结；
+- [x] **【全树递归进程销毁与双重物理终结架构落地（对齐 MonitorTK / TradeVisualizer 工业级规范）】**：
+    - 在 `ats/shutdown.py` 中引入 `psutil` 递归收集子孙进程树（`p.children(recursive=True)`），先全量 terminate 孙子孤儿进程，再关闭直属子进程，结合强力 kill 保底，彻底绝迹孤儿残留；watchdog 超时收敛至 1.5 秒；
+    - 在 `ats/ui/main_window.py` 退出收尾完成日志后，注入 `QTimer.singleShot(150, lambda: os._exit(0))` 快速确定性物理退出；
+    - 在 `run_ats.py` 和 `ats/main_ats.py` 的 `app.exec()` 返回处，使用 `os._exit(code)` 强力终结进程，杜绝 Python GC 与 C++ 析构死锁；
+    - 在 `sys_utils.py` 中全方位增强 `is_packaged_env()` 对 Nuitka Standalone/Onefile 及独立可执行程序的检测鲁棒性；
+- [x] **【全套自动化回归测试 100% 纯绿秒级通过】**：
+    - 更新 `tests/test_ats_shutdown_exit.py`，新增环境矩阵检测、子孙多层进程树递归终结、打包物理终结调度等 3 项专项测试，全部 18 项单测 4.78 秒纯绿通过；
+    - `python -m compileall` 0 语法错误，`git diff --check` 0 违规，UTF-8（无 BOM）保存。
+
+## 2026-10-08 11:35 【NextDayWatch TDX 实时轮询高频重复日志刷屏修复与状态防抖闭环】(`stock_standalone/20261008_1135_task.md`, `ats/ui/main_window.py`, `tests/test_next_day_watch_log_level.py`)
+- [x] **【根因剖析与确权判定】**：
+    - 查明 ATS 盘中 NextDayWatch 4 秒定时轮询中，一旦候选池产生已确认标的（如当前 `confirmed=39`），`confirmed_count = sum(...) > 0` 恒成立；
+    - 原代码 `log_summary = logger.info if confirmed_count else logger.debug` 导致每个 4 秒周期都无差别输出一条完全相同的 `INFO` 汇总日志，导致控制台被大量重复日志刷屏；
+- [x] **【轻量状态防抖与 60s 心跳节流落地（KISS 原则）】**：
+    - 在 `ats/ui/main_window.py` 中记录 `_last_ndw_log_state`、`_last_ndw_log_time` 和 `_last_ndw_log_gaps`；
+    - 仅在状态实质变化（新增确认标的、节点切换、标的数变更）、存在异常缺口（`quote_gaps > 0`）、缺口刚刚自愈归零、或平稳运行满 60 秒定期心跳时才输出 `logger.info`；平稳无变化周期降级为 `logger.debug`；
+- [x] **【全套自动化回归测试 100% 纯绿通过】**：
+    - 更新 `tests/test_next_day_watch_log_level.py`，完整覆盖 7 大时序分支（首次触发、平稳静默、异常缺口、自愈、新增确认、心跳），全部秒级通过；
+    - NextDayWatch 全量 13 项单元测试纯绿通过；`python -m compileall` 0 语法错误，`git diff --check` 0 违规，UTF-8（无 BOM）保存。
+
 ## 2026-10-08 10:15 【ATS 新股次新股自动刷新排序跳变底层逻辑 BUG 根治与两层刷新彻底终结闭环】(`stock_standalone/20261008_1015_task.md`, `ats/ui/new_stock_panel.py`, `tests/test_new_stock_sort_stability.py`)
 - [x] **【根因穿透与两层刷新机制定性】**：
     - 查明历史代码在后台准备函数 `_prepare_stock_table` 中弃用 `sort_col` / `sort_order`，硬编码使用了默认排序（`_sort_w`, `_sort_date`, `pct`）；

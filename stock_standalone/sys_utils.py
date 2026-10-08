@@ -73,13 +73,21 @@ def assert_main_thread(tag=""):
 
 def is_packaged_env() -> bool:
     """判断当前运行环境是否为打包后的可执行程序 (PyInstaller / Nuitka)"""
-    return (
-        getattr(sys, "frozen", False)
-        or "NUITKA_ONEFILE_DIRECTORY" in os.environ
-        or "NUITKA_ONEFILE_BINARY" in os.environ
-        or hasattr(sys, "nuitka_version")
-        or "__compiled__" in globals()
-    )
+    if getattr(sys, "frozen", False):
+        return True
+    if "NUITKA_ONEFILE_DIRECTORY" in os.environ or "NUITKA_ONEFILE_BINARY" in os.environ or "_MEIPASS" in os.environ:
+        return True
+    if hasattr(sys, "nuitka_version"):
+        return True
+    if "__compiled__" in globals():
+        return True
+    main_mod = sys.modules.get("__main__")
+    if main_mod is not None and (hasattr(main_mod, "__compiled__") or "__compiled__" in getattr(main_mod, "__dict__", {})):
+        return True
+    exe_name = os.path.basename(sys.executable or "").lower()
+    if exe_name.endswith(".exe") and not (exe_name.startswith("python") or "pytest" in exe_name):
+        return True
+    return False
 
 
 def safe_resolve_path(path: Any) -> Any:

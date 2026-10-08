@@ -199,7 +199,13 @@ def main():
         return 0
         
     window.show()
-    return app.exec()
+    exit_code = app.exec()
+    if is_packaged_env():
+        os._exit(exit_code if isinstance(exit_code, int) else 0)
+    return exit_code
 
 if __name__ == "__main__":
-    sys.exit(main())
+    code = main()
+    if is_packaged_env():
+        os._exit(code if isinstance(code, int) else 0)
+    sys.exit(code)

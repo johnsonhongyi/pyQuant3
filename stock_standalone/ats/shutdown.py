@@ -41,21 +41,62 @@ def wait_for_threads(threads, deadline):
 
 
 def reap_multiprocessing_children(deadline):
-    """Retire this ATS process's remaining workers before a packaged hard exit."""
+    """Retire this ATS process's remaining workers and their descendant process trees."""
+    try:
+        import psutil
+    except ImportError:
+        psutil = None
+
     children = multiprocessing.active_children()
-    # Match multiprocessing's normal exit policy for daemon children. Perform
-    # it before the watchdog can bypass the interpreter's atexit cleanup.
+    descendants = []
+    if psutil is not None:
+        for child in children:
+            try:
+                if child.is_alive():
+                    p = psutil.Process(child.pid)
+                    descendants.extend(p.children(recursive=True))
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+        # 1. 先递归终止所有孙子孤儿后代进程 (例如 Nuitka Onefile bootstrap 派生的 worker payload)
+        for desc in descendants:
+            try:
+                desc.terminate()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+    # 2. 终止直属 daemon 子进程
     for child in children:
         if child.daemon and child.is_alive():
             child.terminate()
+
+    # 3. 有界等待直属子进程
     for child in children:
         child.join(timeout=max(0.0, deadline - time.monotonic()))
         if child.is_alive():
-            return False
+            try:
+                child.kill()
+                child.join(timeout=0.2)
+            except Exception:
+                pass
+            if child.is_alive():
+                return False
+
+    # 4. 确保后代进程彻底退场
+    if psutil is not None:
+        for desc in descendants:
+            try:
+                desc.wait(timeout=max(0.0, min(0.5, deadline - time.monotonic())))
+            except (psutil.NoSuchProcess, psutil.TimeoutExpired):
+                try:
+                    desc.kill()
+                except Exception:
+                    pass
+
     return True
 
 
-def start_exit_watchdog(timeout_seconds=5.0, exit_code=0):
+def start_exit_watchdog(timeout_seconds=1.5, exit_code=0):
     """Bound packaged interpreter teardown; call only after durable cleanup succeeds."""
     def force_exit():
         threading.Event().wait(max(0.0, timeout_seconds))

@@ -110,6 +110,10 @@ def main():
     profiler.print_summary()
     
     exit_code = app.exec()
+    from sys_utils import is_packaged_env
+    if is_packaged_env():
+        import os
+        os._exit(exit_code if isinstance(exit_code, int) else 0)
     sys.exit(exit_code)
 
 if __name__ == "__main__":
