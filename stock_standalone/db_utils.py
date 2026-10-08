@@ -23,6 +23,8 @@ class SQLiteConnectionManager:
     """
     _instances = {}
     _lock = threading.Lock()
+    _PAGE_CACHE_KIB = 8192
+    _MMAP_BYTES = 32 * 1024 * 1024
 
     @classmethod
     def get_instance(cls, db_path: str):
@@ -55,9 +57,9 @@ class SQLiteConnectionManager:
         if not hasattr(self.local, 'conn'):
             self.local.conn = sqlite3.connect(self.db_path, timeout=30.0)
             self.local.conn.execute("PRAGMA busy_timeout=5000;")
-            # [PERF] 极限加速：开启 64MB 缓存和 256MB 内存映射读取
-            self.local.conn.execute("PRAGMA cache_size=-64000;")
-            self.local.conn.execute("PRAGMA mmap_size=268435456;")
+            # Cache budgets apply per thread connection; keep mmap enabled within a bound.
+            self.local.conn.execute(f"PRAGMA cache_size=-{self._PAGE_CACHE_KIB};")
+            self.local.conn.execute(f"PRAGMA mmap_size={self._MMAP_BYTES};")
             self.local.conn.execute("PRAGMA temp_store=MEMORY;")
         return self.local.conn
 

@@ -2805,6 +2805,39 @@ def load_hdf_db_timed_ctx(fname, table='all', code_l=None, timelimit=True, index
 
 
 # def load_hdf_db_no_timed_ctx(fname, table='all', code_l=None, timelimit=True, index=False,
+def _read_requested_hdf_codes(store, table, codes, multi_index=False, index=False):
+    """Push canonical symbol filters down; retain legacy reads for other layouts."""
+    requested = list(codes)
+    if requested and all(isinstance(code, str) and len(code) == 6 and code.isdigit()
+                         for code in requested):
+        try:
+            storer = store.get_storer(table)
+            if storer.is_table:
+                sample = store.select(table, start=0, stop=1)
+                queryables = storer.queryables()
+                field, values = None, None
+                if isinstance(sample, pd.DataFrame) and not sample.empty:
+                    if multi_index and 'code' in sample.index.names:
+                        field, values = 'code', sample.index.get_level_values('code')
+                    elif not multi_index and 'code' in sample.columns:
+                        field, values = 'code', sample['code']
+                    elif not multi_index and not isinstance(sample.index, pd.MultiIndex):
+                        field, values = 'index', sample.index
+                    first = (values.iloc[0] if isinstance(values, pd.Series) else
+                             values[0] if values is not None else None)
+                    if (field in queryables and isinstance(first, str) and
+                            len(first) == 6 and first.isdigit()):
+                        if index and not multi_index:
+                            requested = [str(1000000 - int(code)) if code.startswith('0')
+                                         else code for code in requested]
+                        selected = store.select(table, where=f"{field} in {requested!r}")
+                        if not selected.empty:
+                            return selected
+        except Exception as exc:
+            log.debug("HDF selective read unavailable for %s: %s", table, exc)
+    return store.get(table)
+
+
 def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
                 limit_time=ct.h5_limit_time, dratio_limit=ct.dratio_limit,
                 MultiIndex=False, showtable=False):
@@ -2908,7 +2941,7 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
                         keys = store.keys()
                         table_key = '/' + table
                         if table_key in keys:
-                            obj = store.get(table)
+                            obj = _read_requested_hdf_codes(store, table, code_l, MultiIndex, index)
                             if isinstance(obj, pd.DataFrame):
                                 dd = obj
                             else:

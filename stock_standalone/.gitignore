@@ -62,3 +62,4 @@ data/ipo_learning/shadow_observations.sqlite
 /instock_canonical_repo.tar.gz
 /InStock/
 !tests/test_ats_compact_memory.py
+!tests/test_tk_compact_memory.py
