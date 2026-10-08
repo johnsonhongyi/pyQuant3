@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 from collections import OrderedDict
@@ -30,7 +31,7 @@ class VWAPSnapshot:
 
 
 class _SymbolState:
-    __slots__ = ("days", "live_date", "live_bars", "live_totals", "last_key", "last_price", "updated_at", "version", "snapshot", "lock")
+    __slots__ = ("days", "live_date", "live_bars", "live_totals", "last_key", "last_price", "updated_at", "version", "snapshot", "lock", "frame_digest", "prefix_digest", "frame_size")
 
     def __init__(self) -> None:
         self.days: OrderedDict[str, list] = OrderedDict()
@@ -43,6 +44,8 @@ class _SymbolState:
         self.version = 0
         self.snapshot: Optional[VWAPSnapshot] = None
         self.lock = threading.RLock()
+        self.frame_digest = self.prefix_digest = b""
+        self.frame_size = 0
 
 
 class VWAPFactory:
@@ -163,6 +166,8 @@ class VWAPFactory:
         clean = str(code).zfill(6)
         state = self._state(clean)
         with state.lock:
+            state.frame_digest = state.prefix_digest = b""
+            state.frame_size = 0
             state.days.clear()
             state.live_bars.clear()
             state.live_totals = [0.0, 0.0, 0.0]
@@ -246,37 +251,28 @@ class VWAPFactory:
         return result or self.get_snapshot(code)
 
     def sync_frame(self, code: str, frame: pd.DataFrame, is_index: bool = False) -> Optional[VWAPSnapshot]:
-        """Seed once, then reconcile only the latest minute on normal polls."""
+        """Reuse identical frames, update the tail, and reseed after historical backfill."""
         if frame is None or frame.empty:
             return self.get_snapshot(code)
         clean = str(code).zfill(6)
         state = self._state(clean)
+        columns = [name for name in ("date", "time_only", "time", "close", "price",
+                   "bar_vol", "vol", "bar_amt", "amount") if name in frame.columns]
+        hashes = pd.util.hash_pandas_object(frame[columns], index=True).to_numpy()
+        digest = hashlib.sha256(hashes.tobytes() + bytes([bool(is_index)])).digest()
+        prefix = hashlib.sha256(hashes[:-1].tobytes() + bytes([bool(is_index)])).digest()
         row = frame.iloc[-1].to_dict()
-        date, minute, _, _, _ = self._row_values(row, is_index)
-        latest_key = date + " " + minute
         with state.lock:
-            needs_seed = not state.last_key
-            if state.last_key and latest_key < state.last_key:
-                needs_seed = True
-            elif state.last_key and latest_key > state.last_key:
-                previous_day = state.live_date
-                if date == previous_day:
-                    try:
-                        old_minute = int(state.last_key[-5:-3]) * 60 + int(state.last_key[-2:])
-                        new_minute = int(minute[:2]) * 60 + int(minute[3:5])
-                        # Expected cadence is one minute; a larger gap triggers a bounded recovery rebuild.
-                        if new_minute - old_minute > 1:
-                            needs_seed = True
-                    except (ValueError, TypeError):
-                        needs_seed = True
-            elif state.last_key == latest_key:
-                old = state.live_bars.get(minute)
-                _, _, amount, volume, pv = self._row_values(row, is_index)
-                if old == (amount, volume, pv):
-                    return state.snapshot
-        if needs_seed:
-            return self.seed_frame(clean, frame, is_index=is_index)
-        return self.update_bar(clean, row, is_index=is_index)
+            if digest == state.frame_digest:
+                return state.snapshot
+            tail_only = ((len(frame) == state.frame_size and prefix == state.prefix_digest)
+                         or (len(frame) == state.frame_size + 1 and prefix == state.frame_digest))
+            if tail_only and state.last_key:
+                snapshot = self.update_bar(clean, row, is_index=is_index)
+            else:
+                snapshot = self.seed_frame(clean, frame, is_index=is_index)
+            state.frame_digest, state.prefix_digest, state.frame_size = digest, prefix, len(frame)
+            return snapshot
 
     def get_snapshot(self, code: str) -> Optional[VWAPSnapshot]:
         state = self._state(str(code).zfill(6))
