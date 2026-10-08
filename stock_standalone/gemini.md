@@ -1,5 +1,16 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-08 22:31 【全系统功能实现与后台自动交易策略运行逻辑闭环深度审核、问题诊断及后续演进规划】(`stock_standalone/20261008_2231_task.md`, `source/easy-stock-service/paper_trade.py`, `strategy.yaml`, `P规则实施手册.md`, `trading_hub.py`)
+- [x] **【全系统架构与各子系统功能实现全景审计】**：
+    - 全面审计 Easy Stock (Go API + Web + Python 定时交易任务)、InStock (LXC 102 Docker, 600日加厚缓存, 10大策略1.46s直出)、ATS/MonitorTK (本地桌面端, 毫秒级分时, 次日异动池, --ipo-learning 控制台) 三大子系统与四模块职责分工；
+    - 确认当前生产容器运行状态、挂载卷路径及 2026-10-08 最新发布版本 `20261008145310` 运转平稳；
+- [x] **【后台自动交易策略运行逻辑闭环（P 规则 & paper_trade）深度穿透】**：
+    - 完整穿透盘前评估（水位P2/新股情绪P3/竞价P9）-> 早盘信号（网格TP11/资金轮动P12/龙头换仓P15/装死日P5/系统风险P27/趋势门P25/早盘四条件P8/大阳跟随P24/止盈补回P18/进击翻转P7）-> 统一决策门（影子评分打标+3%硬KillSwitch）-> 退出链（P17次日下杀/硬止盈止损/P23预期未兑现/破位止损P6/保本P20/诱多清仓P19/头肩顶离场）-> 归因学习（因子拆解/负样本near_miss）的端到端闭环；
+- [x] **【工程缺陷诊断与隐患定性】**：
+    - 查明 6 大关键瓶颈：① `save_ledger` 与 `log_decision` 裸写 JSON 缺乏原子写入与跨进程文件锁；② 统一决策门目前纯为“事后影子评分”，缺乏前置 Enforce 阻断机制；③ `paper_trade.py` 中北交所股票代码拼装缺少 `bj` 前缀映射；④ 盘后 15:40 日线回补与结算存在同时序竞争；⑤ 各子系统筛选池与账本总线相对孤立；⑥ 交易摩擦滑点与资金费率尚未计入；
+- [x] **【四阶段演进规划落地】**：
+    - 确立清晰实施路径：Phase 1 工程稳健性与底层闭环加固（原子写/文件锁/北交所修复/Enforce前置/单测校准）-> Phase 2 子系统数据总线打通与精选池共享 -> Phase 3 模拟盘向实盘执行网关平滑过渡 -> Phase 4 量化因子与离线模型学习闭环。
+
 ## 2026-10-08 11:56 【ATS Nuitka 打包退出后控制台停住未自动释放根治与工业级物理终结闭环】(`stock_standalone/20261008_1156_task.md`, `ats/shutdown.py`, `ats/ui/main_window.py`, `run_ats.py`, `ats/main_ats.py`, `sys_utils.py`, `tests/test_ats_shutdown_exit.py`)
 - [x] **【根因穿透与 PyInstaller / Nuitka 差异定性】**：
     - 查明 Nuitka Onefile 两层进程模型（Bootstrap 外壳 + Payload 核心）下，原 `reap_multiprocessing_children` 仅对直属 `multiprocessing.active_children()` 调 `terminate()`，只杀死外壳，而内层 Payload 孙子进程脱钩沦为孤儿进程；

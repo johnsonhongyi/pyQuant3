@@ -13,6 +13,7 @@ import sys
 import os
 import re
 import time
+import json
 import threading
 import concurrent.futures
 import collections
@@ -1638,6 +1639,17 @@ class TDXGlobalCachePool:
         # 纯内存极速写入，绝不实时写盘，由任务完成后的 flush_if_due 集中 5-10 分钟统一落盘
 
     # ── 2. 多日分时最终结果短效缓存 ──
+    def peek_multi_day_df(self, code: str, days: int, max_age: float = 120.0) -> Optional[pd.DataFrame]:
+        """首帧只读内存快照，不同步 RAM 盘、不初始化连接。"""
+        with self._mutex:
+            entry = self._multi_day_df_cache.get((str(code).zfill(6), int(days)))
+            if entry is None:
+                return None
+            frame, stamp, date = entry
+            if date != datetime.now().strftime("%Y-%m-%d") or time.time() - stamp > max_age:
+                return None
+            return frame.copy() if frame is not None and not frame.empty else None
+
     def get_multi_day_df(self, code: str, days: int, ttl: float = 2.4) -> Optional[pd.DataFrame]:
         self._maybe_sync_from_ramdisk(force=False)
         self._check_date_rollover()
@@ -2442,7 +2454,6 @@ class TDXRealtimeFetcher:
                 # 必须验证能成功拉取真实行情且有效返回数据 (开盘前/早盘 price 为 0.0，但 last_close > 0)
                 quotes = test_api.get_security_quotes([(0, "000001"), (1, "600519")])
                 cost = (time.time() - t0) * 1000
-                test_api.disconnect()
                 if quotes and len(quotes) >= 1:
                     p = safe_float(quotes[0].get("price", 0.0))
                     lc = safe_float(quotes[0].get("last_close", 0.0))
@@ -2450,23 +2461,52 @@ class TDXRealtimeFetcher:
                         return (cost, name, ip, port)
         except Exception:
             pass
+        finally:
+            try:
+                test_api.disconnect()
+            except Exception:
+                pass
         return None
 
     def _init_best_server(self, max_test_count: int = 60, force: bool = False):
-        """并发测速并连接最优服务器"""
+        """首次可用即返回；其余独立探测在后台完善故障转移池。"""
         hosts = get_all_tdx_hosts()
         if not hosts:
             hosts = FALLBACK_TDX_HOSTS
 
         test_targets = hosts[:max_test_count]
+        self._host_probe_generation = getattr(self, "_host_probe_generation", 0) + 1
+        generation = self._host_probe_generation
+        try:
+            from sys_utils import get_app_root
+            path = os.path.join(get_app_root(), "config", "tdx_last_host.json")
+            with open(path, "r", encoding="utf-8") as handle:
+                saved = json.load(handle)
+            preferred = (str(saved[0]), str(saved[1]), int(saved[2]))
+            if preferred in test_targets:
+                test_targets.remove(preferred)
+                test_targets.insert(0, preferred)
+        except (OSError, ValueError, TypeError, IndexError):
+            pass
         valid_results = []
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=25) as executor:
-            futures = [executor.submit(self._ping_single_host, h) for h in test_targets]
-            for f in concurrent.futures.as_completed(futures):
-                res = f.result()
-                if res:
-                    valid_results.append(res)
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=25)
+        futures = [executor.submit(self._ping_single_host, h) for h in test_targets]
+        pending = set(futures)
+        deadline = time.monotonic() + 0.8
+        while pending:
+            budget = None if force else max(0.0, deadline - time.monotonic())
+            done, pending = concurrent.futures.wait(
+                pending, timeout=budget, return_when=concurrent.futures.FIRST_COMPLETED)
+            for future in done:
+                try:
+                    result = future.result()
+                    if result:
+                        valid_results.append(result)
+                except Exception:
+                    pass
+            if not force and (valid_results or time.monotonic() >= deadline):
+                break
 
         if valid_results:
             valid_results.sort(key=lambda x: x[0])
@@ -2481,6 +2521,46 @@ class TDXRealtimeFetcher:
             self.current_host = (fb[0], fb[1], fb[2])
             self.latency_ms = 150.0
             self.add_log(f"⚠️ 动态测速未探测到有效主站，使用默认高可用兜底主站: [{fb[0]}] ({fb[1]}:{fb[2]})", level="WARN")
+
+        def finish_probes():
+            results = list(valid_results)
+            try:
+                for future in concurrent.futures.as_completed(pending):
+                    try:
+                        result = future.result()
+                        if result:
+                            results.append(result)
+                    except Exception:
+                        pass
+                if results:
+                    with self._conn_lock:
+                        if generation == self._host_probe_generation:
+                            self.active_hosts_pool = sorted(results, key=lambda item: item[0])
+            finally:
+                executor.shutdown(wait=True)
+        if pending:
+            threading.Thread(target=finish_probes, name="TDX-host-probes", daemon=True).start()
+        else:
+            executor.shutdown(wait=False)
+
+    def _remember_successful_host(self):
+        temp_path = None
+        try:
+            from sys_utils import get_app_root
+            path = os.path.join(get_app_root(), "config", "tdx_last_host.json")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            temp_path = path + f".tmp_{os.getpid()}"
+            with open(temp_path, "w", encoding="utf-8") as handle:
+                json.dump(self.current_host, handle, ensure_ascii=False)
+            os.replace(temp_path, path)
+        except Exception:
+            pass
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
 
     def _probe_host_alive(self, api: TdxHq_API) -> bool:
         """轻量探针：验证连接的主站是否能真实返回股票行情数据 (防假活/拒绝服务节点，兼容早盘未开盘 price==0 但昨收有效)"""
@@ -2535,6 +2615,7 @@ class TDXRealtimeFetcher:
                         self._is_connected = True
                         self._global_connect_fail_count = 0
                         self._global_connect_cooldown_until = 0.0
+                        self._remember_successful_host()
                         self.add_log(f"已成功连接到主站 [{name}] ({ip}:{port}) (行情探针正常)", level="INFO")
                         return True
                     else:
@@ -2569,6 +2650,7 @@ class TDXRealtimeFetcher:
                             self.latency_ms = cost
                             self._global_connect_fail_count = 0
                             self._global_connect_cooldown_until = 0.0
+                            self._remember_successful_host()
                             self.add_log(f"故障切换成功连接到备用服务器 [{f_name}] ({f_ip}:{f_port}), 延迟: {cost:.1f}ms", level="INFO")
                             return True
                         else:
