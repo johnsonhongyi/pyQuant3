@@ -4777,6 +4777,7 @@ class SBCGlobalDispatcher(QObject):
         self._wake_event = threading.Event()
         self._subscription_revision = 0
         self._subscribers = {}
+        self._cache_preview_running = False
         self.batch_ready.connect(self._deliver_batch, Qt.ConnectionType.QueuedConnection)
 
     @classmethod
@@ -4822,6 +4823,35 @@ class SBCGlobalDispatcher(QObject):
             self._subscribers[key] = (weakref.ref(dlg), code, mode)
             self._subscription_revision += 1
             self.wake_up()
+            launch_preview = self._running and not self._cache_preview_running
+            if launch_preview:
+                self._cache_preview_running = True
+        if launch_preview:
+            threading.Thread(target=self._publish_subscription_cache, daemon=True,
+                             name="SBCCachePreviewThread").start()
+
+    def _publish_subscription_cache(self):
+        """Serve newly opened windows even while the quote worker is blocked on network IO."""
+        try:
+            while True:
+                with self._lock:
+                    subscriptions = [(code, mode) for _, code, mode in self._subscribers.values()]
+                    revision = self._subscription_revision
+                codes = list(dict.fromkeys(code for code, _ in subscriptions))
+                if codes:
+                    pool = TDXGlobalCachePool.get_instance(startup_codes=codes)
+                    pool._ensure_startup_codes_loaded(codes)
+                    for code in codes:
+                        self.batch_ready.emit({code: {"modes": {mode for c, mode in subscriptions if c == code},
+                                                      "is_cache_preview": True}})
+                with self._lock:
+                    if revision == self._subscription_revision:
+                        self._cache_preview_running = False
+                        return
+        except Exception as exc:
+            logger.debug("SBC 缓存首帧投递失败: %s", exc)
+            with self._lock:
+                self._cache_preview_running = False
 
     def unsubscribe(self, dlg):
         with self._lock:
@@ -4840,6 +4870,12 @@ class SBCGlobalDispatcher(QObject):
                 continue
             data = batch.get(code)
             if data is not None and mode in data.get("modes", ()):
+                if data.get("is_cache_preview"):
+                    frame = getattr(dlg.canvas, "df_intraday", None)
+                    if (frame is None or frame.empty or getattr(dlg.canvas, "_last_code", None) != code
+                            or getattr(dlg.canvas, "_last_period_mode", None) != mode):
+                        dlg._render_skeleton_or_cached_frame()
+                    continue
                 dlg.reload_chart(is_timer_tick=True, preloaded=data)
 
     def _run_loop(self, stop_event, wake_event):
@@ -4878,7 +4914,16 @@ class SBCGlobalDispatcher(QObject):
                 # 1. 批量拉取快照 (40 只批次限制与标准化转换)
                 perf_on = os.environ.get("SBC_PERF") == "1"
                 batch_start = time.perf_counter() if perf_on else 0.0
+                if TDXGlobalCachePool._instance is None:
+                    TDXGlobalCachePool.get_instance(startup_codes=codes)
                 fetcher = TDXRealtimeFetcher.get_instance()
+                # Disk history is ready after fetcher initialization; show it before any network wait.
+                if revision != last_served_revision:
+                    pool = getattr(fetcher, "cache_pool", None)
+                    if pool is not None:
+                        pool._ensure_startup_codes_loaded(codes)
+                    self.batch_ready.emit({code: {"modes": {mode for c, mode in subscriptions if c == code},
+                                                  "is_cache_preview": True} for code in codes})
                 snapshots = fetcher.fetch_batch_stock_snapshots(codes)
                 if perf_on:
                     print(f"[SBC PERF] snapshots {len(codes)} codes: {(time.perf_counter() - batch_start) * 1000:.0f} ms", flush=True)

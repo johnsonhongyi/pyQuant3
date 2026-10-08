@@ -873,6 +873,92 @@ def test_all_codes_ipc_snapshot_and_history_before_scoring(monkeypatch, history_
         assert events == [] and cards[0]["is_error"]
 
 
+def test_late_windows_receive_cache_while_quote_request_is_blocked(qapp, monkeypatch):
+    dispatcher = sbc.SBCGlobalDispatcher()
+    dispatcher._running = True
+    stop, wake = threading.Event(), threading.Event()
+    entered, release, delivered = threading.Event(), threading.Event(), threading.Event()
+    windows = [MagicMock(code=f"60010{i}", _current_period_mode="10d") for i in range(10)]
+    dispatcher._subscribers = {id(windows[0]): (lambda: windows[0], "600100", "10d")}
+    received = set()
+    dispatcher.batch_ready.disconnect()
+    def ready(batch):
+        if next(iter(batch.values())).get("is_cache_preview"):
+            received.update(batch)
+            if len(received) == 10:
+                delivered.set()
+    dispatcher.batch_ready.connect(ready, sbc.Qt.ConnectionType.DirectConnection)
+    pool, fetcher = MagicMock(), MagicMock()
+    fetcher.cache_pool = pool
+    def quote(codes):
+        entered.set()
+        release.wait(5)
+        stop.set()
+        return {}
+    fetcher.fetch_batch_stock_snapshots.side_effect = quote
+    monkeypatch.setattr(sbc.TDXGlobalCachePool, "_instance", pool)
+    monkeypatch.setattr(sbc.TDXGlobalCachePool, "get_instance", lambda **kwargs: pool)
+    monkeypatch.setattr(sbc.TDXRealtimeFetcher, "get_instance", lambda: fetcher)
+    worker = threading.Thread(target=dispatcher._run_loop, args=(stop, wake), daemon=True)
+    worker.start()
+    try:
+        assert entered.wait(2)
+        for window in windows[1:]:
+            dispatcher.subscribe(window)
+        assert delivered.wait(2), "later windows must display cache before quote request returns"
+        assert not release.is_set()
+    finally:
+        release.set()
+        worker.join(3)
+
+
+def test_dispatcher_publishes_cache_before_quote_network(qapp, monkeypatch):
+    dispatcher = sbc.SBCGlobalDispatcher()
+    window = SimpleNamespace(code="600108", _current_period_mode="10d")
+    # A retained callable is sufficient: the worker only consumes code/mode values.
+    dispatcher._subscribers = {1: (lambda: window, "600108", "10d")}
+    stop, wake = threading.Event(), threading.Event()
+    events = []
+    dispatcher.batch_ready.disconnect()
+    dispatcher.batch_ready.connect(lambda batch: events.append("cache" if batch["600108"].get("is_cache_preview") else "live"),
+                                   sbc.Qt.ConnectionType.DirectConnection)
+    fetcher = MagicMock()
+    def quote(codes):
+        assert events == ["cache"]
+        stop.set()
+        return {}
+    fetcher.fetch_batch_stock_snapshots.side_effect = quote
+    monkeypatch.setattr(sbc.TDXGlobalCachePool, "_instance", MagicMock())
+    monkeypatch.setattr(sbc.TDXRealtimeFetcher, "get_instance", lambda: fetcher)
+    dispatcher._run_loop(stop, wake)
+    assert events == ["cache"]
+
+
+def test_selective_disk_startup_retains_other_codes_for_later_loading(monkeypatch, tmp_path):
+    import copy
+    from ats.tdx_realtime_fetcher import TDXGlobalCachePool
+    fetcher, pool, clock, rows = _phase_fetcher(monkeypatch, tmp_path)
+    fetcher.fetch_multi_day_intraday_bars("600108", 10)
+    pool._history_static_bars["600109"] = copy.deepcopy(pool._history_static_bars["600108"])
+    assert pool.flush_to_ramdisk(force=True, history_checkpoint=True)
+    restored = TDXGlobalCachePool(startup_codes=["600108"])
+    assert set(restored._history_static_bars) == {"600108"}
+    restored._ensure_startup_code_loaded("600109")
+    assert restored.peek_multi_day_df("600109", 10) is not None
+    assert restored.flush_to_ramdisk(force=True, history_checkpoint=True) is False  # no changes
+    full = TDXGlobalCachePool()
+    assert set(full._history_static_bars) == {"600108", "600109"}
+
+
+def test_intraday_preview_accepts_restored_incremental_after_0930(monkeypatch, tmp_path):
+    fetcher, pool, clock, rows = _phase_fetcher(monkeypatch, tmp_path)
+    frame = fetcher.fetch_multi_day_intraday_bars("600108", 10)
+    clock.current = clock.current.replace(hour=10, minute=0)
+    pool._multi_day_df_cache.clear()
+    pool._history_static_bars.clear()
+    assert pool.peek_multi_day_df("600108", 10) is not None
+
+
 def test_memory_peek_has_no_disk_sync_and_rejects_stale_day():
     from ats.tdx_realtime_fetcher import TDXGlobalCachePool
     from datetime import datetime

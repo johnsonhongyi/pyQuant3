@@ -518,10 +518,10 @@ class TDXGlobalCachePool:
     _lock = threading.Lock()
 
     @classmethod
-    def get_instance(cls) -> 'TDXGlobalCachePool':
+    def get_instance(cls, startup_codes=None) -> 'TDXGlobalCachePool':
         with cls._lock:
             if cls._instance is None:
-                cls._instance = cls()
+                cls._instance = cls(startup_codes=startup_codes)
             return cls._instance
 
     def _get_ramdisk_cache_path(self) -> str:
@@ -573,7 +573,7 @@ class TDXGlobalCachePool:
         """Minute history rolls independently of the 09:15 auction quote stream."""
         return cls.is_trading_day(today_str) and datetime.now().strftime("%H:%M") >= "09:30"
 
-    def __init__(self):
+    def __init__(self, startup_codes=None):
         self._mutex = threading.RLock()
         self._history_request_locks = {}
         self._seed_flush_inflight = False
@@ -623,8 +623,9 @@ class TDXGlobalCachePool:
         self._is_dirty: bool = False
         self._dirty_revision = 0
 
-        # 初始化时从 RamDisk 极速载入 (仅需 0.2ms)
-        self._load_from_ramdisk()
+        # SBC startup validates only subscribed symbols; other symbols load on demand.
+        self._startup_loaded_codes = None if startup_codes is None else {str(code).zfill(6) for code in startup_codes}
+        self._load_from_ramdisk(codes=self._startup_loaded_codes)
 
     @contextmanager
     def _ramdisk_file_lock(self):
@@ -1085,7 +1086,7 @@ class TDXGlobalCachePool:
         return True
 
     def _load_from_ramdisk(self, force: bool = False, sync_rollover: bool = True,
-                           restore_vwap: bool = True) -> bool:
+                           restore_vwap: bool = True, codes=None) -> bool:
         """
         【RamDisk 极速加载 + 自动修复校验】
         从内存盘读取 zlib level 1 压缩二进制包，0.2ms 完成跨进程历史静态缓存与增量计算状态热重载。
@@ -1162,6 +1163,8 @@ class TDXGlobalCachePool:
                 remote_hist = payload.get("history_static_bars", {})
                 if isinstance(remote_hist, dict):
                     for k, v in remote_hist.items():
+                        if codes is not None and str(k).zfill(6) not in codes:
+                            continue
                         if not isinstance(v, dict) or not isinstance(v.get("records"), list):
                             skipped_count += 1
                             continue
@@ -1201,6 +1204,8 @@ class TDXGlobalCachePool:
                 remote_inc = payload.get("incremental_intraday_pool", {})
                 if isinstance(remote_inc, dict):
                     for k, v in remote_inc.items():
+                        if codes is not None and isinstance(k, tuple) and k and str(k[0]).zfill(6) not in codes:
+                            continue
                         if not isinstance(k, tuple) or not k or not isinstance(v, dict):
                             skipped_count += 1
                             continue
@@ -1260,6 +1265,8 @@ class TDXGlobalCachePool:
             if is_cross_day and sync_rollover:
                 self._check_date_rollover(force_from_date=cache_date)
 
+            if codes is None:
+                self._startup_loaded_codes = None
             return True
         except Exception as e:
             logger.debug(f"[TDXGlobalCachePool] 从 RamDisk 载入缓存异常: {e}")
@@ -1554,8 +1561,20 @@ class TDXGlobalCachePool:
             pass
 
     # ── 1. 静态历史分时长效缓存 ──
+    def _ensure_startup_code_loaded(self, code: str):
+        self._ensure_startup_codes_loaded([code])
+
+    def _ensure_startup_codes_loaded(self, codes):
+        loaded = getattr(self, "_startup_loaded_codes", None)
+        missing = {str(code).zfill(6) for code in codes} - loaded if loaded is not None else set()
+        if missing:
+            # Loading/rollover may flush under a file lock: never hold _mutex across it.
+            if self._load_from_ramdisk(force=True, restore_vwap=False, codes=missing):
+                loaded.update(missing)
+
     def get_static_history_bars(self, code: str, days: int,
                                 requested_days: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        self._ensure_startup_code_loaded(code)
         self._maybe_sync_from_ramdisk(force=False)
         self._check_date_rollover()
         c_clean = str(code).zfill(6)
@@ -1666,7 +1685,6 @@ class TDXGlobalCachePool:
         """Only read resident data; completed sessions remain usable before today's first minute."""
         clean, days = str(code).zfill(6), int(days)
         today = datetime.now().strftime("%Y-%m-%d")
-        active = datetime.now().weekday() < 5 and datetime.now().strftime("%H:%M") >= "09:30"
         with self._mutex:
             candidates = []
             for (symbol, horizon), (frame, stamp, date) in self._multi_day_df_cache.items():
@@ -1674,7 +1692,7 @@ class TDXGlobalCachePool:
                     if date == today and time.time() - stamp <= max_age:
                         candidates.append(frame)
             for (symbol, horizon), entry in getattr(self, "_incremental_intraday_pool", {}).items():
-                if symbol == clean and horizon >= days and not active:
+                if symbol == clean and horizon >= days:
                     frame = entry.get("df")
                     if isinstance(frame, pd.DataFrame) and not frame.empty:
                         candidates.append(frame)
@@ -1784,6 +1802,7 @@ class TDXGlobalCachePool:
         - 盘中在 TTL (如 2.4s) 内直接返回
         - 返回 (DataFrame 副本, entry_metadata)
         """
+        self._ensure_startup_code_loaded(code)
         self._check_date_rollover()
         c_clean = str(code).zfill(6)
         key = (c_clean, int(days))
