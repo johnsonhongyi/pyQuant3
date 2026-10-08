@@ -6236,7 +6236,23 @@ class ATSMainWindow(QMainWindow):
                     self.realtime_signal_signal.emit(signal)
                 confirmed_count = sum(1 for event in events_to_dispatch
                                       if event.get("type") == "NEXT_DAY_WATCH_CONFIRM")
-                log_summary = logger.info if confirmed_count else logger.debug
+                now_mono = time.monotonic()
+                curr_state = (endpoint[0], endpoint[1], len(codes), quote_count, quote_gap_count, confirmed_count)
+                last_state = getattr(self, "_last_ndw_log_state", None)
+                last_log_t = getattr(self, "_last_ndw_log_time", 0.0)
+                last_gaps = getattr(self, "_last_ndw_log_gaps", 0)
+
+                state_changed = (last_state != curr_state)
+                gaps_recovered = (last_gaps > 0 and quote_gap_count == 0)
+                heartbeat_due = (now_mono - last_log_t >= 60.0)
+                should_log_info = state_changed or (quote_gap_count > 0) or gaps_recovered or heartbeat_due
+
+                log_summary = logger.info if should_log_info else logger.debug
+                if should_log_info:
+                    self._last_ndw_log_state = curr_state
+                    self._last_ndw_log_time = now_mono
+                    self._last_ndw_log_gaps = quote_gap_count
+
                 log_summary("[NextDayWatch][ATS_TDX] service=TDXRealtimeFetcher node=%s endpoint=%s:%s candidates=%d quotes=%d quote_gaps=%d confirmed=%d elapsed=%.0fms",
                             endpoint[0], endpoint[1], endpoint[2], len(codes), quote_count, quote_gap_count,
                             confirmed_count, (time.perf_counter() - started) * 1000)

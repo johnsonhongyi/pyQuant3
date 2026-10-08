@@ -1,5 +1,11 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](stock_standalone/design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-08 10:15 【ATS 新股次新股自动刷新排序跳变底层逻辑 BUG 修复】(`stock_standalone/20261008_1015_task.md`, `ats/ui/new_stock_panel.py`, `tests/test_new_stock_sort_stability.py`)
+- [x] **【根因穿透与两层刷新机制定性】**：确权后台 `_prepare_stock_table` 硬编码排序输出（图2）覆盖用户选定列与前台分片写入关闭排序（`setSortingEnabled(False)`）导致未完成中间态暴露及跳变死循环；
+- [x] **【后台动态排序与两层刷新彻底根除（KISS 原则）】**：在 `_prepare_stock_table` 中建立 `IPO_HEADER_FIELD_MAP` 字典与 `extra_cols` 动态映射，有手动选择排序列时按选定列与升降序刷新（置顶优先、空值沉底），直接以目标物理顺序输出给前台；无选择时稳定按默认顺序刷新；排序完成后再计算签名与哈希；
+- [x] **【前台交互与渲染状态机加固】**：修复 `_on_header_sort_changed` 触发条件，同步表头指示器与持久化配置，分片写入过程中零跳变，彻底终结两层刷新与中间态暴露；
+- [x] **【自动化测试与全链路回归验证】**：编写覆盖 6 大场景（涨跌%升序精确复现图1、涨跌%降序、现价降序、无选择默认顺序、连续自动刷新绝对幂等无跳变、自定义扩展列排序）的单元测试 `tests/test_new_stock_sort_stability.py`，100% 纯绿通过。
+
 ## 2026-10-08 00:10 【inStock 本地独立版本库建立、GitHub推送闭环及生产Docker安全同步规范落地】(`stock_standalone/20261008_0010_task.md`, `D:\MacTools\WorkFile\WorkSpace\InStock\`, `stock_standalone/ENVIRONMENT_HANDOFF.md`)
 - [x] **【模块统一与独立 Git 仓库确立（SSOT）】**：
     - 将 `JSONData` 核心模块全面迁入 `instock/JSONData/`，所有消费模块与测试自适应对接，注入向后兼容代理，单元测试 100% 纯绿通过；

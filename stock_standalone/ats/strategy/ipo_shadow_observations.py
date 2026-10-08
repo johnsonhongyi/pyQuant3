@@ -7,6 +7,7 @@ import json
 import math
 import os
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -112,6 +113,10 @@ def ats_signal_paper_outcomes(root: str | Path) -> dict[str, Any]:
             sell = sells[-1]
             outcomes.append({"observation_hash": digest, "ticker": observation["ticker"],
                              "as_of_time": observation["as_of_time"],
+                             "computed_at": observation["computed_at"],
+                             "realized_at": datetime.fromtimestamp(
+                                 float(sell["timestamp"]), timezone.utc
+                             ).isoformat(),
                              "signal_type": observation["fields"]["signal_type"],
                              "signal_tier": observation["fields"]["signal_tier"],
                              "buy_directive_id": buy.get("directive_id"),
@@ -136,45 +141,79 @@ def learn_ats_signal_quality(
 ) -> dict[str, Any]:
     """Evaluate ATS signal families on later paper exits, leaving all trade gates closed."""
     source = outcome_report if outcome_report is not None else ats_signal_paper_outcomes(root)
-    outcomes = source.get("outcomes", [])
+    outcomes = source.get("outcomes", []) if isinstance(source, Mapping) else []
+    if not isinstance(outcomes, list):
+        outcomes = []
     result: dict[str, Any] = {
         "state": "WAITING_PAPER_OUTCOMES", "sample_count": len(outcomes),
         "groups": [], "model_promoted": False, "entry_authorized": False,
         "commission_rate": _COMMISSION_RATE, "sell_fixed_fee": _SELL_FIXED_FEE,
     }
-    if not outcomes:
-        return result
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    seen: set[str] = set()
+    rejected = 0
+    now = datetime.now(timezone.utc)
     for row in outcomes:
-        groups.setdefault((str(row["signal_type"]), str(row["signal_tier"])), []).append(row)
+        if not isinstance(row, Mapping):
+            rejected += 1
+            continue
+        observed = _utc(row.get("computed_at") or row.get("as_of_time"))
+        realized = _utc(row.get("realized_at"))
+        value = row.get("net_return_pct")
+        digest = row.get("observation_hash")
+        if (observed is None or realized is None or realized <= observed or realized > now
+                or not isinstance(value, (int, float)) or isinstance(value, bool)
+                or not math.isfinite(value) or not isinstance(digest, str) or not digest
+                or digest in seen or not isinstance(row.get("signal_type"), str)
+                or not isinstance(row.get("signal_tier"), str)):
+            rejected += 1
+            continue
+        seen.add(digest)
+        sample = dict(row, _observed=observed, _realized=realized)
+        groups.setdefault((row["signal_type"], row["signal_tier"]), []).append(sample)
+    result["sample_count"] = len(seen)
+    result["rejected_count"] = rejected
     for (signal_type, signal_tier), rows in sorted(groups.items()):
-        rows.sort(key=lambda row: (row["as_of_time"], row["observation_hash"]))
+        rows.sort(key=lambda row: (row["_observed"], row["observation_hash"]))
         split = max(1, int(len(rows) * 0.7))
         test = rows[split:]
-        enough = len(rows) >= 8 and len(test) >= 2
-        train_mean = sum(row["net_return_pct"] for row in rows[:split]) / split
+        cutoff = test[0]["_observed"] if test else None
+        train = [row for row in rows[:split] if cutoff is not None
+                 and row["_observed"] < cutoff and row["_realized"] < cutoff]
+        enough = len(rows) >= 8 and len(train) >= 5 and len(test) >= 2
+        train_mean = sum(row["net_return_pct"] for row in train) / len(train) if train else None
         test_mean = sum(row["net_return_pct"] for row in test) / len(test) if test else None
         state = "INSUFFICIENT_SAMPLES"
         if enough:
             state = "PAPER_POSITIVE_CANDIDATE" if train_mean > 0 and test_mean > 0 else "PAPER_NONPOSITIVE_CANDIDATE"
         result["groups"].append({
             "signal_type": signal_type, "signal_tier": signal_tier, "state": state,
-            "sample_count": len(rows), "train_mean_net_return_pct": round(train_mean, 4),
+            "sample_count": len(rows), "train_count": len(train), "forward_count": len(test),
+            "purged_count": split - len(train),
+            "forward_cutoff": cutoff.isoformat() if cutoff is not None else None,
+            "train_mean_net_return_pct": round(train_mean, 4) if train_mean is not None else None,
             "forward_mean_net_return_pct": round(test_mean, 4) if test_mean is not None else None,
             "observation_hashes": [row["observation_hash"] for row in rows],
         })
-    result["state"] = "SHADOW_CANDIDATES" if any(
-        row["state"] != "INSUFFICIENT_SAMPLES" for row in result["groups"]
-    ) else "WAITING_MORE_PAPER_OUTCOMES"
+    if result["groups"]:
+        result["state"] = "SHADOW_CANDIDATES" if any(
+            row["state"] != "INSUFFICIENT_SAMPLES" for row in result["groups"]
+        ) else "WAITING_MORE_PAPER_OUTCOMES"
     path = Path(root).resolve() / "data/ipo_learning/ats_signal_quality.latest.json"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(".json.tmp")
+        temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
         temporary.write_text(json.dumps(result, ensure_ascii=False, sort_keys=True,
                                         allow_nan=False) + "\n", encoding="utf-8")
         os.replace(temporary, path)
     except (OSError, TypeError, ValueError):
         result["state"] = "PERSISTENCE_FAILED"
+    finally:
+        if "temporary" in locals():
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
     return result
 
 
