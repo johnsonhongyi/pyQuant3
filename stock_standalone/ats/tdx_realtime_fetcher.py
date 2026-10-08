@@ -54,6 +54,25 @@ def filter_available_intraday_bars(frame: pd.DataFrame, cutoff: Any = None) -> p
     return frame.loc[times.notna() & (times <= point)].copy()
 
 
+def slice_intraday_horizon(frame: pd.DataFrame, days: int, is_index: bool = False) -> pd.DataFrame:
+    """Derive a shorter view without mutating the canonical history/VWAP baseline."""
+    if frame is None or frame.empty or "date" not in frame:
+        return frame
+    selected = sorted(frame["date"].astype(str).unique())[-max(1, int(days)):]
+    result = frame[frame["date"].astype(str).isin(selected)].copy()
+    if {"bar_vol", "bar_amt"}.issubset(result.columns):
+        volumes = pd.to_numeric(result["bar_vol"], errors="coerce").fillna(0.).cumsum()
+        amounts = pd.to_numeric(result["bar_amt"], errors="coerce").fillna(0.).cumsum()
+        numerator = ((pd.to_numeric(result["close"], errors="coerce").fillna(0.)
+                      * pd.to_numeric(result["bar_vol"], errors="coerce").fillna(0.)).cumsum()
+                     if is_index else amounts)
+        result["cum_vol_shares"], result["cum_amt"] = volumes, amounts
+        result["vol"] = result["volume"] = volumes / 100.
+        result["amount"] = amounts
+        result["vwap"] = (numerator / volumes.replace(0., np.nan)).fillna(result["close"])
+    return result
+
+
 def safe_float(val: Any, default: float = 0.0) -> float:
     """健壮的浮点数安全转换函数，杜绝 '-', '--', 'None', NaN, Inf 抛出异常"""
     if val is None or val == "" or val == "-" or val == "--" or val == "null" or val == "None":
@@ -546,25 +565,20 @@ class TDXGlobalCachePool:
 
     @classmethod
     def can_trigger_date_rollover(cls, today_str: Optional[str] = None) -> bool:
-        """
-        【跨交易日滚动迭代触发门禁 (开盘前铁壁防御)】
-        只有在同时满足以下条件时，才允许触发次日跨交易日滚动迭代 (剔除最老1天、昨日并入历史、清空今日临时缓存)：
-        1. 今日必须是真实的 A 股交易日 (排除周末与法定节假日)；
-        2. 当前时间必须已经达到早盘开盘/集合竞价时段 (>= 09:15)！
-           若在 09:15 之前启动系统 (早盘 00:00~09:14)，操盘手正在复盘与做盘前预案，
-           坚决不触发滚动淘汰与删除，完整保留上一交易日的全天分时数据供 0 网络极速复盘！
-        """
-        if not cls.is_trading_day(today_str):
-            return False
-        
-        # 检查当前时刻是否已达到 09:15 开盘线
-        current_hm = datetime.now().strftime("%H:%M")
-        if current_hm < "09:15":
-            return False
-        return True
+        """Quotes and auction observations become active at 09:15."""
+        return cls.is_trading_day(today_str) and datetime.now().strftime("%H:%M") >= "09:15"
+
+    @classmethod
+    def has_continuous_session(cls, today_str: Optional[str] = None) -> bool:
+        """Minute history rolls independently of the 09:15 auction quote stream."""
+        return cls.is_trading_day(today_str) and datetime.now().strftime("%H:%M") >= "09:30"
 
     def __init__(self):
         self._mutex = threading.RLock()
+        self._history_request_locks = {}
+        self._seed_flush_inflight = False
+        self._seed_flush_tokens = {}
+        self._seed_flush_pending = {}
         today_str = datetime.now().strftime("%Y-%m-%d")
         self._current_date_str = today_str
         self._last_rolled_date: Optional[str] = None
@@ -860,8 +874,8 @@ class TDXGlobalCachePool:
         if not timeline.is_unique or not timeline.is_monotonic_increasing or (dates > today_str).any():
             return False
         history = df.loc[dates < today_str, ["date", "time_only"]].to_dict("records")
-        if days > 1 and not cls._has_complete_sessions(
-            history, days - 1, min_bars=1 if ipo_history else 220,
+        if (days > 1 or today_str not in set(dates)) and not cls._has_complete_sessions(
+            history, (days - 1 if today_str in set(dates) else days), min_bars=1 if ipo_history else 220,
             max_gap_minutes=None if ipo_history else 5,
         ):
             return False
@@ -1012,7 +1026,8 @@ class TDXGlobalCachePool:
             return False
         if (entry.get("frozen") or cache_day < today_str or
             (cache_day == today_str and datetime.now().strftime("%H:%M") >= "15:05")):
-            closed = df.loc[df["date"].astype(str) == cache_day, ["date", "time_only"]].to_dict("records")
+            closed_day = max(df["date"].astype(str))
+            closed = df.loc[df["date"].astype(str) == closed_day, ["date", "time_only"]].to_dict("records")
             if not self._has_complete_sessions(
                 closed, 1, min_bars=1 if ipo_aligned else 220,
                 max_gap_minutes=None if ipo_aligned else 5,
@@ -1102,11 +1117,11 @@ class TDXGlobalCachePool:
 
             today_str = datetime.now().strftime("%Y-%m-%d")
             cache_date = payload.get("date")
-            can_rollover = self.can_trigger_date_rollover(today_str)
+            can_rollover = self.has_continuous_session(today_str)
 
             # 核心交易日与开盘防护：
-            # 只有当今天本身是真实交易日，且已经达到早盘开盘时段 (>= 09:15)，且自然日相比缓存日期推进了，才认定为跨交易日！
-            # 若在早盘未开盘前 (< 09:15) 或周末/节假日打开，绝对禁止跨日淘汰与删除，直接复用上一交易日固化缓存！
+            # 只有当今天本身是真实交易日，且已经达到早盘开盘时段 (>= 09:30)，且自然日相比缓存日期推进了，才认定为跨交易日！
+            # 若在早盘未开盘前 (< 09:30) 或周末/节假日打开，绝对禁止跨日淘汰与删除，直接复用上一交易日固化缓存！
             is_cross_day = bool(cache_date and today_str and cache_date != today_str and can_rollover)
 
             repaired_count = 0
@@ -1224,13 +1239,13 @@ class TDXGlobalCachePool:
                     if not self.is_trading_day(today_str):
                         status_tip += f", 非交易日休市固化={self._current_date_str}"
                     elif not can_rollover:
-                        status_tip += f", 盘前复盘固化={self._current_date_str} (<09:15)"
+                        status_tip += f", 盘前复盘固化={self._current_date_str} (<09:30)"
                     status_tip += ")"
                     logger.info(status_tip)
                 else:
                     logger.info(
                         f"🔄 [TDXGlobalCachePool] 检测到 RamDisk 历史分时为上一交易日 ({cache_date})，"
-                        f"今日 ({today_str} >= 09:15) 开盘启动滑动窗口向前自动滚动迭代..."
+                        f"今日 ({today_str} >= 09:30) 开盘启动滑动窗口向前自动滚动迭代..."
                     )
 
             # VWAP 工厂仅持久化有界摘要和当前日分钟状态，不把 DataFrame 放进快照分区。
@@ -1263,7 +1278,7 @@ class TDXGlobalCachePool:
                 return False
         return self.flush_to_ramdisk(force=True)
 
-    def flush_to_ramdisk(self, force: bool = False) -> bool:
+    def flush_to_ramdisk(self, force: bool = False, history_checkpoint: bool = False) -> bool:
         """
         【RamDisk 极限压缩原子持久化】
         采用 zlib level 1 极限极速无损压缩与原子替换 (tmp -> os.replace)，
@@ -1272,11 +1287,11 @@ class TDXGlobalCachePool:
         now = time.time()
         from ats.archive_policy import archive_window, ARCHIVE_INTERVAL
         window, day = archive_window()
-        if window is None or not self._is_dirty:
+        if (window is None and not history_checkpoint) or not self._is_dirty:
             return False
-        if window == 'market' and now - self._last_flush_ts < ARCHIVE_INTERVAL:
+        if not history_checkpoint and window == 'market' and now - self._last_flush_ts < ARCHIVE_INTERVAL:
             return False
-        if window == 'close':
+        if not history_checkpoint and window == 'close':
             if self._archive_close_day == day:
                 return False
             try:
@@ -1308,7 +1323,7 @@ class TDXGlobalCachePool:
 
                     today_str = self._current_date_str
                     current_hm = datetime.now().strftime("%H:%M")
-                    is_trading_active = self.is_trading_day(today_str) and ("09:15" <= current_hm < "15:05")
+                    is_trading_active = self.is_trading_day(today_str) and ("09:30" <= current_hm < "15:05")
                     is_after_close = not is_trading_active
                     payload = {
                         "date": today_str,
@@ -1351,7 +1366,7 @@ class TDXGlobalCachePool:
     def _maybe_sync_from_ramdisk(self, force: bool = False):
         """轻量微秒级探测 RamDisk mtime，外部进程有新数据时自动热重载"""
         now = time.time()
-        if not force and now - self._last_mtime_check_ts < 1800.0:
+        if not force and now - self._last_mtime_check_ts < 2.0:
             return
         self._last_mtime_check_ts = now
         try:
@@ -1375,14 +1390,17 @@ class TDXGlobalCachePool:
         today_str = datetime.now().strftime("%Y-%m-%d")
         effective_old_date = force_from_date or self._current_date_str
 
-        # 核心交易日与开盘门禁：非交易日 (周末/节假日) 或交易日早盘未开盘 (< 09:15)，严禁自动跨日滚动与早期数据淘汰！
+        # 核心交易日与开盘门禁：非交易日 (周末/节假日) 或交易日早盘未开盘 (< 09:30)，严禁自动跨日滚动与早期数据淘汰！
         if not force_from_date:
-            if not self.can_trigger_date_rollover(today_str):
+            if not self.has_continuous_session(today_str):
                 return
             if getattr(self, "_last_rolled_date", None) == today_str and today_str == self._current_date_str:
                 return
 
         with self._mutex:
+            if effective_old_date == today_str:
+                self._last_rolled_date = today_str
+                return
             self._current_date_str = today_str
             rolled_stocks = 0
             all_codes = set(self._history_static_bars.keys()) | {k[0] for k in self._incremental_intraday_pool.keys()}
@@ -1621,6 +1639,11 @@ class TDXGlobalCachePool:
                 last_cum_pv = sum(safe_float(r.get("close")) * safe_float(r.get("bar_vol")) for r in cleaned_records)
 
         with self._mutex:
+            existing = self._history_static_bars.get(c_clean)
+            if (existing and existing.get("date") == today_str and existing.get("days", 0) > days
+                    and existing.get("records")
+                    and str(existing["records"][-1].get("date", "")) >= str(cleaned_records[-1].get("date", ""))):
+                return
             self._history_static_bars[c_clean] = {
                 "date": today_str,
                 "days": days,
@@ -1640,15 +1663,85 @@ class TDXGlobalCachePool:
 
     # ── 2. 多日分时最终结果短效缓存 ──
     def peek_multi_day_df(self, code: str, days: int, max_age: float = 120.0) -> Optional[pd.DataFrame]:
-        """首帧只读内存快照，不同步 RAM 盘、不初始化连接。"""
+        """Only read resident data; completed sessions remain usable before today's first minute."""
+        clean, days = str(code).zfill(6), int(days)
+        today = datetime.now().strftime("%Y-%m-%d")
+        active = datetime.now().weekday() < 5 and datetime.now().strftime("%H:%M") >= "09:30"
         with self._mutex:
-            entry = self._multi_day_df_cache.get((str(code).zfill(6), int(days)))
-            if entry is None:
+            candidates = []
+            for (symbol, horizon), (frame, stamp, date) in self._multi_day_df_cache.items():
+                if symbol == clean and horizon >= days and frame is not None and not frame.empty:
+                    if date == today and time.time() - stamp <= max_age:
+                        candidates.append(frame)
+            for (symbol, horizon), entry in getattr(self, "_incremental_intraday_pool", {}).items():
+                if symbol == clean and horizon >= days and not active:
+                    frame = entry.get("df")
+                    if isinstance(frame, pd.DataFrame) and not frame.empty:
+                        candidates.append(frame)
+            if not candidates:
+                entry = getattr(self, "_history_static_bars", {}).get(clean)
+                if entry and entry.get("records") and entry.get("days", 0) >= days:
+                    frame = pd.DataFrame(entry["records"])
+                    if "time" in frame:
+                        frame.set_index("time", inplace=True)
+                    candidates.append(frame)
+            if not candidates:
                 return None
-            frame, stamp, date = entry
-            if date != datetime.now().strftime("%Y-%m-%d") or time.time() - stamp > max_age:
-                return None
-            return frame.copy() if frame is not None and not frame.empty else None
+            frame = max(candidates, key=len).copy()
+        if "date" not in frame:
+            return None
+        dates = frame["date"].astype(str)
+        selected = sorted(dates[dates <= today].unique())[-days:]
+        frame = frame.loc[dates.isin(selected)].copy()
+        return slice_intraday_horizon(frame, days, normalize_tdx_target(clean)[0]) if not frame.empty else None
+
+    def checkpoint_history_seed(self, code: str, frame: pd.DataFrame):
+        """Persist a newly acquired closed-session baseline once, off the caller/UI thread."""
+        if frame is None or frame.empty or "date" not in frame:
+            return
+        today = datetime.now().strftime("%Y-%m-%d")
+        closed = frame.loc[frame["date"].astype(str) < today]
+        if closed.empty:
+            return
+        clean = str(code).zfill(6)
+        with self._mutex:
+            values = [col for col in ("date", "time_only", "close", "bar_vol", "bar_amt") if col in closed]
+            import hashlib
+            revision = hashlib.sha256(pd.util.hash_pandas_object(closed[values], index=True).to_numpy().tobytes()).digest()
+            token = (revision, self._cache_generations.get(clean, 0))
+            if self._seed_flush_tokens.get(clean) == token:
+                return
+            self._seed_flush_pending[clean] = token
+            if self._seed_flush_inflight:
+                return
+            self._seed_flush_inflight = True
+        def persist():
+            try:
+                while True:
+                    with self._mutex:
+                        pending = dict(self._seed_flush_pending)
+                        self._seed_flush_pending.clear()
+                    if not self.flush_to_ramdisk(force=True, history_checkpoint=True):
+                        with self._mutex:
+                            for symbol, token in pending.items():
+                                self._seed_flush_pending.setdefault(symbol, token)
+                            self._seed_flush_inflight = False
+                        return
+                    with self._mutex:
+                        self._seed_flush_tokens.update(pending)
+                        if not self._seed_flush_pending:
+                            self._seed_flush_inflight = False
+                            return
+            except Exception as exc:
+                with self._mutex:
+                    self._seed_flush_inflight = False
+                logger.debug(f"TDX history checkpoint failed: {exc}")
+        try:
+            threading.Thread(target=persist, daemon=True, name="TDXHistoryCheckpoint").start()
+        except Exception as exc:
+            with self._mutex:
+                self._seed_flush_inflight = False
+            logger.debug(f"TDX history checkpoint startup failed: {exc}")
 
     def get_multi_day_df(self, code: str, days: int, ttl: float = 2.4) -> Optional[pd.DataFrame]:
         self._maybe_sync_from_ramdisk(force=False)
@@ -1696,7 +1789,7 @@ class TDXGlobalCachePool:
         key = (c_clean, int(days))
         lookup_days = int(requested_days or days)
         current_hm = datetime.now().strftime("%H:%M")
-        is_trading_active = self.is_trading_day(self._current_date_str) and ("09:15" <= current_hm < "15:05")
+        is_trading_active = self.is_trading_day(self._current_date_str) and ("09:30" <= current_hm < "15:05")
         is_after_close = not is_trading_active
         def _check_and_return_entry():
             nonlocal key
@@ -1798,7 +1891,10 @@ class TDXGlobalCachePool:
             listing_date = str(ipo_info.get("listing_date") or "").strip()[:10]
         except Exception:
             pass
-        expected_listing_dates = self._listing_session_dates(listing_date, today_str) if listing_date else []
+        calendar_today = datetime.now().strftime("%Y-%m-%d")
+        expected_listing_dates = self._listing_session_dates(listing_date, calendar_today) if listing_date else []
+        if not self.has_continuous_session(calendar_today):
+            expected_listing_dates = [day for day in expected_listing_dates if day < calendar_today]
         actual_dates = sorted(set(df["date"].astype(str))) if isinstance(df, pd.DataFrame) and "date" in df else []
         # TDX 返回的是请求窗口，不是从上市日起的整段历史；只比对最近 N 个应有交易日。
         # 新股上市交易日少于 N 时，N 按实际上市交易日数自适应缩短。
@@ -1831,7 +1927,8 @@ class TDXGlobalCachePool:
             )
             return
         if is_after_close:
-            closed = df.loc[df["date"].astype(str) == today_str, ["date", "time_only"]].to_dict("records")
+            closed_day = max(df["date"].astype(str))
+            closed = df.loc[df["date"].astype(str) == closed_day, ["date", "time_only"]].to_dict("records")
             if not self._has_complete_sessions(
                 closed, 1, min_bars=1 if ipo_timeline_aligned else 220,
                 max_gap_minutes=None if ipo_timeline_aligned else 5,
@@ -3425,6 +3522,42 @@ class TDXRealtimeFetcher:
             "server_time": time.strftime("%H:%M:%S")
         }
 
+    def _record_auction_snapshot(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        now = datetime.now()
+        hm = now.strftime("%H:%M")
+        if not ("09:15" <= hm < "09:30") or not self.cache_pool.is_trading_day(now.strftime("%Y-%m-%d")):
+            return snapshot
+        code = snapshot.get("code", "")
+        finalized = hm >= "09:25"
+        bid, ask = safe_float(snapshot.get("bid1")), safe_float(snapshot.get("ask1"))
+        raw_price = safe_float(snapshot.get("price"))
+        if finalized:
+            price = safe_float(snapshot.get("open_price"))
+            if price <= 0 and safe_float(snapshot.get("volume")) > 0:
+                price = raw_price
+            kind = "auction_open" if price > 0 else "auction_pending"
+        else:
+            price = bid if bid > 0 and bid == ask else raw_price
+            kind = "auction_indicative"
+        snapshot.update(market_phase=kind, auction_price=price, auction_finalized=finalized,
+                        price_is_indicative=not finalized)
+        if finalized and price > 0:
+            snapshot["open_price"] = price
+            snapshot["price"] = snapshot["trade"] = price
+        with self._conn_lock:
+            samples = getattr(self, "_auction_chart_samples", None)
+            if samples is None:
+                samples = self._auction_chart_samples = {}
+            entry = samples.get(code)
+            day = now.strftime("%Y-%m-%d")
+            if entry is None or entry[0] != day:
+                entry = samples[code] = (day, {})
+            if price > 0:
+                entry[1][hm] = {"date": day, "time_only": hm, "price": price,
+                                "kind": kind, "observed_at": now.strftime("%H:%M:%S")}
+            snapshot["auction_samples"] = [dict(item) for item in entry[1].values()]
+        return snapshot
+
     def fetch_stock_snapshot(
         self,
         code: str,
@@ -3437,7 +3570,7 @@ class TDXRealtimeFetcher:
         quotes = self.get_security_quotes_safe([c_clean])
         if not quotes:
             return {}
-        return self._normalize_quote_to_snapshot(quotes[0], circulation_shares_wan)
+        return self._record_auction_snapshot(self._normalize_quote_to_snapshot(quotes[0], circulation_shares_wan))
 
     def fetch_batch_stock_snapshots(
         self,
@@ -3460,7 +3593,7 @@ class TDXRealtimeFetcher:
             if not c:
                 continue
             circ_wan = circ_map.get(c)
-            result[c] = self._normalize_quote_to_snapshot(q, circ_wan)
+            result[c] = self._record_auction_snapshot(self._normalize_quote_to_snapshot(q, circ_wan))
         return result
 
     def fetch_intraday_bars(self, code: str) -> pd.DataFrame:
@@ -3675,6 +3808,22 @@ class TDXRealtimeFetcher:
                 logger.debug(f"[全局分时同步] 预热 {c} 异常: {e}")
 
     def fetch_multi_day_intraday_bars(self, code: str, days: int = 2) -> pd.DataFrame:
+        clean = str(code).zfill(6)
+        with self.cache_pool._mutex:
+            request_lock = self.cache_pool._history_request_locks.setdefault(clean, threading.RLock())
+        with request_lock:
+            if int(days) < 10:
+                ttl = 2.4 if self.cache_pool.has_continuous_session() else 86400.0
+                canonical = self.cache_pool.get_incremental_intraday(clean, 10, ttl=ttl)
+                if canonical is not None:
+                    return slice_intraday_horizon(canonical[0], days, normalize_tdx_target(clean)[0])
+            frame = self._fetch_multi_day_intraday_bars(clean, days)
+            if frame is not None and not frame.empty:
+                self.cache_pool.set_multi_day_df(clean, days, frame)
+                self.cache_pool.checkpoint_history_seed(clean, frame)
+            return frame
+
+    def _fetch_multi_day_intraday_bars(self, code: str, days: int = 2, category: int = 8) -> pd.DataFrame:
         """
         拉取最近 N 个交易日的全量分时 K 线数据 (包含 1日, 2日, 3日, 5日, 10日分时图)，按交易日拼接并计算每日 VWAP 均线与换手率
         【架构级全局缓存加速 (操盘手核心优化)】:
@@ -3705,14 +3854,16 @@ class TDXRealtimeFetcher:
                 today = datetime.strptime(today_date_str, "%Y-%m-%d").date()
                 if listed is not None and listed <= today:
                     expected_listing_dates = self.cache_pool._listing_session_dates(listing_date, today_date_str)
+                    if not self.cache_pool.has_continuous_session(today_date_str):
+                        expected_listing_dates = [day for day in expected_listing_dates if day < today_date_str]
                     calendar_sessions = len(expected_listing_dates)
                     if 0 < calendar_sessions < days:
                         days = calendar_sessions
             except Exception:
                 pass
-            can_rollover = self.cache_pool.can_trigger_date_rollover(today_date_str)
+            can_rollover = self.cache_pool.has_continuous_session(today_date_str)
 
-            # 1. 优先从全局缓存池提取增量/收盘固化缓存 (收盘后、非交易日或开盘前 <09:15 均 0 网络直出；盘中在 TTL 内 0 网络直出)
+            # 1. 优先从全局缓存池提取增量/收盘固化缓存 (收盘后、非交易日或开盘前 <09:30 均 0 网络直出；盘中在 TTL 内 0 网络直出)
             try:
                 _base_intv = float(getattr(cct, 'ats_tdx_interval', 3.0) or 3.0)
             except Exception:
@@ -3731,9 +3882,9 @@ class TDXRealtimeFetcher:
                         if inc_has_today:
                             return df_inc
                     else:
-                        cached_inc_df = df_inc.copy()
+                        return df_inc
 
-            # 若未开盘 (< 09:15) 或为非交易日，且多日缓存有值，直接返回，避免盘前向 TDX 发起无效请求
+            # 若未开盘 (< 09:30) 或为非交易日，且多日缓存有值，直接返回，避免盘前向 TDX 发起无效请求
             if not can_rollover:
                 df_multi = self.cache_pool.get_multi_day_df(c_clean, days, ttl=86400.0)
                 if df_multi is not None and not df_multi.empty:
@@ -3776,6 +3927,13 @@ class TDXRealtimeFetcher:
                 self.cache_pool.set_multi_day_df(c_clean, days, history_df)
                 return history_df
 
+            def _repair_or_history() -> pd.DataFrame:
+                if category == 8:
+                    recovered = self._fetch_multi_day_intraday_bars(c_clean, requested_days, category=7)
+                    if recovered is not None and not recovered.empty:
+                        return recovered
+                return _static_history_frame()
+
             # 休市/盘前没有“今日增量”可拉取时，静态 N-1 日历史本身就是权威回放数据。
             if has_valid_hist and not can_rollover:
                 static_df = _static_history_frame()
@@ -3789,24 +3947,24 @@ class TDXRealtimeFetcher:
             with self._conn_lock:
                 if not self._is_connected or self.api is None:
                     if not self.connect():
-                        return pd.DataFrame() if can_rollover else _static_history_frame()
+                        return _static_history_frame()
                 try:
                     if is_idx:
-                        bars = self.api.get_index_bars(8, mkt, c_target, 0, 800) or []
-                        needed_batches = min(4, (fetch_days * 240 + 799) // 800)
+                        bars = self.api.get_index_bars(category, mkt, c_target, 0, 800) or []
+                        needed_batches = min(4, (fetch_days * 242 + 240 + 799) // 800)
                         for b_idx in range(1, needed_batches):
                             offset = b_idx * 800
-                            bars_prev = self.api.get_index_bars(8, mkt, c_target, offset, 800) or []
+                            bars_prev = self.api.get_index_bars(category, mkt, c_target, offset, 800) or []
                             if bars_prev:
                                 bars = bars_prev + bars
                             else:
                                 break
                     else:
-                        bars = self.api.get_security_bars(8, mkt, c_clean, 0, 800) or []
-                        needed_batches = min(4, (fetch_days * 240 + 799) // 800)
+                        bars = self.api.get_security_bars(category, mkt, c_clean, 0, 800) or []
+                        needed_batches = min(4, (fetch_days * 242 + 240 + 799) // 800)
                         for b_idx in range(1, needed_batches):
                             offset = b_idx * 800
-                            bars_prev = self.api.get_security_bars(8, mkt, c_clean, offset, 800) or []
+                            bars_prev = self.api.get_security_bars(category, mkt, c_clean, offset, 800) or []
                             if bars_prev:
                                 bars = bars_prev + bars
                             else:
@@ -3821,21 +3979,21 @@ class TDXRealtimeFetcher:
                     if self.connect():
                         try:
                             if is_idx:
-                                bars = self.api.get_index_bars(8, mkt, c_target, 0, 800) or []
-                                needed_batches = min(4, (fetch_days * 240 + 799) // 800)
+                                bars = self.api.get_index_bars(category, mkt, c_target, 0, 800) or []
+                                needed_batches = min(4, (fetch_days * 242 + 240 + 799) // 800)
                                 for b_idx in range(1, needed_batches):
                                     offset = b_idx * 800
-                                    bars_prev = self.api.get_index_bars(8, mkt, c_target, offset, 800) or []
+                                    bars_prev = self.api.get_index_bars(category, mkt, c_target, offset, 800) or []
                                     if bars_prev:
                                         bars = bars_prev + bars
                                     else:
                                         break
                             else:
-                                bars = self.api.get_security_bars(8, mkt, c_clean, 0, 800) or []
-                                needed_batches = min(4, (fetch_days * 240 + 799) // 800)
+                                bars = self.api.get_security_bars(category, mkt, c_clean, 0, 800) or []
+                                needed_batches = min(4, (fetch_days * 242 + 240 + 799) // 800)
                                 for b_idx in range(1, needed_batches):
                                     offset = b_idx * 800
-                                    bars_prev = self.api.get_security_bars(8, mkt, c_clean, offset, 800) or []
+                                    bars_prev = self.api.get_security_bars(category, mkt, c_clean, offset, 800) or []
                                     if bars_prev:
                                         bars = bars_prev + bars
                                     else:
@@ -3844,17 +4002,22 @@ class TDXRealtimeFetcher:
                             bars = None
 
             if not bars:
-                return pd.DataFrame() if can_rollover else _static_history_frame()
+                return _repair_or_history()
 
             df = pd.DataFrame(bars)
             if df.empty or "datetime" not in df.columns:
-                return pd.DataFrame()
+                return _repair_or_history()
 
             df = filter_available_intraday_bars(df)
             if df.empty:
                 return pd.DataFrame()
             df["date_str"] = df["datetime"].astype(str).str[:10]
             df["time_str"] = df["datetime"].astype(str).str[11:16]
+            if not can_rollover:
+                # The 09:25 auction print is shown separately; it is not a complete minute session.
+                df = df[df["date_str"] < today_date_str].copy()
+                if df.empty:
+                    return _static_history_frame()
             # TDX 分页存在边界重复/返回顺序差异；先按时间稳定排序并去重，
             # 避免累计量价在重复分钟上形成 VWAP 竖刺。
             df.sort_values(["date_str", "time_str"], kind="stable", inplace=True)
@@ -3898,20 +4061,28 @@ class TDXRealtimeFetcher:
                         f"[AutoRepair] {c_clean} TDX 分时分页缺失，拒绝缓存并等待重拉 "
                         f"(预期窗口={expected_fetch_window}, 实得={actual_fetch_dates})"
                     )
-                    return pd.DataFrame()
+                    return _repair_or_history()
                 now_hm = datetime.now().strftime("%H:%M")
                 today_minutes = df.loc[df["date_str"] == today_date_str, "time_str"]
                 if now_hm >= "15:05" and not self.cache_pool._has_complete_sessions(
                     df.loc[df["date_str"] == today_date_str, ["date_str", "time_str"]]
                     .rename(columns={"date_str": "date", "time_str": "time_only"}).to_dict("records"), 1):
                     logger.warning(f"[AutoRepair] {c_clean} 收盘分时不完整，等待重拉")
-                    return pd.DataFrame()
+                    return _repair_or_history()
                 if ("09:45" <= now_hm <= "11:30" or "13:15" <= now_hm <= "15:00") and not today_minutes.empty:
                     last_minute = max(today_minutes)
                     now_minute = int(now_hm[:2]) * 60 + int(now_hm[3:])
                     bar_minute = int(last_minute[:2]) * 60 + int(last_minute[3:])
                     if now_minute - bar_minute > 15:
                         logger.debug(f"[AutoRepair] {c_clean} TDX 当日分钟数据滞后 {now_minute - bar_minute} 分钟 (可能交易稀疏或停牌)，保留当前最新数据呈现")
+
+            if not can_rollover:
+                trailing = sorted(df["date_str"].unique())[-days:]
+                closed_rows = df[df["date_str"].isin(trailing)][["date_str", "time_str"]].rename(
+                    columns={"date_str": "date", "time_str": "time_only"})
+                expected_count = min(days, len(expected_listing_dates)) if expected_listing_dates else days
+                if not self.cache_pool._has_complete_sessions(closed_rows.to_dict("records"), expected_count):
+                    return _repair_or_history()
 
             # 3. 分支 A: 若命中历史静态缓存，执行【当日时间戳增量比对与合并】
             if has_valid_hist and days > 1:
@@ -4042,12 +4213,12 @@ class TDXRealtimeFetcher:
             hist_last_vol = 0.0
             hist_last_amt = 0.0
             hist_last_pv = 0.0
-            today_date_identified = target_dates[-1] if target_dates else today_date_str
+            today_date_identified = today_date_str
 
             for d_str, group in df_filtered.groupby("date_str"):
                 date_short = d_str[5:]
                 group_records = group.to_dict('records')
-                is_history_day = (d_str < today_date_identified) and (len(target_dates) > 1)
+                is_history_day = d_str < today_date_identified
 
                 for r in group_records:
                     t_str = str(r.get("time_str", ""))
@@ -4111,6 +4282,18 @@ class TDXRealtimeFetcher:
 
             # 若有多日数据，将今天之前的前 N-1 天长效写入全局静态缓存池
             if hist_part_records and days > 1:
+                history_dates = sorted({r["date"] for r in hist_part_records})[-(days - 1):]
+                hist_part_records = [dict(r) for r in hist_part_records if r["date"] in history_dates]
+                hist_last_vol = hist_last_amt = hist_last_pv = 0.0
+                for row in hist_part_records:
+                    hist_last_vol += row["bar_vol"]
+                    hist_last_amt += row["bar_amt"]
+                    hist_last_pv += row["close"] * row["bar_vol"] if is_idx else 0.0
+                    row.update(cum_vol_shares=hist_last_vol, cum_amt=hist_last_amt,
+                               vol=hist_last_vol / 100.0, volume=hist_last_vol / 100.0,
+                               amount=hist_last_amt,
+                               vwap=round((hist_last_pv if is_idx else hist_last_amt) / hist_last_vol, 2)
+                               if hist_last_vol > 0 else row["close"])
                 self.cache_pool.set_static_history_bars(
                     c_clean, days, hist_part_records, hist_last_vol, hist_last_amt, hist_last_pv,
                     requested_days=requested_days
@@ -4141,12 +4324,12 @@ class TDXRealtimeFetcher:
 
         clean_code = str(code).zfill(6)
         days = max(1, min(10, int(days)))
-        frame = self.fetch_multi_day_intraday_bars(clean_code, days=days)
+        frame = self.fetch_multi_day_intraday_bars(clean_code, days=10)
         if frame is None or frame.empty:
             return pd.DataFrame(), VWAPFactory.get_instance().get_snapshot(clean_code)
         is_index = normalize_tdx_target(clean_code)[0]
         snapshot = VWAPFactory.get_instance().sync_frame(clean_code, frame, is_index=is_index)
-        return frame, snapshot
+        return slice_intraday_horizon(frame, days, is_index=is_index), snapshot
 
     def get_cached_kline_bars(self, code: str, category: str = "day", min_count: int = 1) -> Optional[pd.DataFrame]:
         """

@@ -835,3 +835,222 @@ def test_listing_checks_only_read_cache_and_follow_calendar_revision(monkeypatch
     monkeypatch.setattr(NewStockFetcher, "_instance", SimpleNamespace(_cached_ipo_dict=calendar, _last_calendar_fetch_time=1.0))
     assert engine.is_stock_first_listing_day("920199")
     assert not engine.is_stock_unlisted("920199")
+
+
+# Market-phase and durable history cache closure.
+def _phase_fetcher(monkeypatch, tmp_path, hm="09:28"):
+    from datetime import datetime as RealDateTime
+    import ats.tdx_realtime_fetcher as tdx
+    class Clock(RealDateTime):
+        current = RealDateTime.fromisoformat("2026-10-08 " + hm + ":00")
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current
+    monkeypatch.setattr(tdx, "datetime", Clock)
+    monkeypatch.setattr(tdx.TDXGlobalCachePool, "is_trading_day", classmethod(lambda cls, day=None: True))
+    monkeypatch.setattr(tdx.TDXGlobalCachePool, "_get_ramdisk_cache_path", lambda self: str(tmp_path / "history.cache"))
+    monkeypatch.setattr(NewStockFetcher, "_instance", SimpleNamespace(_cached_ipo_dict={}))
+    pool = tdx.TDXGlobalCachePool()
+    monkeypatch.setattr(pool, "checkpoint_history_seed", MagicMock())
+    fetcher = tdx.TDXRealtimeFetcher.__new__(tdx.TDXRealtimeFetcher)
+    fetcher.cache_pool = pool
+    fetcher._conn_lock = threading.RLock()
+    fetcher._is_connected = True
+    fetcher.get_circulation_shares = lambda code: 10000000
+    dates = pd.bdate_range("2026-09-23", periods=11).strftime("%Y-%m-%d").tolist()
+    dates = dates[:-1]  # Ten completed sessions before Oct 8 (mock calendar).
+    rows = []
+    for day in dates:
+        minutes = (pd.date_range(day + " 09:30", periods=121, freq="min").tolist()
+                   + pd.date_range(day + " 13:00", periods=121, freq="min").tolist())
+        for stamp in minutes:
+            rows.append(dict(datetime=stamp.strftime("%Y-%m-%d %H:%M"), open=10., close=10.,
+                             high=10.1, low=9.9, vol=100., amount=1000.))
+    api = MagicMock()
+    def page(category, market, code, start, count):
+        end = len(rows) - start
+        return rows[max(0, end - count):max(0, end)]
+    api.get_security_bars.side_effect = page
+    fetcher.api = api
+    return fetcher, pool, Clock, rows
+
+
+def test_0928_cold_ten_days_are_complete_and_reopen_is_zero_network(monkeypatch, tmp_path):
+    fetcher, pool, clock, rows = _phase_fetcher(monkeypatch, tmp_path)
+    assert pool.can_trigger_date_rollover() and not pool.has_continuous_session()
+    frame = fetcher.fetch_multi_day_intraday_bars("600108", 10)
+    assert len(frame) == 2420 and frame["date"].nunique() == 10
+    assert "2026-10-08" not in set(frame["date"])
+    assert ("600108", 10) in pool._incremental_intraday_pool
+    assert pool._history_static_bars["600108"]["records"][-1]["date"] == frame["date"].iloc[-1]
+    calls = fetcher.api.get_security_bars.call_count
+    for _ in range(3):
+        assert fetcher.fetch_multi_day_intraday_bars("600108", 10).equals(frame)
+    assert fetcher.api.get_security_bars.call_count == calls
+    assert pool.peek_multi_day_df("600108", 3)["date"].nunique() == 3
+    assert pool.peek_multi_day_df("600108", 5)["date"].nunique() == 5
+
+
+def test_auction_quotes_are_indicative_until_0925_and_do_not_enter_history(monkeypatch, tmp_path):
+    fetcher, pool, clock, rows = _phase_fetcher(monkeypatch, tmp_path, "09:19")
+    before = fetcher._record_auction_snapshot(dict(code="600108", price=10., open_price=0.,
+                     bid1=10.5, ask1=10.5, volume=0.))
+    assert before["auction_price"] == 10.5 and before["price_is_indicative"]
+    assert before["open_price"] == 0. and before["price"] == 10.
+    clock.current = clock.fromisoformat("2026-10-08 09:25:00")
+    after = fetcher._record_auction_snapshot(dict(code="600108", price=10.6, open_price=10.6,
+                    bid1=10.6, ask1=10.6, volume=100.))
+    assert after["open_price"] == after["auction_price"] == 10.6
+    assert not after["price_is_indicative"] and after["market_phase"] == "auction_open"
+    assert len(after["auction_samples"]) == 2
+    assert pool._incremental_intraday_pool == {} and pool._history_static_bars == {}
+
+
+def test_0928_checkpoint_survives_new_pool_and_reopen(monkeypatch, tmp_path):
+    import ats.archive_policy as archive
+    fetcher, pool, clock, rows = _phase_fetcher(monkeypatch, tmp_path)
+    frame = fetcher.fetch_multi_day_intraday_bars("600108", 10)
+    monkeypatch.setattr(archive, "archive_window", lambda: (None, "2026-10-08"))
+    assert not pool.flush_to_ramdisk(force=True)
+    assert pool.flush_to_ramdisk(force=True, history_checkpoint=True)
+    restored = type(pool)()
+    fetcher.cache_pool = restored
+    fetcher.api.get_security_bars.reset_mock()
+    assert fetcher.fetch_multi_day_intraday_bars("600108", 10).equals(frame)
+    fetcher.api.get_security_bars.assert_not_called()
+
+
+def test_first_continuous_minute_merges_history_without_refetching_old_pages(monkeypatch, tmp_path):
+    fetcher, pool, clock, rows = _phase_fetcher(monkeypatch, tmp_path)
+    old = fetcher.fetch_multi_day_intraday_bars("600108", 10)
+    clock.current = clock.fromisoformat("2026-10-08 09:31:00")
+    rows.append(dict(datetime="2026-10-08 09:31", open=10.6, close=10.6, high=10.6,
+                     low=10.6, vol=200., amount=2120.))
+    fetcher.api.get_security_bars.reset_mock()
+    new = fetcher.fetch_multi_day_intraday_bars("600108", 10)
+    assert new["date"].nunique() == 10 and new["date"].iloc[-1] == "2026-10-08"
+    assert new.index.is_unique
+    assert fetcher.api.get_security_bars.call_count == 1
+    assert new["cum_vol_shares"].iloc[-1] == 9 * 242 * 100 + 200
+
+
+def test_factory_rebuilds_when_backfilled_history_changes_with_identical_tail():
+    from ats.vwap_factory import VWAPFactory
+    factory = VWAPFactory()
+    frame = pd.DataFrame([dict(date="2026-10-07", time_only="15:00", close=10., bar_vol=100., bar_amt=1000.),
+                          dict(date="2026-10-08", time_only="09:31", close=11., bar_vol=100., bar_amt=1100.)])
+    first = factory.sync_frame("600108", frame)
+    revised = frame.copy()
+    revised.loc[0, "bar_amt"] = 900.
+    second = factory.sync_frame("600108", revised)
+    assert second.vwap_5d == 10. and first.vwap_5d == 10.5
+    assert factory.sync_frame("600108", revised.copy()) is second
+
+
+@pytest.mark.parametrize("days", [3, 5])
+def test_0928_smaller_horizons_cache_complete_sessions(monkeypatch, tmp_path, days):
+    fetcher, pool, clock, rows = _phase_fetcher(monkeypatch, tmp_path)
+    rows.append(dict(datetime="2026-10-08 09:25", open=10.6, close=10.6, high=10.6,
+                     low=10.6, vol=200., amount=2120.))
+    first = fetcher.fetch_multi_day_intraday_bars("600108", days)
+    assert first["date"].nunique() == days and len(first) == days * 242
+    calls = fetcher.api.get_security_bars.call_count
+    assert fetcher.fetch_multi_day_intraday_bars("600108", days).equals(first)
+    assert fetcher.api.get_security_bars.call_count == calls
+
+
+def test_truncated_primary_history_is_repaired_by_alternate_minute_category(monkeypatch, tmp_path):
+    fetcher, pool, clock, rows = _phase_fetcher(monkeypatch, tmp_path)
+    original = fetcher.api.get_security_bars.side_effect
+    def damaged(category, market, code, start, count):
+        page = original(category, market, code, start, count)
+        return [row for row in page if row["datetime"][:10] != rows[-1]["datetime"][:10]] if category == 8 else page
+    fetcher.api.get_security_bars.side_effect = damaged
+    result = fetcher.fetch_multi_day_intraday_bars("600108", 10)
+    assert result["date"].nunique() == 10 and len(result) == 2420
+    assert {call.args[0] for call in fetcher.api.get_security_bars.call_args_list} == {7, 8}
+
+
+def test_concurrent_consumers_share_one_cold_history_request(monkeypatch, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    fetcher, pool, clock, rows = _phase_fetcher(monkeypatch, tmp_path)
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        frames = list(executor.map(lambda _: fetcher.fetch_multi_day_intraday_bars("600108", 10), range(4)))
+    assert all(frame.equals(frames[0]) for frame in frames)
+    assert fetcher.api.get_security_bars.call_count == 4  # One four-page seed, no duplicate consumers.
+
+
+def test_factory_latest_bar_revisions_and_appends_keep_incremental_path(monkeypatch):
+    from ats.vwap_factory import VWAPFactory
+    factory = VWAPFactory()
+    frame = pd.DataFrame([dict(date="2026-10-08", time_only="09:31", close=10., bar_vol=100., bar_amt=1000.)])
+    factory.sync_frame("600108", frame)
+    seed = MagicMock(wraps=factory.seed_frame)
+    monkeypatch.setattr(factory, "seed_frame", seed)
+    revised = frame.copy(); revised.loc[0, "bar_amt"] = 1100.
+    assert factory.sync_frame("600108", revised).vwap_1d == 11.
+    appended = pd.concat([revised, pd.DataFrame([dict(date="2026-10-08", time_only="09:32", close=12., bar_vol=100., bar_amt=1200.)])], ignore_index=True)
+    assert factory.sync_frame("600108", appended).vwap_1d == 11.5
+    seed.assert_not_called()
+
+
+
+def test_ten_day_reset_restores_full_timeline_and_auction_overlay_keeps_bars(qapp, monkeypatch, tmp_path):
+    fetcher, pool, clock, rows = _phase_fetcher(monkeypatch, tmp_path)
+    frame = fetcher.fetch_multi_day_intraday_bars("600108", 10)
+    canvas = sbc.SBCChartCanvas(); canvas.code = "600108"; canvas.resize(1000, 640)
+    try:
+        canvas.set_data(frame, open_p=10., period_mode="10d")
+        canvas._visible_bar_count = 120
+        canvas.reset_view()
+        canvas.auction_samples = [dict(time_only="09:19", price=10.5, kind="auction_indicative"),
+                                  dict(time_only="09:25", price=10.6, kind="auction_open")]
+        image = QPixmap(canvas.size()); canvas.render(image)
+        assert canvas._get_visible_slice()[0].equals(canvas.df_intraday)
+        assert canvas._coord_info["n_items"] == 2420
+        assert canvas.df_intraday[frame.columns].equals(frame)
+        assert not image.isNull()
+    finally:
+        canvas.close()
+
+
+def test_empty_live_result_keeps_matching_cached_chart():
+    frame = bars(20)
+    canvas = SimpleNamespace(df_intraday=frame, _last_code="600108", _last_period_mode="10d")
+    state = SimpleNamespace(code="600108", canvas=canvas, lbl_info=MagicMock())
+    sbc.SBCIntradayChartDialog._apply_chart_payload(state, dict(code="600108", mode="10d", df_target=pd.DataFrame(), data_fp=("empty",)))
+    assert canvas.df_intraday is frame
+    assert state.lbl_info.setText.called
+
+
+
+def test_factory_shorter_views_reuse_ten_day_seed_without_downgrading_cache(monkeypatch, tmp_path):
+    from ats.vwap_factory import VWAPFactory
+    fetcher, pool, clock, rows = _phase_fetcher(monkeypatch, tmp_path)
+    monkeypatch.setattr(VWAPFactory, "_instance", VWAPFactory())
+    short, snapshot = fetcher.fetch_multi_horizon_vwap("600108", days=3)
+    assert short["date"].nunique() == 3 and snapshot.coverage_days == 10
+    calls = fetcher.api.get_security_bars.call_count
+    long, _ = fetcher.fetch_multi_horizon_vwap("600108", days=10)
+    assert long["date"].nunique() == 10
+    assert fetcher.api.get_security_bars.call_count == calls
+    assert pool._history_static_bars["600108"]["days"] == 10
+    direct = fetcher.fetch_multi_day_intraday_bars("600108", days=5)
+    assert direct["date"].nunique() == 5 and direct["cum_vol_shares"].iloc[-1] == 5 * 242 * 100
+    assert fetcher.api.get_security_bars.call_count == calls
+
+
+def test_resident_history_preview_precedes_slow_quote_and_finance_requests(monkeypatch, tmp_path):
+    fetcher, pool, clock, rows = _phase_fetcher(monkeypatch, tmp_path)
+    fetcher.fetch_multi_day_intraday_bars("600108", 10)
+    fetcher.fetch_stock_snapshot = MagicMock(side_effect=AssertionError("quote must follow history preview"))
+    monkeypatch.setattr(TDXRealtimeFetcher, "get_instance", lambda: fetcher)
+    cancelled, previews = [], []
+    def preview(payload):
+        previews.append(payload)
+        cancelled.append(True)
+    result = SBCIntradayChartDialog._do_fetch_chart_data(SimpleNamespace(engine=None),
+        "600108", "10d", on_preview=preview, is_cancelled_func=lambda: bool(cancelled))
+    assert result["is_cancelled"] and previews[0]["is_cached_preview"]
+    assert previews[0]["df_target"]["date"].nunique() == 10
+    fetcher.fetch_stock_snapshot.assert_not_called()
