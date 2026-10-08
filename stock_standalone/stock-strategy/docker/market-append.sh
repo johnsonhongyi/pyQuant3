@@ -34,13 +34,43 @@ mkdir -p "$LOG_ROOT" "$LOCK_ROOT"
 (
     exec 9>"$lock_file"
     if ! /usr/bin/flock -n 9; then
-        printf '[%s] %s append already running; skipped\n' "$(date -Is)" "$1"
+        printf '[%s] %s append already running; skipped\n' "$(date -Is)" "$1" >> "$log_file"
         exit 0
     fi
+
+    rotate_log() {
+        [ -f "$log_file" ] || return 0
+        size=$(wc -c < "$log_file" | tr -d ' ')
+        [ "$size" -ge 20971520 ] || return 0
+        index=5
+        while [ "$index" -gt 0 ]; do
+            previous=$((index - 1))
+            if [ "$previous" -eq 0 ]; then
+                source=$log_file
+            else
+                source="$log_file.$previous"
+            fi
+            target="$log_file.$index"
+            if [ -f "$source" ]; then
+                if [ -f "$target" ]; then rm -f -- "$target"; fi
+                mv -- "$source" "$target"
+            fi
+            index=$previous
+        done
+    }
+    rotate_log
+    exec >> "$log_file" 2>&1
 
     export EASY_STOCK_DATA_DB="$DATA_ROOT/data/easy-stock/stock-data.db"
     export TRADING_CALENDAR_PATH="$DATA_ROOT/config/trading-calendar.json"
     export PYTHONUNBUFFERED=1
+    # The API has no host port; resolve its address on the managed bridge.
+    api_address=$(docker inspect -f '{{with index .NetworkSettings.Networks "stockstrategy-net"}}{{.IPAddress}}{{end}}' stockstrategy-api 2>/dev/null || true)
+    if [ -n "$api_address" ]; then
+        export EASY_STOCK_API_URL="http://$api_address:20081"
+    else
+        printf '[%s] API container address unavailable; history backfill may fail\n' "$(date -Is)"
+    fi
 
     printf '[%s] %s append started\n' "$(date -Is)" "$1"
     cd "$SERVICE"
@@ -66,4 +96,4 @@ mkdir -p "$LOG_ROOT" "$LOCK_ROOT"
         printf '[%s] %s append failed (exit=%s)\n' "$(date -Is)" "$1" "$status"
         exit "$status"
     fi
-) >> "$log_file" 2>&1
+)

@@ -85,6 +85,10 @@ fi
 
 [ -f "$GO_BACKEND_SOURCE/go.mod" ] || fail "Go backend source is missing: $GO_BACKEND_SOURCE"
 [ -f "$GO_BACKEND_SOURCE/cmd/server/main.go" ] || fail 'Go backend entry point is missing.'
+[ -f "$PROJECT/docker/market-append.sh" ] || fail 'Market append scheduler script is missing.'
+[ -f "$PROJECT/docker/stockstrategy-market-append.cron" ] || fail 'Market append cron schedule is missing.'
+command -v flock >/dev/null 2>&1 || fail 'flock is required for safe market append scheduling.'
+command -v crontab >/dev/null 2>&1 || fail 'cron is required for market append scheduling.'
 
 mkdir -p "$SERVICE"
 for pair in "data:$DATA_ROOT/data/service" "logs:$DATA_ROOT/logs/service" \
@@ -197,6 +201,8 @@ docker run -d \
     -e TZ=Asia/Hong_Kong \
     -v "$DATA_ROOT/data:/data" \
     -v "$DATA_ROOT/logs/backend:/logs/backend" \
+    -v "$DATA_ROOT/logs/service:/logs/service:ro" \
+    -v "$PROJECT/docker/stockstrategy-market-append.cron:/config/stockstrategy-market-append.cron:ro" \
     "stockstrategy/backend:$BUILD_TAG"
 
 docker run -d \
@@ -259,11 +265,7 @@ for old_database in \
     link_shared_database "$old_database"
 done
 
-[ -f "$PROJECT/docker/market-append.sh" ] || fail 'Market append scheduler script is missing.'
-[ -f "$PROJECT/docker/stockstrategy-market-append.cron" ] || fail 'Market append cron schedule is missing.'
 chmod 0755 "$PROJECT/docker/market-append.sh"
-command -v flock >/dev/null 2>&1 || fail 'flock is required for safe market append scheduling.'
-command -v crontab >/dev/null 2>&1 || fail 'cron is required for market append scheduling.'
 install -m 0644 "$PROJECT/docker/stockstrategy-market-append.cron" /etc/cron.d/stockstrategy-market-append
 systemctl enable --now cron
 
