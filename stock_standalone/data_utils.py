@@ -3479,6 +3479,10 @@ def fetch_and_process(
                 
                 init_res_m = resample
 
+                # 清理 H5 后，旧内存缓存不能作为本次持久化初始化的结果。
+                tdd.clear_tdx_static_memory_cache()
+                init_persisted = True
+
                 if now_time <= 835:
                     base_resamples = ['d','2d', '3d', 'w', 'm','45d','3M']
                 else:
@@ -3499,7 +3503,15 @@ def fetch_and_process(
                             top_now,
                             dl=ct.Resample_LABELS_Days[res_m],
                             resample=res_m)
+                        table = f"low_{res_m}_{ct.Resample_LABELS_Days[res_m]}_y_all"
+                        persisted = tdd.h5a.load_hdf_db(
+                            'tdx_last_df', table=table, timelimit=False)
+                        if persisted is None or persisted.empty:
+                            init_persisted = False
+                            logger.error(f"[INIT-PERSIST-FAILED] {res_m} 表 {table} 未落盘，等待重试")
+                            break
                     else:
+                        init_persisted = False
                         init_res_m = resample
                         logger.info(f'resample:{res_m} now_time:{now_time} > 905 终止初始化 init_tdx 用时:{time.time()-time_init_m:.2f}')
                         break
@@ -3507,9 +3519,11 @@ def fetch_and_process(
                 #还原最后的初始化的init_res_m
                 resample = init_res_m
                 # 4️⃣ 关键：标记 init 已完成（跨循环）
-                g_values.setkey("tdx.init.done", True)
-                g_values.setkey("tdx.init.date", today)
-                force_init_latch = False  # ⭐ [Cut 6] 初始化完成，释放锁存器
+                g_values.setkey("tdx.init.done", init_persisted)
+                if init_persisted:
+                    g_values.setkey("tdx.init.date", today)
+                START_INIT = 0 if init_persisted else 1
+                force_init_latch = not init_persisted
                 top_all = pd.DataFrame()
                 lastpTDX_DF = pd.DataFrame()
                 df_allDF.clear()
