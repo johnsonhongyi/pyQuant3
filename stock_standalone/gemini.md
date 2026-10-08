@@ -1,5 +1,35 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-08 10:15 【ATS 新股次新股自动刷新排序跳变底层逻辑 BUG 根治与两层刷新彻底终结闭环】(`stock_standalone/20261008_1015_task.md`, `ats/ui/new_stock_panel.py`, `tests/test_new_stock_sort_stability.py`)
+- [x] **【根因穿透与两层刷新机制定性】**：
+    - 查明历史代码在后台准备函数 `_prepare_stock_table` 中弃用 `sort_col` / `sort_order`，硬编码使用了默认排序（`_sort_w`, `_sort_date`, `pct`）；
+    - 前台分片写入时 `setSortingEnabled(False)` 将后台的默认排序暴露在界面上，写入完成后 `setSortingEnabled(True)` 由 Qt 再做一次重排，导致界面在每次自动刷新时出现“先跳变回默认顺序、又变回选中排序”的双层刷新与视觉抖动；
+- [x] **【轻量底层修复与多梯队单次原子刷新落地（遵循 KISS 原则，零过度设计）】**：
+    - 建立 `IPO_HEADER_FIELD_MAP` 字典与 `extra_cols` 动态映射，在 `_prepare_stock_table` 底层直接实现排序列分流：
+        - **有手动选择排序列时**：严格按选定列与升降序刷新（保证今日大事件与 ⭐ 重点关注标的置顶，无行情待上市标的自然沉底），直接以目标物理顺序输出给前台；
+        - **未手动选择排序列时**：严格回退到原有的基础默认顺序；
+    - 排序完成后再计算签名与哈希，确保能够精准捕捉物理行序变更；
+    - 修复表头事件驱动与指示器同步：用户点击表头列即刻保存持久化并驱动后台重新准备，初始化时同步指示器状态，消除前后台脱节；
+- [x] **【全套自动化回归测试 100% 纯绿通过】**：
+    - 新增 `tests/test_new_stock_sort_stability.py` 覆盖 6 大场景（涨跌%升序精确复现图1、涨跌%降序、现价降序、无选择默认顺序、连续自动刷新绝对幂等无跳变、自定义扩展列排序），0.92 秒全部通过；
+    - `python -m compileall` 0 语法错误，`git diff --check` 0 违规，UTF-8（无 BOM）保存。
+
+## 2026-10-08 01:21 【--ipo-learning 进展深度审核、完成功能全景核实及后续演进规划】(`stock_standalone/20261008_0121_task.md`, `run_ats.py`, `tools/run_ipo_learning_console.py`, `ats/ui/ipo_learning_console.py`, `tools/run_ipo_data_acquisition.py`)
+- [x] **【--ipo-learning 入口定位与跨平台/打包架构确立】**：
+    - 确立 `run_ats.py` 顶层 CLI 独立分发机制（`--ipo-learning` / `--ipo-console` / `--learning-console` / `--ipo-learning-console`），无缝绕过 ATS 主界面与重型策略池，支持高 DPI / 多分辨率自适应（`StandaloneLearningWindow`）与离线仿真只读展示（`--simulation-read-only`）；
+    - 适配 Nuitka Onefile 与 Windows 虚拟内存盘（RamDisk）物理路径解析（`safe_resolve_path`），彻底免疫 `WinError 1 (ERROR_INVALID_FUNCTION)` 崩溃；
+- [x] **【多进程并发与零卡顿 GUI 响应性根治闭环】**：
+    - 采集与重型计算全面移入 Windows `spawn` 独立子进程，QThread 仅异步接收单向 Pipe 数据；
+    - 实现增量脏更新与单元格原位复用，未变数据刷新耗时从 164ms 骤降至 14ms（提速 91%），详情异步加载并丢弃过时迟到请求；
+- [x] **【12 大功能 Tab 控制台完整落地与全链路 66 项测试秒级通过】**：
+    - 完整落地实施阶段、采集队列流水、回放效果验收、Provider预检、数据契约时效、本地来源状态、输入快照、D1-D3成熟标签、操作状态机、单股因果告警、学习事件复核、LLM交互共 12 大 Tab 界面；
+    - 落地双 SQLite 本地持久化（`source_observations.sqlite` 968 条历史记录 + `shadow_observations.sqlite` 23 条异动样本）；
+    - 贯通 Gate 0~5 严格 Fail-Closed 风控闸门、本地 Ollama (`qwen3.5:4b`) 异步观察者、双 CLI 故障转移与 SFT/DPO 离线学习数据封存管线；
+    - 66 项 IPO 专项自动化测试 100% 毫秒级纯绿通过；
+- [x] **【客观定性当前阻断项与四阶段演进规划】**：
+    - 定性当前 41 字段数据处于盘后 6/41 或 10/41 的 `UNREADY` 状态，强类型 Gate 正向放行有待全量数据接通，成熟样本为 0 待积累，生产权限（`allow_remote` / CLI / 订单）严格保持 Fail-Closed 锁定；
+    - 明确后续推进路线：Phase 1 盘中 41 字段数据源全量补齐 -> Phase 2 强类型 Gate 上下文与影子决策跑通 -> Phase 3 D1-D3 标签积累人工复核与 13 项回放验收 -> Phase 4 本地 SFT/DPO 训练与受控演练。
+
 ## 2026-10-07 23:58 【InStock 根目录软链接清理与 GitHub 官方版本库纯净同步闭环】(`D:\MacTools\WorkFile\WorkSpace\InStock\`, `https://github.com/johnsonhongyi/Instock`)
 - [x] **【彻底清理根目录 JSONData 符号链接】**：
     - 响应用户指示，通过 `git rm -f JSONData` 彻底从版本库中移除根目录历史符号链接，保持仓库顶层目录结构纯净优雅（仅保留 `instock/`、`supervisor/`、`.gitignore`、`LICENSE`、`requirements.txt`）；

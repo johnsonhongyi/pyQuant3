@@ -140,6 +140,32 @@ def get_new_stock_table_headers(extra_cols: Optional[List[str]] = None) -> List[
     return base_headers + extra_headers + ["阶梯策略"]
 
 
+IPO_HEADER_FIELD_MAP = {
+    "代码": ("code", False),
+    "名称": ("name", False),
+    "状态": ("status", False),
+    "竞价信号": ("bidding_tag", False),
+    "上市日": ("listing_date", False),
+    "申购日": ("apply_date", False),
+    "解禁日": ("lift_date", False),
+    "发行价": ("issue_price", True),
+    "现价": ("price", True),
+    "涨跌%": ("pct", True),
+    "涨速%": ("velocity_pct", True),
+    "VWAP": ("vwap_dev_pct", True),
+    "换手%": ("turnover", True),
+    "流通(亿)": ("float_mv_yi", True),
+    "总值(亿)": ("total_mv_yi", True),
+    "成交(亿)": ("amount_yi", True),
+    "DFF": ("dff", True),
+    "Rank": ("rank", True),
+    "DFF2": ("dff2", True),
+    "DFF3": ("dff3", True),
+    "大盘偏离": ("rs", True),
+    "大盘共振": ("resonance", False),
+    "阶梯策略": ("has_strategy", True),
+}
+
 
 def _merge_ipc_frame(data, df_ipc, extra_cols):
     data = data.copy()
@@ -330,7 +356,81 @@ def _prepare_stock_table(data, fav_stocks, sh_pct, extra_cols, filter_type, sear
     if fset is not None and not df_filtered.empty:
         df_filtered = df_filtered[df_filtered["code"].astype(str).str.strip().str.zfill(6).isin(fset)]
 
-    # Unchanged snapshots need neither cell writes nor sorting.
+    # ── 排序处理：有手动选择就按手动选择的排序方式刷新，没有选择就默认顺序 ──
+    headers = get_new_stock_table_headers(extra_cols)
+    header_name = headers[int(sort_col)] if (sort_col is not None and 0 <= int(sort_col) < len(headers)) else None
+
+    codes = df_filtered["code"].astype(str).str.zfill(6)
+    statuses = df_filtered["status"].astype(str)
+    listing_dates = df_filtered.get("listing_date", pd.Series("-", index=df_filtered.index)).astype(str)
+    apply_dates = df_filtered.get("apply_date", pd.Series("-", index=df_filtered.index)).astype(str)
+
+    field_info = IPO_HEADER_FIELD_MAP.get(header_name)
+    if not field_info and header_name:
+        if "涨速" in header_name:
+            field_info = ("velocity_pct", True)
+        else:
+            try:
+                col_map = getattr(cct, 'vis_column_map', {}) or {}
+            except Exception:
+                col_map = {}
+            for c_extra in (extra_cols or []):
+                mapped_h = col_map.get(c_extra, col_map.get(c_extra.lower(), c_extra))
+                if header_name in (c_extra, mapped_h):
+                    is_num = c_extra in df_filtered.columns and pd.api.types.is_numeric_dtype(df_filtered[c_extra])
+                    field_info = (c_extra, is_num)
+                    break
+            if not field_info and header_name in df_filtered.columns:
+                is_num = pd.api.types.is_numeric_dtype(df_filtered[header_name])
+                field_info = (header_name, is_num)
+
+    if field_info is not None:
+        # 🎯 用户手动选择了排序列：按选定列与升降序刷新（置顶标的优先，空值沉底）
+        field, is_num = field_info
+        is_today = listing_dates.eq(today_str) | apply_dates.eq(today_str)
+        is_fav = codes.isin(fav_stocks)
+        pin_rank = np.select([is_today, is_fav], [0, 1], default=2)
+
+        is_desc = (sort_order == Qt.SortOrder.DescendingOrder or sort_order == 1 or sort_order == "desc")
+        val_asc = not is_desc
+
+        if is_num:
+            price_s = pd.to_numeric(df_filtered.get("price", 0.0), errors="coerce").fillna(0.0)
+            raw_s = pd.to_numeric(df_filtered.get(field, np.nan), errors="coerce")
+            if field in ("price", "issue_price", "turnover", "float_mv_yi", "total_mv_yi", "amount_yi", "rank"):
+                is_empty = (raw_s <= 0.0) | raw_s.isna()
+            else:
+                is_empty = (price_s <= 0.0) | raw_s.isna()
+            sort_val = raw_s.fillna(0.0)
+        else:
+            s_str = df_filtered.get(field, pd.Series("-", index=df_filtered.index)).astype(str).str.strip()
+            is_empty = s_str.isin(["", "-", "--", "None", "nan"])
+            sort_val = s_str.where(~is_empty, "1970-01-01" if "date" in field else "")
+
+        df_filtered["_pin"] = pin_rank
+        df_filtered["_empty"] = is_empty.astype(int)
+        df_filtered["_val"] = sort_val
+        df_filtered["_tie_date"] = listing_dates.replace("-", "1970-01-01")
+
+        df_filtered.sort_values(
+            by=["_pin", "_empty", "_val", "_tie_date", "code"],
+            ascending=[True, True, val_asc, False, True],
+            inplace=True, na_position="last"
+        )
+        df_filtered.drop(columns=["_pin", "_empty", "_val", "_tie_date"], inplace=True, errors="ignore")
+    else:
+        # 默认顺序：未手动选择排序列时，按原有基础默认权重顺序
+        df_filtered["_sort_w"] = np.select(
+            [listing_dates.eq(today_str), apply_dates.eq(today_str), codes.isin(fav_stocks),
+             statuses.str.contains("首日", regex=False), statuses.str.contains("前5日", regex=False),
+             statuses.str.contains("待上市", regex=False), statuses.str.contains("次新", regex=False)],
+            [0.0, 0.1, 1.0, 2.0, 3.0, 4.0, 5.0], default=6.0)
+        df_filtered["_sort_date"] = listing_dates.replace("-", "1970-01-01")
+        df_filtered.sort_values(by=["_sort_w", "_sort_date", "pct"],
+                                ascending=[True, True, False], inplace=True)
+        df_filtered.drop(columns=["_sort_w", "_sort_date"], inplace=True)
+
+    # ── 排序完成后再计算签名与哈希（确保捕获物理行序变动） ──
     signature = None
     row_hashes = {}
     row_context = (frozenset(fav_stocks), sh_pct, today_str, tuple(extra_cols))
@@ -344,20 +444,6 @@ def _prepare_stock_table(data, fav_stocks, sh_pct, extra_cols, filter_type, sear
                      sort_col, sort_order, selected_code)
     except (TypeError, ValueError):
         pass
-    # ── 2. 今日事件 (今日上市 / 今日申购) 与重点关注优先权重排序 (置顶第0梯队) ──
-    codes = df_filtered["code"].astype(str).str.zfill(6)
-    statuses = df_filtered["status"].astype(str)
-    listing_dates = df_filtered.get("listing_date", pd.Series("-", index=df_filtered.index)).astype(str)
-    apply_dates = df_filtered.get("apply_date", pd.Series("-", index=df_filtered.index)).astype(str)
-    df_filtered["_sort_w"] = np.select(
-        [listing_dates.eq(today_str), apply_dates.eq(today_str), codes.isin(fav_stocks),
-         statuses.str.contains("首日", regex=False), statuses.str.contains("前5日", regex=False),
-         statuses.str.contains("待上市", regex=False), statuses.str.contains("次新", regex=False)],
-        [0.0, 0.1, 1.0, 2.0, 3.0, 4.0, 5.0], default=6.0)
-    df_filtered["_sort_date"] = listing_dates.replace("-", "1970-01-01")
-    df_filtered.sort_values(by=["_sort_w", "_sort_date", "pct"],
-                            ascending=[True, True, False], inplace=True)
-    df_filtered.drop(columns=["_sort_w", "_sort_date"], inplace=True)
 
     return df_filtered.to_dict('records'), signature, row_hashes, row_context, today_str
 
@@ -416,8 +502,9 @@ class NewStockPanel(QWidget):
         self._pending_ipc_sh_pct: float = 0.0
         self.extra_cols = get_new_stock_extra_cols()
 
-        # 排序持久化状态 (默认: 第3列 上市日 降序)
-        self.sort_col = 3
+        # 排序持久化状态 (默认: 上市日 降序)
+        init_headers = get_new_stock_table_headers(self.extra_cols)
+        self.sort_col = init_headers.index("上市日") if "上市日" in init_headers else 4
         self.sort_order = Qt.SortOrder.DescendingOrder
         self._load_sort_state()
 
@@ -684,6 +771,8 @@ class NewStockPanel(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.horizontalHeader().sortIndicatorChanged.connect(self._on_header_sort_changed)
+        if 0 <= self.sort_col < self.table.columnCount():
+            self.table.horizontalHeader().setSortIndicator(self.sort_col, self.sort_order)
 
         self.table.stock_activated.connect(self._on_stock_activated)
         self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
@@ -813,8 +902,11 @@ class NewStockPanel(QWidget):
         """用户点击表头排序列时触发：记录并持久化"""
         changed = col != self.sort_col or order != self.sort_order
         self._save_sort_state(col, order)
-        if changed and (getattr(self, '_table_painter', None) is not None
-                        or getattr(self, '_table_prepare_running', False)):
+        if changed and not self.df_data.empty:
+            painter = getattr(self, '_table_painter', None)
+            if painter is not None:
+                painter.close()
+                self._table_painter = None
             self._request_table_prepare()
 
     def _get_refresh_interval_sec(self) -> float:

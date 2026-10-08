@@ -85,6 +85,8 @@ def test_signal_outcome_uses_complete_paper_exit_and_both_side_fees(tmp_path, pa
     if not expected_closed:
         assert result["pending_count"] == 1
         return
+    assert datetime.fromisoformat(result["outcomes"][0]["realized_at"]).timestamp() == sell_time + 60
+    assert result["outcomes"][0]["computed_at"] == observed.isoformat()
     assert result["outcomes"][0]["fees"] == (10.15 if partial else 5.15)
     assert result["outcomes"][0]["net_pnl"] == (-0.15 if partial else 4.85)
     assert result["outcomes"][0]["label_candidate"] == ("LOSS_OR_FLAT" if partial else "PROFIT")
@@ -97,7 +99,8 @@ def test_signal_outcome_uses_complete_paper_exit_and_both_side_fees(tmp_path, pa
 
 def test_signal_quality_requires_forward_positive_paper_returns(tmp_path):
     outcomes = [
-        {"signal_type": "PULLBACK_BUY", "signal_tier": "S", "as_of_time": f"2026-09-{day:02d}",
+        {"signal_type": "PULLBACK_BUY", "signal_tier": "S", "as_of_time": f"2026-09-{day:02d}T02:00:00+00:00",
+         "realized_at": f"2026-09-{day + 1:02d}T02:00:00+00:00",
          "observation_hash": str(day), "net_return_pct": 1.0 if day < 9 else -1.0}
         for day in range(1, 11)
     ]
@@ -282,3 +285,58 @@ def test_source_refresh_reservation_serializes_concurrent_callers(tmp_path):
             ticker = f"{301689 + trial:06d}"
             results = list(executor.map(lambda _: _reserve_ats_source_refresh(tmp_path, ticker, now), range(4)))
             assert results.count(True) == 1
+
+
+@pytest.mark.parametrize("invalid", [None, "invalid", "2026-09-01T01:00:00+00:00"])
+def test_signal_quality_rejects_missing_or_invalid_maturity(tmp_path, invalid):
+    row = {"signal_type": "PULLBACK_BUY", "signal_tier": "S",
+           "as_of_time": "2026-09-01T02:00:00+00:00", "realized_at": invalid,
+           "observation_hash": "sample", "net_return_pct": 1.0}
+    result = learn_ats_signal_quality(tmp_path, {"outcomes": [row]})
+    assert result["state"] == "WAITING_PAPER_OUTCOMES"
+    assert result["rejected_count"] == 1
+    assert result["sample_count"] == 0
+
+
+def test_signal_quality_purges_labels_unavailable_at_forward_cutoff(tmp_path):
+    rows = [{"signal_type": "PULLBACK_BUY", "signal_tier": "S",
+             "as_of_time": f"2026-09-{day:02d}T02:00:00+00:00",
+             "realized_at": "2026-09-20T02:00:00+00:00",
+             "observation_hash": str(day), "net_return_pct": 10.0}
+            for day in range(1, 11)]
+    result = learn_ats_signal_quality(tmp_path, {"outcomes": rows})
+    assert result["state"] == "WAITING_MORE_PAPER_OUTCOMES"
+    assert result["groups"][0]["purged_count"] == 7
+    assert result["groups"][0]["train_count"] == 0
+    assert result["groups"][0]["train_mean_net_return_pct"] is None
+    assert result["entry_authorized"] is False
+
+
+def test_signal_quality_rejects_duplicate_and_nonfinite_samples_and_clears_stale_report(tmp_path):
+    row = {"signal_type": "PULLBACK_BUY", "signal_tier": "S",
+           "as_of_time": "2026-09-01T02:00:00+00:00",
+           "realized_at": "2026-09-02T02:00:00+00:00",
+           "observation_hash": "sample", "net_return_pct": 1.0}
+    result = learn_ats_signal_quality(tmp_path, {"outcomes": [row, row, None,
+        dict(row, observation_hash="bad", net_return_pct=float("nan"))]})
+    assert result["sample_count"] == 1
+    assert result["rejected_count"] == 3
+    empty = learn_ats_signal_quality(tmp_path, {"outcomes": []})
+    saved = json.loads((tmp_path / "data/ipo_learning/ats_signal_quality.latest.json").read_text(encoding="utf-8"))
+    assert saved == empty
+    assert saved["state"] == "WAITING_PAPER_OUTCOMES"
+
+
+@pytest.mark.parametrize("report", [{"outcomes": None}, {"outcomes": "bad"}, {"outcomes": {}}])
+def test_signal_quality_invalid_report_degrades_to_waiting(tmp_path, report):
+    assert learn_ats_signal_quality(tmp_path, report)["state"] == "WAITING_PAPER_OUTCOMES"
+
+
+def test_signal_quality_rejects_future_exit(tmp_path):
+    row = {"signal_type": "PULLBACK_BUY", "signal_tier": "S",
+           "as_of_time": "2026-09-01T02:00:00+00:00",
+           "realized_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+           "observation_hash": "future", "net_return_pct": 1.0}
+    result = learn_ats_signal_quality(tmp_path, {"outcomes": [row]})
+    assert result["rejected_count"] == 1
+    assert result["sample_count"] == 0
