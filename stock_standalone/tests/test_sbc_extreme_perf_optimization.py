@@ -16,6 +16,14 @@ import time
 import pytest
 import numpy as np
 import pandas as pd
+import threading
+from dataclasses import asdict
+from PyQt6.QtGui import QPainter, QPixmap
+from ats.intraday_strategy_engine import IntradayStrategyEngine
+from ats.new_stock_fetcher import NewStockFetcher
+from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+from ats.ui import intraday_strategy_dialog as sbc
+from ats.vwap_trading_engine import VWAPTradingEngine
 from unittest.mock import MagicMock, patch
 from types import SimpleNamespace
 
@@ -96,9 +104,12 @@ def test_vwap_proactive_strategy_vectorization_zero_drift():
     assert elapsed_ms < 800.0, f"策略评估耗时过长: {elapsed_ms:.2f} ms"
 
     # 热缓存再次评估
-    t1 = time.perf_counter()
-    signals_cached = SBCIntradayChartDialog._eval_vwap_proactive_strategy(state, df_bars, period_mode="10d")
-    cached_ms = (time.perf_counter() - t1) * 1000.0
+    cached_samples = []
+    for _ in range(7):
+        t1 = time.perf_counter()
+        signals_cached = SBCIntradayChartDialog._eval_vwap_proactive_strategy(state, df_bars, period_mode="10d")
+        cached_samples.append((time.perf_counter() - t1) * 1000.0)
+    cached_ms = float(np.median(cached_samples))
     assert cached_ms < 3.0, f"热命中耗时过长: {cached_ms:.2f} ms"
     assert signals == signals_cached
 
@@ -505,3 +516,322 @@ def test_p1_1_and_p1_2_headless_fetch_and_workbench_safety(qapp, monkeypatch):
 
     eval_dlg.close()
     wb.close()
+
+
+# Startup performance and correctness closure.
+def bars(count=400):
+    rng = np.random.default_rng(24)
+    close = 10 + np.cumsum(rng.normal(0, 0.02, count))
+    return pd.DataFrame({"date": ["2026-10-08"] * count, "open": close + 0.01,
+                         "high": close + 0.08, "low": close - 0.08, "close": close,
+                         "vwap": close + rng.normal(0, 0.03, count), "vol": np.arange(count) + 1.0},
+                        index=pd.date_range("2026-10-08 09:30", periods=count, freq="min"))
+
+
+def test_same_rule_is_atomic_across_workers():
+    entered, release = threading.Event(), threading.Event()
+    class PausedRule(dict):
+        def get(self, key, default=None):
+            if key == "trigger_expr":
+                entered.set()
+                assert release.wait(2)
+            return super().get(key, default)
+    rule = PausedRule(rule_id="race", trigger_expr="price > 0", sell_ratio=0.3)
+    engine = IntradayStrategyEngine.__new__(IntradayStrategyEngine)
+    engine.rule_state_map = {}
+    engine.is_stock_unlisted = lambda code: False
+    engine.get_open_price_tier = lambda *a, **k: ("normal", 0, "standard")
+    engine.get_current_phase = lambda *a: ({"rules": [rule]}, 0)
+    engine.mark_dirty = lambda: None
+    engine.save_intraday_cache = lambda **k: True
+    results, failures = [], []
+    def evaluate():
+        try:
+            results.extend(engine.evaluate_tick("600108", {"trade": 10.1}, 10, "10:00", strategy={}))
+        except Exception as exc:
+            failures.append(exc)
+    first, second = threading.Thread(target=evaluate), threading.Thread(target=evaluate)
+    first.start()
+    assert entered.wait(1)
+    second.start()
+    release.set()
+    first.join(2)
+    second.join(2)
+    assert not first.is_alive() and not second.is_alive() and not failures
+    assert len(results) == 1
+    assert engine.rule_state_map["600108"]["remaining_ratio"] == pytest.approx(0.7)
+
+
+@pytest.mark.parametrize("include_missing", [False, True])
+def test_prepared_features_equal_streaming_state(include_missing):
+    frame = bars(700)
+    if include_missing:
+        frame.loc[frame.index[::37], "close"] = 0
+        frame.loc[frame.index[::41], "vwap"] = 0
+    reference = VWAPTradingEngine(rule_model=SimpleNamespace(), arbiter=object())
+    prepared = VWAPTradingEngine(rule_model=SimpleNamespace(), arbiter=object())
+    prepared._prepare_replay_features("600108", *(frame[key].to_numpy() for key in
+                                                  ("open", "high", "low", "close", "vwap")))
+    for i, row in enumerate(frame.itertuples()):
+        if row.close <= 0:
+            continue
+        states = []
+        for engine in (reference, prepared):
+            engine.update_minute_bar("600108", i * 60, row.open, row.high, row.low, row.close, row.vol, row.vwap)
+            states.append(asdict(engine.compute_tick_state("600108", row.close, row.vwap)))
+        for key, value in states[0].items():
+            if isinstance(value, float):
+                assert states[1][key] == pytest.approx(value, abs=1e-12)
+            else:
+                assert states[1][key] == value
+
+
+def test_strategy_cache_reuses_copy_and_detects_history_and_rule_changes(monkeypatch):
+    # 实际规则模型用于评估；单独保留引用以模拟热重载。
+    from ats.vwap_rule_model import VWAPRuleModel
+    model = VWAPRuleModel()
+    state = SimpleNamespace(code="600108", _vwap_engine_cache=SimpleNamespace(rule_model=model))
+    frame = bars()
+    detect = MagicMock(return_value={})
+    monkeypatch.setattr(sbc, "detect_vwap_displacement_reversal", detect)
+    evaluate = sbc.SBCIntradayChartDialog._eval_vwap_proactive_strategy
+    first = evaluate(state, frame)
+    assert evaluate(state, frame.copy()) is first
+    assert detect.call_count == 1
+    revised = frame.copy()
+    revised.iloc[0, revised.columns.get_loc("high")] += 2
+    assert evaluate(state, revised) is not first
+    assert detect.call_count == 2
+    last = state._cached_vwap_signals
+    model._raw_config = dict(model._raw_config, cache_probe="changed")
+    assert evaluate(state, revised.copy()) is not last
+    assert detect.call_count == 2
+
+
+def test_preview_precedes_strategy_and_channel_and_can_cancel(monkeypatch):
+    frame = bars(20)
+    fetcher = MagicMock()
+    fetcher.fetch_stock_snapshot.return_value = {"open_price": 10, "price": 10.1}
+    fetcher.fetch_multi_horizon_vwap.return_value = (frame, {})
+    monkeypatch.setattr(sbc.TDXRealtimeFetcher, "get_instance", lambda: fetcher)
+    monkeypatch.setattr(NewStockFetcher, "refresh_ipo_calendar_background", lambda: None)
+    monkeypatch.setattr(sbc, "resolve_stock_name", lambda code: "测试")
+    monkeypatch.setattr(sbc.SBCIndicatorCache, "get", lambda *a: None)
+    events = []
+    state = SimpleNamespace(engine=None, _channel_overlay_enabled=True)
+    state._eval_vwap_proactive_strategy = lambda *a, **k: events.append("strategy") or []
+    state._fetch_channel_info_static = lambda *a: events.append("channel") or None
+    load = sbc.SBCIntradayChartDialog._do_fetch_chart_data
+    result = load(state, "600108", "10d", on_preview=lambda payload: events.append("preview"))
+    assert events == ["preview", "channel", "strategy"]
+    assert result["df_target"].equals(frame) and not result.get("is_preview")
+    events.clear()
+    cancelled = threading.Event()
+    def preview(payload):
+        events.append("preview")
+        cancelled.set()
+    result = load(state, "600108", "10d", on_preview=preview, is_cancelled_func=cancelled.is_set)
+    assert result["is_cancelled"] and events == ["preview"]
+
+
+def test_preview_keeps_worker_busy_and_rejects_old_epoch():
+    state = SimpleNamespace(code="600108", _load_epoch=2, _current_period_mode="10d",
+                            _load_inflight=True, _pending_load=None, _apply_chart_payload=MagicMock())
+    arrive = sbc.SBCIntradayChartDialog._on_async_chart_data_arrived
+    payload = {"is_preview": True}
+    arrive(state, 1, "600108", "10d", payload)
+    state._apply_chart_payload.assert_not_called()
+    arrive(state, 2, "600108", "10d", payload)
+    state._apply_chart_payload.assert_called_once()
+    assert state._load_inflight
+
+
+def test_static_layer_reuse_and_selection_invalidation(qapp, monkeypatch):
+    canvas = sbc.SBCChartCanvas()
+    canvas.resize(800, 560)
+    canvas.code = "600108"
+    canvas.set_data(bars(20), open_p=10)
+    paints = []
+    def paint(*args):
+        paints.append(True)
+        canvas._signal_hit_boxes = [{"trade_id": 1}]
+    monkeypatch.setattr(canvas, "_paint_intraday", paint)
+    monkeypatch.setattr(canvas, "_draw_amplitude_hud", lambda *a: None)
+    image = QPixmap(800, 560)
+    painter = QPainter(image)
+    try:
+        canvas._draw_chart_static_layer(painter, 50, 20, 700, 500)
+        canvas._signal_hit_boxes = []
+        canvas._draw_chart_static_layer(painter, 50, 20, 700, 500)
+        assert len(paints) == 1 and canvas._signal_hit_boxes == [{"trade_id": 1}]
+        canvas.selected_trade_id = 1
+        canvas._draw_chart_static_layer(painter, 50, 20, 700, 500)
+        assert len(paints) == 2
+    finally:
+        painter.end()
+        canvas.close()
+
+
+def test_pixel_simplification_preserves_column_extremes():
+    values = np.sin(np.arange(1000))
+    columns = np.repeat(np.arange(100), 10)
+    indices = sbc._pixel_extreme_indices(values, columns)
+    assert len(indices) <= 202 and indices[0] == 0 and indices[-1] == 999
+    for column in range(100):
+        original = values[columns == column]
+        retained = values[indices[columns[indices] == column]]
+        assert retained.min() == original.min() and retained.max() == original.max()
+
+
+def test_fast_tdx_selection_does_not_wait_for_slow_probe(monkeypatch, tmp_path):
+    import ats.tdx_realtime_fetcher as tdx
+    import sys_utils
+    release = threading.Event()
+    finished = threading.Event()
+    monkeypatch.setattr(tdx, "get_all_tdx_hosts", lambda: [("fast", "1", 7709), ("slow", "2", 7709)])
+    monkeypatch.setattr(sys_utils, "get_app_root", lambda: str(tmp_path))
+    state = SimpleNamespace(_conn_lock=threading.RLock(), add_log=MagicMock())
+    def probe(host):
+        if host[0] == "slow":
+            release.wait(2)
+            finished.set()
+        return (10.0, *host)
+    state._ping_single_host = probe
+    try:
+        TDXRealtimeFetcher._init_best_server(state)
+        assert state.current_host[0] == "fast" and not finished.is_set()
+    finally:
+        release.set()
+        assert finished.wait(1)
+
+
+def test_cached_name_and_ipo_do_not_initialize_or_request(monkeypatch):
+    import sys_utils
+    monkeypatch.setattr(NewStockFetcher, "_instance", None)
+    monkeypatch.setattr(NewStockFetcher, "get_instance", MagicMock(side_effect=AssertionError("no initialization")))
+    assert NewStockFetcher.get_cached_ipo_calendar() == {}
+    monkeypatch.setattr(sys_utils, "_resolved_name_cache", {})
+    monkeypatch.setattr(sys_utils, "_SINA_ENGINE", MagicMock())
+    assert sys_utils.get_cached_stock_name("600108") == "个股_600108"
+    sys_utils._SINA_ENGINE.get_code_cname.assert_not_called()
+
+
+def test_launcher_batches_windows_and_flushes_recents_once(qapp, monkeypatch, tmp_path):
+    import json
+    import run_sbc
+    path = tmp_path / "layout.json"
+    layout = {"initialized": True, "sbc_holdings_windows": [{"code": f"60010{i}"} for i in range(5)]}
+    path.write_text(json.dumps(layout), encoding="utf-8")
+    monkeypatch.setattr(run_sbc, "_get_launcher_layout_cfg_path", lambda: str(path))
+    monkeypatch.setattr(sbc, "_get_sbc_layout_cfg_path", lambda: str(path))
+    monkeypatch.setattr(sbc, "QSettings", MagicMock())
+    monkeypatch.setattr(run_sbc, "_is_restoring_holdings", False)
+    queue = []
+    monkeypatch.setattr(run_sbc, "QTimer", SimpleNamespace(singleShot=lambda delay, callback: queue.append(callback)))
+    persist = MagicMock(wraps=sbc._persist_sbc_recent_codes)
+    monkeypatch.setattr(sbc, "_persist_sbc_recent_codes", persist)
+    def open_window(parent, code, **kwargs):
+        assert kwargs["record_open"] is False
+        assert sbc._read_sbc_layout_config(str(path)) is layout_data[0]
+        sbc._save_sbc_recent_code(code)
+        return MagicMock(code=code)
+    # 缓存对象来自读取后的配置，捕获首次共享对象。
+    layout_data = []
+    original_begin = sbc._begin_sbc_startup_batch
+    def begin(path, data):
+        layout_data.append(data)
+        original_begin(path, data)
+    monkeypatch.setattr(run_sbc, "_begin_sbc_startup_batch", begin)
+    monkeypatch.setattr(run_sbc, "open_sbc_chart_dialog", open_window)
+    windows = run_sbc.restore_launcher_holdings_windows()
+    assert len(windows) == 2 and run_sbc._is_restoring_holdings and persist.call_count == 0
+    while queue:
+        queue.pop(0)()
+    assert len(windows) == 5 and not run_sbc._is_restoring_holdings and persist.call_count == 1
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["sbc_holdings_windows"] == layout["sbc_holdings_windows"]
+    assert saved["sbc_recent_codes"] == [f"60010{i}" for i in range(4, -1, -1)]
+
+
+@pytest.mark.parametrize("history_available,is_unlisted", [(True, False), (False, False), (False, True)])
+def test_all_codes_ipc_snapshot_and_history_before_scoring(monkeypatch, history_available, is_unlisted):
+    source = pd.DataFrame({"open": [10.0], "trade": [11.0]}, index=["600108"])
+    engine, fetcher = MagicMock(), MagicMock()
+    engine.get_all_target_codes.return_value = ["600108"]
+    engine.auto_select_strategy.return_value = {"name": "test"}
+    engine.get_stock_ladder_spec.return_value = {"float_mv_yi": 15, "issue_price": 10}
+    engine.is_stock_unlisted.return_value = is_unlisted
+    events, cards = [], []
+    def snapshot(frame, code):
+        assert frame is not source and frame.equals(source)
+        return {"open_price": 10.0, "price": 11.0}
+    engine.extract_market_snapshot_from_df.side_effect = snapshot
+    fetcher.fetch_intraday_bars.return_value = bars(20) if history_available else pd.DataFrame()
+    engine.hydrate_from_intraday_df.side_effect = lambda *a, **k: events.append("hydrate") or True
+    engine.evaluate_tick.side_effect = lambda *a, **k: events.append("tick") or []
+    engine.evaluate_seven_nodes.side_effect = lambda *a, **k: events.append("score") or {}
+    workbench = SimpleNamespace(tdx_fetcher=fetcher, selected_data_source="ATS_IPC", _latest_df=source)
+    state = SimpleNamespace(engine=engine, workbench=workbench, lbl_meta=MagicMock(),
+                            _eval_finished=SimpleNamespace(emit=lambda results, *args: cards.extend(results)))
+    class ImmediateThread:
+        def __init__(self, target, **kwargs):
+            self.target = target
+        def start(self):
+            self.target()
+    monkeypatch.setattr(sbc.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(sbc, "resolve_stock_name", lambda code: "测试")
+    monkeypatch.setattr(sbc.TDXRealtimeFetcher, "get_instance", lambda: fetcher)
+    sbc.AllCodesStrategyEvalDialog.run_evaluation(state)
+    fetcher.fetch_stock_snapshot.assert_not_called()
+    if history_available:
+        assert events == ["hydrate", "tick", "score"] and not cards[0]["is_error"]
+    elif is_unlisted:
+        assert events == ["tick", "score"] and not cards[0]["is_error"]
+        fetcher.fetch_intraday_bars.assert_not_called()
+    else:
+        assert events == [] and cards[0]["is_error"]
+
+
+def test_memory_peek_has_no_disk_sync_and_rejects_stale_day():
+    from ats.tdx_realtime_fetcher import TDXGlobalCachePool
+    from datetime import datetime
+    pool = TDXGlobalCachePool.__new__(TDXGlobalCachePool)
+    pool._mutex = threading.RLock()
+    frame = bars(20)
+    pool._multi_day_df_cache = {("600108", 10): (frame, time.time(), datetime.now().strftime("%Y-%m-%d"))}
+    pool._maybe_sync_from_ramdisk = MagicMock(side_effect=AssertionError("UI disk sync"))
+    copy = pool.peek_multi_day_df("600108", 10)
+    assert copy is not frame and copy.equals(frame)
+    pool._multi_day_df_cache[("600108", 10)] = (frame, time.time(), "2000-01-01")
+    assert pool.peek_multi_day_df("600108", 10) is None
+    pool._maybe_sync_from_ramdisk.assert_not_called()
+
+
+def test_cached_preview_does_not_initialize_tdx(monkeypatch):
+    from datetime import datetime
+    frame = bars(20)
+    frame["date"] = datetime.now().strftime("%Y-%m-%d")
+    pool = SimpleNamespace(peek_multi_day_df=lambda *a: frame.copy())
+    monkeypatch.setattr(sbc.TDXGlobalCachePool, "_instance", pool)
+    monkeypatch.setattr(sbc.TDXRealtimeFetcher, "get_instance", MagicMock(side_effect=AssertionError("UI initialization")))
+    state = SimpleNamespace(code="600108", _current_period_mode="1m", _apply_chart_payload=MagicMock())
+    sbc.SBCIntradayChartDialog._render_skeleton_or_cached_frame(state)
+    payload = state._apply_chart_payload.call_args[0][0]
+    assert payload["is_cached_preview"] and payload["is_preview"]
+    assert payload["df_target"].equals(frame)
+
+
+def test_listing_checks_only_read_cache_and_follow_calendar_revision(monkeypatch):
+    from datetime import datetime
+    monkeypatch.setattr(NewStockFetcher, "_instance", None)
+    monkeypatch.setattr(TDXRealtimeFetcher, "_instance", None)
+    monkeypatch.setattr(NewStockFetcher, "get_instance", MagicMock(side_effect=AssertionError("UI IPO initialization")))
+    monkeypatch.setattr(TDXRealtimeFetcher, "get_instance", MagicMock(side_effect=AssertionError("UI TDX initialization")))
+    engine = IntradayStrategyEngine.__new__(IntradayStrategyEngine)
+    engine.get_stock_ladder_spec = lambda code: {}
+    assert not engine.is_stock_first_listing_day("920199")
+    assert not engine.is_stock_unlisted("920199")
+    calendar = {"920199": {"listing_date": datetime.now().strftime("%Y-%m-%d"), "status": "首日(N)"}}
+    monkeypatch.setattr(NewStockFetcher, "_instance", SimpleNamespace(_cached_ipo_dict=calendar, _last_calendar_fetch_time=1.0))
+    assert engine.is_stock_first_listing_day("920199")
+    assert not engine.is_stock_unlisted("920199")

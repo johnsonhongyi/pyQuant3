@@ -21,6 +21,7 @@ import math
 import logging
 import threading
 import weakref
+import hashlib
 from copy import copy as shallow_copy
 import pandas as pd
 import numpy as np
@@ -47,13 +48,45 @@ from PyQt6.QtWidgets import (
     QCheckBox, QSlider, QToolBar, QStackedWidget, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QObject, QTimer, pyqtSignal, QSettings, QParallelAnimationGroup, QPropertyAnimation, QEasingCurve, QRect, QRectF, QEvent, QPoint, QPointF
-from PyQt6.QtGui import QColor, QFont, QBrush, QIcon, QPainter, QPen, QPainterPath, QCursor, QPolygon, QPolygonF
+from PyQt6.QtGui import QColor, QFont, QBrush, QIcon, QPainter, QPen, QPainterPath, QCursor, QPolygon, QPolygonF, QPixmap
 
-from sys_utils import resolve_stock_name
+from sys_utils import resolve_stock_name, get_cached_stock_name
 from ats.intraday_strategy_engine import IntradayStrategyEngine
-from ats.tdx_realtime_fetcher import TDXRealtimeFetcher, normalize_tdx_target
+from ats.tdx_realtime_fetcher import TDXRealtimeFetcher, TDXGlobalCachePool, normalize_tdx_target
 from ats.ui.styles import apply_dark_theme, DARK_THEME_QSS, bind_top_shortcut, set_seamless_stay_on_top
 from signal_types import SignalPoint, SignalType, SignalSource
+
+
+def _frame_content_revision(frame: pd.DataFrame):
+    """跨副本稳定，且历史行、索引、列及类型修订都会失效。"""
+    digest = hashlib.sha256()
+    schema = []
+    for column, series in frame.items():
+        schema.append((column, str(series.dtype)))
+        if series.dtype.kind in "biufcmM" and not isinstance(series.dtype, pd.api.extensions.ExtensionDtype):
+            digest.update(series.to_numpy().tobytes())
+        else:
+            digest.update(repr(series.tolist()).encode("utf-8"))
+    if frame.index.dtype.kind in "biufcmM":
+        digest.update(frame.index.to_numpy().tobytes())
+    else:
+        digest.update(repr(frame.index.tolist()).encode("utf-8"))
+    digest.update(repr(schema).encode("utf-8"))
+    return digest.digest()
+
+
+def _pixel_extreme_indices(values, pixel_columns):
+    """仅简化显示路径；每个像素列保留按时间排序的高低点。"""
+    values = np.asarray(values, dtype=float)
+    if len(values) < 3 or len(values) <= 2 * (int(pixel_columns[-1]) + 1) or not np.isfinite(values).all():
+        return np.arange(len(values))
+    starts = np.flatnonzero(np.r_[True, pixel_columns[1:] != pixel_columns[:-1]])
+    ends = np.r_[starts[1:], len(values)]
+    indices = [0, len(values) - 1]
+    for start, end in zip(starts, ends):
+        group = values[start:end]
+        indices.extend((start + int(np.argmin(group)), start + int(np.argmax(group))))
+    return np.unique(indices)
 
 try:
     from JohnsonUtil import commonTips as cct
@@ -991,7 +1024,7 @@ class SBCChartCanvas(QWidget):
         if self.df_intraday is None or len(self.df_intraday) < 15:
             try:
                 from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
-                fetcher = TDXRealtimeFetcher.get_instance()
+                fetcher = TDXRealtimeFetcher._instance
                 cat_req = p_mode if p_mode in ("5m", "15m", "30m", "60m", "day", "2k", "3k", "week", "month") else "60m"
                 df_k = fetcher.get_cached_kline_bars(c_clean, category=cat_req) if hasattr(fetcher, "get_cached_kline_bars") else None
                 if df_k is not None and not df_k.empty and len(df_k) >= 15:
@@ -1320,16 +1353,17 @@ class SBCChartCanvas(QWidget):
             # ── 3. 兜底方案：仅在 1m 或短周期分钟 K 线且本地无多日数据时，优先读取日 K 内存缓存，严禁阻塞 UI 线程 ──
             if not days_detail:
                 from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
-                fetcher = TDXRealtimeFetcher.get_instance()
+                fetcher = TDXRealtimeFetcher._instance
                 ready = getattr(self, "_amplitude_day_result", None)
-                df_day = ready[1] if ready and ready[0] == c_clean else fetcher.get_cached_kline_bars(c_clean, category="day", min_count=2)
+                df_day = ready[1] if ready and ready[0] == c_clean else (fetcher.get_cached_kline_bars(c_clean, category="day", min_count=2) if fetcher else None)
                 if df_day is None or df_day.empty or len(df_day) < 2:
                     if c_clean not in self._amplitude_fetching_codes and time.monotonic() >= self._amplitude_retry_after.get(c_clean, 0.0):
                         self._amplitude_fetching_codes.add(c_clean)
                         def _async_fetch_day():
                             d_df = None
                             try:
-                                d_df = fetcher.fetch_kline_bars(c_clean, category="day", count=8)
+                                background_fetcher = fetcher or TDXRealtimeFetcher.get_instance()
+                                d_df = background_fetcher.fetch_kline_bars(c_clean, category="day", count=8)
                             except Exception as exc:
                                 logger.debug(f"振幅补拉 {c_clean} 异常: {exc}")
                             finally:
@@ -1994,12 +2028,17 @@ class SBCChartCanvas(QWidget):
     def _set_chart_snapshot(self, frame: pd.DataFrame, signals):
         """画布持有独立快照；行情和信号变更统一经 setter 发布新版本。"""
         self.df_intraday = frame.copy() if frame is not None else pd.DataFrame()
+        if not self.df_intraday.empty:
+            volumes = self._extract_intraday_bar_volumes(self.df_intraday)
+            if len(volumes) == len(self.df_intraday):
+                self.df_intraday["_bar_vol_computed"] = volumes
         self.signals = [shallow_copy(sig) for sig in (signals or [])]
         self._data_revision = getattr(self, "_data_revision", 0) + 1
         self._cached_times_token = None
         self._cached_kline_extremes_token = None
         self._cached_intraday_layout_token = None
         self._cached_kline_layout_token = None
+        self._static_layer_token = None
 
     def set_data(self, df_intraday: pd.DataFrame, open_p: float = 0.0, vwap_p: float = 0.0, high_p: float = 0.0, low_p: float = 0.0, sell_min: float = 0.0, sell_max: float = 0.0, signals: list = None, period_mode: str = "1m"):
         self._set_chart_snapshot(df_intraday, signals)
@@ -2080,15 +2119,7 @@ class SBCChartCanvas(QWidget):
                 painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, f"⏳ 正在加载 [{self.period_mode}] 行情走势图...")
                 return
 
-            # 1. K 线图模式 (5m / 15m / 30m / 60m / day / 2d / week / month)
-            if self.period_mode in ["5m", "15m", "30m", "60m", "day", "2d", "2k", "3k", "week", "month"]:
-                self._paint_kline(painter, margin_left, margin_top, chart_w, chart_h)
-            else:
-                # 2. 分时图模式 (1m / 3d / 5d / 10d)
-                self._paint_intraday(painter, margin_left, margin_top, chart_w, chart_h)
-
-            # 2.5 📊 绘制走势图右上角近几日振幅活跃度 HUD (对齐图 2 红框位置)
-            self._draw_amplitude_hud(painter, margin_left, margin_top, chart_w, chart_h)
+            self._draw_chart_static_layer(painter, margin_left, margin_top, chart_w, chart_h)
 
             # 3. 🔍 顶层绘制鼠标左键框选放大矩形遮罩 (Rubberband Box Zoom)
             if getattr(self, '_is_box_zooming', False) and self._box_zoom_origin and self._box_zoom_current:
@@ -2337,6 +2368,39 @@ class SBCChartCanvas(QWidget):
         finally:
             painter.end()
 
+    def _draw_chart_static_layer(self, painter, margin_left, margin_top, chart_w, chart_h):
+        """行情/布局变化才重建静态图层；十字线和框选仍逐次绘制。"""
+        scalar_keys = ("code", "period_mode", "_data_revision", "_zoom_start_idx", "_zoom_end_idx",
+                       "_is_right_anchored", "_visible_bar_count", "selected_trade_id", "_vol_mode",
+                       "open_price", "vwap", "high_price", "low_price", "target_sell_min", "target_sell_max",
+                       "channel_overlay_enabled", "auto_eval_enabled")
+        object_keys = ("channel_info", "multi_vwap_snapshot", "strategy_eval_result", "amplitude_info")
+        ratio = self.devicePixelRatioF()
+        token = (self.width(), self.height(), ratio, self.font().toString(),
+                 tuple(getattr(self, key, None) for key in scalar_keys),
+                 tuple(repr(getattr(self, key, None)) for key in object_keys))
+        if getattr(self, "_static_layer_token", None) != token:
+            layer = QPixmap(math.ceil(self.width() * ratio), math.ceil(self.height() * ratio))
+            layer.setDevicePixelRatio(ratio)
+            layer.fill(Qt.GlobalColor.transparent)
+            layer_painter = QPainter(layer)
+            try:
+                layer_painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                layer_painter.setFont(self.font())
+                if self.period_mode in ("5m", "15m", "30m", "60m", "day", "2d", "2k", "3k", "week", "month"):
+                    self._paint_kline(layer_painter, margin_left, margin_top, chart_w, chart_h)
+                else:
+                    self._paint_intraday(layer_painter, margin_left, margin_top, chart_w, chart_h)
+                self._draw_amplitude_hud(layer_painter, margin_left, margin_top, chart_w, chart_h)
+            finally:
+                layer_painter.end()
+            self._static_layer = layer
+            self._static_hit_boxes = list(self._signal_hit_boxes)
+            self._static_layer_token = token
+        else:
+            self._signal_hit_boxes = list(self._static_hit_boxes)
+        painter.drawPixmap(0, 0, self._static_layer)
+
     def _paint_intraday(self, painter: QPainter, margin_left: int, margin_top: int, chart_w: int, chart_h: int):
         self._channel_box_h = 0
         df_view, start_i, end_i = self._get_visible_slice()
@@ -2457,8 +2521,11 @@ class SBCChartCanvas(QWidget):
         def price_to_y(p_val: float) -> float:
             return margin_top + main_h - ((p_val - min_p) / p_range) * main_h
 
+        total_n = max(240 if self.period_mode == "1m" and not self._is_zoomed() else len(prices), len(prices))
+        pixel_columns = np.floor(np.arange(len(prices)) / max(1, total_n - 1)
+                                 * active_chart_w * self.devicePixelRatioF()).astype(int)
+
         def time_to_x(idx_val: int) -> float:
-            total_n = max(240 if self.period_mode == "1m" and not self._is_zoomed() else len(prices), len(prices))
             return margin_left + (idx_val / max(1, total_n - 1)) * active_chart_w
 
         # 绘制背景水平网格线
@@ -2669,7 +2736,7 @@ class SBCChartCanvas(QWidget):
         if len(vwaps) > 1:
             path_vwap = QPainterPath()
             path_vwap.moveTo(time_to_x(0), price_to_y(vwaps[0]))
-            for i in range(1, len(vwaps)):
+            for i in _pixel_extreme_indices(vwaps, pixel_columns)[1:]:
                 if vwaps[i] > 0.01:
                     path_vwap.lineTo(time_to_x(i), price_to_y(vwaps[i]))
             painter.setPen(QPen(QColor("#ffd700"), 1.5, Qt.PenStyle.DashLine))
@@ -2679,7 +2746,7 @@ class SBCChartCanvas(QWidget):
         if len(prices) > 1:
             path_p = QPainterPath()
             path_p.moveTo(time_to_x(0), price_to_y(prices[0]))
-            for i in range(1, len(prices)):
+            for i in _pixel_extreme_indices(prices, pixel_columns)[1:]:
                 if prices[i] > 0.01:
                     path_p.lineTo(time_to_x(i), price_to_y(prices[i]))
             painter.setPen(QPen(QColor("#00b4d8"), 1.8))
@@ -3049,12 +3116,20 @@ class SBCChartCanvas(QWidget):
                 total_n = max(240 if self.period_mode == "1m" and not self._is_zoomed() else len(prices), len(prices))
                 bar_step = chart_w / max(1, total_n - 1)
                 bar_w = max(1.0, min(10.0, bar_step * 0.75))
-                for vi in range(min(len(prices), len(vols))):
+                count = min(len(prices), len(vols))
+                if count > active_chart_w * self.devicePixelRatioF():
+                    starts = np.flatnonzero(np.r_[True, pixel_columns[1:count] != pixel_columns[:count-1]])
+                    ends = np.r_[starts[1:], count]
+                    draw_vols = np.add.reduceat(vols[:count], starts)
+                    draw_indices = ends - 1
+                    draw_max = max(float(np.nanmax(draw_vols)), 1.0)
+                else:
+                    draw_vols, draw_indices, draw_max = vols[:count], np.arange(count), max_vol
+                for vi, v_val in zip(draw_indices, draw_vols):
                     vx = time_to_x(vi)
-                    v_val = vols[vi]
                     if v_val <= 0:
                         continue
-                    bar_h = max(1.0, (v_val / max_vol) * (vol_h - 18))
+                    bar_h = max(1.0, (v_val / draw_max) * (vol_h - 18))
                     by = vol_top + vol_h - bar_h
 
                     # 涨红跌绿
@@ -4845,8 +4920,9 @@ class SBCIntradayChartDialog(QWidget):
         # 🤖 挂载全自动分时多周期交易执行系统 (VWAP进攻端 + ProactiveExit 8层防守端守护 + ConsensusArbiter 双组共识)
         self.vwap_auto_strategy_enabled: bool = True
         self.vwap_engine = VWAPTradingEngine() if VWAPTradingEngine else None
-        self.exit_engine = ProactiveExitEngine() if ProactiveExitEngine else None
-        self.arbiter = ConsensusArbiter() if ConsensusArbiter else None
+        rule_model = self.vwap_engine.rule_model if self.vwap_engine else None
+        self.exit_engine = ProactiveExitEngine(rule_model=rule_model) if ProactiveExitEngine else None
+        self.arbiter = self.vwap_engine.arbiter if self.vwap_engine else (ConsensusArbiter() if ConsensusArbiter else None)
 
         # ⚡ 阶段2 两阶段秒开异步加载控制与 Epoch 防旧数据覆写门禁
         self.async_load_enabled: bool = True
@@ -4861,7 +4937,7 @@ class SBCIntradayChartDialog(QWidget):
             | Qt.WindowType.WindowMinMaxButtonsHint
             | Qt.WindowType.WindowCloseButtonHint
         )
-        self.setWindowTitle(f"📈 【{self.code} {resolve_stock_name(self.code)}】SBC 实盘分时走势与关键阶梯基准图")
+        self.setWindowTitle(f"📈 【{self.code} {get_cached_stock_name(self.code)}】SBC 实盘分时走势与关键阶梯基准图")
         self.setMinimumSize(480, 320) # 💡 合理的最小窗口尺寸保护，确保顶栏按钮与图元不被挤爆
         self.setStyleSheet("""
             SBCIntradayChartDialog, QWidget {
@@ -4907,7 +4983,7 @@ class SBCIntradayChartDialog(QWidget):
         tb_layout.setContentsMargins(2, 2, 2, 2)
         tb_layout.setSpacing(3)
 
-        self.lbl_title = QLabel(f"📊 {self.code} {resolve_stock_name(self.code)}")
+        self.lbl_title = QLabel(f"📊 {self.code} {get_cached_stock_name(self.code)}")
         self.lbl_title.setStyleSheet("font-size: 9pt; font-weight: bold; color: #00ff88;")
 
         # 周期切换按钮组: [1日] [2日] [3日] [5日] [10日] | [5分K] [30分K] [60分K] [日K] [周K] [月K]
@@ -5260,8 +5336,8 @@ class SBCIntradayChartDialog(QWidget):
         self._geo_save_timer.timeout.connect(self._do_save_sbc_geometry)
 
         # 7.2 VWAP 策略引擎缓存与增量计算指纹 (P0 消除每轮全量 2400 根 Bar 逐 Tick 重新模拟)
-        self._vwap_engine_cache = VWAPTradingEngine() if VWAPTradingEngine else None
-        self._exit_engine_cache = ProactiveExitEngine() if ProactiveExitEngine else None
+        self._vwap_engine_cache = self.vwap_engine
+        self._exit_engine_cache = self.exit_engine
         self._cached_strat_fp = None
         self._cached_vwap_signals = []
         self._cached_rev_fp = None
@@ -5289,13 +5365,47 @@ class SBCIntradayChartDialog(QWidget):
 
     def _render_skeleton_or_cached_frame(self):
         """【⚡ 阶段2 两阶段秒开】第一阶段：微秒级轻量骨架直出，主线程 0 阻塞呈现"""
-        name = resolve_stock_name(self.code)
+        name = get_cached_stock_name(self.code)
         mode = getattr(self, '_current_period_mode', '1m')
         if hasattr(self, 'lbl_title') and self.lbl_title:
             self.lbl_title.setText(f"📊 {self.code} {name} | [{mode.upper()}] 正在直连...")
             self.lbl_title.setToolTip(f"【{self.code} {name}】正在通过独立高速通道载入数据...")
         if hasattr(self, 'lbl_info') and self.lbl_info:
             self.lbl_info.setText("💡 正在通过独立高速通道载入数据...")
+        pool = TDXGlobalCachePool._instance
+        if pool is None or mode not in ("1m", "3d", "5d", "10d"):
+            return
+        try:
+            days = {"1m": 10, "3d": 3, "5d": 5, "10d": 10}[mode]
+            frame = pool.peek_multi_day_df(self.code, days)
+            if frame is None and days != 10:
+                frame = pool.peek_multi_day_df(self.code, 10)
+            if frame is None or frame.empty or "date" not in frame:
+                return
+            history_frame = frame
+            dates = frame["date"].astype(str)
+            if mode == "1m":
+                frame = frame[dates == datetime.now().strftime("%Y-%m-%d")].copy()
+            else:
+                frame = frame[dates.isin(sorted(dates.unique())[-days:])].copy()
+                if "bar_amt" in frame and "bar_vol" in frame:
+                    amounts = frame["close"] * frame["bar_vol"] if normalize_tdx_target(self.code)[0] else frame["bar_amt"]
+                    frame["vwap"] = (amounts.cumsum() / frame["bar_vol"].cumsum().replace(0, np.nan)).fillna(0)
+            if frame.empty:
+                return
+            today = frame[frame["date"].astype(str) == str(frame["date"].iloc[-1])]
+            op = float(today["open"].iloc[0])
+            p = float(frame["close"].iloc[-1])
+            self._apply_chart_payload({
+                "code": self.code, "mode": mode, "is_preview": True, "df_target": frame,
+                "is_cached_preview": True,
+                "amplitude_history_df": history_frame if mode == "1m" else None,
+                "op": op, "p": p, "vw": float(frame.iloc[-1].get("vwap", p)),
+                "hi": float(today["high"].max()), "lo": float(today["low"].min()),
+                "sigs": [], "data_fp": ("cached_preview", self.code, mode, _frame_content_revision(frame)),
+            })
+        except Exception as exc:
+            logger.debug("SBC 缓存首帧不可用 %s: %s", self.code, exc)
 
     def _on_poll_timer_tick(self):
         """定时器心跳周期检查与刷新：窗口隐藏或非交易期自动抑制"""
@@ -5435,6 +5545,8 @@ class SBCIntradayChartDialog(QWidget):
         """
         【💾 物理写盘】原子持久化窗口尺寸大小、屏显坐标与看盘周期到 JSON 与 QSettings (支持任意时段实时配置更新)
         """
+        if _sbc_startup_layout is not None:
+            return
         geo_dict = getattr(self, "_memory_geo_dict", None) or self._get_effective_normal_geometry()
         if not geo_dict or geo_dict.get("width", 0) < 200 or geo_dict.get("height", 0) < 100:
             return
@@ -5519,8 +5631,7 @@ class SBCIntradayChartDialog(QWidget):
             cfg_path = _get_sbc_layout_cfg_path()
             if os.path.exists(cfg_path):
                 try:
-                    with open(cfg_path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
+                    data = _read_sbc_layout_config(cfg_path)
 
                     if "sbc_auto_eval_enabled" in data:
                         restored_auto_eval = bool(data["sbc_auto_eval_enabled"])
@@ -6724,18 +6835,23 @@ class SBCIntradayChartDialog(QWidget):
         last_vol = float(last_row.get("vol", last_row.get("volume", 0.0)))
         last_idx = str(df_bars.index[-1])
 
-        # 🚀 指纹缓存判定 (P0 核心瓶颈突破)：若数据行数与最新价未变，直接复用上轮计算结果，0 毫秒极速返回
+        # 完整内容版本避免历史修订漏算，也允许缓存层的行情副本命中。
+        frame_revision = _frame_content_revision(df_bars)
+        rule_model = getattr(getattr(self, "_vwap_engine_cache", None), "rule_model", None)
+        if rule_model is not None:
+            rule_model.check_and_reload_if_modified()
+        rule_revision = json.dumps(getattr(rule_model, "_raw_config", {}), sort_keys=True, default=str)
         strat_fp = (self.code, period_mode, n_bars, last_idx, last_close, last_vol,
                     last_row.get("high"), last_row.get("low"), last_row.get("vwap"),
-                    last_row.get("bar_amt", last_row.get("amount")))
+                    last_row.get("bar_amt", last_row.get("amount")), frame_revision, rule_revision)
         # 输入按快照交付；不同帧即使尾部相同，也可能包含历史行情修订。
-        if getattr(self, '_cached_strategy_frame', None) is df_bars and getattr(self, '_cached_strat_fp', None) == strat_fp and hasattr(self, '_cached_vwap_signals'):
+        if getattr(self, '_cached_strat_fp', None) == strat_fp and hasattr(self, '_cached_vwap_signals'):
             return self._cached_vwap_signals
 
         bar_dates = normalize_intraday_bar_dates(df_bars)
         # 💥 [NEW] 预先判定分时多日底抬高企稳与VWAP位移反转结构 (带指纹缓存)
-        rev_fp = (self.code, n_bars, last_idx, last_close)
-        if getattr(self, '_cached_reversal_frame', None) is df_bars and getattr(self, '_cached_rev_fp', None) == rev_fp and hasattr(self, '_cached_reversal_info'):
+        rev_fp = (self.code, frame_revision)
+        if getattr(self, '_cached_rev_fp', None) == rev_fp and hasattr(self, '_cached_reversal_info'):
             reversal_info = self._cached_reversal_info
         else:
             reversal_info = {}
@@ -6745,7 +6861,6 @@ class SBCIntradayChartDialog(QWidget):
                 except Exception:
                     reversal_info = {}
             self._cached_rev_fp = rev_fp
-            self._cached_reversal_frame = df_bars
             self._cached_reversal_info = reversal_info
 
         is_reversal_struct = bool(reversal_info.get("is_reversal", False))
@@ -6754,8 +6869,12 @@ class SBCIntradayChartDialog(QWidget):
         prev_high_level = float(reversal_info.get("prev_high", 0.0))
 
         signals = []
-        exit_engine = ProactiveExitEngine()
-        vwap_engine = VWAPTradingEngine()
+        if rule_model is None:
+            vwap_engine = VWAPTradingEngine()
+            rule_model = vwap_engine.rule_model
+        else:
+            vwap_engine = VWAPTradingEngine(rule_model=rule_model)
+        exit_engine = ProactiveExitEngine(rule_model=rule_model)
 
         trade_id_seq = 0
         in_pos = False
@@ -6786,6 +6905,7 @@ class SBCIntradayChartDialog(QWidget):
             vols_arr = np.zeros(n_bars, dtype=float)
 
         time_keys = [str(x) for x in df_bars.index]
+        vwap_engine._prepare_replay_features(self.code, opens_arr, highs_arr, lows_arr, closes_arr, vwaps_arr)
         for idx in range(n_bars):
             close_p = float(closes_arr[idx])
             if close_p <= 0.0:
@@ -7037,7 +7157,7 @@ class SBCIntradayChartDialog(QWidget):
         t_cnt = len(trades_df) if trades_df is not None else 0
         win_cnt = len(trades_df[trades_df['pnl_pct'] > 0]) if trades_df is not None and not trades_df.empty else 0
         win_color = "#ef4444" if win_r >= 50.0 else "#22c55e"
-        self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [多周期通道回测] 交易:{t_cnt}笔 胜率:{win_r:.1f}% (点击标记看收益)")
+        self.lbl_title.setText(f"📊 {self.code} {get_cached_stock_name(self.code)} | [多周期通道回测] 交易:{t_cnt}笔 胜率:{win_r:.1f}% (点击标记看收益)")
         self.lbl_info.setText(
             f"💡 <b>【通道回测收益】</b> 交易 <font color='#38bdf8'><b>{t_cnt}</b></font> 笔, "
             f"胜率 <font color='{win_color}'><b>{win_r:.1f}%</b></font> | "
@@ -7084,7 +7204,7 @@ class SBCIntradayChartDialog(QWidget):
         self.custom_kline_df = None
 
         # 更新窗口标题与标题栏
-        st_name = resolve_stock_name(c_clean)
+        st_name = get_cached_stock_name(c_clean)
         self.setWindowTitle(f"📈 【{c_clean} {st_name}】SBC 实盘分时走势与关键阶梯基准图")
         self.lbl_title.setText(f"📊 {c_clean} {st_name}")
 
@@ -7145,7 +7265,7 @@ class SBCIntradayChartDialog(QWidget):
         c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
         if not c_clean or c_clean == "000000":
             return str(code)
-        st_name = resolve_stock_name(c_clean)
+        st_name = get_cached_stock_name(c_clean)
         if st_name and st_name != c_clean and not st_name.startswith("个股_"):
             return f"{c_clean} {st_name}"
         return c_clean
@@ -7227,7 +7347,7 @@ class SBCIntradayChartDialog(QWidget):
                 except Exception:
                     pass
             activate_and_raise_sbc_window(existing)
-            st_name = resolve_stock_name(c_clean)
+            st_name = get_cached_stock_name(c_clean)
             self.lbl_info.setText(f"📌 标的 <font color='#38bdf8'><b>[{c_clean} {st_name}]</b></font> 已经处于打开状态，已就地置顶激活！")
             self.lbl_info.setToolTip(f"📌 标的 [{c_clean} {st_name}] 已经处于打开状态，已就地置顶激活并在当前屏幕自动重排！")
             QTimer.singleShot(80, lambda: rearrange_all_sbc_windows(parent_win=existing))
@@ -7251,7 +7371,7 @@ class SBCIntradayChartDialog(QWidget):
             new_dlg.show()
             new_dlg.raise_()
             new_dlg.activateWindow()
-            st_name = resolve_stock_name(c_clean)
+            st_name = get_cached_stock_name(c_clean)
             self.lbl_info.setText(f"🚀 已在当前屏幕打开标的 <font color='#38bdf8'><b>[{c_clean} {st_name}]</b></font> 并自动重排！")
             self.lbl_info.setToolTip(f"🚀 已在当前屏幕以独立窗口打开标的 [{c_clean} {st_name}] 回测并自动平铺重排！")
             QTimer.singleShot(80, lambda: rearrange_all_sbc_windows(parent_win=new_dlg))
@@ -7314,6 +7434,7 @@ class SBCIntradayChartDialog(QWidget):
         channel_info: Optional[Dict[str, float]] = None,
         is_cancelled_func: Optional[Any] = None,
         preloaded: Optional[Dict[str, Any]] = None,
+        on_preview: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """【⚡ 阶段2 后台异步取数与策略运算核心】主线程0阻塞，网络IO与复杂回测运算在工作线程执行"""
         if is_cancelled_func and is_cancelled_func():
@@ -7332,33 +7453,19 @@ class SBCIntradayChartDialog(QWidget):
         amt = float(snap.get("amount", 0.0))
         to_rate = float(snap.get("turnover_rate", 0.0))
 
-        # 信号提取
+        state = self.engine._get_stock_state(code, op) if self.engine else {}
+        # 首帧只带已有信号；评分及通道补全在行情交付之后执行。
         if custom_signals:
             sigs = custom_signals
         else:
-            state = self.engine._get_stock_state(code, op) if self.engine else {}
-            sigs = state.get("signals", [])
-            if mode == "1m" and not sigs and self.engine is not None and op > 1.0:
-                now_t = datetime.now().strftime("%H:%M:%S")
-                eval_res = self.engine.evaluate_seven_nodes(
-                    code=code,
-                    current_time_str=now_t,
-                    open_price=op,
-                    price=p,
-                    high_price=hi,
-                    low_price=lo,
-                    vwap=vw,
-                    turnover_rate=to_rate,
-                    amount=amt
-                )
-                sigs = state.get("signals", []) or eval_res.get("signals", [])
+            sigs = list(state.get("signals", []))
 
         t_min = op * 1.03 if op > 1.0 else 0.0
         t_max = op * 1.05 if op > 1.0 else 0.0
 
         # 分时/多日分时复用日线缓存；关闭叠加时不额外读取或提取通道指标。
         if mode in ("1m", "3d", "5d", "10d") and getattr(self, "_channel_overlay_enabled", True):
-            channel_info = SBCIndicatorCache.get(code, "day") or self._fetch_channel_info_static(fetcher, code)
+            channel_info = SBCIndicatorCache.get(code, "day")
         else:
             channel_info = None
 
@@ -7405,10 +7512,6 @@ class SBCIntradayChartDialog(QWidget):
                     hi = float(df_multi['high'].max()) if 'high' in df_multi.columns else p
                 if lo <= 1.0:
                     lo = float(df_multi['low'].min()) if 'low' in df_multi.columns else p
-                if vwap_auto_strategy_enabled and not custom_signals:
-                    auto_sigs = self._eval_vwap_proactive_strategy(df_multi, period_mode=mode)
-                    if auto_sigs:
-                        sigs = auto_sigs
             df_target = df_multi
 
         elif mode in ["5m", "15m", "30m", "60m", "day", "2d", "2k", "3k", "week", "month"]:
@@ -7488,10 +7591,6 @@ class SBCIntradayChartDialog(QWidget):
                     if to_rate <= 0:
                         to_rate = float(df_intraday.iloc[-1].get("turnover_rate", 0.0))
 
-                if vwap_auto_strategy_enabled and not custom_signals:
-                    auto_sigs = self._eval_vwap_proactive_strategy(df_intraday, period_mode="1m")
-                    if auto_sigs:
-                        sigs = auto_sigs
             df_target = df_intraday
 
         # 计算状态指纹 (用于阶段 4 入口级脏检查)
@@ -7502,9 +7601,10 @@ class SBCIntradayChartDialog(QWidget):
         data_fp = (code, mode, n_bars, last_idx, round(last_close, 3), round(last_vol, 1),
                    round(p, 3), round(vw, 3), round(hi, 3), round(lo, 3),
                    round(amt, 2), round(to_rate, 3), repr(sigs),
-                   repr(channel_info), repr(multi_vwap_snapshot))
+                   repr(channel_info), repr(multi_vwap_snapshot),
+                   _frame_content_revision(df_target) if n_bars else None)
 
-        return {
+        payload = {
             "is_cancelled": False,
             "code": code,
             "mode": mode,
@@ -7525,6 +7625,36 @@ class SBCIntradayChartDialog(QWidget):
             "data_fp": data_fp,
         }
 
+        if on_preview and n_bars:
+            on_preview(dict(payload, is_preview=True))
+        if is_cancelled_func and is_cancelled_func():
+            return {"is_cancelled": True}
+
+        # 网络元数据和策略均不阻塞首帧；UI 评分随后只读取此缓存。
+        from ats.new_stock_fetcher import NewStockFetcher
+        NewStockFetcher.refresh_ipo_calendar_background()
+        resolve_stock_name(code)
+        if mode in ("1m", "3d", "5d", "10d") and getattr(self, "_channel_overlay_enabled", True) and not channel_info:
+            channel_info = self._fetch_channel_info_static(fetcher, code)
+            if self.engine is not None:
+                self.engine.invalidate_listing_metadata(code)
+        if mode == "1m" and n_bars and self.engine is not None and op > 1.0 and not custom_signals:
+            self.engine.hydrate_from_intraday_df(code, df_target, open_price=op)
+            eval_res = self.engine.evaluate_seven_nodes(
+                code=code, current_time_str=datetime.now().strftime("%H:%M:%S"),
+                open_price=op, price=p, high_price=hi, low_price=lo,
+                vwap=vw, turnover_rate=to_rate, amount=amt,
+            )
+            sigs = list(state.get("signals", [])) or eval_res.get("signals", [])
+        if mode in ("1m", "3d", "5d", "10d"):
+            if n_bars and vwap_auto_strategy_enabled and not custom_signals:
+                auto_sigs = self._eval_vwap_proactive_strategy(df_target, period_mode=mode)
+                if auto_sigs:
+                    sigs = auto_sigs
+        payload.update(sigs=sigs, channel_info=channel_info)
+        payload["data_fp"] = data_fp[:12] + (repr(sigs), repr(channel_info)) + data_fp[14:] + ("complete",)
+        return payload
+
     def _apply_chart_payload(self, payload: Dict[str, Any], is_timer_tick: bool = False):
         """【🎨 阶段2 主线程安全渲染】根据已准备好的图表载荷渲染 UI，内置入口级脏检查阻断"""
         if not payload or payload.get("is_cancelled"):
@@ -7534,6 +7664,8 @@ class SBCIntradayChartDialog(QWidget):
             return
 
         mode = payload.get("mode", "1m")
+        is_preview = bool(payload.get("is_preview"))
+        is_degraded = bool(payload.get("is_degraded"))
         data_fp = payload.get("data_fp")
 
         # 🚀 [阶段4 入口级脏检查] 若为定时心跳刷新，且数据与盘面指纹完全一致，短路跳过后续全部重排与重绘！
@@ -7588,15 +7720,16 @@ class SBCIntradayChartDialog(QWidget):
                 self.canvas.multi_vwap_snapshot = multi_vwap_snapshot
                 self.canvas.set_data(df_multi, op, vw, hi, lo, t_min, t_max, sigs, period_mode=mode)
                 self.canvas.update_amplitude_data(self.code)
-                self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [{mode.upper()}多日分时] 今:{op:.2f} 现:{cl_last:.2f}")
+                self.lbl_title.setText(f"📊 {self.code} {get_cached_stock_name(self.code)} | [{mode.upper()}多日分时] 今:{op:.2f} 现:{cl_last:.2f}")
                 vwap_linkage = f" | 多周期结构: {multi_vwap_snapshot.structure} | 今日VWAP={multi_vwap_snapshot.vwap_1d:.2f}" if multi_vwap_snapshot and multi_vwap_snapshot.vwap_1d else ""
                 if multi_vwap_snapshot and multi_vwap_snapshot.vwap_5d and multi_vwap_snapshot.complete_5d:
                     vwap_linkage += f" | 5日VWAP={multi_vwap_snapshot.vwap_5d:.2f}"
                 if multi_vwap_snapshot and multi_vwap_snapshot.vwap_10d and multi_vwap_snapshot.complete_10d:
                     vwap_linkage += f" | 10日VWAP={multi_vwap_snapshot.vwap_10d:.2f}"
-                self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】[{mode.upper()}多日分时] 今开={op:.2f}元, 现价={cl_last:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 策略买卖信号数: {len(sigs)} 步{vwap_linkage}")
-                self._update_unified_realtime_log(df_multi, op, cl_last, vw, hi, lo, to_rate, amt, sigs, mode=mode)
-                if getattr(self, 'auto_eval_enabled', True):
+                self.lbl_title.setToolTip(f"【{self.code} {get_cached_stock_name(self.code)}】[{mode.upper()}多日分时] 今开={op:.2f}元, 现价={cl_last:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 策略买卖信号数: {len(sigs)} 步{vwap_linkage}")
+                if not (is_preview or is_degraded):
+                    self._update_unified_realtime_log(df_multi, op, cl_last, vw, hi, lo, to_rate, amt, sigs, mode=mode)
+                if not (is_preview or is_degraded) and getattr(self, 'auto_eval_enabled', True):
                     self._on_eval_r_clicked(toggle=False)
             else:
                 self.canvas.set_data(pd.DataFrame(), op, 0.0, hi, lo, t_min, t_max, [], period_mode=mode)
@@ -7613,14 +7746,15 @@ class SBCIntradayChartDialog(QWidget):
                     t_cnt = len(self.custom_trades_df)
                     win_cnt = len(self.custom_trades_df[self.custom_trades_df['pnl_pct'] > 0]) if not self.custom_trades_df.empty else 0
                     win_r = (win_cnt / t_cnt * 100.0) if t_cnt > 0 else 0.0
-                    self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [多周期通道回测] 交易:{t_cnt}笔 胜率:{win_r:.1f}% (点击标记看收益)")
-                    self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】多周期通道量化回测走势图 | 共 {t_cnt} 笔交易，胜率 {win_r:.1f}% | 点击任意买卖信号标记或按 Space/[/] 键查看单笔收益与持仓光束")
+                    self.lbl_title.setText(f"📊 {self.code} {get_cached_stock_name(self.code)} | [多周期通道回测] 交易:{t_cnt}笔 胜率:{win_r:.1f}% (点击标记看收益)")
+                    self.lbl_title.setToolTip(f"【{self.code} {get_cached_stock_name(self.code)}】多周期通道量化回测走势图 | 共 {t_cnt} 笔交易，胜率 {win_r:.1f}% | 点击任意买卖信号标记或按 Space/[/] 键查看单笔收益与持仓光束")
                 else:
                     p_disp = "2D" if mode.lower() in ("2d", "2k") else ("3D" if mode.lower() in ("3d", "3k") else mode.upper())
-                    self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | [{p_disp}GG通道] 今:{op:.2f} 现:{cl_last:.2f}")
-                    self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】[{p_disp}K线通道] 今开={op:.2f}元, 现价={cl_last:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 买卖信号数: {len(sigs)} 步")
-                self._update_unified_realtime_log(df_kline, op, cl_last, vw, hi, lo, to_rate, amt, sigs, mode=mode)
-                if getattr(self, 'auto_eval_enabled', True):
+                    self.lbl_title.setText(f"📊 {self.code} {get_cached_stock_name(self.code)} | [{p_disp}GG通道] 今:{op:.2f} 现:{cl_last:.2f}")
+                    self.lbl_title.setToolTip(f"【{self.code} {get_cached_stock_name(self.code)}】[{p_disp}K线通道] 今开={op:.2f}元, 现价={cl_last:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 买卖信号数: {len(sigs)} 步")
+                if not (is_preview or is_degraded):
+                    self._update_unified_realtime_log(df_kline, op, cl_last, vw, hi, lo, to_rate, amt, sigs, mode=mode)
+                if not (is_preview or is_degraded) and getattr(self, 'auto_eval_enabled', True):
                     self._on_eval_r_clicked(toggle=False)
 
         else:
@@ -7651,7 +7785,7 @@ class SBCIntradayChartDialog(QWidget):
             self.canvas.multi_vwap_snapshot = multi_vwap_snapshot
             self.canvas.set_data(df_intraday, op, vw, hi, lo, t_min, t_max, sigs, period_mode="1m")
             self.canvas.update_amplitude_data(self.code)
-            self.lbl_title.setText(f"📊 {self.code} {resolve_stock_name(self.code)} | 今:{op:.2f} 现:{p:.2f}")
+            self.lbl_title.setText(f"📊 {self.code} {get_cached_stock_name(self.code)} | 今:{op:.2f} 现:{p:.2f}")
             vwap_linkage = ""
             if multi_vwap_snapshot:
                 vwap_linkage = f" | 多周期结构={multi_vwap_snapshot.structure}"
@@ -7659,10 +7793,17 @@ class SBCIntradayChartDialog(QWidget):
                     vwap_linkage += f" | 5日VWAP={multi_vwap_snapshot.vwap_5d:.2f}元"
                 if multi_vwap_snapshot.vwap_10d and multi_vwap_snapshot.complete_10d:
                     vwap_linkage += f" | 10日VWAP={multi_vwap_snapshot.vwap_10d:.2f}元"
-            self.lbl_title.setToolTip(f"【{self.code} {resolve_stock_name(self.code)}】今开={op:.2f}元, 现价={p:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 买卖信号数: {len(sigs)} 步{vwap_linkage}")
-            self._update_unified_realtime_log(df_intraday, op, p, vw, hi, lo, to_rate, amt, sigs, mode="1m")
-            if getattr(self, 'auto_eval_enabled', True):
+            self.lbl_title.setToolTip(f"【{self.code} {get_cached_stock_name(self.code)}】今开={op:.2f}元, 现价={p:.2f}元, VWAP={vw:.2f}元, 最高={hi:.2f}元, 最低={lo:.2f}元 | 买卖信号数: {len(sigs)} 步{vwap_linkage}")
+            if not (is_preview or is_degraded):
+                self._update_unified_realtime_log(df_intraday, op, p, vw, hi, lo, to_rate, amt, sigs, mode="1m")
+            if not (is_preview or is_degraded) and getattr(self, 'auto_eval_enabled', True):
                 self._on_eval_r_clicked(toggle=False)
+
+        if is_degraded:
+            self.lbl_info.setText("行情已加载，策略或指标暂不可用，等待重试")
+        elif is_preview:
+            message = "显示最近行情，正在更新行情与策略…" if payload.get("is_cached_preview") else "行情已加载，正在更新策略与指标…"
+            self.lbl_info.setText(message)
 
     def reload_chart(self, is_timer_tick: bool = False, force_sync: bool = False,
                      preloaded: Optional[Dict[str, Any]] = None):
@@ -7734,6 +7875,22 @@ class SBCIntradayChartDialog(QWidget):
         custom_trades_df = getattr(self, "custom_trades_df", None)
         auto_strategy = getattr(self, "vwap_auto_strategy_enabled", True)
         channel_info = getattr(self.canvas, "channel_info", None) if hasattr(self, 'canvas') else None
+        current_frame = getattr(self.canvas, "df_intraday", None)
+        should_preview = (not is_timer_tick or current_frame is None or current_frame.empty
+                          or getattr(self.canvas, "_last_code", None) != cur_code
+                          or getattr(self.canvas, "_last_period_mode", None) != mode)
+        preview_payload = None
+        def publish_preview(payload):
+            nonlocal preview_payload
+            preview_payload = dict(payload)
+            if not should_preview:
+                return
+            payload["is_timer_tick"] = is_timer_tick
+            payload["data_fp"] += ("preview",)
+            try:
+                self._async_chart_data_ready.emit(cur_epoch, cur_code, mode, payload)
+            except RuntimeError:
+                pass
         def _bg_fetch_worker():
             fetch_start = time.perf_counter()
             payload = {"is_cancelled": True}
@@ -7748,9 +7905,13 @@ class SBCIntradayChartDialog(QWidget):
                     channel_info=channel_info,
                     is_cancelled_func=lambda: cur_epoch != self._load_epoch,
                     preloaded=preloaded,
+                    on_preview=publish_preview,
                 )
             except Exception as e:
                 logger.debug(f"[SBC] 异步取数提示: {e}")
+                if preview_payload is not None:
+                    payload = dict(preview_payload, is_preview=False, is_degraded=True)
+                    payload["data_fp"] += ("degraded",)
             finally:
                 if not isinstance(payload, dict):
                     payload = {"is_cancelled": True}
@@ -7766,6 +7927,14 @@ class SBCIntradayChartDialog(QWidget):
 
     def _on_async_chart_data_arrived(self, epoch: int, code: str, mode: str, payload: object):
         """【🛡️ 阶段2 Epoch Guard 门禁】槽函数接收异步工作线程传回数据，严格防串屏"""
+        if isinstance(payload, dict) and payload.get("is_preview"):
+            if (not getattr(self, "_is_closing", False)
+                    and epoch == getattr(self, "_load_epoch", 0)
+                    and code == self.code
+                    and mode == getattr(self, "_current_period_mode", "1m")
+                    and self._pending_load is None):
+                self._apply_chart_payload(payload, is_timer_tick=payload.get("is_timer_tick", False))
+            return
         self._load_inflight = False
         pending = self._pending_load
         self._pending_load = None
@@ -7832,7 +8001,7 @@ class SBCIntradayChartDialog(QWidget):
             if hasattr(self, 'log_box') and self.log_box and not self.log_box.isVisible():
                 return
             now_str = datetime.now().strftime("%H:%M:%S")
-            st_name = resolve_stock_name(self.code)
+            st_name = get_cached_stock_name(self.code)
 
             # 1. TDX 通信通道与行情健康诊断
             server_info = "TDX行情服务器"
@@ -8391,14 +8560,40 @@ def _get_sbc_layout_cfg_path():
     return os.path.join(cfg_dir, "intraday_ui_layout.json")
 
 
+_sbc_startup_layout = None
+_sbc_startup_recent = None
+
+
+def _read_sbc_layout_config(path):
+    if _sbc_startup_layout is not None and os.path.normcase(os.path.abspath(path)) == _sbc_startup_layout[0]:
+        return _sbc_startup_layout[1]
+    with open(path, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def _begin_sbc_startup_batch(path, data):
+    global _sbc_startup_layout, _sbc_startup_recent
+    _sbc_startup_layout = (os.path.normcase(os.path.abspath(path)), data)
+    _sbc_startup_recent = _load_sbc_recent_codes()
+
+
+def _end_sbc_startup_batch():
+    global _sbc_startup_layout, _sbc_startup_recent
+    recent = _sbc_startup_recent
+    _sbc_startup_layout = _sbc_startup_recent = None
+    if recent is not None:
+        _persist_sbc_recent_codes(recent)
+
+
 def _load_sbc_recent_codes() -> List[str]:
     """【💾 读取最近访问/回测标的】保留最近 10 个有效 6 位标的代码 (双保险: JSON + QSettings)"""
+    if _sbc_startup_recent is not None:
+        return list(_sbc_startup_recent)
     # 1. 优先从 config/intraday_ui_layout.json 读取
     try:
         cfg_path = _get_sbc_layout_cfg_path()
         if os.path.exists(cfg_path):
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            data = _read_sbc_layout_config(cfg_path)
             codes = data.get("sbc_recent_codes", [])
             if isinstance(codes, list):
                 valid = []
@@ -8431,6 +8626,7 @@ def _load_sbc_recent_codes() -> List[str]:
 
 def _save_sbc_recent_code(code: str):
     """【💾 原子持久化最近访问标的】LRU 队列保留最新 10 个，新代码置顶"""
+    global _sbc_startup_recent
     if not code:
         return
     c_clean = "".join(filter(str.isdigit, str(code))).zfill(6)
@@ -8442,7 +8638,16 @@ def _save_sbc_recent_code(code: str):
             recent.remove(c_clean)
         recent.insert(0, c_clean)
         recent = recent[:10]
+        if _sbc_startup_layout is not None:
+            _sbc_startup_recent = recent
+            return
+        _persist_sbc_recent_codes(recent)
+    except Exception as e:
+        logger.debug(f"保存 SBC 最近代码异常: {e}")
 
+
+def _persist_sbc_recent_codes(recent):
+    try:
         cfg_path = _get_sbc_layout_cfg_path()
         data = {}
         if os.path.exists(cfg_path):
@@ -11908,6 +12113,13 @@ class AllCodesStrategyEvalDialog(QDialog):
 
         engine = self.engine
         tdx_fetcher = getattr(self.workbench, "tdx_fetcher", None) if self.workbench else None
+        source = getattr(self.workbench, "selected_data_source", "TDX_REALTIME")
+        data_source = "ATS_IPC" if source == "ATS_IPC" else "TDX_REALTIME"
+        latest_df = getattr(self.workbench, "_latest_df", None)
+        if latest_df is None or latest_df.empty:
+            parent = getattr(self.workbench, "parent_window", None)
+            latest_df = getattr(parent, "current_df", None)
+        latest_df = latest_df.copy(deep=True) if isinstance(latest_df, pd.DataFrame) else None
 
         def _bg_eval():
             collected_cards = []
@@ -11924,12 +12136,25 @@ class AllCodesStrategyEvalDialog(QDialog):
                             c,
                             engine=engine,
                             tdx_fetcher=tdx_fetcher,
-                            data_source="TDX_REALTIME"
+                            data_source=data_source,
+                            latest_df=latest_df,
                         )
                         open_p, trade_p, high_p, low_p, vwap_p, to_rate, amt_val, bid1_p, _, is_unlisted, last_close = data_tuple
                         if not (math.isfinite(open_p) and open_p > 0 and math.isfinite(trade_p) and trade_p > 0):
                             raise ValueError("暂无有效行情，跳过策略评分")
 
+                        if not is_unlisted:
+                            history_fetcher = tdx_fetcher or TDXRealtimeFetcher.get_instance()
+                            try:
+                                history_fetcher.fetch_kline_bars(c, category="day", count=10)
+                                engine.invalidate_listing_metadata(c)
+                            except Exception as exc:
+                                logger.debug("上市元数据预取失败 %s: %s", c, exc)
+                            history = history_fetcher.fetch_intraday_bars(c)
+                            if history is None or history.empty:
+                                raise ValueError("缺少历史分时，暂不锁定历史节点或生成策略信号")
+                            if not engine.hydrate_from_intraday_df(c, history, open_price=open_p):
+                                raise ValueError("历史分时无效，跳过策略评分")
                         tick_row = {"trade": trade_p, "close": trade_p}
                         sigs = engine.evaluate_tick(
                             code=c, tick_row=tick_row, open_price=open_p, current_time_str=now_time_str, bid1_price=bid1_p

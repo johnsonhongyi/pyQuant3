@@ -11,6 +11,7 @@ ats/new_stock_fetcher.py — ATS 新股/次新股/IPO发行日历全市场多通
 import sys
 import os
 import time
+import threading
 import json
 import math
 import logging
@@ -83,12 +84,48 @@ class NewStockFetcher:
     """新股与次新股多通道数据获取、聚合与磁盘持久化引擎"""
 
     _instance = None
+    _instance_lock = threading.RLock()
+    _calendar_refresh_lock = threading.Lock()
+    _calendar_fetch_lock = threading.RLock()
+    _calendar_refresh_inflight = False
+    _calendar_retry_after = 0.0
+
+    @classmethod
+    def get_cached_ipo_calendar(cls) -> Dict[str, Dict[str, Any]]:
+        """评分热路径只读已有日历；初始化及联网由后台取数负责。"""
+        instance = cls._instance
+        return instance._cached_ipo_dict if instance is not None else {}
 
     @classmethod
     def get_instance(cls):
-        if cls._instance is None:
-            cls._instance = cls()
+        with cls._instance_lock:
+            if cls._instance is None:
+                cls._instance = cls()
         return cls._instance
+
+    @classmethod
+    def refresh_ipo_calendar_background(cls):
+        """单任务后台刷新；失败后也冷却，避免每个窗口重复联网。"""
+        with cls._calendar_refresh_lock:
+            if cls._calendar_refresh_inflight or time.monotonic() < cls._calendar_retry_after:
+                return
+            cls._calendar_refresh_inflight = True
+        def refresh():
+            try:
+                cls.get_instance().fetch_ipo_calendar()
+            except Exception as exc:
+                logger.debug("IPO 后台刷新失败: %s", exc)
+            finally:
+                with cls._calendar_refresh_lock:
+                    cls._calendar_refresh_inflight = False
+                    cls._calendar_retry_after = time.monotonic() + 60.0
+        try:
+            threading.Thread(target=refresh, name="SBC-IPO-metadata", daemon=True).start()
+        except Exception as exc:
+            with cls._calendar_refresh_lock:
+                cls._calendar_refresh_inflight = False
+                cls._calendar_retry_after = time.monotonic() + 60.0
+            logger.debug("IPO 后台线程启动失败: %s", exc)
 
     def __init__(self):
         self._cached_stocks_df: Optional[pd.DataFrame] = None
@@ -330,6 +367,11 @@ class NewStockFetcher:
         return self._cached_lift_dict
 
     def fetch_ipo_calendar(self, page_size: int = 100, force: bool = False) -> Dict[str, Dict[str, Any]]:
+        """同步请求与后台预热共用单个刷新任务，避免重复请求和写盘。"""
+        with self._calendar_fetch_lock:
+            return self._fetch_ipo_calendar(page_size, force)
+
+    def _fetch_ipo_calendar(self, page_size: int, force: bool) -> Dict[str, Dict[str, Any]]:
         """
         从东方财富 IPO 日历接口增量拉取最新发行与上市新股列表:
         - 【增量合并原则】：对于已在本地缓存且已上市的个股信息永久保留、不再重复请求；

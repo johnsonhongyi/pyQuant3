@@ -38,6 +38,8 @@ from ats.ui.intraday_strategy_dialog import (
     SBCIntradayChartDialog,
     open_sbc_chart_dialog,
     rearrange_all_sbc_windows,
+    _begin_sbc_startup_batch,
+    _end_sbc_startup_batch,
 )
 from sys_utils import ensure_backend_tk_running
 
@@ -131,6 +133,8 @@ _is_restoring_holdings = False
 def save_launcher_holdings_windows(force: bool = False, allow_empty: bool = False):
     """【💾 集中持久化保存持仓盯盘窗口】独立保存至 sbc_launcher_holdings_layout.json，支持维护最近 3 组历史快照与防清零保护"""
     global _last_save_holdings_time, _last_saved_content_fingerprint
+    if _is_restoring_holdings and not force:
+        return
     now = time.time()
     # 💡 [长阈值节流] 默认在窗口关闭退出时集中统一持久化；若非强制退出，至少 15 分钟 (900s) 且指纹变更才写盘一次
     if not force and (now - _last_save_holdings_time < 900.0):
@@ -462,10 +466,81 @@ def restore_launcher_holdings_windows(snapshot_index: Optional[int] = None) -> L
     恢复位置遵循“原来在什么位置排布就在什么位置排布，除非换行”。
     """
     global _is_restoring_holdings
+    if _is_restoring_holdings:
+        return []
     _is_restoring_holdings = True
     restored = []
     cfg_path = _get_launcher_layout_cfg_path()
     has_initialized_config = False
+    batch_pending = False
+
+    def restore_in_batches(items, layout_data, auto_layout=False):
+        nonlocal batch_pending
+        items = [item for item in items if isinstance(item, dict) and item.get("code")]
+        if not items:
+            return
+        _begin_sbc_startup_batch(cfg_path, layout_data)
+        screen_obj = QApplication.primaryScreen()
+        sg = screen_obj.availableGeometry() if screen_obj else QRect(0, 0, 1920, 1080)
+        cursor = 0
+        prev_bottom = sg.top() + 12
+        finished = False
+        app_inst = QApplication.instance()
+
+        def finish():
+            nonlocal finished, batch_pending
+            global _is_restoring_holdings
+            if finished:
+                return
+            finished = True
+            batch_pending = False
+            _end_sbc_startup_batch()
+            _is_restoring_holdings = False
+            if app_inst:
+                try:
+                    app_inst.aboutToQuit.disconnect(finish)
+                except (TypeError, RuntimeError):
+                    pass
+            if auto_layout and restored:
+                rearrange_all_sbc_windows()
+                save_launcher_holdings_windows(force=True)
+            print(f"[SBC Launcher] 已完成恢复 {len(restored)} 个盯盘窗口")
+
+        def restore_next():
+            nonlocal cursor, prev_bottom, batch_pending
+            if finished:
+                return
+            if app_inst and app_inst.property("is_app_exiting"):
+                finish()
+                return
+            try:
+                for _ in range(2):
+                    if cursor >= len(items):
+                        break
+                    item = items[cursor]
+                    cursor += 1
+                    try:
+                        dlg = open_sbc_chart_dialog(None, code=item["code"],
+                                                    period_mode=item.get("period_mode", "10d"), record_open=False)
+                        if dlg:
+                            dlg.show()
+                            gx, gy, gw, gh, prev_bottom = _calculate_safe_geometry_with_wrap(item, sg, prev_bottom)
+                            dlg.setGeometry(gx, gy, gw, gh)
+                            restored.append(dlg)
+                    except Exception as exc:
+                        print(f"[SBC Launcher] 恢复窗口失败 {item['code']}: {exc}")
+                if cursor < len(items):
+                    batch_pending = True
+                    QTimer.singleShot(0, restore_next)
+                else:
+                    finish()
+            except Exception as exc:
+                finish()
+                print(f"[SBC Launcher] 分批恢复中止: {exc}")
+
+        if app_inst:
+            app_inst.aboutToQuit.connect(finish)
+        restore_next()
     try:
         if os.path.exists(cfg_path):
             try:
@@ -491,43 +566,20 @@ def restore_launcher_holdings_windows(snapshot_index: Optional[int] = None) -> L
                                 snap_time = snapshots[0].get("time", "历史快照")
                                 print(f"[SBC Launcher] 🛡 当前盯盘配置为空，已自动从最近历史快照 ({snap_time}) 灾备回退恢复 {len(win_list)} 个窗口！")
 
-                screen_obj = QApplication.primaryScreen()
-                sg = screen_obj.availableGeometry() if screen_obj else QRect(0, 0, 1920, 1080)
-                prev_bottom = sg.top() + 12
-
-                for item in win_list:
-                    code = item.get("code")
-                    if not code:
-                        continue
-                    period = item.get("period_mode", "10d")
-                    dlg = open_sbc_chart_dialog(None, code=code, period_mode=period)
-                    if dlg:
-                        dlg.show()
-                        gx, gy, gw, gh, prev_bottom = _calculate_safe_geometry_with_wrap(item, sg, prev_bottom)
-                        dlg.setGeometry(gx, gy, gw, gh)
-                        restored.append(dlg)
+                restore_in_batches(win_list, data)
             except Exception as e:
                 print(f"[SBC Launcher] 读取历史盯盘配置异常: {e}")
 
         # 💡 只有在配置文件彻底不存在且未曾初始化过时，才自动从当前真实持仓标的启动盯盘
         # 一旦操盘手曾启动并手动增减过标的，严禁在恢复时擅自把用户关闭的股票重新拉出来！
-        if not restored and not has_initialized_config:
+        if not restored and not batch_pending and not has_initialized_config:
             holdings = _get_current_holding_codes()
             if holdings:
                 print(f"[SBC Launcher] 初次启动无历史配置，自动为当前 {len(holdings)} 只持仓股启动独立盯盘窗口...")
-                for code in holdings:
-                    dlg = open_sbc_chart_dialog(None, code=code, period_mode="10d")
-                    if dlg:
-                        dlg.show()
-                        restored.append(dlg)
-                # 自动平铺重排
-                if restored:
-                    rearrange_all_sbc_windows()
-                # 仅在初次根据真实持仓全新初始化生成新窗口时才持久化落盘一次
-                if restored:
-                    save_launcher_holdings_windows(force=True)
+                restore_in_batches([{"code": code, "period_mode": "10d"} for code in holdings], {}, auto_layout=True)
     finally:
-        _is_restoring_holdings = False
+        if not batch_pending:
+            _is_restoring_holdings = False
 
     return restored
 
@@ -672,7 +724,7 @@ def main():
     else:
         # 💡 无参启动：专门用来盯持仓的盘 (支持通过 --snapshot N 指定加载哪一组历史快照)
         restored = restore_launcher_holdings_windows(snapshot_index=snapshot_idx)
-        if not restored:
+        if not restored and not _is_restoring_holdings:
             # 若持仓亦为空，启动默认 600733 (严禁读取 ATS 的 recent_codes，彻底杜绝配置串扰)
             code = "600733"
             period = "10d"
@@ -682,7 +734,7 @@ def main():
                 window.show()
         else:
             codes_str = ", ".join(getattr(d, 'code', '') for d in restored)
-            print(f"[SBC Launcher] 成功自动恢复上次退出的 {len(restored)} 个持仓盯盘窗口: [{codes_str}]")
+            print(f"[SBC Launcher] 已启动分批恢复，当前显示 {len(restored)} 个持仓盯盘窗口: [{codes_str}]")
 
     exit_code = 0
     try:

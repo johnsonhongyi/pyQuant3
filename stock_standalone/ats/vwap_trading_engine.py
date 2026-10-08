@@ -12,6 +12,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List, Tuple
 import pandas as pd
+import numpy as np
 
 from ats.vwap_rule_model import VWAPRuleModel
 from ats.consensus_arbiter import ConsensusArbiter, VoteResult, ArbiterDecision
@@ -83,6 +84,50 @@ class VWAPTradingEngine:
         # 每只标的的滑动分时历史 (最多保留 240 根 1 分钟柱)
         self._minute_bars: Dict[str, List[MinuteBar]] = {}
         self._last_price_vs_vwap: Dict[str, str] = {}
+        self._replay_features = {}
+        self._replay_offsets = {}
+
+    def _prepare_replay_features(self, code, opens, highs, lows, closes, vwaps):
+        """回放一次性计算滚动特征；实盘 Tick 保留原有计算路径。"""
+        arrays = [np.asarray(values, dtype=float) for values in (opens, highs, lows, closes, vwaps)]
+        if not all(np.isfinite(values).all() for values in arrays):
+            return
+        valid = arrays[3] > 0
+        opens, highs, lows, closes, vwaps = [values[valid] for values in arrays]
+        n = len(closes)
+        if not n:
+            return
+        positions = np.arange(n)
+        above = closes >= vwaps
+        starts = np.where(np.r_[True, above[1:] != above[:-1]], positions, 0)
+        runs = np.minimum(240, positions - np.maximum.accumulate(starts) + 1)
+        slope = np.zeros(n)
+        if n >= 5:
+            past = vwaps[:-4]
+            np.divide(vwaps[4:] - past, past, out=slope[4:], where=past > 0)
+            slope[4:] *= 100.0
+        consolidation = np.zeros(n, dtype=int)
+        ranges = np.zeros(n)
+        for window in (30, 20, 15, 10):
+            hi = pd.Series(highs).rolling(window).max().to_numpy()
+            lo = pd.Series(lows).rolling(window).min().to_numpy()
+            rng = np.full(n, np.inf)
+            np.divide(hi - lo, lo, out=rng, where=lo > 0)
+            rng *= 100.0
+            matched = (consolidation == 0) & (rng <= 1.5)
+            consolidation[matched] = window
+            ranges[matched] = rng[matched]
+        spread = highs - lows
+        body_ratio = np.zeros(n)
+        np.divide(np.abs(closes - opens), spread, out=body_ratio, where=spread > 0)
+        doji = (spread <= 0) | (body_ratio < 0.25)
+        doji_ratio = pd.Series(doji.astype(float)).rolling(10).sum().to_numpy() / 10.0
+        directions = closes >= opens
+        flips = np.r_[False, directions[1:] != directions[:-1]]
+        flip_counts = pd.Series(flips.astype(float)).rolling(9).sum().to_numpy()
+        self._replay_features[code] = (slope, np.where(above, runs, 0), np.where(above, 0, runs),
+                                       consolidation, ranges, doji_ratio, flip_counts)
+        self._replay_offsets[code] = -1
 
     def update_minute_bar(
         self,
@@ -112,6 +157,8 @@ class VWAPTradingEngine:
         )
         if len(bars) > 240:
             bars.pop(0)
+        if code in self._replay_features:
+            self._replay_offsets[code] += 1
 
     def compute_tick_state(
         self,
@@ -135,6 +182,33 @@ class VWAPTradingEngine:
         else:
             price_vs_vwap = curr_relation
         self._last_price_vs_vwap[code] = curr_relation
+
+        prepared = self._replay_features.get(code)
+        offset = self._replay_offsets.get(code, -1)
+        if prepared is not None and 0 <= offset < len(prepared[0]):
+            slope, above, below, consolidation, ranges, doji_ratios, flips = prepared
+            vwap_slope = float(slope[offset])
+            direction = "UP" if vwap_slope > 0.05 else ("DOWN" if vwap_slope < -0.05 else "FLAT")
+            clarity, hesitating, reason = 80.0, False, ""
+            if offset >= 9:
+                ratio, flip_count = float(doji_ratios[offset]), int(flips[offset])
+                clarity = max(0.0, min(100.0, 100.0 - ratio * 40.0
+                                      - (25.0 if flip_count >= 6 else 0.0)
+                                      - (20.0 if direction == "DOWN" else 0.0)))
+                if ratio >= 0.40:
+                    hesitating, reason = True, f"近10分钟十字星占比达 {ratio*100:.0f}%，多空博弈犹豫不决"
+                elif flip_count >= 7:
+                    hesitating, reason = True, "分时呈现多空高频锯齿拉锯，缺乏有效单边推升合力"
+                elif direction == "DOWN":
+                    hesitating, reason = True, "均价线处于下倾通道，属于弱势混沌期"
+            return VWAPTickState(
+                code=code, price=price, vwap_today=vwap_today, vwap_yesterday=vwap_yesterday,
+                vwap_cum_5d=vwap_cum_5d, volume_ratio=volume_ratio,
+                price_vs_vwap=price_vs_vwap, vwap_slope_5m=vwap_slope, vwap_direction=direction,
+                minutes_above_vwap=int(above[offset]), minutes_below_vwap=int(below[offset]),
+                consolidation_minutes=int(consolidation[offset]), consolidation_range_pct=float(ranges[offset]),
+                structure_clarity_score=clarity, is_hesitation_period=hesitating, hesitation_reason=reason,
+            )
 
         # 2. VWAP 斜率与方向计算
         vwap_slope = 0.0

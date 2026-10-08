@@ -13,6 +13,7 @@ import atexit
 import hashlib
 import threading
 import logging
+from functools import wraps
 import pandas as pd
 import numpy as np
 from datetime import datetime, time as dt_time
@@ -22,6 +23,25 @@ from sys_utils import get_app_root, get_conf_path
 from signal_types import SignalPoint, SignalType, SignalSource
 
 logger = logging.getLogger("IntradayStrategyEngine")
+
+_stock_locks_guard = threading.Lock()
+
+
+def _serialize_stock_state(method):
+    """同股状态变更串行执行；不同股票独立，允许节点评估重入。"""
+    @wraps(method)
+    def wrapped(self, code, *args, **kwargs):
+        c_clean = str(code).zfill(6)
+        with _stock_locks_guard:
+            locks = getattr(self, "_stock_state_locks", None)
+            if locks is None:
+                locks = self._stock_state_locks = {}
+            if c_clean not in locks:
+                locks[c_clean] = threading.RLock()
+            lock = locks[c_clean]
+        with lock:
+            return method(self, code, *args, **kwargs)
+    return wrapped
 
 
 def is_valid_stock_code(code: str) -> bool:
@@ -98,6 +118,11 @@ class IntradayStrategyEngine:
             pass
         self.load_config()
         self.load_intraday_cache()
+        try:
+            from ats.new_stock_fetcher import NewStockFetcher
+            NewStockFetcher.refresh_ipo_calendar_background()
+        except Exception as exc:
+            logger.debug("IPO 元数据预热失败: %s", exc)
 
     def _cleanup_legacy_tmp_files(self):
         """[启动自愈] 自动清理 config 目录下遗留的历史 .tmp 临时碎片文件"""
@@ -500,7 +525,7 @@ class IntradayStrategyEngine:
         ipo_info = {}
         try:
             from ats.new_stock_fetcher import NewStockFetcher
-            ipo_dict = NewStockFetcher.get_instance().fetch_ipo_calendar()
+            ipo_dict = NewStockFetcher.get_cached_ipo_calendar()
             if c_clean in ipo_dict:
                 ipo_info = ipo_dict[c_clean]
         except Exception:
@@ -795,6 +820,21 @@ class IntradayStrategyEngine:
                     return st
         return None
 
+    def _refresh_listing_cache_revision(self):
+        from ats.new_stock_fetcher import NewStockFetcher
+        instance = NewStockFetcher._instance
+        revision = (id(instance), getattr(instance, "_last_calendar_fetch_time", 0.0))
+        if getattr(self, "_listing_calendar_revision", None) != revision:
+            self._listing_calendar_revision = revision
+            getattr(self, "_first_listing_day_cache", {}).clear()
+            getattr(self, "_unlisted_cache", {}).clear()
+
+    @_serialize_stock_state
+    def invalidate_listing_metadata(self, code: str):
+        c_clean = str(code).zfill(6)
+        getattr(self, "_first_listing_day_cache", {}).pop(c_clean, None)
+        getattr(self, "_unlisted_cache", {}).pop(c_clean, None)
+
     def is_stock_first_listing_day(self, code: str) -> bool:
         """
         【100% 数据与每日自动更新新股上市表驱动】客观精准判定标的今日是否为【上市首日】：
@@ -816,6 +856,7 @@ class IntradayStrategyEngine:
 
         if not hasattr(self, "_first_listing_day_cache"):
             self._first_listing_day_cache = {}
+        self._refresh_listing_cache_revision()
 
         now_ts = time.time()
         cached = self._first_listing_day_cache.get(c_clean)
@@ -828,8 +869,7 @@ class IntradayStrategyEngine:
         # 1. 【最高权威·每日自动更新的新股上市表】：直接从 NewStockFetcher 权威日历与状态判定
         try:
             from ats.new_stock_fetcher import NewStockFetcher
-            ipo_fetcher = NewStockFetcher.get_instance()
-            ipo_dict = getattr(ipo_fetcher, '_cached_ipo_dict', {})
+            ipo_dict = NewStockFetcher.get_cached_ipo_calendar()
             if c_clean in ipo_dict:
                 ipo_info = ipo_dict[c_clean]
                 ipo_list_date = str(ipo_info.get("listing_date", "")).strip()[:10]
@@ -858,8 +898,8 @@ class IntradayStrategyEngine:
         if res_first_day is None:
             try:
                 from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
-                fetcher = TDXRealtimeFetcher.get_instance()
-                df_daily = fetcher.fetch_kline_bars(c_clean, category="day", count=5)
+                fetcher = TDXRealtimeFetcher._instance
+                df_daily = fetcher.get_cached_kline_bars(c_clean, category="day", min_count=1) if fetcher else None
                 if df_daily is not None and not df_daily.empty:
                     last_row_date = str(df_daily.iloc[-1].get("datetime", df_daily.iloc[-1].get("time", "")))[:10]
                     if len(df_daily) >= 2:
@@ -876,7 +916,7 @@ class IntradayStrategyEngine:
         if res_first_day is None:
             res_first_day = False
 
-        self._first_listing_day_cache[c_clean] = (res_first_day, now_ts + 3600.0)
+        self._first_listing_day_cache[c_clean] = (res_first_day, now_ts)
         return res_first_day
 
     def is_stock_unlisted(self, code: str) -> bool:
@@ -900,6 +940,7 @@ class IntradayStrategyEngine:
 
         if not hasattr(self, "_unlisted_cache"):
             self._unlisted_cache = {}
+        self._refresh_listing_cache_revision()
 
         now_ts = time.time()
         cached = self._unlisted_cache.get(c_clean)
@@ -912,8 +953,7 @@ class IntradayStrategyEngine:
         # 1. 权威新股上市表与 IPO 日历检验 (包含未公布上市日期的所有新股)
         try:
             from ats.new_stock_fetcher import NewStockFetcher
-            ipo_fetcher = NewStockFetcher.get_instance()
-            ipo_dict = getattr(ipo_fetcher, '_cached_ipo_dict', {})
+            ipo_dict = NewStockFetcher.get_cached_ipo_calendar()
             if c_clean in ipo_dict:
                 ipo_info = ipo_dict[c_clean]
                 ipo_status = str(ipo_info.get("status", "")).strip()
@@ -951,8 +991,8 @@ class IntradayStrategyEngine:
         if res_unlisted is None:
             try:
                 from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
-                fetcher = TDXRealtimeFetcher.get_instance()
-                df_daily = fetcher.fetch_kline_bars(c_clean, category="day", count=10)
+                fetcher = TDXRealtimeFetcher._instance
+                df_daily = fetcher.get_cached_kline_bars(c_clean, category="day", min_count=1) if fetcher else None
                 if df_daily is not None and not df_daily.empty:
                     # 严格过滤伪测试脏日 K (如 open <= 0.05 或 amount <= 1000)
                     valid_bars = df_daily[
@@ -1028,7 +1068,7 @@ class IntradayStrategyEngine:
                 from ats.new_stock_strategy_generator import NewStockStrategyGenerator
                 from ats.new_stock_fetcher import NewStockFetcher
                 generator = NewStockStrategyGenerator.get_instance()
-                ipo_dict = NewStockFetcher.get_instance().fetch_ipo_calendar()
+                ipo_dict = NewStockFetcher.get_cached_ipo_calendar()
                 ipo_info = ipo_dict.get(c_clean, {})
                 stock_name = ipo_info.get("name") or resolve_stock_name(c_clean)
                 real_issue_p = float(ipo_info.get("issue_price", 0.0) or 0.0)
@@ -1116,6 +1156,7 @@ class IntradayStrategyEngine:
             
         return phases[1] if len(phases) >= 2 else None, 1
 
+    @_serialize_stock_state
     def _get_stock_state(self, code: str, open_price: float) -> Dict[str, Any]:
         """获取或初始化某股票的策略运行与 7 节点评分状态机"""
         c_clean = str(code).zfill(6)
@@ -1145,6 +1186,7 @@ class IntradayStrategyEngine:
                 state["min_price"] = open_price
         return state
 
+    @_serialize_stock_state
     def set_manual_node_score(self, code: str, node_id_or_idx: Any, score: float):
         """设置某节点的人工打分覆盖并自动标记变动（由统一调度防抖持久化）"""
         c_clean = str(code).zfill(6)
@@ -1153,6 +1195,7 @@ class IntradayStrategyEngine:
         self.mark_dirty()
         self.save_intraday_cache_throttled(interval_sec=5.0)
 
+    @_serialize_stock_state
     def set_node_custom_param(self, code: str, node_id: str, value: float):
         """设置某节点的校准价格或换手率参数并自动标记变动（由统一调度防抖持久化）"""
         c_clean = str(code).zfill(6)
@@ -1163,6 +1206,7 @@ class IntradayStrategyEngine:
         self.mark_dirty()
         self.save_intraday_cache_throttled(interval_sec=5.0)
 
+    @_serialize_stock_state
     def reset_node_custom_params(self, code: str):
         """重置所有节点的校准参数、锁死参数与人工打分并自动标记变动"""
         c_clean = str(code).zfill(6)
@@ -1173,6 +1217,7 @@ class IntradayStrategyEngine:
         self.mark_dirty()
         self.save_intraday_cache_throttled(interval_sec=5.0)
 
+    @_serialize_stock_state
     def clear_stock_cache(self, code: str):
         """【🧹 彻底清理单股缓存】清除该标的内存中的节点锁死状态、手动参数、时间快照并同步持久化"""
         c_clean = str(code).zfill(6)
@@ -1200,6 +1245,7 @@ class IntradayStrategyEngine:
                     return s[:5]
         return s[:5]
 
+    @_serialize_stock_state
     def hydrate_from_intraday_df(self, code: str, df_intraday: Optional[pd.DataFrame], open_price: Optional[float] = None) -> bool:
         """
         全自动解析分时 DataFrame (1分钟 K 线 / 盘中 Tick 历史)，将早盘至当前时刻的所有历史节点 (09:25, 09:40, 10:00, 11:00 等)
@@ -1343,6 +1389,7 @@ class IntradayStrategyEngine:
         self.scan_and_evaluate_intraday_timeline(code, df_intraday)
         return True
 
+    @_serialize_stock_state
     def scan_and_evaluate_intraday_timeline(self, code: str, df_intraday: pd.DataFrame) -> List[SignalPoint]:
         """
         根据全量 240 分钟分时 K 线，逐分钟反演扫描策略规则触发点，
@@ -1517,6 +1564,7 @@ class IntradayStrategyEngine:
         state["execution_logs"] = execution_logs
         return signals
 
+    @_serialize_stock_state
     def evaluate_seven_nodes(
         self,
         code: str,
@@ -1674,7 +1722,7 @@ class IntradayStrategyEngine:
         if issue_p <= 0:
             try:
                 from ats.new_stock_fetcher import NewStockFetcher
-                ipo_dict = NewStockFetcher.get_instance().fetch_ipo_calendar()
+                ipo_dict = NewStockFetcher.get_cached_ipo_calendar()
                 if c_clean in ipo_dict:
                     issue_p = float(ipo_dict[c_clean].get("issue_price", 0.0) or 0.0)
             except Exception:
@@ -2195,6 +2243,7 @@ class IntradayStrategyEngine:
 
         return eval_result
 
+    @_serialize_stock_state
     def evaluate_tick(
         self,
         code: str,

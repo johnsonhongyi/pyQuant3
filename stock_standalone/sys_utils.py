@@ -788,6 +788,7 @@ def ensure_all_configs_released():
     repair_system_configurations_and_delisted_stocks()
 
 _resolved_name_cache = {}
+_name_resolution_retry_after = {}
 _resolved_code_cache = {}          # 精确反查: name -> code
 _resolved_code_normalized = {}     # 规整反查: normalized_name -> code
 _resolved_code_strip_prefix = {}   # 去除ST等前缀反查: stripped_name -> code
@@ -1074,7 +1075,12 @@ def _save_to_name_cache(code: str, name: str, allow_placeholder: bool = False):
 # 执行初始化加载
 _load_name_cache()
 
-def resolve_stock_name(code_clean: str) -> str:
+def get_cached_stock_name(code_clean: str) -> str:
+    """UI 热路径只读内存名称，不触发本地扫描或联网。"""
+    return resolve_stock_name(code_clean, cached_only=True)
+
+
+def resolve_stock_name(code_clean: str, *, cached_only: bool = False) -> str:
     """
     高精度、多通道、带内存与磁盘高速持久化缓存的个股名字解析器。
     专门根治“个股_XXXXXX”或代码数字做名字等 placeholder 占位符问题。
@@ -1104,6 +1110,10 @@ def resolve_stock_name(code_clean: str) -> str:
         cached_name = _resolved_name_cache[code_clean]
         if cached_name and not cached_name.startswith("个股_") and not cached_name.isdigit() and cached_name != code_clean:
             return cached_name
+
+    import time
+    if cached_only or time.monotonic() < _name_resolution_retry_after.get(code_clean, 0.0):
+        return f"个股_{code_clean}"
 
     logger.info(f"[resolve_stock_name] Start multi-channel resolution for code: {code_clean} (original: {original_input!r})")
 
@@ -1241,6 +1251,7 @@ def resolve_stock_name(code_clean: str) -> str:
                     pass
 
     fallback_name = f"个股_{code_clean}"
+    _name_resolution_retry_after[code_clean] = time.monotonic() + 60.0
     logger.warning(f"[resolve_stock_name] All channels failed to resolve name for {code_clean}. Fallback to placeholder.")
     _save_to_name_cache(code_clean, fallback_name, allow_placeholder=True)
     return fallback_name
