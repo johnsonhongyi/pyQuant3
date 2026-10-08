@@ -33,6 +33,7 @@ import math
 import pickle
 import zlib
 from contextlib import contextmanager
+from ats.compact_cache import CompactBarRecords, read_cache_payload, write_cache_payload
 
 logger = LoggerFactory.getLogger("TDXRealtimeFetcher")
 
@@ -521,7 +522,7 @@ class TDXGlobalCachePool:
     def get_instance(cls, startup_codes=None) -> 'TDXGlobalCachePool':
         with cls._lock:
             if cls._instance is None:
-                cls._instance = cls(startup_codes=startup_codes)
+                cls._instance = cls(startup_codes=() if startup_codes is None else startup_codes)
             return cls._instance
 
     def _get_ramdisk_cache_path(self) -> str:
@@ -575,6 +576,7 @@ class TDXGlobalCachePool:
 
     def __init__(self, startup_codes=None):
         self._mutex = threading.RLock()
+        self._decode_lock = threading.Lock()
         self._history_request_locks = {}
         self._seed_flush_inflight = False
         self._seed_flush_tokens = {}
@@ -625,7 +627,8 @@ class TDXGlobalCachePool:
 
         # SBC startup validates only subscribed symbols; other symbols load on demand.
         self._startup_loaded_codes = None if startup_codes is None else {str(code).zfill(6) for code in startup_codes}
-        self._load_from_ramdisk(codes=self._startup_loaded_codes)
+        if self._startup_loaded_codes is None or self._startup_loaded_codes:
+            self._load_from_ramdisk(codes=self._startup_loaded_codes)
 
     @contextmanager
     def _ramdisk_file_lock(self):
@@ -1086,7 +1089,7 @@ class TDXGlobalCachePool:
         return True
 
     def _load_from_ramdisk(self, force: bool = False, sync_rollover: bool = True,
-                           restore_vwap: bool = True, codes=None) -> bool:
+                           restore_vwap: bool = True, codes=None, snapshot=None) -> bool:
         """
         【RamDisk 极速加载 + 自动修复校验】
         从内存盘读取 zlib level 1 压缩二进制包，0.2ms 完成跨进程历史静态缓存与增量计算状态热重载。
@@ -1099,16 +1102,21 @@ class TDXGlobalCachePool:
             if not force and mtime <= self._last_ramdisk_mtime and self._last_ramdisk_mtime > 0:
                 return False
 
-            with open(self._ramdisk_path, "rb") as f:
-                compressed_data = f.read()
-
-            if not compressed_data:
-                return False
-
             # ── 反序列化（损坏时自动删除 pkl 文件，彻底避免反复毒化）──
             try:
-                raw_bytes = zlib.decompress(compressed_data)
-                payload = pickle.loads(raw_bytes)
+                with self._decode_lock:
+                    payload = read_cache_payload(self._ramdisk_path)
+                    if codes is not None:
+                        # Release unrelated decoded rows before allowing another reader.
+                        for partition in ('history_static_bars', 'incremental_intraday_pool',
+                                          'daily_metrics_cache', 'shares_cache', 'vwap_states'):
+                            entries = payload.get(partition, {})
+                            payload[partition] = {k: v for k, v in entries.items()
+                                                  if str(k[0] if isinstance(k, tuple) else k).zfill(6) in codes}
+                        del entries
+                    if snapshot is not None:
+                        snapshot['vwap_states'] = payload.get('vwap_states', {})
+                        snapshot['cache_generations'] = payload.get('cache_generations', {})
             except (zlib.error, pickle.UnpicklingError, EOFError, Exception) as corrupt_err:
                 logger.warning(
                     f"⚠️ [AutoRepair] RamDisk 缓存文件损坏 ({corrupt_err})，"
@@ -1165,7 +1173,7 @@ class TDXGlobalCachePool:
                     for k, v in remote_hist.items():
                         if codes is not None and str(k).zfill(6) not in codes:
                             continue
-                        if not isinstance(v, dict) or not isinstance(v.get("records"), list):
+                        if not isinstance(v, dict) or not isinstance(v.get("records"), (list, CompactBarRecords)):
                             skipped_count += 1
                             continue
                         if _cache_generation(v) < self._cache_generations.get(str(k).zfill(6), 0):
@@ -1195,6 +1203,7 @@ class TDXGlobalCachePool:
                         if not self._validate_history_entry(k, v, today_str):
                             skipped_count += 1
                             continue
+                        v["records"] = CompactBarRecords(v["records"])
                         v["_quality_len"] = len(v["records"])
                         local_entry = self._history_static_bars.get(k)
                         if local_entry is None or v.get("updated_at", 0) > local_entry.get("updated_at", 0):
@@ -1221,11 +1230,13 @@ class TDXGlobalCachePool:
 
                 remote_metrics = payload.get("daily_metrics_cache", {})
                 if isinstance(remote_metrics, dict):
-                    self._daily_metrics_cache.update(remote_metrics)
+                    self._daily_metrics_cache.update({k: v for k, v in remote_metrics.items()
+                                                     if codes is None or str(k).zfill(6) in codes})
 
                 remote_shares = payload.get("shares_cache", {})
                 if isinstance(remote_shares, dict):
-                    self._shares_cache.update(remote_shares)
+                    self._shares_cache.update({k: v for k, v in remote_shares.items()
+                                               if codes is None or str(k).zfill(6) in codes})
 
                 self._last_ramdisk_mtime = mtime
                 # 若尚未开盘或处于非交易日，当前有效日期锁定为缓存中的上一有效交易日 (如昨日)，保证缓存命中率 100%
@@ -1257,7 +1268,9 @@ class TDXGlobalCachePool:
             if restore_vwap:
                 try:
                     from ats.vwap_factory import VWAPFactory
-                    VWAPFactory.get_instance().restore_states(payload.get("vwap_states", {}))
+                    states = payload.get("vwap_states", {})
+                    VWAPFactory.get_instance().restore_states({k: v for k, v in states.items()
+                                                              if codes is None or str(k).zfill(6) in codes})
                 except Exception as e_vwap_restore:
                     logger.debug(f"[TDXGlobalCachePool] VWAP 摘要恢复降级: {e_vwap_restore}")
 
@@ -1265,8 +1278,6 @@ class TDXGlobalCachePool:
             if is_cross_day and sync_rollover:
                 self._check_date_rollover(force_from_date=cache_date)
 
-            if codes is None:
-                self._startup_loaded_codes = None
             return True
         except Exception as e:
             logger.debug(f"[TDXGlobalCachePool] 从 RamDisk 载入缓存异常: {e}")
@@ -1317,8 +1328,27 @@ class TDXGlobalCachePool:
             with self._ramdisk_file_lock():
                 # Merge the latest cross-process snapshot while holding the file lock;
                 # persisted generations evict copies created before a cache clear.
-                self._load_from_ramdisk(force=True, sync_rollover=False, restore_vwap=False)
                 with self._mutex:
+                    loaded = self._startup_loaded_codes
+                    resident = (set(loaded) | set(self._history_static_bars)
+                                | {key[0] for key in self._incremental_intraday_pool}
+                                | set(self._daily_metrics_cache) | set(self._shares_cache)
+                                if loaded is not None else None)
+                    local_generations = dict(self._cache_generations)
+                    remote_snapshot = {}
+                    self._load_from_ramdisk(force=True, sync_rollover=False, restore_vwap=False,
+                                            snapshot=remote_snapshot)
+                    remote_generations = remote_snapshot.get('cache_generations', {})
+                    merged_vwap = {
+                        code: state for code, state in remote_snapshot.get('vwap_states', {}).items()
+                        if int(remote_generations.get(code, 0)) >= self._cache_generations.get(code, 0)
+                    }
+                    for code, state in vwap_states.items():
+                        if local_generations.get(code, 0) < self._cache_generations.get(code, 0):
+                            continue
+                        previous = merged_vwap.get(code)
+                        if previous is None or state.get('updated_at', 0) >= previous.get('updated_at', 0):
+                            merged_vwap[code] = state
 
                     for code, entry in list(self._history_static_bars.items()):
                         if int(entry.get("_cache_generation", 0)) < self._cache_generations.get(code, 0):
@@ -1341,16 +1371,24 @@ class TDXGlobalCachePool:
                         "cache_generations": dict(self._cache_generations),
                         "daily_metrics_cache": dict(self._daily_metrics_cache),
                         "shares_cache": dict(self._shares_cache),
-                        "vwap_states": vwap_states,
+                        "vwap_states": merged_vwap,
                         "updated_at": now
                     }
 
                     revision = self._dirty_revision
-                    raw_bytes = pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)
-                compressed = zlib.compress(raw_bytes, 1)
+                    # Payload owns the merged remote histories. Release them from
+                    # the resident pool before other queries/writers resume.
+                    if resident is not None:
+                        for mapping in (self._history_static_bars, self._incremental_intraday_pool,
+                                        self._daily_metrics_cache, self._shares_cache):
+                            for key in list(mapping):
+                                if str(key[0] if isinstance(key, tuple) else key).zfill(6) not in resident:
+                                    del mapping[key]
+                    # Snapshot owns the row buffers; callers replace entries rather
+                    # than mutate them while serialization runs outside the mutex.
                 tmp_path = self._ramdisk_path + f".{os.getpid()}.tmp"
                 with open(tmp_path, "wb") as f:
-                    f.write(compressed)
+                    write_cache_payload(payload, f)
                     f.flush()
                     os.fsync(f.fileno())
                 os.replace(tmp_path, self._ramdisk_path)
@@ -1364,7 +1402,7 @@ class TDXGlobalCachePool:
                 pass
             with self._mutex:
                 self._is_dirty = self._dirty_revision != revision
-            logger.info(f"💾 [TDXGlobalCachePool] RamDisk 持久化完成: 已保存 {len(payload['history_static_bars'])} 只静态分时 / {len(payload['incremental_intraday_pool'])} 组增量分时 ({len(compressed)/1024:.1f} KB, 收盘固化={is_after_close})")
+            logger.info(f"💾 [TDXGlobalCachePool] RamDisk 持久化完成: 已保存 {len(payload['history_static_bars'])} 只静态分时 / {len(payload['incremental_intraday_pool'])} 组增量分时 ({os.path.getsize(self._ramdisk_path)/1024:.1f} KB, 收盘固化={is_after_close})")
             return True
         except Exception as e:
             logger.debug(f"[TDXGlobalCachePool] 写入 RamDisk 异常: {e}")
@@ -1372,6 +1410,14 @@ class TDXGlobalCachePool:
 
     def _maybe_sync_from_ramdisk(self, force: bool = False):
         """轻量微秒级探测 RamDisk mtime，外部进程有新数据时自动热重载"""
+        loaded = getattr(self, '_startup_loaded_codes', None)
+        if loaded is not None:
+            with self._mutex:
+                codes = set(loaded) | set(self._history_static_bars) | {k[0] for k in self._incremental_intraday_pool}
+            if not codes:
+                return
+        else:
+            codes = None
         now = time.time()
         if not force and now - self._last_mtime_check_ts < 2.0:
             return
@@ -1380,7 +1426,7 @@ class TDXGlobalCachePool:
             if os.path.exists(self._ramdisk_path):
                 mtime = os.path.getmtime(self._ramdisk_path)
                 if force or mtime > self._last_ramdisk_mtime:
-                    self._load_from_ramdisk(force=force)
+                    self._load_from_ramdisk(force=force, codes=codes)
         except Exception:
             pass
 
@@ -1532,7 +1578,7 @@ class TDXGlobalCachePool:
                             "days": days,
                             "requested_days": requested_days,
                             "adaptive_history": adaptive_history,
-                            "records": new_records,
+                            "records": CompactBarRecords(new_records),
                             "last_cum_vol": cum_vol,
                             "last_cum_amt": cum_amt,
                             "last_cum_pv": cum_pv,
@@ -1570,7 +1616,8 @@ class TDXGlobalCachePool:
         if missing:
             # Loading/rollover may flush under a file lock: never hold _mutex across it.
             if self._load_from_ramdisk(force=True, restore_vwap=False, codes=missing):
-                loaded.update(missing)
+                with self._mutex:
+                    loaded.update(missing)
 
     def get_static_history_bars(self, code: str, days: int,
                                 requested_days: Optional[int] = None) -> Optional[Dict[str, Any]]:
@@ -1669,7 +1716,7 @@ class TDXGlobalCachePool:
                 "requested_days": int(requested_days or days),
                 "adaptive_history": int(requested_days or days) > int(days),
                 "_cache_generation": self._cache_generations.get(c_clean, 0),
-                "records": cleaned_records,
+                "records": CompactBarRecords(cleaned_records),
                 "_quality_len": len(cleaned_records),
                 "last_cum_vol": float(last_cum_vol),
                 "last_cum_amt": float(last_cum_amt),
@@ -1699,7 +1746,9 @@ class TDXGlobalCachePool:
             if not candidates:
                 entry = getattr(self, "_history_static_bars", {}).get(clean)
                 if entry and entry.get("records") and entry.get("days", 0) >= days:
-                    frame = pd.DataFrame(entry["records"])
+                    records = entry["records"]
+                    frame = (records.to_frame() if isinstance(records, CompactBarRecords)
+                             else pd.DataFrame(records))
                     if "time" in frame:
                         frame.set_index("time", inplace=True)
                     candidates.append(frame)
@@ -1762,6 +1811,7 @@ class TDXGlobalCachePool:
             logger.debug(f"TDX history checkpoint startup failed: {exc}")
 
     def get_multi_day_df(self, code: str, days: int, ttl: float = 2.4) -> Optional[pd.DataFrame]:
+        self._ensure_startup_code_loaded(code)
         self._maybe_sync_from_ramdisk(force=False)
         self._check_date_rollover()
         c_clean = str(code).zfill(6)
@@ -1791,7 +1841,10 @@ class TDXGlobalCachePool:
         key = (c_clean, int(days))
         with self._mutex:
             if df is not None and not df.empty:
-                self._multi_day_df_cache[key] = (df.copy(), time.time(), self._current_date_str)
+                incremental = self._incremental_intraday_pool.get(key, {}).get("df")
+                resident = (incremental if isinstance(incremental, pd.DataFrame)
+                            and incremental.equals(df) else df.copy())
+                self._multi_day_df_cache[key] = (resident, time.time(), self._current_date_str)
 
     # ── 3. 交易日计算增量分时与时间戳复用 ──
     def get_incremental_intraday(self, code: str, days: int, ttl: float = 2.4,
@@ -2000,7 +2053,7 @@ class TDXGlobalCachePool:
                     "frozen": is_after_close
                 }
                 # 同步填充短期 df 缓存
-                self._multi_day_df_cache[key] = (df.copy(), time.time(), today_str)
+                self._multi_day_df_cache[key] = (self._incremental_intraday_pool[key]["df"], time.time(), today_str)
                 self._is_dirty = True
                 self._dirty_revision += 1
 
@@ -2034,6 +2087,11 @@ class TDXGlobalCachePool:
         :param partition: None 表示全部分区，否则可选 'history', 'df', 'incremental', 'metrics', 'quotes', 'kline', 'shares'
         """
         self._maybe_sync_from_ramdisk(force=True)
+        if getattr(self, '_startup_loaded_codes', None) is not None:
+            # Clear operations must see remote generations, including symbols
+            # that this on-demand process has never subscribed to.
+            self._load_from_ramdisk(force=True, sync_rollover=False, restore_vwap=False,
+                                    codes={str(code).zfill(6)} if code else None)
         with self._mutex:
             c_clean = str(code).zfill(6) if code else None
             if partition in (None, "history", "incremental"):
@@ -2041,6 +2099,7 @@ class TDXGlobalCachePool:
                     set(self._history_static_bars)
                     | {key[0] for key in self._incremental_intraday_pool}
                     | {key[0] for key in self._multi_day_df_cache}
+                    | set(self._cache_generations)
                 )
                 for affected_code in affected_codes:
                     if affected_code:
@@ -2156,7 +2215,7 @@ class TDXGlobalCachePool:
                     continue
                 if was_repaired:
                     new_entry = dict(entry)
-                    new_entry["records"] = recs
+                    new_entry["records"] = CompactBarRecords(recs)
                     last_r = recs[-1]
                     new_entry["last_cum_vol"] = float(last_r.get("cum_vol_shares", entry.get("last_cum_vol", 0.0)))
                     new_entry["last_cum_amt"] = float(last_r.get("cum_amt", entry.get("last_cum_amt", 0.0)))
@@ -3926,7 +3985,9 @@ class TDXRealtimeFetcher:
             def _static_history_frame() -> pd.DataFrame:
                 if not has_valid_hist:
                     return pd.DataFrame()
-                history_df = pd.DataFrame(list(hist_entry.get("records", [])))
+                records = hist_entry.get("records", [])
+                history_df = (records.to_frame() if isinstance(records, CompactBarRecords)
+                              else pd.DataFrame(records))
                 if history_df.empty:
                     return history_df
                 if cached_inc_df is not None and not cached_inc_df.empty:
@@ -4105,10 +4166,14 @@ class TDXRealtimeFetcher:
 
             # 3. 分支 A: 若命中历史静态缓存，执行【当日时间戳增量比对与合并】
             if has_valid_hist and days > 1:
-                hist_records = list(hist_entry.get("records", []))
+                hist_records = hist_entry.get("records", [])
+                if not isinstance(hist_records, CompactBarRecords):
+                    hist_records = CompactBarRecords(hist_records)
                 # ★ 核心防御：历史分区不应包含今日数据，否则 hist_records + today_records 导致分时图「双峰」重复
-                hist_records = [r for r in hist_records if str(r.get("date", "")) < today_date_str]
-                if not hist_records:
+                history_mask = np.fromiter(
+                    (str(row.get("date", "")) < today_date_str for row in hist_records),
+                    dtype=bool, count=len(hist_records))
+                if not history_mask.any():
                     logger.debug(f"[AutoRepair] {c_clean} hist_records 全部为今日数据，降级 Branch B 重拉")
                     has_valid_hist = False
                 else:
@@ -4118,7 +4183,8 @@ class TDXRealtimeFetcher:
                     cum_pv = float(hist_entry.get("last_cum_pv", 0.0))
                     # 🌟 [自愈兜底] 若为指数且缺少 last_cum_pv，从 hist_records 的点位与量快速重建累计 pv，杜绝均线缩水
                     if is_idx and cum_pv <= 0.0 and hist_records:
-                        cum_pv = sum(float(r.get("close", 0.0)) * float(r.get("bar_vol", 0.0)) for r in hist_records)
+                        cum_pv = sum(float(r.get("close", 0.0)) * float(r.get("bar_vol", 0.0))
+                                     for r, keep in zip(hist_records, history_mask) if keep)
 
                 # 竞价前后 TDX 仍可能只返回昨日 Bar，不能把昨日再次拼到历史尾部。
                 latest_date = today_date_str
@@ -4196,8 +4262,7 @@ class TDXRealtimeFetcher:
                         "turnover_rate": to_rate
                     })
 
-                all_records = hist_records + today_records
-                df_res = pd.DataFrame(all_records)
+                df_res = hist_records.to_frame(today_records, row_mask=history_mask)
                 if not df_res.empty:
                     df_res.set_index("time", inplace=True)
                     self.cache_pool.set_incremental_intraday(

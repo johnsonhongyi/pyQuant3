@@ -5081,7 +5081,7 @@ class ATSMainWindow(QMainWindow):
                         from JSONData.tdx_hdf5_api import SafeHDFStore
                         with SafeHDFStore(path, mode='r') as store:
                             code_query = ", ".join([f"'{c}'" for c in query_codes])
-                            df = store.select('/all_30', where=f"code in [{code_query}]")
+                            df = store.select('/all_30', where=f"code in [{code_query}]", columns=['close'])
                         last_err = None
                         break
                     except Exception as e:

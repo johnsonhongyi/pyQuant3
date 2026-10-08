@@ -939,15 +939,54 @@ def test_selective_disk_startup_retains_other_codes_for_later_loading(monkeypatc
     from ats.tdx_realtime_fetcher import TDXGlobalCachePool
     fetcher, pool, clock, rows = _phase_fetcher(monkeypatch, tmp_path)
     fetcher.fetch_multi_day_intraday_bars("600108", 10)
+    assert pool._multi_day_df_cache[("600108", 10)][0] is pool._incremental_intraday_pool[("600108", 10)]["df"]
     pool._history_static_bars["600109"] = copy.deepcopy(pool._history_static_bars["600108"])
     assert pool.flush_to_ramdisk(force=True, history_checkpoint=True)
     restored = TDXGlobalCachePool(startup_codes=["600108"])
     assert set(restored._history_static_bars) == {"600108"}
+    restored._is_dirty = True
+    assert restored.flush_to_ramdisk(force=True, history_checkpoint=True)
+    assert set(restored._history_static_bars) == {"600108"}
+    assert restored._startup_loaded_codes == {"600108"}
     restored._ensure_startup_code_loaded("600109")
     assert restored.peek_multi_day_df("600109", 10) is not None
     assert restored.flush_to_ramdisk(force=True, history_checkpoint=True) is False  # no changes
     full = TDXGlobalCachePool()
     assert set(full._history_static_bars) == {"600108", "600109"}
+
+
+def test_selective_checkpoint_preserves_vwap_and_unloaded_clear_generations(monkeypatch, tmp_path):
+    import ats.tdx_realtime_fetcher as tdx
+    import ats.archive_policy as archive
+    from ats.compact_cache import read_cache_payload, write_cache_payload
+    from ats.vwap_factory import VWAPFactory
+    fetcher, pool, clock, rows = _phase_fetcher(monkeypatch, tmp_path)
+    fetcher.fetch_multi_day_intraday_bars('600108', 10)
+    assert pool.flush_to_ramdisk(force=True, history_checkpoint=True)
+    payload = read_cache_payload(pool._ramdisk_path)
+    payload['history_static_bars']['600109'] = dict(payload['history_static_bars']['600108'],
+                                                  _cache_generation=4)
+    payload['cache_generations']['600109'] = 4
+    payload['vwap_states'] = {'600109': {'updated_at': 42.0, 'days': [('2026-10-07', [1., 2., 3.])]}}
+    with open(pool._ramdisk_path, 'wb') as destination:
+        write_cache_payload(payload, destination)
+    monkeypatch.setattr(VWAPFactory, '_instance', VWAPFactory())
+    restored = tdx.TDXGlobalCachePool(startup_codes=['600108'])
+    restored._is_dirty = True
+    assert restored.flush_to_ramdisk(force=True, history_checkpoint=True)
+    assert read_cache_payload(pool._ramdisk_path)['vwap_states'] == payload['vwap_states']
+    assert set(restored._history_static_bars) == {'600108'}
+    # An unsubscribed symbol with generation 4 must advance to 5, not reset to 1.
+    monkeypatch.setattr(archive, 'archive_window', lambda: ('market', '2026-10-08'))
+    restored._last_flush_ts = 0
+    restored.invalidate('600109', partition='history')
+    saved = read_cache_payload(pool._ramdisk_path)
+    assert saved['cache_generations']['600109'] == 5
+    assert '600109' not in saved['history_static_bars']
+    assert '600109' not in saved['vwap_states']
+    restored._last_flush_ts = 0
+    restored.invalidate(partition='history')
+    assert read_cache_payload(pool._ramdisk_path)['history_static_bars'] == {}
 
 
 def test_intraday_preview_accepts_restored_incremental_after_0930(monkeypatch, tmp_path):
