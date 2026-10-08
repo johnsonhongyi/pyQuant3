@@ -206,3 +206,4 @@ stock_standalone/tests/test_sbc_extreme_perf_optimization.py
 stock_standalone/stock-strategy/.build-cache/*
 stock_standalone/instock_*.tar.gz
 stock_standalone/config/new_stock_lift_calendar.json.*
+stock_standalone/config/intraday_strategy_state_cache.json.*

@@ -6486,8 +6486,8 @@ class SBCIntradayChartDialog(QWidget):
                     app_inst = QApplication.instance()
                     if app_inst:
                         app_inst.quit()
-                event.accept()
-                return
+                # The initiating window must also unsubscribe and release its timers.
+                is_app_exiting = True
 
         if hasattr(self, 'poll_timer') and self.poll_timer:
             self.poll_timer.stop()
