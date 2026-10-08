@@ -167,7 +167,7 @@ try {
     [Environment]::SetEnvironmentVariable('VITE_A_STOCK_TOKEN', $null, 'Process')
 
     Write-Host 'Preparing source sync package (local data, logs, reviews, screenshots, and secrets excluded)...'
-    $null = New-Item -ItemType Directory -Path (Join-Path $payload 'backend'),(Join-Path $payload 'web-dist'),(Join-Path $payload 'source') -Force
+    $null = New-Item -ItemType Directory -Path (Join-Path $payload 'backend'),(Join-Path $payload 'web-dist'),(Join-Path $payload 'source'),(Join-Path $payload 'docker') -Force
     Copy-Item -LiteralPath $backendOutput -Destination (Join-Path $payload 'backend\easy-stock-backend')
     Get-ChildItem -LiteralPath $webDist -Force | Copy-Item -Destination (Join-Path $payload 'web-dist') -Recurse -Force
     $sourceFiles = & $git -C $sourceRoot ls-files --cached --others --exclude-standard
@@ -182,6 +182,7 @@ try {
         Copy-Item -LiteralPath $from -Destination $to -Force
     }
     if (-not (Test-Path -LiteralPath (Join-Path $payload 'source\easy-stock-service\trading-calendar.json'))) { throw 'Source calendar was excluded from the package.' }
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'docker\market-append.sh') -Destination (Join-Path $payload 'docker\market-append.sh')
     Copy-Item -LiteralPath $deployHelper -Destination (Join-Path $payload 'deploy-prebuilt.sh')
     Invoke-CheckedNative -File $tar -Arguments @('-czf',$archive,'-C',$payload,'.') -Description 'Release packaging'
 

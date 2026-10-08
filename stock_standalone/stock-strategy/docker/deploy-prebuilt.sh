@@ -24,11 +24,13 @@ IMAGE_BUILDER="stockstrategy-image-stage-$RELEASE"
 API_CHECK="stockstrategy-api-check-$RELEASE"
 WEB_DIST="$DATA_ROOT/app/web-dist/$RELEASE"
 CALENDAR_BACKUP="$STAGE/trading-calendar.previous.json"
+MARKET_APPEND_BACKUP="$STAGE/market-append.previous.sh"
 API_OLD_MOVED=0
 WEB_OLD_MOVED=0
 API_NEW_CREATED=0
 WEB_NEW_CREATED=0
 CALENDAR_UPDATED=0
+MARKET_APPEND_UPDATED=0
 SUCCESS=0
 
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -56,6 +58,9 @@ rollback() {
             install -m 0644 "$CALENDAR_BACKUP" "$DATA_ROOT/config/trading-calendar.json"
             ln -sfn "$DATA_ROOT/config/trading-calendar.json" "$PROJECT/source/easy-stock-service/trading-calendar.json"
         fi
+        if [ "$MARKET_APPEND_UPDATED" -eq 1 ] && [ -f "$MARKET_APPEND_BACKUP" ]; then
+            install -m 0755 "$MARKET_APPEND_BACKUP" "$PROJECT/docker/market-append.sh"
+        fi
         [ -d "$WEB_DIST" ] && rm -rf -- "$WEB_DIST"
         docker image rm "$API_IMAGE" >/dev/null 2>&1
     else
@@ -73,6 +78,7 @@ mountpoint -q /mnt/4TB || fail '/mnt/4TB is not mounted.'
 [ -f "$DATA_ROOT/config/backend.env" ] || fail 'Backend environment file is missing.'
 [ -f "$PROJECT/docker/nginx.conf" ] || fail 'Managed nginx configuration is missing.'
 [ -f "$PROJECT/docker/web-entrypoint.sh" ] || fail 'Managed web entrypoint is missing.'
+[ -f /etc/cron.d/stockstrategy-market-append ] || fail 'Installed market append cron schedule is missing.'
 
 available_kb=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)
 data_free_kb=$(df -Pk /mnt/4TB | awk 'END {print $4}')
@@ -97,6 +103,7 @@ tar -xzf "$ARCHIVE" -C "$UNPACK"
 [ -s "$UNPACK/backend/easy-stock-backend" ] || fail 'Prebuilt backend binary is missing.'
 [ -s "$UNPACK/web-dist/index.html" ] || fail 'Prebuilt frontend index is missing.'
 [ -s "$UNPACK/source/easy-stock-service/trading-calendar.json" ] || fail 'Source trading calendar is missing.'
+[ -s "$UNPACK/docker/market-append.sh" ] || fail 'Updated market append script is missing.'
 
 cp -a "$DATA_ROOT/config/trading-calendar.json" "$CALENDAR_BACKUP"
 calendar_tmp="$DATA_ROOT/config/.trading-calendar.$RELEASE.tmp"
@@ -111,9 +118,13 @@ PY
 mv -f -- "$calendar_tmp" "$DATA_ROOT/config/trading-calendar.json"
 CALENDAR_UPDATED=1
 
-mkdir -p "$PROJECT/source" "$DATA_ROOT/app/web-dist" "$DATA_ROOT/logs/backend" "$DATA_ROOT/logs/web"
+mkdir -p "$PROJECT/source" "$DATA_ROOT/app/web-dist" "$DATA_ROOT/logs/backend" "$DATA_ROOT/logs/web" "$DATA_ROOT/logs/service"
 cp -a "$UNPACK/source/." "$PROJECT/source/"
 ln -sfn "$DATA_ROOT/config/trading-calendar.json" "$PROJECT/source/easy-stock-service/trading-calendar.json"
+cp -a "$PROJECT/docker/market-append.sh" "$MARKET_APPEND_BACKUP"
+MARKET_APPEND_UPDATED=1
+install -m 0755 "$UNPACK/docker/market-append.sh" "$PROJECT/docker/.market-append.$RELEASE.tmp"
+mv -f -- "$PROJECT/docker/.market-append.$RELEASE.tmp" "$PROJECT/docker/market-append.sh"
 mkdir -p "$WEB_DIST"
 cp -a "$UNPACK/web-dist/." "$WEB_DIST/"
 chown -R 101:101 "$DATA_ROOT/logs/web"
@@ -171,7 +182,10 @@ docker run -d \
     -e A_STOCK_SETTINGS_PATH=/data/easy-stock/settings.json -e A_STOCK_MASTERY_CACHE=/data/trading-mastery \
     -e A_STOCK_HERMES_HOME=/data/hermes-home -e A_STOCK_HERMES_WORKDIR=/app \
     -e HOME=/data -e XDG_CONFIG_HOME=/data/config -e TZ=Asia/Hong_Kong \
-    -v "$DATA_ROOT/data:/data" -v "$DATA_ROOT/logs/backend:/logs/backend" "$API_IMAGE" >/dev/null
+    -v "$DATA_ROOT/data:/data" -v "$DATA_ROOT/logs/backend:/logs/backend" \
+    -v "$DATA_ROOT/logs/service:/logs/service:ro" \
+    -v /etc/cron.d/stockstrategy-market-append:/config/stockstrategy-market-append.cron:ro \
+    "$API_IMAGE" >/dev/null
 API_NEW_CREATED=1
 
 wait_healthy() {
