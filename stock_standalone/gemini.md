@@ -8,7 +8,7 @@
 - [x] **【全树递归进程销毁与双重物理终结架构落地（对齐 MonitorTK / TradeVisualizer 工业级规范）】**：
     - 在 `ats/shutdown.py` 中引入 `psutil` 递归收集子孙进程树（`p.children(recursive=True)`），先全量 terminate 孙子孤儿进程，再关闭直属子进程，结合强力 kill 保底，彻底绝迹孤儿残留；watchdog 超时收敛至 1.5 秒；
     - 在 `ats/ui/main_window.py` 退出收尾完成日志后，注入 `QTimer.singleShot(150, lambda: os._exit(0))` 快速确定性物理退出；
-    - 在 `run_ats.py` 和 `ats/main_ats.py` 的 `app.exec()` 返回处，使用 `os._exit(code)` 强力终结进程，杜绝 Python GC 与 C++ 析构死锁；
+    - 在 `run_ats.py` 和 `ats/main_ats.py` 的 `app.exec()` 返回处，使用 `os._exit(code)` 强力终结进程，杜绝 Python GC 与 C++ 析构死锁；在 `run_ats.py` 顶层统一导入 `is_packaged_env` 并内置独立 fallback 定义，彻底修复打包下未导入抛出 `NameError: name 'is_packaged_env' is not defined` 的隐患；
     - 在 `sys_utils.py` 中全方位增强 `is_packaged_env()` 对 Nuitka Standalone/Onefile 及独立可执行程序的检测鲁棒性；
 - [x] **【全套自动化回归测试 100% 纯绿秒级通过】**：
     - 更新 `tests/test_ats_shutdown_exit.py`，新增环境矩阵检测、子孙多层进程树递归终结、打包物理终结调度等 3 项专项测试，全部 18 项单测 4.78 秒纯绿通过；

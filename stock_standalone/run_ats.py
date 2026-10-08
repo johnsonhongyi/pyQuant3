@@ -14,10 +14,17 @@ if __name__ == "__main__":
 
 # Ensure workspace root is in path (Nuitka / PyInstaller / dev 统一兼容的物理根目录方案)
 try:
-    from sys_utils import get_app_root
+    from sys_utils import get_app_root, is_packaged_env
     current_dir = get_app_root()
 except Exception:
     current_dir = os.path.dirname(os.path.abspath(__file__))
+    def is_packaged_env() -> bool:
+        return (
+            getattr(sys, "frozen", False)
+            or "NUITKA_ONEFILE_DIRECTORY" in os.environ
+            or "NUITKA_ONEFILE_BINARY" in os.environ
+            or hasattr(sys, "nuitka_version")
+        )
 
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
