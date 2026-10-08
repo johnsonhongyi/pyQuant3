@@ -200,8 +200,8 @@ def test_sbc_close_returns_while_worker_waits_and_restart_keeps_latest_request(q
         assert worker_ids != [threading.get_ident()]
         assert manager.launch_holdings_watcher(snapshot_idx=1) is None
         assert manager.launch_holdings_watcher(snapshot_idx=2) is None
-        assert manager._pending_holdings_launch == (2,)
-        manager.launch_holdings_watcher = lambda snapshot_idx=None: requests.append(snapshot_idx)
+        assert manager._pending_holdings_launch[0] == 2
+        manager.launch_holdings_watcher = lambda snapshot_idx=None, snapshot_data=None: requests.append(snapshot_idx)
     finally:
         release.set()
         manager._close_workers[-1].join(2)

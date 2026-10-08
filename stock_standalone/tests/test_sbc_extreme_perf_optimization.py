@@ -716,6 +716,87 @@ def test_cached_name_and_ipo_do_not_initialize_or_request(monkeypatch):
     sys_utils._SINA_ENGINE.get_code_cname.assert_not_called()
 
 
+@pytest.mark.parametrize("snapshot_only", [False, True])
+def test_snapshot_restores_all_codes_after_group_exit(qapp, monkeypatch, tmp_path, snapshot_only):
+    import json
+    import run_sbc
+    path = tmp_path / "snapshot.json"
+    codes = [f"60010{i}" for i in range(10)]
+    snapshot = {"codes": codes, "windows": [{"code": codes[0]}]}
+    if not snapshot_only:
+        path.write_text(json.dumps({"recent_history_snapshots": [snapshot]}), encoding="utf-8")
+    monkeypatch.setattr(run_sbc, "_get_launcher_layout_cfg_path", lambda: str(path))
+    monkeypatch.setattr(run_sbc, "_is_restoring_holdings", False)
+    monkeypatch.setattr(run_sbc, "_begin_sbc_startup_batch", MagicMock())
+    monkeypatch.setattr(run_sbc, "_end_sbc_startup_batch", MagicMock())
+    monkeypatch.setattr(run_sbc, "open_sbc_chart_dialog", lambda parent, code, **kwargs: MagicMock(code=code))
+    queue = []
+    monkeypatch.setattr(run_sbc, "QTimer", SimpleNamespace(singleShot=lambda delay, callback: queue.append(callback)))
+    qapp.setProperty("is_app_exiting", True)
+    qapp.setProperty("_has_saved_on_quit", True)
+    windows = run_sbc.restore_launcher_holdings_windows(snapshot_index=1, snapshot_data=snapshot if snapshot_only else None)
+    while queue:
+        queue.pop(0)()
+    assert [window.code for window in windows] == codes
+    assert not run_sbc._is_restoring_holdings
+    assert not qapp.property("_has_saved_on_quit")
+
+
+def test_snapshot_selection_survives_close_saving_new_history(monkeypatch):
+    import run_sbc
+    import ats.ui.sbc_launcher as launcher
+    from ats.ui.sbc_launcher import SBCProcessManager
+    selected = {"codes": ["600108", "600109"], "windows": [{"code": "600108"}]}
+    snapshots = [selected]
+    manager = SBCProcessManager.__new__(SBCProcessManager)
+    manager._shutdown_requested = False
+    manager._closing_holdings = None
+    manager._closing_holdings_proc = None
+    manager._in_process_holdings = []
+    monkeypatch.setattr(run_sbc, "get_launcher_history_snapshots", lambda: snapshots)
+    monkeypatch.setattr(manager, "cleanup_dead_processes", MagicMock())
+    monkeypatch.setattr(manager, "is_launcher_running", MagicMock(side_effect=[True, False]))
+    monkeypatch.setattr(manager, "_on_gui_thread", lambda: True)
+    monkeypatch.setattr(manager, "close_launcher_process", lambda: snapshots.insert(0, {"codes": ["600733"]}))
+    monkeypatch.setattr(launcher, "_build_sbc_subprocess_command", lambda **kwargs: None)
+    restore = MagicMock(return_value=[MagicMock()])
+    monkeypatch.setattr(run_sbc, "restore_launcher_holdings_windows", restore)
+    monkeypatch.setenv("SBC_LAYOUT_CONFIG_PATH", "test-layout.json")
+    monkeypatch.setenv("SBC_IS_HOLDINGS_LAUNCHER", "1")
+    manager.launch_holdings_watcher(snapshot_idx=1)
+    assert restore.call_args.kwargs["snapshot_data"] == selected
+
+
+def test_group_exit_forces_existing_runtime_cache_checkpoint(monkeypatch):
+    import run_sbc
+    from ats.tdx_realtime_fetcher import TDXGlobalCachePool
+    from ats.intraday_strategy_engine import IntradayStrategyEngine
+    pool, engine = MagicMock(), MagicMock()
+    monkeypatch.setattr(TDXGlobalCachePool, "_instance", pool)
+    monkeypatch.setattr(IntradayStrategyEngine, "_instance", engine)
+    run_sbc.persist_sbc_runtime_caches()
+    pool.flush_to_ramdisk.assert_called_once_with(force=True, history_checkpoint=True)
+    engine.save_intraday_cache.assert_called_once_with(force=True)
+
+
+def test_group_exit_saves_layout_and_runtime_once(monkeypatch):
+    import run_sbc
+    properties = {}
+    app = SimpleNamespace(property=lambda key: properties.get(key),
+                          setProperty=lambda key, value: properties.__setitem__(key, value),
+                          topLevelWidgets=lambda: [], quit=MagicMock())
+    monkeypatch.setattr(run_sbc, "QApplication", SimpleNamespace(instance=lambda: app))
+    layout, caches = MagicMock(), MagicMock()
+    monkeypatch.setattr(run_sbc, "save_launcher_holdings_windows", layout)
+    monkeypatch.setattr(run_sbc, "persist_sbc_runtime_caches", caches)
+    monkeypatch.setenv("SBC_IS_HOLDINGS_LAUNCHER", "1")
+    run_sbc.quit_and_save_all_sbc_windows()
+    run_sbc.quit_and_save_all_sbc_windows()
+    layout.assert_called_once_with(force=True)
+    caches.assert_called_once_with()
+    assert properties["is_app_exiting"]
+
+
 def test_launcher_batches_windows_and_flushes_recents_once(qapp, monkeypatch, tmp_path):
     import json
     import run_sbc

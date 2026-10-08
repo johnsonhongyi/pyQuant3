@@ -10,6 +10,7 @@ SBC Process Launcher & Lifecycle Manager
 """
 
 import os
+import json
 import sys
 import atexit
 import subprocess
@@ -230,12 +231,18 @@ class SBCProcessManager:
                 return True
         return False
 
-    def launch_holdings_watcher(self, snapshot_idx: Optional[int] = None):
+    def launch_holdings_watcher(self, snapshot_idx: Optional[int] = None, snapshot_data: Optional[dict] = None):
         """【🚀 启动持仓盯盘】在开发环境与打包环境下均优先调起独立子进程运行 (支持指定历史快照)"""
         if self._shutdown_requested:
             return None
+        if snapshot_idx is not None and snapshot_data is None:
+            import run_sbc
+            snapshots = run_sbc.get_launcher_history_snapshots()
+            if 1 <= snapshot_idx <= len(snapshots):
+                import copy
+                snapshot_data = copy.deepcopy(snapshots[snapshot_idx - 1])
         if self._closing_holdings is not None and self._closing_holdings.is_alive():
-            self._pending_holdings_launch = (snapshot_idx,)
+            self._pending_holdings_launch = (snapshot_idx, snapshot_data)
             if not self._restart_timer_pending:
                 from PyQt6.QtCore import QTimer
                 self._restart_timer_pending = True
@@ -250,7 +257,7 @@ class SBCProcessManager:
                 logger.info(f"[SBCLauncher] 切换至历史快照 {snapshot_idx}，平稳关闭当前盯盘并重启...")
                 self.close_launcher_process()
                 if self._on_gui_thread():
-                    return self.launch_holdings_watcher(snapshot_idx=snapshot_idx)
+                    return self.launch_holdings_watcher(snapshot_idx=snapshot_idx, snapshot_data=snapshot_data)
             else:
                 logger.info("[SBCLauncher] 持仓盯盘已在运行中，尝试激活窗口...")
                 self.activate_launcher_windows()
@@ -265,6 +272,9 @@ class SBCProcessManager:
             env.pop("_MEIPASS2", None)
             env["ATS_SBC_SUBPROCESS"] = "1"
             env["SBC_IS_HOLDINGS_LAUNCHER"] = "1"
+            env.pop("SBC_RESTORE_SNAPSHOT", None)
+            if snapshot_data is not None:
+                env["SBC_RESTORE_SNAPSHOT"] = json.dumps(snapshot_data, ensure_ascii=False)
             closed_path = os.path.join(tempfile.gettempdir(), f"ats_sbc_closed_{uuid.uuid4().hex}")
             env["ATS_SBC_CLOSED_PATH"] = closed_path
             try:
@@ -315,7 +325,7 @@ class SBCProcessManager:
             import run_sbc
             os.environ["SBC_LAYOUT_CONFIG_PATH"] = run_sbc._get_launcher_layout_cfg_path()
             os.environ["SBC_IS_HOLDINGS_LAUNCHER"] = "1"
-            restored = run_sbc.restore_launcher_holdings_windows(snapshot_index=snapshot_idx)
+            restored = run_sbc.restore_launcher_holdings_windows(snapshot_index=snapshot_idx, snapshot_data=snapshot_data)
             if not restored:
                 from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
                 dlg = open_sbc_chart_dialog(None, code="600733", period_mode="10d")
@@ -365,7 +375,7 @@ class SBCProcessManager:
         pending = self._pending_holdings_launch
         self._pending_holdings_launch = None
         if pending is not None and not self._shutdown_requested:
-            self.launch_holdings_watcher(snapshot_idx=pending[0])
+            self.launch_holdings_watcher(snapshot_idx=pending[0], snapshot_data=pending[1])
 
     def _close_in_process_holdings(self):
         # 1. 优先关闭并持久化保存在当前进程内打开的持仓盯盘窗口
@@ -375,7 +385,8 @@ class SBCProcessManager:
                 alive_wins = [w for w in self._in_process_holdings if _is_widget_alive(w)]
                 if alive_wins:
                     logger.info(f"[SBCLauncher] 正在关闭进程内 {len(alive_wins)} 个持仓盯盘窗口并持久化...")
-                    run_sbc.save_launcher_holdings_windows()
+                    run_sbc.save_launcher_holdings_windows(force=True)
+                    run_sbc.persist_sbc_runtime_caches()
                     for w in alive_wins:
                         try:
                             w.close()
