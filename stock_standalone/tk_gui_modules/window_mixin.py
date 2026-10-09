@@ -943,14 +943,27 @@ class WindowMixin:
             logger.info(f"保存监控列表失败: {e}")
 
     def restore_all_monitor_windows(self) -> None:
-        """启动时从文件恢复窗口"""
+        """逐窗恢复，每个窗口之间返回 Tk 事件循环处理输入。"""
+        if getattr(self, '_monitor_restore_pending', False) or getattr(self, '_is_closing', False):
+            return
         monitor_data = load_monitor_list(MONITOR_LIST_FILE)
         if not monitor_data:
             logger.info("无监控窗口记录。")
             return
 
         logger.debug(f"正在恢复 {len(monitor_data)} 个监控窗口...")
-        for m in monitor_data:
+        self._monitor_restore_pending = True
+        remaining = iter(monitor_data)
+        exhausted = object()
+
+        def restore_next():
+            if getattr(self, '_is_closing', False):
+                self._monitor_restore_pending = False
+                return
+            m = next(remaining, exhausted)
+            if m is exhausted:
+                self._monitor_restore_pending = False
+                return
             try:
                 code = m[0]
                 concept_name = m[2] if len(m) > 2 else "" 
@@ -970,3 +983,10 @@ class WindowMixin:
                         logger.debug(f"恢复窗口 {unique_code}: {concept_name} ({code})")
             except Exception as e:
                 logger.info(f"恢复窗口失败: {m}, 错误: {e}")
+            try:
+                self.after(50, restore_next)
+            except Exception as e:
+                self._monitor_restore_pending = False
+                logger.info(f"恢复监控窗口调度失败: {e}")
+
+        restore_next()

@@ -723,7 +723,7 @@ class MinuteKlineCache:
             self._is_restored = True
             logger.info(f"♻️ MinuteKlineCache Restored from dict: {len(self._shared_cache)} stocks.")
 
-    def save_cache(self, filepath: Optional[str] = None, compression: str = 'zstd') -> bool:
+    def save_cache(self, filepath: Optional[str] = None, compression: str = 'zstd', lock_timeout: Optional[float] = None) -> bool:
         """
         [NEW ARCHITECTURE PERSISTENCE] 新架构极致压缩持久化：
         直接将所有股票的连续结构化 NumPy 数组写入 pickle 文件，
@@ -742,13 +742,19 @@ class MinuteKlineCache:
             if dirname:
                 os.makedirs(dirname, exist_ok=True)
             import pickle
-            with self._lock:
+            acquired = self._lock.acquire() if lock_timeout is None else self._lock.acquire(timeout=lock_timeout)
+            if not acquired:
+                logger.warning("K 线快照保存跳过：后台更新仍持锁，保留已有持久快照")
+                return False
+            try:
                 # 提取精简紧凑结构
                 compact_dump = {
                     '__version__': 2,
                     '__created_at__': time.time(),
                     'data': {code: series.raw_array for code, series in self._shared_cache.items() if len(series) > 0}
                 }
+            finally:
+                self._lock.release()
             
             # 使用临时文件原子替换，防止断电或并发读写产生半写入坏文件
             tmp_path = filepath + ".tmp"
@@ -2459,7 +2465,7 @@ class MinuteKlineCache:
 
     def get_v_reversal_pool(self) -> set[str]:
         """供外层引擎高速检索潜伏池成员"""
-        return self._v_reversal_pool
+        return self._v_reversal_pool.copy()
         
     def get_consolidation_flags(self, code: str) -> dict:
         """获取潜伏期锚点数据 (供突破校验使用)"""
@@ -3088,15 +3094,22 @@ class MinuteKlineCache:
         try:
             # 深拷贝并转换状态机语言
             mapped_flags = {}
-            for code, state in self._consolidation_flags.items():
-                mapped_state = state.copy()
+            if not self._lock.acquire(timeout=0.2):
+                logger.warning("潜伏池状态保存跳过：缓存正在更新，保留上次完整快照")
+                return False
+            try:
+                flags_snapshot = {code: state.copy() for code, state in self._consolidation_flags.items()}
+                pool_snapshot = list(self._v_reversal_pool)
+            finally:
+                self._lock.release()
+            for code, mapped_state in flags_snapshot.items():
                 if "phase" in mapped_state:
                     mapped_state["phase"] = phase_map.get(mapped_state["phase"], mapped_state["phase"])
                 mapped_flags[code] = mapped_state
 
             state_dict = {
                 "update_time": time.time(),
-                "v_reversal_pool": list(self._v_reversal_pool),
+                "v_reversal_pool": pool_snapshot,
                 "consolidation_flags": mapped_flags
             }
             
@@ -3114,7 +3127,7 @@ class MinuteKlineCache:
             # 使用临时文件写入后重命名，确保原子性防止写一半崩溃
             tmp_file = filepath + ".tmp"
             with open(tmp_file, "w", encoding="utf-8") as f:
-                json.dump(state_dict, f, cls=NpEncoder, ensure_ascii=False, indent=2)
+                f.write(json.dumps(state_dict, cls=NpEncoder, ensure_ascii=False, separators=(",", ":")))
             os.replace(tmp_file, filepath)
             if self.verbose:
                 logger.info(f"💾 [V反潜伏池] 状态已持久化至 {filepath} (容量: {len(self._v_reversal_pool)} 只)")
@@ -3237,7 +3250,8 @@ class MinuteKlineCache:
         try:
             # 1. 确保最新状态已写入 Ramdisk
             ramdisk_path = str(cct.get_ramdisk_path("v_reversal_pool.json"))
-            self.save_consolidation_state(ramdisk_path)
+            if not self.save_consolidation_state(ramdisk_path):
+                return False
             
             # 2. 读取要备份的 JSON 文本
             if not os.path.exists(ramdisk_path):
@@ -4214,6 +4228,8 @@ class DataPublisher:
         self.simulation_mode = simulation_mode
         self.verbose = verbose
         self._save_lock = threading.Lock()
+        self._pending_batch_lock = threading.Lock()
+        self._batch_update_lock = threading.RLock()
         # 核心缓存组件 (传递 verbose)
         self.kline_cache = MinuteKlineCache(
             max_len=int(getattr(cct.CFG, 'kline_cache_max_len', 300)), # 300 阈值可以通过配置文件设置
@@ -4250,7 +4266,7 @@ class DataPublisher:
         self._last_update_date: Optional[str] = None # 最近处理的数据日期 (YYYY-MM-DD)
         self._is_recovered_empty = False # 是否处于“加载失败导致空数据”的危险状态
         self.is_ready = False # 🚀 [ASYNC] 异步加载就绪状态
-        self._pending_batches = [] # 🚀 [ASYNC] 异步加载期间积压的实时数据批次缓存
+        self._pending_batches = {} # 恢复期间每分钟仅保留最新快照，保留分钟历史
         # Interval Settings
         self.expected_interval = 60 # 默认 1分钟
         self.last_batch_clock = 0.0
@@ -4408,15 +4424,21 @@ class DataPublisher:
                 logger.error(f"Snapshot load error: {e}")
                 self._is_recovered_empty = True
             finally:
-                self.is_ready = True
-                if hasattr(self, '_pending_batches') and self._pending_batches:
-                    logger.info(f"🔄 Processing {len(self._pending_batches)} buffered real-time batches after recovery...")
-                    for pending_df in self._pending_batches:
+                # 恢复回放与实时更新共用一个写锁，避免新行情被旧快照反向覆盖。
+                with self._batch_update_lock:
+                    with self._pending_batch_lock:
+                        pending = list(self._pending_batches.values())
+                        self._pending_batches.clear()
+                        self.is_ready = True
+                    if pending:
+                        logger.info(f"🔄 Processing {len(pending)} buffered minute snapshots after recovery...")
+                    for pending_df in pending:
+                        if self._stop_event.is_set():
+                            break
                         try:
-                            self.update_batch(pending_df)
+                            self._apply_batch(pending_df)
                         except Exception as p_e:
                             logger.error(f"Error processing pending batch: {p_e}")
-                    self._pending_batches.clear()
 
         threading.Thread(target=run_recovery, name="DataPublisher_Recovery", daemon=True).start()
 
@@ -4456,12 +4478,12 @@ class DataPublisher:
             return
             
         logger.info("🛑 DataPublisher stopping background tasks...")
+        self._stop_event.set()
         # [NEW] 退出前强制保存快照，防止盘后最后一段数据丢失
         try:
             self.save_cache(force=True)
         except:
             pass
-        self._stop_event.set()
         # 由于是 daemon 线程，此处无需 join 阻塞，让逻辑感知 event 后自然终结即可
 
     def set_paused(self, paused: bool):
@@ -4943,13 +4965,21 @@ class DataPublisher:
         """
         接收来自 fetch_and_process 的 DataFrame 快照
         """
-        if not getattr(self, 'is_ready', False):
-            if not hasattr(self, '_pending_batches'):
-                self._pending_batches = []
-            self._pending_batches.append(df.copy())
-            logger.info(f"⏳ Background recovery in progress. Buffered 1 real-time batch ({len(df)} rows).")
+        if df is None or df.empty or self._stop_event.is_set():
             return
+        with self._pending_batch_lock:
+            if not self.is_ready:
+                minute = int(time.time() // 60)
+                is_new_minute = minute not in self._pending_batches
+                self._pending_batches[minute] = df.copy()
+                if is_new_minute:
+                    logger.info(f"⏳ Background recovery in progress. Buffered minute snapshot ({len(df)} rows).")
+                return
+        with self._batch_update_lock:
+            if not self._stop_event.is_set():
+                self._apply_batch(df)
 
+    def _apply_batch(self, df: pd.DataFrame):
         t0 = time.time()
         is_trading = cct.get_work_time_duration()
 
@@ -5205,10 +5235,10 @@ class DataPublisher:
         手动或周期性将当前 K 线缓存保存到磁盘快照
         :param force: 是否强制保存 (忽略时间间隔)
         """
-        if self._save_lock.locked():
+        if not self._save_lock.acquire(blocking=False):
             logger.warning("save_cache skipped: another save in progress")
             return
-        with self._save_lock:
+        try:
             try:
                 if not hasattr(self, 'kline_cache') or not self.kline_cache:
                     return
@@ -5242,7 +5272,10 @@ class DataPublisher:
                             return
 
                         # 优先调用新架构极致压缩持久化 (NumPy 连续结构数组直写, 耗时 <0.05秒, 磁盘占用缩小 85%)
-                        status = self.kline_cache.save_cache(self._cache_path)
+                        if self._stop_event.is_set():
+                            status = self.kline_cache.save_cache(self._cache_path, lock_timeout=0.5)
+                        else:
+                            status = self.kline_cache.save_cache(self._cache_path)
                         
                         if status:
                             self._is_recovered_empty = False # 成功保存一次后，解除空加载警报
@@ -5259,6 +5292,8 @@ class DataPublisher:
                         logger.debug("save_cache skipped: no data to save.")
             except Exception as e:
                 logger.error(f"save_cache error: {e}")
+        finally:
+            self._save_lock.release()
 
     def subscribe(self, code: str, callback: Callable[..., object]):
         self.subscribers[code].append(callback)

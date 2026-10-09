@@ -584,7 +584,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 🔷 [VERSION] 快照版本号 + inflight 计数器
         self._snapshot_version     = 0
         self._compute_inflight     = 0
-        self._compute_max_inflight = max(3, _compute_workers // 2)
+        self._compute_max_inflight = 1
+        self._pending_tree_data = None
         
         # 💥 关键修复: 必须在创建任何窗口(包括 root)之前设置 DPI 感知
         # 否则非客户区(标题栏)无法正确缩放
@@ -4134,24 +4135,34 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"[UI] 全量队列强制清理失败: {e}\n{traceback.format_exc()}")
 
     def wait_all_threads(self, timeout=0.5):
-        main = threading.current_thread()
+        current = threading.current_thread()
+        main = threading.main_thread()
+        deadline = time.monotonic() + timeout
         for t in threading.enumerate():
             # ❗ 跳过当前主线程以及所有守护线程 (daemon=True)
             # 守护线程会在 os._exit(0) 时被系统自动回收，无需显式等待
-            if t is main or t.daemon:
+            if t is current or t is main or t.daemon:
                 continue
             # ❗ 跳过 DummyThread
             if isinstance(t, threading._DummyThread):
                 logger.warning(f"[SKIP DummyThread] {t.name}")
                 continue
             logger.info(f"[WAIT] Non-daemon thread: {t.name}")
-            t.join(timeout)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            t.join(remaining)
             if t.is_alive():
                 logger.error(f"[STILL ALIVE] {t.name}")
 
     # --- DPI and Window management moved to Mixins ---
     @with_log_level(LoggerFactory.INFO)
     def on_close(self):
+        if getattr(self, '_is_closing', False):
+            return
+        self._is_closing = True
+        if hasattr(self, '_app_exiting'):
+            self._app_exiting.set()
         try:
             import sys_utils
             sys_utils.register_link_callback(None)
@@ -4165,12 +4176,24 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception:
             pass
 
-        # 🛡️ [NEW] 退出保险：25秒后如果还没退出，则强行终止进程，防止 GUI 挂起导致僵尸进程
+        # 最终兜底独立于归档预算，避免正常保存触发旧的 25 秒强退
         def failsafe_exit():
-            print("\n🚨 [Failsafe] Shutdown timeout reached (25s). Forcing physical exit...")
+            print("\n🚨 [Failsafe] Shutdown timeout reached (120s). Forcing physical exit...")
+            # 强退前回收本进程的后代，避免其继续占用 PyInstaller 解压文件。
+            try:
+                import psutil
+                children = psutil.Process(os.getpid()).children(recursive=True)
+                for child in children:
+                    try:
+                        child.kill()
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                psutil.wait_procs(children, timeout=1.0)
+            except Exception:
+                pass
             os._exit(0)
 
-        exit_timer = threading.Timer(25.0, failsafe_exit)
+        exit_timer = threading.Timer(120.0, failsafe_exit)
         exit_timer.daemon = True
         exit_timer.start()
 
@@ -4189,11 +4212,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         logger.error(f"[V-Reversal Backup Error] {e}")
             except Exception:
                 pass
-
-            self._is_closing = True
-
-            if hasattr(self, '_app_exiting'):
-                self._app_exiting.set()  # 通知所有监听线程立即停止
 
             # 🚀 [NEW] Stop and join Watchdog (GuardDog) thread early
             if hasattr(self, '_watchdog_thread') and self._watchdog_thread is not None:
@@ -4386,90 +4404,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except Exception:
                 pass
 
-            logger.info("正在执行物理存档...")
-
-            try:
-
-                t_logger = TradingLogger()
-                archive_file_tools(
-                    t_logger.db_path,
-                    "trading_signals",
-                    ARCHIVE_DIR,
-                    logger
-                )
-
-                from trading_hub import get_trading_hub
-                hub = get_trading_hub()
-
-                archive_file_tools(
-                    hub.signal_db,
-                    "signal_strategy",
-                    ARCHIVE_DIR,
-                    logger
-                )
-
-                if hasattr(self, 'handbook'):
-                    archive_file_tools(
-                        self.handbook.data_file,
-                        "stock_handbook",
-                        ARCHIVE_DIR,
-                        logger
-                    )
-
-                archive_file_tools(
-                    WINDOW_CONFIG_FILE,
-                    "window_config",
-                    ARCHIVE_DIR,
-                    logger
-                )
-
-                archive_file_tools(
-                    VOICE_ALERT_CONFIG_FILE,
-                    "voice_alert_config",
-                    ARCHIVE_DIR,
-                    logger
-                )
-
-                archive_file_tools(
-                    FAVORITE_STOCKS_FILE,
-                    "favorite_stocks",
-                    ARCHIVE_DIR,
-                    logger
-                )
-
-                try:
-                    from sys_utils import get_conf_path
-                    mp_strat_file = get_conf_path("multi_period_strategies.json")
-                    if mp_strat_file and os.path.exists(mp_strat_file):
-                        archive_file_tools(
-                            mp_strat_file,
-                            "multi_period_strategies",
-                            ARCHIVE_DIR,
-                            logger
-                        )
-                except Exception as e:
-                    logger.warning(f"多周期策略归档异常: {e}")
-
-                archive_search_history_list(
-                    monitor_list_file=MONITOR_LIST_FILE,
-                    search_history_file=SEARCH_HISTORY_FILE,
-                    archive_dir=ARCHIVE_DIR,
-                    logger=logger
-                )
-
-                try:
-                    is_td = cct.get_trade_date_status() if (cct and hasattr(cct, 'get_trade_date_status')) else True
-                    now_i = cct.get_now_time_int() if (cct and hasattr(cct, 'get_now_time_int')) else 1530
-                    if is_td and now_i >= 1502:
-                        df_curr_close = getattr(self, 'df_all', None)
-                        if df_curr_close is not None and not df_curr_close.empty:
-                            from JSONData.multiday_feature_store import archive_daily_features
-                            archive_daily_features(df_curr_close)
-                except Exception as e_close_mfs:
-                    logger.debug(f"退出时多日换手率归档跳过: {e_close_mfs}")
-
-            except Exception as e:
-                logger.warning(f"数据存档过程异常: {e}")
+            # 主线程读取界面属性；文件工作线程只接收路径和数据。
+            t_logger = getattr(strategy, 'trading_logger', None)
+            import trading_hub
+            hub = getattr(trading_hub, '_hub_instance', None)
+            archive_paths = [
+                (t_logger.db_path if t_logger is not None else os.path.join(BASE_DIR, "trading_signals.db"), "trading_signals"),
+                (hub.signal_db if hub is not None else os.path.join(BASE_DIR, "signal_strategy.db"), "signal_strategy"),
+                (WINDOW_CONFIG_FILE, "window_config"),
+                (VOICE_ALERT_CONFIG_FILE, "voice_alert_config"),
+                (FAVORITE_STOCKS_FILE, "favorite_stocks"),
+            ]
+            if hasattr(self, 'handbook'):
+                archive_paths.append((self.handbook.data_file, "stock_handbook"))
+            df_close = getattr(self, 'df_all', None)
 
             # =========================================================
             # ⭐ STEP 3: 停止所有子进程
@@ -4540,7 +4488,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 try:
                     logger.info("正在执行 MinuteKlineCache 退出保存...")
                     self.realtime_service.stop()
-                    self.realtime_service.save_cache(force=True)
                 except Exception:
                     pass
 
@@ -4649,10 +4596,59 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             pass
 
                     qt_app.closeAllWindows()
+                    from PyQt6.QtCore import QCoreApplication, QEvent
+                    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
             except Exception as e:
                 logger.debug(f"Qt UI cleanup error: {e}")
 
+            # GUI/工作进程已经停止；归档在后台执行，主线程只等待完成通知。
+            archive_done = threading.Event()
+            def save_shutdown_archives(paths=tuple(archive_paths), close_frame=df_close):
+                try:
+                    deadline = time.monotonic() + 60.0
+                    logger.info("正在后台执行物理存档（独立预算 60 秒）...")
+                    for archive_path, prefix in paths:
+                        archive_file_tools(archive_path, prefix, ARCHIVE_DIR, logger, deadline=deadline)
+                    from sys_utils import get_conf_path
+                    mp_strat_file = get_conf_path("multi_period_strategies.json")
+                    if mp_strat_file and os.path.exists(mp_strat_file):
+                        archive_file_tools(mp_strat_file, "multi_period_strategies", ARCHIVE_DIR, logger, deadline=deadline)
+                    archive_search_history_list(
+                        monitor_list_file=MONITOR_LIST_FILE,
+                        search_history_file=SEARCH_HISTORY_FILE,
+                        archive_dir=ARCHIVE_DIR,
+                        logger=logger,
+                    )
+                    if cct.get_trade_date_status() and cct.get_now_time_int() >= 1502:
+                        if close_frame is not None and not close_frame.empty:
+                            from JSONData.multiday_feature_store import archive_daily_features
+                            archive_daily_features(close_frame)
+                except Exception as e:
+                    logger.warning("退出数据归档异常: %s", e)
+                finally:
+                    archive_done.set()
+            self._shutdown_archive_thread = threading.Thread(
+                target=save_shutdown_archives, name="TkShutdownArchive", daemon=True)
+            self._shutdown_archive_thread.start()
+            self.status_var.set("正在保存退出数据...")
+            self.after(100, self._poll_shutdown_archive, archive_done, exit_timer)
+        except Exception:
+            logger.exception("退出资源清理异常，进入最终清理")
+            self._finish_close(exit_timer)
+
+    def _poll_shutdown_archive(self, archive_done, exit_timer):
+        """Tk 主线程等待文件保存，完成后再销毁窗口。"""
+        if not archive_done.is_set():
+            self.after(100, self._poll_shutdown_archive, archive_done, exit_timer)
+            return
+        self._shutdown_archive_thread.join(timeout=0.2)
+        self._shutdown_archive_thread = None
+        self._finish_close(exit_timer)
+
+    def _finish_close(self, exit_timer):
+        """最终窗口销毁和进程回收保持在主线程。"""
+        try:
             # =========================================================
             # ⭐ STEP 6: 等待残余线程退出 / 销毁 Tk Root
             # =========================================================
@@ -4668,8 +4664,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except Exception:
                 pass
             
-            # ⭐ 关键：成功进入“可控退出路径”，取消 failsafe
-            exit_timer.cancel()
             # =========================================================
             # ⭐ STEP 7: 最终清理子进程并物理切断
             # =========================================================
@@ -4745,6 +4739,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 print(f"发现后台残留占用进程: PID={pid}, EXE={proc_exe}，正在实施强力清理...")
                                 p_obj = psutil.Process(pid)
                                 p_obj.kill()
+                                p_obj.wait(timeout=0.5)
                         except Exception:
                             pass
                     time.sleep(0.2)
@@ -4782,9 +4777,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     sys.stderr.flush()
                 except Exception:
                     pass
-                # ⚠ 永远不要 cancel failsafe
-                # 因为如果 destroy()/stopLogger()/psutil 某步卡死
-                # 仍需依赖 failsafe 保底物理退出
+                exit_timer.cancel()
                 os._exit(0)
 
         except Exception as e:
@@ -6413,21 +6406,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         full_df = latest_p
                     
                     if full_df is not None:
-                        try:
-                            from realtime_data_service import get_global_kline_cache
-                            kline_cache = get_global_kline_cache()
-                        except Exception:
-                            kline_cache = getattr(getattr(self, 'realtime_service', None), 'kline_cache', None)
-
-                        if kline_cache:
-                            try:
-                                if full_df is not None and not full_df.empty:
-                                    kline_cache.attach_multiday_twap_to_df(full_df)
-                                if full_df_res is not None and not full_df_res.empty and full_df_res is not full_df:
-                                    kline_cache.attach_multiday_twap_to_df(full_df_res)
-                            except Exception as ex:
-                                logger.error(f"[Bus] Failed to attach dynamic twap: {ex}")
-
+                        # 发布原始快照，不在接收线程等待历史缓存锁；动态列由 compute 补齐。
+                        self.market_bus.publish(full_df, df_filtered, full_df_res, df_filtered_res)
+                        self._last_snapshot_recv_time = time.time()
+                        if not getattr(self, '_first_snapshot_published', False):
+                            self._first_snapshot_published = True
+                            logger.info("[MarketPipeline] 首批行情已发布: rows=%s", len(full_df))
                         # 📡 从实时 df 中批量提取新股名称注入缓存（防抖：60s 一次）
                         _last_name_bulk = getattr(self, '_last_name_bulk_ts', 0)
                         if time.time() - _last_name_bulk > 60:
@@ -6438,8 +6422,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             except Exception:
                                 pass
 
-                        self.market_bus.publish(full_df, df_filtered, full_df_res, df_filtered_res)
-                        self._last_snapshot_recv_time = time.time()  # 🌟 成功收到并发布快照，更新时间戳
                         # logger.debug("📡 [Bus] Published latest snapshot with resampled track.")
                 
                 time.sleep(0.05) # 20Hz 刷新率足够
@@ -6448,7 +6430,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 time.sleep(1)
 
             # logger.info(f'refresh_flag.value : {self.refresh_flag.value}')
-        self.status_var.set("刷新已启动")
+        logger.info("📡 MarketBusWorker loop exited.")
 
     def format_next_time(self,delay_ms=None):
         """把 root.after 的延迟时间转换成 %H:%M 格式"""
@@ -6531,10 +6513,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                 # 📂 确保 K 线缓存周期性保存 (即便没有新数据进入队列)
                 if hasattr(self, 'realtime_service') and self.realtime_service:
-                    try:
-                        self.realtime_service.save_cache(force=False)
-                    except Exception as e:
-                        logger.error(f"Periodic cache save check failed: {e}")
+                    if not getattr(self, '_cache_save_inflight', False) and time.monotonic() - getattr(self, '_last_cache_save_check', 0) >= 5.0:
+                        self._last_cache_save_check = time.monotonic()
+                        self._cache_save_inflight = True
+                        service = self.realtime_service
+                        def save_periodic_cache():
+                            try:
+                                service.save_cache(force=False)
+                            except Exception as e:
+                                logger.error(f"Periodic cache save check failed: {e}")
+                            finally:
+                                self._cache_save_inflight = False
+                        try:
+                            threading.Thread(target=save_periodic_cache,
+                                             name='PeriodicCacheSave', daemon=True).start()
+                        except Exception:
+                            self._cache_save_inflight = False
+                            raise
 
                 # ⚪️ [FIX] 无条件消耗 signal_bridge_queue（跨进程信号中转）
                 # 必须在 bus_data 条件外执行：即使行情无更新，子进程仍可能有信号待转发
@@ -6573,7 +6568,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         'filtered_ui_data': df_filtered,
                         'full_snapshot_res': full_df_res,
                         'filtered_ui_data_res': df_filtered_res,
-                        'timestamp': snap_time
+                        'timestamp': snap_time,
+                        'source_version': version,
                     }
 
 
@@ -6642,6 +6638,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """
         t_pump_start = time.time()
         try:
+            if getattr(self, '_is_closing', False):
+                return
+            # 串行计算，忙时覆盖待处理快照；不重复净化、排序或排队全市场任务。
+            if getattr(self, '_compute_inflight', 0):
+                pending = getattr(self, '_pending_tree_data', None)
+                self._pending_tree_data = (data_packet, sync_ui, query,
+                                           force or bool(pending and pending[3]))
+                return
             # 1. 解包
             if isinstance(data_packet, dict):
                 full_df       = data_packet.get('full_snapshot')
@@ -6659,8 +6663,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             t_unpack = time.time()
 
             # 2. 代码与数据净化 (轻量)
+            sanitized = {}
             def _sanitize(d):
                 if d is None: return None
+                source_id = id(d)
+                if source_id in sanitized:
+                    return sanitized[source_id]
                 d = d.copy()
                 if d.index.name == 'code': d.index.name = None
                 if 'code' not in d.columns:
@@ -6691,6 +6699,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         valid_code_mask = d['code'].astype(str).str.match(r'^\d{6}$') & (d['code'] != '000000')
                         d = d[valid_code_mask]
                     
+                sanitized[source_id] = d
                 return d
 
             full_df = _sanitize(full_df)
@@ -6701,19 +6710,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if full_df is None or full_df.empty:
                 return
 
-            # 所有计算输入按内容判定；无法安全哈希时保守执行本帧。
-            source_frames = (full_df, full_df_res, df_raw, df_raw_res)
-            source_hashes = tuple(
-                frame_fingerprint(frame) if frame is not None else 'absent'
-                for frame in source_frames
-            )
-            df_hash = None if None in source_hashes else hash((
-                source_hashes, snap_time,
+            # 总线每次发布冻结双轨输入并递增版本；消费端无需再扫描全表。
+            # 旧调用没有可信版本号时保守执行，避免用采样或对象地址漏掉变化。
+            source_version = data_packet.get('source_version') if isinstance(data_packet, dict) else None
+            df_hash = None if source_version is None else (
+                source_version, snap_time,
                 str(self.global_values.getkey('resample')),
                 str(getattr(self, 'sortby_col', None)),
                 bool(getattr(self, 'sortby_col_ascend', False)),
                 repr(getattr(self, 'feature_marker', None)),
-            ))
+                query, bool(sync_ui),
+            )
             if not query and not force and same_fingerprint(getattr(self, '_last_processed_df_hash', None), df_hash):
                 return
 
@@ -6726,15 +6733,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if query:
                 from query_engine_util import query_engine
                 try:
-                    try:
-                        from realtime_data_service import get_global_kline_cache
-                        kline_cache = get_global_kline_cache()
-                    except Exception:
-                        kline_cache = getattr(getattr(self, 'realtime_service', None), 'kline_cache', None)
-
-                    if kline_cache and target_full_df is not None and not target_full_df.empty:
-                        kline_cache.attach_multiday_twap_to_df(target_full_df)
-
                     df = query_engine.execute(target_full_df, query)
                 except Exception:
                     df = target_full_df
@@ -6746,9 +6744,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 5. 排序 (轻量)
             cur_res = self.global_values.getkey("resample") or 'd'
             if df is not None and not df.empty:
-                df = self._sort_dataframe(df)
-
                 if 'resample' not in df.columns:
+                    df = df.copy()
                     df['resample'] = cur_res
 
             t_sort = time.time()
@@ -6765,28 +6762,43 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     f"Hash={t_hash - t_sanitize1:.3f}s, Filter={t_filter - t_hash:.3f}s, Sort={t_sort - t_filter:.3f}s"
                 )
 
-            # 7. Compute 风暴限流 (防止 compute_executor 队列爆炸)
-            max_fl = getattr(self, '_compute_max_inflight', 5)
-            if getattr(self, '_compute_inflight', 0) >= max_fl:
-                logger.warning(f"[ComputeStorm] Backlog {self._compute_inflight}>={max_fl}, dropping")
-                return
-
             # 8. 分配版本号 (进入 compute 前绑定，确保过期判断准确)
             self._snapshot_version = getattr(self, '_snapshot_version', 0) + 1
             version = self._snapshot_version
             self._compute_inflight = getattr(self, '_compute_inflight', 0) + 1
+            view_context = (query, cur_res, getattr(self, 'sortby_col', None),
+                            bool(getattr(self, 'sortby_col_ascend', False)))
+            self._compute_view_context = view_context
+
+            # 首批行情只更新显示，不等待历史恢复/情绪计算，也不提前驱动交易。
+            if sync_ui and df is not None and not getattr(self, '_first_market_frame_shown', False):
+                def show_first_frame(d=df.copy(), context=view_context, v=version):
+                    if getattr(self, '_is_closing', False) or getattr(self, '_first_market_frame_shown', False):
+                        return
+                    if (getattr(self, '_last_value', ''), self.global_values.getkey('resample') or 'd',
+                        getattr(self, 'sortby_col', None), bool(getattr(self, 'sortby_col_ascend', False))) != context:
+                        return
+                    self.refresh_tree(d, force=True, source_version=('initial', v))
+                    self._first_market_frame_shown = True
+                    logger.info("[MarketPipeline] 首批行情已显示: rows=%s version=%s", len(d), v)
+                self._put_deduped_task('initial_market_frame', show_first_frame)
 
             # 9. 提交 CPU 重计算到 compute_executor
-            fut = self.compute_executor.submit(
-                self._run_compute_async,
-                full_df,
-                df,
-                sync_ui, cur_res, version, force,
-                getattr(self, 'sortby_col', None),
-                getattr(self, 'sortby_col_ascend', False),
-                getattr(self, 'feature_marker', None),
-                full_df_res
-            )
+            try:
+                fut = self.compute_executor.submit(
+                    self._run_compute_async,
+                    full_df,
+                    df,
+                    sync_ui, cur_res, version, force,
+                    getattr(self, 'sortby_col', None),
+                    getattr(self, 'sortby_col_ascend', False),
+                    getattr(self, 'feature_marker', None),
+                    full_df_res, query=query
+                )
+            except Exception:
+                self._compute_inflight = 0
+                self._last_processed_df_hash = None
+                raise
             # callback 在 compute 线程执行 — 严禁直接触 UI，必须回流 pump
             fut.add_done_callback(lambda f, v=version, frc=force: self._on_compute_done(f, v, frc))
             self._last_processed_df_hash = df_hash
@@ -6797,12 +6809,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # Pump 阶段完成，释放 processing 标志，允许 update_tree 提交下一帧
             self._is_processing_tree_data = False
 
-    def _run_compute_async(self, full_df, df, sync_ui, cur_res, version, force=False, sortby_col=None, sortby_col_ascend=False, feature_marker=None, full_df_res=None):
+    def _run_compute_async(self, full_df, df, sync_ui, cur_res, version, force=False, sortby_col=None, sortby_col_ascend=False, feature_marker=None, full_df_res=None, query=""):
         """
         [Compute Thread] CPU 重计算区。严禁直接操作 UI 或调用 _put_deduped_task。
         结果仅通过 return 值传递，由 _on_compute_done->pump->_handle_compute_result 写入 UI。
         """
         try:
+            if getattr(self, '_is_closing', False):
+                return None
             # 1. 情绪评分 (heavy)
             if hasattr(self, 'realtime_service') and self.realtime_service:
                 try:
@@ -6814,21 +6828,26 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     logger.error(f"[Compute] Realtime sync error: {e}")
 
             time.sleep(0.005) # ⭐ [GIL-YIELD] 主动让出 5ms 纯空闲时间片，保障主线程 UI 渲染与操作系统窗口操作极其流畅
+            if getattr(self, '_is_closing', False):
+                return None
 
             # 2. 信号检测 (最重的 CPU 操作)
+            same_tracks = full_df_res is full_df
             try:
                 full_df = detect_signals(full_df)
             except Exception as e:
                 logger.error(f"[Compute] detect_signals failed: {e}")
 
-            if full_df_res is not None and not full_df_res.empty:
+            if same_tracks:
+                full_df_res = full_df
+            elif full_df_res is not None and not full_df_res.empty:
                 try:
                     full_df_res = detect_signals(full_df_res)
                 except Exception as e:
                     logger.error(f"[Compute] detect_signals on full_df_res failed: {e}")
 
             # 在所有 df_all（即 full_df）计算完成后，将计算列同步到展示轨 full_df_res 上，避免计算两次
-            if full_df_res is not None and not full_df_res.empty:
+            if not same_tracks and full_df_res is not None and not full_df_res.empty:
                 try:
                     cols_to_sync = ['emotion_status', 'emotion']
                     # 确保 code 列在两轨数据中都存在（防止未 sanitize 或 DataFrame 重构产生缺失）
@@ -6854,9 +6873,27 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             time.sleep(0.005) # ⭐ [GIL-YIELD] 再次主动释放 GIL 锁
 
+            # 查询前补齐动态均价，避免冷启动按缺失字段过滤成空表。
+            if getattr(self, '_is_closing', False):
+                return None
+            cache = getattr(getattr(self, 'realtime_service', None), 'kline_cache', None)
+            if cache is not None:
+                try:
+                    cache.set_df_all_cache(full_df)
+                    if full_df_res is not None and not full_df_res.empty and full_df_res is not full_df:
+                        cache.attach_multiday_twap_to_df(full_df_res)
+                except Exception as ex:
+                    logger.error(f"[Compute] Failed to set df_all_cache: {ex}")
+
             # 3. 将 target_source (full_df_res 或 full_df) 增强列同步到 df 视图
             target_source = full_df_res if (full_df_res is not None and not full_df_res.empty) else full_df
-            if df is not None and not df.empty:
+            if query:
+                try:
+                    from query_engine_util import query_engine
+                    df = query_engine.execute(target_source, query)
+                except Exception as e:
+                    logger.warning(f"[Compute] Query failed after enrichment: {e}")
+            elif df is not None and not df.empty:
                 try:
                     df = target_source.loc[df.index.intersection(target_source.index)].copy()
                 except Exception:
@@ -6865,6 +6902,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             target_source.set_index('code')['emotion_status']
                         ).fillna(50)
 
+            if df is not None and not df.empty:
                 # 4. [PERF] CPU预计算：在后台线程完成 Treeview 的排序运算，彻底解放 UI 线程
                 try:
                     from global_favorites import GlobalFavoriteManager
@@ -6917,14 +6955,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if not full_df.empty:
                 self._run_live_strategy_process(full_df)
 
-            # Cache enrichment may wait for the minute-cache lock; keep it off Tk.
-            cache = getattr(getattr(self, 'realtime_service', None), 'kline_cache', None)
-            if cache is not None:
-                try:
-                    cache.set_df_all_cache(full_df)
-                except Exception as ex:
-                    logger.error(f"[Compute] Failed to set df_all_cache: {ex}")
-
             return (full_df, df, sync_ui, cur_res, force, full_df_res)
 
         except Exception as e:
@@ -6940,17 +6970,24 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             result = fut.result()
         except Exception as e:
             logger.error(f"[Compute] Future failed v{version}: {e}")
-            self._last_processed_df_hash = None
-            self._compute_inflight = max(0, getattr(self, '_compute_inflight', 1) - 1)
-            return
-
-        if result is None:
-            self._last_processed_df_hash = None
-            self._compute_inflight = max(0, getattr(self, '_compute_inflight', 1) - 1)
-            return
+            result = None
 
         # 强制回流 pump — UI 单入口封口
-        self.pump_executor.submit(self._handle_compute_result, result, version, force)
+        def finish_compute():
+            try:
+                self._handle_compute_result(result, version, force)
+            finally:
+                pending = getattr(self, '_pending_tree_data', None)
+                self._pending_tree_data = None
+                if pending is not None and not getattr(self, '_is_closing', False):
+                    self._process_tree_data_async(*pending)
+        try:
+            self.pump_executor.submit(finish_compute)
+        except RuntimeError:
+            if not getattr(self, '_is_closing', False):
+                logger.exception('[Compute] Failed to return result to pump')
+            self._compute_inflight = 0
+            self._last_processed_df_hash = None
 
     def _handle_compute_result(self, result, version, force=False):
         """
@@ -6959,12 +6996,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         refresh_tree UI
         """
         self._compute_inflight = max(0, getattr(self, '_compute_inflight', 1) - 1)
-
-        # [VERSION] Pump 层: 丢弃过期结果 (第一层防护)
-        cur_ver = getattr(self, '_snapshot_version', 0)
-        if version < cur_ver:
-            logger.debug(f"[Version] Drop stale v{version} < v{cur_ver}")
+        if result is None:
+            self._last_processed_df_hash = None
+            self._last_ui_bus_version = 0
             return
+
+        # 按已交付结果判定过期；后续行情提交不能使首个完成结果永远无法显示。
+        if version <= getattr(self, '_last_applied_compute_version', 0):
+            return
+        view_context = getattr(self, '_compute_view_context', None)
 
         try:
             full_df, df, sync_ui, cur_res, force_res, *extra = result
@@ -6997,19 +7037,31 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return
 
         # 单点写 UI (通过 Latest-Wins 聚合器)
+        def apply_result(display_df):
+            try:
+                if getattr(self, '_is_closing', False):
+                    return
+                if version <= getattr(self, '_last_applied_compute_version', 0):
+                    return
+                current_context = (getattr(self, '_last_value', ''),
+                                   self.global_values.getkey('resample') or 'd',
+                                   getattr(self, 'sortby_col', None),
+                                   bool(getattr(self, 'sortby_col_ascend', False)))
+                if view_context is not None and current_context != view_context:
+                    self._last_ui_bus_version = 0
+                    return
+                self._last_applied_compute_version = version
+                self._apply_tree_data_sync(full_df, display_df, cur_res, final_force, full_df_res)
+            finally:
+                self._is_ui_sync_pending = False
         if df is not None:
             def _do_sync():
-                # [VERSION] UI 层: 再次校验 (第二层防护)
-                if version < getattr(self, '_snapshot_version', 0):
-                    return
-                self._apply_tree_data_sync(full_df, df if sync_ui else None, cur_res, final_force, full_df_res)
+                apply_result(df if sync_ui else None)
             self._is_ui_sync_pending = True
             self._put_deduped_task("main_ui_sync", _do_sync)
         elif full_df is not None and not full_df.empty:
             def _do_mem_sync():
-                if version < getattr(self, '_snapshot_version', 0):
-                    return
-                self._apply_tree_data_sync(full_df, None, cur_res, final_force, full_df_res)
+                apply_result(None)
             self._is_ui_sync_pending = True
             self._put_deduped_task("main_ui_sync", _do_mem_sync)
 
@@ -7064,56 +7116,36 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     has_update = True
 
                 # 1. [CORE] 更新主内存及其版本 (必须每轮执行)
-                # 计算快照 Hash 用于版本校验，若数据完全无变动则跳过后续昂贵的 UI 渲染
-                df_hash = 0
-                if not full_df.empty:
-                    # [OPTIMIZE] 哈希指纹改进：取 5 点价格采样，提高变动检测精度
-                    p_col = next((c for c in ['close', 'trade', 'price', 'now'] if c in full_df.columns), None)
-                    if p_col:
-                        n = len(full_df)
-                        sample_idx = [0, n // 4, n // 2, 3 * n // 4, n - 1] if n > 4 else list(range(n))
-                        # 使用采样点的值元组计算哈希，比 sum() 更稳健
-                        p_val_tuple = tuple(full_df[p_col].iloc[sample_idx].values)
-                        df_hash = hash(n) ^ hash(p_val_tuple)
-                    else:
-                        df_hash = hash(full_df.index.size)
-                
+                # Pump 已按发布版本去重；五点价格采样会漏掉其他股票及指标变化。
+                df_hash = getattr(self, '_data_update_version', 0) + 1
                 last_hash = getattr(self, '_last_apply_df_hash', -1)
-                
-                if df_hash != last_hash:
-                    has_update = True
-                    # [OPTIMIZE] 仅在数据真实变动时，执行一次全量内存整合，提升后续索引速度
-                    try:
-                        full_df._consolidate_inplace()
-                    except Exception: pass
+                has_update = True
                 
                 with self._df_lock:
                     self.df_all = full_df
                     self.df_all_res = full_df_res if full_df_res is not None else full_df
                 
 
-                # 🚀 [CORE FIX] 策略动态均线与 TWAP/VWAP 挂载完成后自动刷新策略显示 (防止显示为空及免去手动点击筛选)
-                current_query = getattr(self, '_last_value', "")
-                if current_query and (ui_df is None or ui_df.empty) and (full_df is not None and not full_df.empty):
-                    try:
-                        from query_engine_util import query_engine
-                        if query_engine:
-                            refreshed_df = query_engine.execute(full_df, current_query)
-                            if refreshed_df is not None and not refreshed_df.empty:
-                                ui_df = refreshed_df
-                                logger.info(f"🔄 [Sync] 策略动态均价挂载后自动刷新策略显示，重算命中结果: {len(ui_df)} 行")
-                    except Exception as ex:
-                        logger.warning(f"[Sync] Auto refresh strategy after dynamic TWAP error: {ex}")
+                # 动态字段补齐后的查询已在 compute 执行，空结果也必须正常交付界面。
                 
                 # ⚡ [NEW] 主动强力注入交易内核特征预加载温热 (移至 compute_executor 异步执行以彻底释放主线程)
                 try:
-                    from trading_kernel.kernel_service import get_kernel_service
-                    kernel_srv = get_kernel_service()
-                    if not kernel_srv._indicator_cache:
+                    warmup = getattr(self, '_kernel_warmup_future', None)
+                    if not getattr(self, '_kernel_warmup_complete', False) and (warmup is None or warmup.done()):
                         # 🛡️ 仅限交易日预热 5500+ 指标缓存，非交易日坚决不无谓吞噬 1GB 内存
                         if cct.get_trade_date_status():
-                            logger.info("📡 [Sync] Premarket df_all layout synchronizing. Proactively pre-warming kernel cache asynchronously...")
-                            self.compute_executor.submit(kernel_srv.update_df_all, full_df)
+                            def warmup_kernel(snapshot=full_df):
+                                try:
+                                    if getattr(self, '_is_closing', False):
+                                        return
+                                    from trading_kernel.kernel_service import get_kernel_service
+                                    kernel_srv = get_kernel_service()
+                                    if not kernel_srv._indicator_cache:
+                                        kernel_srv.update_df_all(snapshot)
+                                    self._kernel_warmup_complete = True
+                                except Exception as e:
+                                    logger.error(f"[Compute] Kernel warmup failed: {e}")
+                            self._kernel_warmup_future = self.compute_executor.submit(warmup_kernel)
                 except Exception as ex:
                     logger.error(f"[Sync] Failed to proactively update df_all to kernel: {ex}")
                 
@@ -7197,7 +7229,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         self._is_gui_rendering = True
                         try:
                             # 1. 刷新主 Treeview (核心任务)
-                            self.refresh_tree(ui_df, skip_sort=True)
+                            self.refresh_tree(ui_df, skip_sort=True,
+                                              source_version=self._data_update_version)
+                            self._first_market_frame_shown = True
                         finally:
                             self._is_gui_rendering = False
                         self._last_tree_render_ts = now
@@ -8029,6 +8063,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.info("📡 Diagnostic Watchdog active (Threshold: 2.0s).")
             while not getattr(self, "_is_closing", False):
                 time.sleep(0.5)
+                if getattr(self, '_is_closing', False):
+                    break
                 delay = time.time() - getattr(self, "_last_ui_heartbeat", 0)
                 
                 if delay > 5:
@@ -8643,6 +8679,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # 因此通过 after(0) 调度回主线程安全构建
                 def _create_in_main():
                     try:
+                        if getattr(self, '_is_closing', False):
+                            return
                         t1 = time.time()
                         logger.warning("⏱️ [SectorBidding][BUILD-Main] Step 2: SectorBiddingPanel() 构建开始 ...")
                         panel = SectorBiddingPanel(main_window=self)
@@ -8662,6 +8700,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                         # 推入首次行情（延迟至下一帧，让面板先完成 show）
                         def _push_initial_data():
+                            if getattr(self, '_is_closing', False):
+                                return
                             if hasattr(self, 'df_all') and not self.df_all.empty:
                                 t3 = time.time()
                                 logger.warning("⏱️ [SectorBidding][BUILD-Main] Step 4: df_all + on_realtime_data_arrived ...")
@@ -8676,7 +8716,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         _tb.print_exc()
 
                 # 回调至 Tk 主线程
-                self.after(0, _create_in_main)
+                self.tk_dispatch_queue.put(_create_in_main)
 
             except Exception as e:
                 logger.error(f"[SectorBidding][BUILD-Worker] 后台线程异常: {e}")
@@ -9303,7 +9343,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             self._last_send_trade_date, today, trade_day, preview_time,
                             preview_version, getattr(self, '_last_vis_bus_version', 0),
                             getattr(self, '_last_send_source_fingerprint', None),
-                            frame_fingerprint(preview_df),
+                            send_content_fingerprint(preview_df),
                         )
                 if not pending_full_sync:
                     try:
@@ -9431,7 +9471,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         time.sleep(0.5)
                         continue
 
-                    source_fp = frame_fingerprint(df_bus_all)
+                    source_fp = send_content_fingerprint(df_bus_all)
                     source_current_day = datetime.fromtimestamp(snap_time).strftime('%Y-%m-%d') == today
                     if is_new_trade_snapshot(
                         getattr(self, '_last_send_trade_date', None), today, trade_day, snap_time,
@@ -9481,7 +9521,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     else:
                         df_ui = df_bus_all
                     display_fp = send_content_fingerprint(df_ui)
-                    daily_fp = send_content_fingerprint(df_bus_all)
+                    daily_fp = display_fp if df_ui is df_bus_all else send_content_fingerprint(df_bus_all)
                     content_fp = ((cur_resample, display_fp, daily_fp)
                                   if display_fp is not None and daily_fp is not None else None)
                     if not content_requires_send(
@@ -17690,7 +17730,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.error(f"❌ 切换特征颜色失败: {e}")
 
-    def refresh_tree(self, df=None, force=False, skip_sort=False, scroll_to_view=False):
+    def refresh_tree(self, df=None, force=False, skip_sort=False, scroll_to_view=False, source_version=None):
         """刷新 TreeView，保证列和数据严格对齐。 (高性能版：强制节流)"""
         start_time = time.time()
         
@@ -17751,7 +17791,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             c for c in ['code', 'trade', 'now', 'price', 'close', 'percent', 'signal', 'name', *self.current_cols]
             if c in df.columns
         ))
-        content_hash = frame_fingerprint(df[cols_to_check])
+        content_hash = source_version if source_version is not None else frame_fingerprint(df[cols_to_check])
         current_fingerprint = None if content_hash is None else (tuple(self.current_cols), content_hash)
 
         # 触发判断：非强制刷新时，如果指纹一致则跳过
@@ -24928,21 +24968,23 @@ if __name__ == "__main__":
             import win32api
             win32api.SetConsoleCtrlHandler(app._native_ctrl_handler, True)
 
-        try:
-            app.mainloop()
-        except KeyboardInterrupt:
-            # 额外防护：Ctrl+C 在某些情况下仍可能抛异常
-            now = time.time()
-            if now - _exit_ctrl_c_time > 3:
-                _exit_ctrl_c_count = 0
+        while True:
+            try:
+                app.mainloop()
+                break
+            except KeyboardInterrupt:
+                # 额外防护：Ctrl+C 在某些情况下仍可能抛异常
+                now = time.time()
+                if now - _exit_ctrl_c_time > 3:
+                    _exit_ctrl_c_count = 0
             
-            _exit_ctrl_c_count += 1
-            _exit_ctrl_c_time = now
+                _exit_ctrl_c_count += 1
+                _exit_ctrl_c_time = now
 
-            if _exit_ctrl_c_count >= 3:
-                print("\n检测到连续 3 次 Ctrl+C，正在强制退出程序...")
-                emergency_cleanup_subprocesses()
-                os._exit(0)
-            else:
-                app.ask_exit()
-                _exit_ctrl_c_count = 0
+                if _exit_ctrl_c_count >= 3:
+                    print("\n检测到连续 3 次 Ctrl+C，正在强制退出程序...")
+                    emergency_cleanup_subprocesses()
+                    os._exit(0)
+                else:
+                    app.ask_exit()
+                    _exit_ctrl_c_count = 0

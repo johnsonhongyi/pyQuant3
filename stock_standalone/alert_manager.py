@@ -339,6 +339,9 @@ class AlertManager:
         self.cooldowns: Dict[str, float] = {}
         self.message_cooldowns: Dict[str, float] = {}
         self.global_last_alert: float = 0
+        self._voice_overflow_log_lock = threading.Lock()
+        self._voice_overflow_log_time = float('-inf')
+        self._voice_overflow_log_count = 0
         
         # [NEW] 会话中已报警代码列表 (Session-based highlights)
         self.session_alerted_codes = set()
@@ -620,6 +623,18 @@ class AlertManager:
                     self.session_alerted_codes.add(str(actual_code))
                     logger.debug(f"✅ [SessionTrack] Added {actual_code} to alerted codes")
 
+    def _log_voice_overflow(self, action, key):
+        now = time.monotonic()
+        with self._voice_overflow_log_lock:
+            self._voice_overflow_log_count += 1
+            if now - self._voice_overflow_log_time < 30.0:
+                return
+            suppressed = self._voice_overflow_log_count - 1
+            self._voice_overflow_log_count = 0
+            self._voice_overflow_log_time = now
+        logger.warning("Voice queue full; %s: %s; suppressed=%d in previous interval",
+                       action, key, suppressed)
+
     def _do_send_alert(self, message: str, priority: int = 2, key: Optional[str] = None, cooldown: int = 0):
         """实际的消息分发与记录逻辑"""
         now = time.time()
@@ -658,13 +673,9 @@ class AlertManager:
                     dropped_priority = dropped.get('priority', 2) if isinstance(dropped, dict) else 2
                     if dropped is not None and dropped_priority < priority:
                         self.voice_queue.put_nowait(dropped)
-                        logger.warning(
-                            f"Voice queue full; kept higher-priority queued alert and skipped new alert: {key}"
-                        )
+                        self._log_voice_overflow("kept higher-priority alert; skipped new alert", key)
                         return
-                    logger.warning(
-                        f"Voice queue full; replaced queued alert (priority={dropped_priority}) with new alert: {key}"
-                    )
+                    self._log_voice_overflow(f"replaced queued alert (priority={dropped_priority})", key)
 
                 item = {
                     'priority': priority,

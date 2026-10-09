@@ -779,6 +779,8 @@ class BiddingMomentumDetector:
         self.simulation_mode = simulation_mode
         self._is_ready = False if lazy_load else True
         self._loading_thread = None
+        self._load_lock = threading.Lock()
+        self._loading_callbacks = []
         self.silent_mode = silent_mode # [NEW] 集成模式下抑制重复日志打印
         self.enable_background_linkage = False # [NEW] 是否允许后台自动联动 (默认关闭，仅在赛马面板开启时授权)
 
@@ -1049,57 +1051,54 @@ class BiddingMomentumDetector:
                     args=(k_old,),
                     daemon=True
                 ).start()
+            return True
 
         except Exception as e:
             logger.error(f"❌ Apply state failed: {e}")
+            return False
 
     def _apply_and_finalize(self, state_dict, on_ready_callback=None):
-        """UI线程唯一入口（必须保证在主线程执行）"""
+        """加载线程合并纯数据；就绪回调通过宿主的信号桥通知 GUI。"""
         try:
-            self._apply_detector_state(state_dict)
-            self._is_ready = True
+            if not self._apply_detector_state(state_dict):
+                return
+            with self._load_lock:
+                self._is_ready = True
+                callbacks, self._loading_callbacks = self._loading_callbacks, []
+            if on_ready_callback and on_ready_callback not in callbacks:
+                callbacks.append(on_ready_callback)
 
             logger.info("✅ Detector ready")
 
-            if on_ready_callback:
-                on_ready_callback()
+            for callback in callbacks:
+                try:
+                    callback()
+                except Exception:
+                    logger.exception("Detector ready callback failed")
 
         except Exception as e:
             logger.error(f"❌ finalize failed: {e}")
 
     def ensure_data_ready_async(self, on_ready_callback: Callable = None):
-        """稳定版 ProcessPool loader（无UI死锁版本）"""
-
-        if self._is_ready:
-            if on_ready_callback:
-                on_ready_callback()
-            return
-
-        if getattr(self, '_loading_in_progress', False):
-            logger.warning("📡 [Detector] Data loading is already in progress, skipping duplicate launch.")
-            return
-        self._loading_in_progress = True
-
-        def _dispatch_ui(fn):
-            """统一UI调度入口"""
-            try:
-                if hasattr(self, 'after'):
-                    self.after(0, fn)
+        """同一探测器仅恢复一次；加载中的订阅者共享结果，回调须支持信号桥。"""
+        with self._load_lock:
+            ready = self._is_ready
+            if not ready:
+                if on_ready_callback and on_ready_callback not in self._loading_callbacks:
+                    self._loading_callbacks.append(on_ready_callback)
+                if getattr(self, '_loading_in_progress', False):
                     return
-            except:
-                pass
-
-            try:
-                from PyQt6.QtCore import QTimer
-                QTimer.singleShot(0, fn)
-                return
-            except:
-                pass
-
-            # 最后兜底（不建议，但不会死）
-            fn()
+                self._loading_in_progress = True
+        if ready:
+            if on_ready_callback:
+                try:
+                    on_ready_callback()
+                except Exception:
+                    logger.exception("Detector ready callback failed")
+            return
 
         def _worker():
+            executor = None
             try:
                 import os
                 import concurrent.futures
@@ -1115,19 +1114,22 @@ class BiddingMomentumDetector:
                 )
 
                 def _done(fut):
+                    state_dict = None
                     try:
                         state_dict = fut.result()
-
-                        def _apply():
-                            self._apply_and_finalize(state_dict, on_ready_callback)
-
-                        _dispatch_ui(_apply)
+                        self._apply_and_finalize(state_dict)
 
                     except Exception as e:
                         logger.error(f"ProcessPool failed: {e}")
 
                     finally:
-                        self._loading_in_progress = False
+                        # Future 可能继续存活；移交后释放大结果容器中的额外引用。
+                        if state_dict is not None:
+                            state_dict.clear()
+                        with self._load_lock:
+                            self._loading_in_progress = False
+                            if not self._is_ready:
+                                self._loading_callbacks.clear()
                         try:
                             executor.shutdown(wait=False, cancel_futures=True)
                         except:
@@ -1136,18 +1138,28 @@ class BiddingMomentumDetector:
                 future.add_done_callback(_done)
 
             except Exception as e:
-                self._loading_in_progress = False
+                with self._load_lock:
+                    self._loading_in_progress = False
+                    self._loading_callbacks.clear()
+                if executor is not None:
+                    try:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                    except Exception:
+                        logger.exception("Detector loader shutdown failed")
                 logger.error(f"_worker failed: {e}")
 
-        if self._loading_thread is None or not self._loading_thread.is_alive():
+        try:
             self._loading_thread = threading.Thread(
                 target=_worker,
                 name="DetectorAsyncLoad",
                 daemon=True
             )
             self._loading_thread.start()
-        else:
-            logger.warning("Detector loading already running")
+        except Exception:
+            with self._load_lock:
+                self._loading_in_progress = False
+                self._loading_callbacks.clear()
+            logger.exception("Detector loading thread failed")
 
     # =========================================================
     # 公共接口
@@ -2522,7 +2534,8 @@ class BiddingMomentumDetector:
         import time
         time.sleep(0.5)
         count = 0
-        for code, kline_data in kline_payload_new.items():
+        while kline_payload_new:
+            code, kline_data = kline_payload_new.popitem()
             count += 1
             if count % 50 == 0: time.sleep(0)
             if not kline_data: continue
@@ -2550,7 +2563,8 @@ class BiddingMomentumDetector:
         import time
         time.sleep(0.5)
         count = 0
-        for code, kline_data in kline_payload_legacy.items():
+        while kline_payload_legacy:
+            code, kline_data = kline_payload_legacy.popitem()
             count += 1
             if count % 50 == 0: time.sleep(0)
             if not kline_data: continue
@@ -4045,8 +4059,9 @@ class BiddingMomentumDetector:
                             'opening_bonus': ts.opening_bonus,
                             # [PERF] 仅对高分股挂载 K 线，节省 90% 的内存拷贝开销
                             'klines': list(ts.klines) if (ts.score >= self.score_threshold and ts.klines) else [],
-                            # 🚀 [PERF] 预计算 prices5，根除下游 O(N) 列表推导，注意 deque 需要先 list 化才能切片
-                            'prices5': [float(k.get('close', p_now)) for k in list(ts.klines)[-5:]] if ts.klines else [p_now],
+                            # 仅读取 deque 尾部五根 K 线，避免复制整段历史。
+                            'prices5': [float(ts.klines[-i].get('close', p_now))
+                                        for i in range(min(5, len(ts.klines)), 0, -1)] if ts.klines else [p_now],
                             'is_untradable': ts.is_untradable,
                             'is_counter_trend': ts.is_counter_trend,
                             'is_accumulating': ts.is_accumulating,
@@ -4090,7 +4105,7 @@ class BiddingMomentumDetector:
                         if ts.score >= 0.5:
                             for cat in cats:
                                 if cat not in SECTOR_BLACKLIST and len(cat) <= 30:
-                                    self._sector_active_stocks_persistent[cat][code] = {'code': code, **data}
+                                    self._sector_active_stocks_persistent[cat][code] = data
                         else:
                             for cat in cats:
                                 if code in self._sector_active_stocks_persistent.get(cat, {}):
@@ -4239,21 +4254,25 @@ class BiddingMomentumDetector:
 
         # [P0-OPT] 在锁外预取快照，极大减少锁竞争 (Holding lock only for shallow copies)
         with self._lock:
-            sector_stocks_map = {k: v.copy() for k, v in self._sector_active_stocks_persistent.items()}
+            sector_stocks_map = {k: self._sector_active_stocks_persistent.get(k, {}).copy()
+                                 for k in sectors_to_update}
             # [🚀 安全性加固] 执行深层副本（拷贝 Set），防止锁外计算时受到行情线程对集合的 inplace 修改
             sector_full_map = {k: v.copy() for k, v in self.sector_map.items()}
 
         # 联动概念本轮跟风计算局部缓存，避免在同一个 _aggregate_sectors 周期内重复遍历计算相同概念
         concept_cache = {}
 
-        for sector in sectors_to_update:
+        for sector_index, sector in enumerate(sectors_to_update):
+            if sector_index % 20 == 0:
+                time.sleep(0)
             stocks_dict = sector_stocks_map.get(sector, {})
             if not stocks_dict:
                 if sector in new_active: del new_active[sector]
                 continue
             
             # [FIX] 动态过滤：只要大于等于 0.5 基础活性门槛即计入板块统计，以敏锐捕捉板块群体动能与龙头
-            stocks = [s for s in stocks_dict.values() if s.get('score', 0) >= 0.5]
+            # 个股快照在多个板块间共享；板块专属 leader_score 只写入本轮局部副本。
+            stocks = [s.copy() for s in stocks_dict.values() if s.get('score', 0) >= 0.5]
             
             if not stocks:
                 if sector in new_active: del new_active[sector]

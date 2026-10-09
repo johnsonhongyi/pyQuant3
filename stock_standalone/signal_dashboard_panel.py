@@ -1044,13 +1044,17 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._stats_counters = {"follow": 0, "breakout": 0, "risk": 0, "breakdown": 0, "bull": 0, "bear": 0, "other": 0}
         self._is_updating_ui = False
         self._table_update_buffer: List[BusEvent] = [] # [NEW] UI 更新缓冲
+        self._pending_row_flashes = {}
+        self._row_flash_timer = QTimer(self)
+        self._row_flash_timer.setSingleShot(True)
+        self._row_flash_timer.timeout.connect(self._reset_row_flashes)
         self._data_lock = threading.Lock() # ⭐ [NEW] 线程锁保护共享数据
         self._state_lock = threading.Lock()
         self._event_state: Dict[tuple, BusEvent] = {}
         self._dirty_keys: Set[tuple] = set()
         self._state_timestamps: Dict[tuple, float] = {}
         self._state_ttl_seconds = 600
-        self._max_render_per_frame = 200
+        self._max_render_per_frame = 32
         
         # [NEW] 集中化事件消费定时器：代替高频 QTimer 注册，10FPS (100ms) 批量拉取消费，彻底去噪
         self._event_consume_timer = QTimer(self)
@@ -1287,6 +1291,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         
         if hasattr(self, '_table_update_buffer'):
             self._table_update_buffer.clear()
+        self._row_flash_timer.stop()
+        self._pending_row_flashes.clear()
         
     def showEvent(self, event):
         """⭐ [KEY FIX] 窗口显示回调：同步磁吸状态 + 首次显示后延迟恢复表格列宽与布局"""
@@ -3832,7 +3838,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             
         # ===== 3. 单帧最大渲染天花板截断（防 CPU 洪峰击穿）=====
         if len(valid_keys) > self._max_render_per_frame:
-            valid_keys = valid_keys[-self._max_render_per_frame:]
+            with self._state_lock:
+                self._dirty_keys.update(valid_keys[self._max_render_per_frame:])
+            valid_keys = valid_keys[:self._max_render_per_frame]
             
         # ===== 4. GUI 增量差分渲染（无锁阶段）=====
         for k in valid_keys:
@@ -4001,8 +4009,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             return
 
         try:
-            events_raw = self._table_update_buffer[:]
-            self._table_update_buffer.clear()
+            events_raw = self._table_update_buffer[:32]
+            del self._table_update_buffer[:len(events_raw)]
         finally:
             self._data_lock.release()
         
@@ -4038,17 +4046,23 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             for event in events_to_process:
                 self._append_to_tables(event)
                 processed_count += 1
+                if time.perf_counter() - batch_start >= 0.02:
+                    break
         finally:
+            with self._data_lock:
+                self._table_update_buffer[:0] = events_to_process[processed_count:]
+                has_pending = bool(self._table_update_buffer)
             current_tab_text = self.tabs.tabText(self.tabs.currentIndex())
             for name, table in self.tables.items():
                 state = scroll_states.get(name)
                 # [PERF] ENGINE TABS 不接收信号插入，自有一套排序刷新逻辑
                 if name not in ["🌟 决策队列", "🐉 龙头追踪", "🔥 板块热力", "🌐 战略趋势"]:
                     # [STEP-2 FIX] 仅对当前可见的 Tab 执行实时排序，不可见 Tab 标记为“需要排序”
-                    if name == current_tab_text:
+                    if name == current_tab_text and (not has_pending or time.monotonic() - getattr(self, '_last_signal_sort_ts', 0) >= 0.25):
                         sort_col = getattr(table, '_sort_col', table.horizontalHeader().sortIndicatorSection())
                         sort_order = getattr(table, '_sort_order', table.horizontalHeader().sortIndicatorOrder())
                         self._sort_table_python(table, sort_col, sort_order)
+                        self._last_signal_sort_ts = time.monotonic()
                         table._needs_sort = False # 已完成
                     else:
                         table._needs_sort = True # 标记脏位，切回来时再排
@@ -4076,11 +4090,13 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             if state['at_top']:
                 table.verticalScrollBar().setValue(0)
             else:
-                new_val = state['value'] + len(events_to_process)
+                new_val = state['value'] + processed_count
                 table.verticalScrollBar().setValue(new_val)
 
         # [NEW] 批量插入后立即触发统计重算，消除统计更新滞后的体感
         self._update_stats_display()
+        if has_pending:
+            self._batch_timer.start(16)
 
     def _process_event(self, event: BusEvent, update_ui=True):
         payload = event.payload
@@ -4195,14 +4211,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                         # 兼容旧版本直接存 Item 的情况
                         old_item = old_meta['item'] if isinstance(old_meta, dict) else old_meta
                         existing_row = table.row(old_item)
-                        if existing_row >= 0:
-                            table.removeRow(existing_row)
                     except (RuntimeError, Exception): 
                         pass 
             
             # [A1] insertRow(0) → appendRow (O(1) 尾部追加)
-            new_row = table.rowCount()
-            table.insertRow(new_row)
+            new_row = existing_row
+            if new_row < 0:
+                new_row = table.rowCount()
+                table.insertRow(new_row)
             
             # 🛡️ [CAPPING] 限制表格总长度
             max_rows = 5000
@@ -4272,8 +4288,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             
             # 搜索隐藏逻辑 (使用 blob 代替逐个 item 访问)
             search_text = self.search_input.text().strip().lower()
-            if search_text and search_text not in search_blob:
-                table.setRowHidden(new_row, True)
+            table.setRowHidden(new_row, bool(search_text and search_text not in search_blob))
             
             color = self._get_item_color(pattern, detail, grade)
             if is_alerted: color = alert_fg
@@ -4333,21 +4348,27 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def _flash_row(self, table, row, is_priority_bg=False, priority_bg_brush=None):
         try:
+            if not table.isVisible():
+                return
             items = [table.item(row, i) for i in range(table.columnCount())]
             if not items or not items[0]: return
             flash_bg = self._brushes.get("flash", QBrush(QColor(255, 255, 0, 60)))
+            bg_brush = priority_bg_brush if is_priority_bg else self._brushes.get("transparent", QBrush(QColor(0, 0, 0, 0)))
             for item in items:
-                if item: item.setBackground(flash_bg)
-            
-            def reset_bg():
-                bg_brush = priority_bg_brush if is_priority_bg else self._brushes.get("transparent", QBrush(QColor(0, 0, 0, 0)))
-                for it in items:
-                    try:
-                        if it: it.setBackground(bg_brush)
-                    except RuntimeError:
-                        pass # Item was deleted from C++ side
-            QTimer.singleShot(800, reset_bg)
+                if item:
+                    item.setBackground(flash_bg)
+                    self._pending_row_flashes[id(item)] = (item, bg_brush)
+            if not self._row_flash_timer.isActive():
+                self._row_flash_timer.start(800)
         except: pass
+
+    def _reset_row_flashes(self):
+        pending, self._pending_row_flashes = self._pending_row_flashes, {}
+        for item, brush in pending.values():
+            try:
+                item.setBackground(brush)
+            except RuntimeError:
+                pass
 
     def _refresh_all_tables(self):
         """[PERF v4.0] 极致 O(N) 全量刷新，彻底根治 L2917 循环内的 O(N^2) 性能陷阱"""

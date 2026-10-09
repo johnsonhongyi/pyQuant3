@@ -1343,17 +1343,16 @@ class DataProcessWorker(QThread):
 
         try:
 
-            if hasattr(self.detector, "_load_stock_selector_data"):
-
-                self._safe_log_info(
-                    "📡 [Worker] Background loading..."
-                )
-
-                self.detector._load_stock_selector_data()
-
-                self._safe_log_info(
-                    "✅ [Worker] Background loading completed."
-                )
+            # 复用全局恢复任务，禁止再次在主进程解压并构建完整会话。
+            ready = threading.Event()
+            self.detector.ensure_data_ready_async(on_ready_callback=ready.set)
+            while self._is_running:
+                if ready.wait(0.05):
+                    self._safe_log_info("✅ [Worker] Shared detector loading completed.")
+                    return
+                if not getattr(self.detector, '_loading_in_progress', False):
+                    self._safe_log_warning("[Worker] Detector restore failed; continuing with live data.")
+                    return
 
         except Exception:
 
@@ -1708,10 +1707,6 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self.detector = BiddingMomentumDetector(realtime_service=rs, lazy_load=True)
             self._is_global_detector = False
 
-        # [ROOT-FIX] 直接把完成回调注册在主 GUI 对象上，利用 QTimer.singleShot 安全派发，绕过死循环子线程 of the event pump blind spot!
-        self.detector.on_score_finished = self._on_score_finished_callback
-        self.detector.ensure_data_ready_async(on_ready_callback=self._on_detector_ready)
-
         # [ROOT-FIX] 使用 LinkageManagerProxy 替代原始 StockSender 以防 IO 阻塞
         from linkage_service import get_link_manager
         self.link_manager = get_link_manager()
@@ -1839,15 +1834,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         #     pass
 
         # 线程结束后清理
-        self._worker.stopped.connect(self._worker.deleteLater)
+        self._worker.finished.connect(self._worker.deleteLater)
 
         # UI层回调
         # [FIX] 连接数据处理信号到刷新函数，而不是停止信号
         self._worker.data_updated.connect(self._on_worker_finished)
-
-        # 直接启动 Worker 线程
-        self._worker.start()
-
 
         self._is_initializing = True
         self._init_ui()
@@ -1855,6 +1846,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._restore_geometry()
         self._restore_ui_state()
         self._is_initializing = False
+
+        # UI、锁和信号桥全部就绪后才订阅；已预热的 detector 可能立即回调。
+        self.detector.on_score_finished = self._on_score_finished_callback
+        self.detector.ensure_data_ready_async(on_ready_callback=self._on_detector_ready)
+        self._worker.start()
 
         # UI 刷新计时器 (保持定义但默认不启动，作为 fallback 或数据中断时的兜底)
         self._refresh_timer = QTimer(self)
@@ -1981,7 +1977,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 except Exception as ex:
                     logger.warning(f"[SectorBiddingPanel] Failed to stop detector: {ex}")
             # 这里是真正关闭，我们保存数据
-            self.detector.save_persistent_data()
+            if not getattr(self, '_close_data_saved', False):
+                self.detector.save_persistent_data()
             
         event.accept()
 
@@ -2775,15 +2772,21 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     def _on_score_finished_callback(self):
         """[ROOT-FIX] 打分分片计算全部结束后的回调。
         通过 QObject 信号桥梁将刷新动作安全、线程合规地调度回主线程，彻底消除 QTimer 警告！"""
+        if getattr(getattr(self, 'main_window', None), '_is_closing', False):
+            return
         logger.debug("🔔 [SectorPanel] Async scoring completed. Triggering UI refresh via SignalBridge.")
+        # 后台评分完成遵守行情刷新间隔；强制刷新仅由用户操作或首次就绪请求。
         with self._update_lock:
-            self._force_update_requested = True
-        
+            if not getattr(self, '_has_scoring_result', False):
+                self._has_scoring_result = True
+                self._force_update_requested = True
         if hasattr(self, '_worker') and self._worker is not None:
             self._worker.data_updated.emit(None)
 
     def _on_detector_ready(self):
         """[ROOT-FIX] 异步加载回调：数据就绪后通过 SignalBridge 触发首次刷新，绝对防范跨线程 Timer 崩溃"""
+        if getattr(getattr(self, 'main_window', None), '_is_closing', False):
+            return
         logger.debug("📡 [SectorPanel] Detector data ready, triggering initial refresh via SignalBridge.")
         with self._update_lock:
             self._force_update_requested = True
@@ -2793,6 +2796,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
     def _on_sbc_test_finished(self, data: dict):
         """SBC 测试完成回调"""
+        if getattr(self.main_window, '_is_closing', False):
+            return
         try:
             # 动态导入可视化函数
             try:
@@ -2950,7 +2955,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self._worker.add_data(df_all)  # [THREAD-SAFETY] 外部调用点 (instock_MonitorTK.py) 已确保是不可变快照，物理移除深拷贝以减少 50ms 主线程阻塞
 
             with self._update_lock:
-                self._force_update_requested = force_update
+                self._force_update_requested = self._force_update_requested or force_update
 
         except Exception as e:
             import traceback
@@ -2967,10 +2972,6 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         if df is not None:
             self._last_source_df = df
             
-            # [NEW] 实现实盘实时过滤：如果宏观查询激活，在每次数据更新后自动重算匹配池
-            if getattr(self, '_is_macro_active', False) and getattr(self, '_macro_query_str', ''):
-                self._run_macro_query_internal(self._macro_query_str, is_auto_refresh=True)
-            
         try:
             now = time.time()
             
@@ -2985,34 +2986,42 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             with self._update_lock:
                 # 只有触发强制刷新（如用户交互）或行情周期到了才真正重绘
                 should_refresh = self._force_update_requested or (now - self._last_refresh_ts >= limit) 
+                if not should_refresh or getattr(self, '_ui_refresh_pending', False):
+                    return
+                self._ui_refresh_pending = True
             
-            if should_refresh:
-                QTimer.singleShot(0, self._refresh_sector_list)
-                
-                # 🚀 [NEW] 在竞价计算完毕更新 UI 后，同步强力驱策已打开的跟单 HUD 刷新
-                if hasattr(self, 'main_window') and self.main_window and hasattr(self.main_window, 'spatial_follow_hud'):
-                    hud = self.main_window.spatial_follow_hud
-                    if hud and hud.isVisible():
-                        logger.warning("📡 [SectorPanel-to-HUD] Triggering synchronous HUD refresh following successful bidding calculation.")
-                        # 延迟 100ms 调度，给板块表格渲染以充足的时间
-                        QTimer.singleShot(100, lambda: hud.update_hud_data(hud.sector_name))
-                self._last_refresh_ts = now
-                with self._update_lock:
-                    self._force_update_requested = False
-            else:
-                # [NEW] 兜底：如果不需要全量刷新表格，但仍需给用户一个反馈，
-                # 尤其是在用户点击了刷新按钮后进入此回调的情况。
-                if getattr(self, '_force_update_requested', False) and hasattr(self, 'status_lbl'):
-                    if self.status_lbl.text().startswith("⏳"):
-                        now_str = datetime.now().strftime("%H:%M:%S")
-                        self.status_lbl.setText(f"✅ 计算已完成 ({now_str}) | 看板已对齐")
-                        self.status_lbl.setStyleSheet("color: #aad4ff;")
-            
+            QTimer.singleShot(0, self._flush_worker_refresh)
+
         except Exception as e:
+            with self._update_lock:
+                self._ui_refresh_pending = False
             logger.error(f"[SectorBiddingPanel] _on_worker_finished err: {e}")
             if hasattr(self, 'status_lbl'):
                 self.status_lbl.setText(f"❌ 刷新出错: {e}")
                 self.status_lbl.setStyleSheet("color: #ff6666;")
+
+    def _flush_worker_refresh(self):
+        """同一批完成通知只渲染一次，宏查询使用执行时的最新行情。"""
+        with self._update_lock:
+            self._force_update_requested = False
+        started = time.perf_counter()
+        try:
+            if getattr(self, '_is_macro_active', False) and getattr(self, '_macro_query_str', ''):
+                self._run_macro_query_internal(self._macro_query_str, is_auto_refresh=True)
+            self._refresh_sector_list()
+            self._last_refresh_ts = time.time()
+            host = getattr(self, 'main_window', None)
+            hud = getattr(host, 'spatial_follow_hud', None)
+            if hud and hud.isVisible():
+                QTimer.singleShot(100, lambda: hud.update_hud_data(hud.sector_name))
+        except Exception:
+            logger.exception("[SectorBiddingPanel] UI refresh failed")
+        finally:
+            with self._update_lock:
+                self._ui_refresh_pending = False
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            if elapsed_ms > 500:
+                logger.warning("[SECTOR-UI-SLOW] refresh elapsed=%.1fms", elapsed_ms)
 
     def _get_detector_ui_snapshot(self):
         """Never make the shared Tk/Qt GUI wait for the scoring worker's lock."""
@@ -4357,8 +4366,10 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         results = []
         detector = self.detector
         q_lower = query.lower()
-        
-        with detector._lock:
+        cached_query, cached_results = getattr(self, '_ui_stock_search_cache', ('', []))
+        if not detector._lock.acquire(blocking=False):
+            return cached_results if cached_query == query else []
+        try:
             # 遍历所有活跃板块 (detector.active_sectors 是一个 dict {sector_name: info})
             for s_name, info in detector.active_sectors.items():
                 leader_code = info.get('leader', '')
@@ -4401,11 +4412,13 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                         '_match_code': m_code       # 记录命中的代码用于后续精准选中
                     })
         
-        # 2. [ULTRA-PERFORMANCE] 如果活跃板块未命中，利用数据层索引进行高速检索 (消除 O(N) 遍历)
-        if not results:
-            results = detector.search_by_index(query)
-        
-        return results
+            # detector 使用 RLock，索引回退也在已取得的锁内完成，避免再次等待后台。
+            if not results:
+                results = detector.search_by_index(query)
+            self._ui_stock_search_cache = (query, results)
+            return results
+        finally:
+            detector._lock.release()
 
     # ── [NEW] Watchlist Support ──────────────────────────────────────
     def _populate_watchlist(self, reset_to_top: bool = False):
@@ -5075,8 +5088,13 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         
         if self.detector.realtime_service:
             rs = self.detector.realtime_service
-            # 获取全量 K 线
-            klines = rs.get_minute_klines(code, n=240)
+            # 后台分时写入时使用表格快照，双击不能等待缓存锁。
+            cache = rs.kline_cache
+            if cache._lock.acquire(blocking=False):
+                try:
+                    klines = rs.get_minute_klines(code, n=240)
+                finally:
+                    cache._lock.release()
             # 获取情绪分
             meta['emotion'] = rs.get_emotion_score(code)
             # 获取 55188 题材/人气等元数据
@@ -5098,19 +5116,20 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 # 记录当前现价，以便在没有 K 线时补全
                 meta['now_price'] = pdata.get('prices')[-1] if pdata.get('prices') else 0
         
-        with self.detector._lock:
-            ts = self.detector._tick_series.get(code)
-            if ts:
-                # [FIX] 如果依然没 K 线，尝试从 detector 内存获取
-                if not klines:
-                    klines = list(ts.klines)
-                
-                meta['high_day'] = ts.high_day
-                meta['low_day'] = ts.low_day
-                meta['last_high'] = ts.last_high
-                meta['last_low'] = ts.last_low
-                if meta['last_close'] == 0:
-                    meta['last_close'] = ts.last_close
+        if self.detector._lock.acquire(blocking=False):
+            try:
+                ts = self.detector._tick_series.get(code)
+                if ts:
+                    if not klines:
+                        klines = list(ts.klines)
+                    meta['high_day'] = ts.high_day
+                    meta['low_day'] = ts.low_day
+                    meta['last_high'] = ts.last_high
+                    meta['last_low'] = ts.last_low
+                    if meta['last_close'] == 0:
+                        meta['last_close'] = ts.last_close
+            finally:
+                self.detector._lock.release()
 
         dlg = DetailedChartDialog(code, name, klines, meta, self)
         dlg.exec()

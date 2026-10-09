@@ -57,10 +57,16 @@ class MarketStateBus:
             
         # Serialize publishers while allowing readers to access the previous snapshot.
         with self._publish_lock:
-            frozen_all = df_all.copy()
-            frozen_filtered = df_filtered.copy() if df_filtered is not None else frozen_all
-            frozen_res = df_all_res.copy() if df_all_res is not None else frozen_all
-            frozen_filtered_res = df_filtered_res.copy() if df_filtered_res is not None else frozen_filtered
+            copies = {}
+            def freeze(frame):
+                key = id(frame)
+                if key not in copies:
+                    copies[key] = frame.copy()
+                return copies[key]
+            frozen_all = freeze(df_all)
+            frozen_filtered = freeze(df_filtered) if df_filtered is not None else frozen_all
+            frozen_res = freeze(df_all_res) if df_all_res is not None else frozen_all
+            frozen_filtered_res = freeze(df_filtered_res) if df_filtered_res is not None else frozen_filtered
             with self._data_lock:
                 self._df_all, self._df_filtered = frozen_all, frozen_filtered
                 self._df_all_res, self._df_filtered_res = frozen_res, frozen_filtered_res
