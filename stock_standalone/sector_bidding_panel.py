@@ -1458,7 +1458,15 @@ class DataProcessWorker(QThread):
             if df is None:
                 return
 
-            active_codes = df.index.tolist() if hasattr(df, 'index') else []
+            # EOD/history feeds can have a RangeIndex after reset_index().
+            raw_codes = df['code'] if 'code' in df.columns else df.index
+            active_codes = []
+            for raw_code in raw_codes:
+                code = str(raw_code).strip()
+                if len(code) != 6 or not code.isdigit():
+                    code = _RE_NON_DIGIT.sub('', code).zfill(6)[-6:]
+                if len(code) == 6 and code.isdigit() and code != '000000':
+                    active_codes.append(code)
 
             # ================================================================
             # 注册代码
@@ -1472,6 +1480,7 @@ class DataProcessWorker(QThread):
             # 分片处理
             # ================================================================
 
+            self.latest_df = df  # Publish the source before scoring can emit its completion.
             total = len(active_codes)
             if total > 0:
                 try:
@@ -1584,6 +1593,7 @@ class DataLoaderThread(QThread):
 
 class SectorBiddingPanel(QWidget, WindowMixin):
     """竞价和尾盘板块联动监控面板 v3"""
+    macro_query_ready = pyqtSignal(object)
 
     def _on_history_load_clicked(self):
         """弹出【增强型日历】选择框加载历史快照 (异步非阻塞版)"""
@@ -1709,8 +1719,24 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         
         # [NEW] Macro Query State
         self._macro_query_str = ""
-        self._macro_filtered_codes = [] # List of codes that pass Stage 1
+        self._macro_filtered_codes = set()
         self._is_macro_active = False
+        self._macro_source_version = 0
+        self._macro_completed_key = None
+        self._macro_running_key = None
+        self._macro_pending_job = None
+        self._macro_future = None
+        self._panel_closing = False
+        self._row_action_jobs = {}
+        self._table_render_jobs = {}
+        self._table_render_callbacks = {}
+        self._sector_selection_serial = 0
+        self._watchlist_selection_serial = 0
+        self._stock_selection_serial = 0
+        self.macro_query_ready.connect(self._on_macro_query_ready, Qt.ConnectionType.QueuedConnection)
+        self._snapshot_retry_timer = QTimer(self)
+        self._snapshot_retry_timer.setSingleShot(True)
+        self._snapshot_retry_timer.timeout.connect(self._flush_worker_refresh)
 
         # 动态获取列配置
         self.stock_cols = getattr(cct.CFG, 'bidding_window_col', ["code", "name", "role", "price", "percent", "score", "price_diff", "dff", "trend", "hint"])
@@ -1817,7 +1843,25 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         if self.sector_table.rowCount() == 0:
             if hasattr(self, 'status_lbl'):
                 self.status_lbl.setText("🔄 准备首次数据评分映射...")
-            QTimer.singleShot(500, self.manual_refresh)
+            # Reuse warm detector data; showing a window must not rescore all stocks.
+            with self._update_lock:
+                self._force_update_requested = True
+            QTimer.singleShot(0, self._on_worker_finished)
+        else:
+            with self._update_lock:
+                self._force_update_requested = True
+                self._ui_refresh_pending = True
+            QTimer.singleShot(0, self._flush_worker_refresh)
+
+    def hideEvent(self, event):
+        self._snapshot_retry_timer.stop()
+        for timer, _ in self._row_action_jobs.values():
+            timer.stop()
+        for table, (timer, _) in list(self._table_render_jobs.items()):
+            timer.stop()
+            self._table_render_jobs[table] = (timer, None)
+        self._table_render_callbacks.clear()
+        super().hideEvent(event)
 
     def _on_btn_close_clicked(self):
         """工具栏'关闭'按钮触发的彻底退出"""
@@ -1843,7 +1887,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self.detector.reconstruct_all_from_cache()
             self._refresh_sector_list()
             # [NEW] 强制刷新当前选中的板块右侧表格，确保龙头角色和位次立即更新
-            self._on_sector_table_selection_changed()
+            self._on_sector_table_selection_changed(link_software=False)
         else:
             # 实时模式处理
             self.detector._last_gc_ts = 0 
@@ -1864,6 +1908,21 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             return
 
         # ✅ [FIX] 清除主窗口中的引用，防止对象已销毁但引用依然存在的异常
+        self._panel_closing = True
+        self._snapshot_retry_timer.stop()
+        for timer, _ in self._row_action_jobs.values():
+            timer.stop()
+        self._row_action_jobs.clear()
+        for timer, _ in self._table_render_jobs.values():
+            timer.stop()
+        self._table_render_jobs.clear()
+        self._table_render_callbacks.clear()
+        self._macro_pending_job = None
+        if self._macro_future is not None:
+            self._macro_future.cancel()
+        owned_executor = getattr(self, '_macro_owned_executor', None)
+        if owned_executor is not None:
+            owned_executor.shutdown(wait=False, cancel_futures=True)
         if hasattr(self.main_window, 'sector_bidding_panel'):
            self.main_window.sector_bidding_panel = None
            
@@ -2628,7 +2687,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self._populate_watchlist()
             # [FIX] 搜索时右侧表无法及时更新：强制同步当前板块详情
             if self.sector_table.currentRow() >= 0:
-                self._on_sector_table_selection_changed()
+                self._on_sector_table_selection_changed(link_software=False)
             return
 
         try:
@@ -2852,7 +2911,14 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             
             # [USER REQUEST] 如果有 status_var2 (在 instock_MonitorTK 中有)，则尝试同步
             if hasattr(self.main_window, 'status_var2'):
-                self.main_window.status_var2.set(f"wri ok: {blkname} count: {len(codes)}")
+                host = self.main_window
+                def _update_host_status():
+                    if not getattr(host, '_is_closing', False):
+                        host.status_var2.set(msg)
+                if hasattr(host, '_put_deduped_task'):
+                    host._put_deduped_task('sector_write_status', _update_host_status)
+                elif hasattr(host, 'tk_dispatch_queue'):
+                    host.tk_dispatch_queue.put_nowait(_update_host_status)
                 
         except Exception as e:
             err_msg = f"写入板块失败: {e}"
@@ -2903,10 +2969,18 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
     def _on_worker_finished(self, _=None):
         """在主线程被调用，由后台真正计算完毕后触发UI更新"""
+        if self._panel_closing:
+            return
+        self._ui_snapshot_ts = -1
+        self._ui_snapshot_version = -1
         df = getattr(self._worker, 'latest_df', None)
         # [NEW] 捕获并更新最新的全量行情数据源，确保宏观查询使用的是包含 nclose, ral 等全量字段的 df
         if df is not None:
+            if df is not self._last_source_df:
+                self._macro_source_version += 1
             self._last_source_df = df
+        if not self.isVisible():
+            return
             
         try:
             now = time.time()
@@ -2922,7 +2996,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             with self._update_lock:
                 # 只有触发强制刷新（如用户交互）或行情周期到了才真正重绘
                 should_refresh = self._force_update_requested or (now - self._last_refresh_ts >= limit) 
-                if not should_refresh or getattr(self, '_ui_refresh_pending', False):
+                if (not should_refresh or getattr(self, '_ui_refresh_pending', False)
+                        or self._snapshot_retry_timer.isActive()):
                     return
                 self._ui_refresh_pending = True
             
@@ -2938,9 +3013,19 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
     def _flush_worker_refresh(self):
         """同一批完成通知只渲染一次，宏查询使用执行时的最新行情。"""
-        with self._update_lock:
-            self._force_update_requested = False
+        if self._panel_closing:
+            return
         try:
+            if not self.isVisible():
+                self._snapshot_retry_timer.stop()
+                return
+            self._get_detector_ui_snapshot()
+            if not getattr(self, '_ui_snapshot_fresh', False):
+                if not self._snapshot_retry_timer.isActive():
+                    self._snapshot_retry_timer.start(100)
+                return
+            with self._update_lock:
+                self._force_update_requested = False
             if getattr(self, '_is_macro_active', False) and getattr(self, '_macro_query_str', ''):
                 self._run_macro_query_internal(self._macro_query_str, is_auto_refresh=True)
             self._refresh_sector_list()
@@ -2958,16 +3043,22 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     def _get_detector_ui_snapshot(self):
         """Never make the shared Tk/Qt GUI wait for the scoring worker's lock."""
         detector = self.detector
-        now = time.monotonic()
-        if now - getattr(self, '_ui_snapshot_ts', -1) < 0.25:
+        if (hasattr(self, '_ui_detector_snapshot') and
+                getattr(self, '_ui_snapshot_version', -1) == detector.data_version):
+            self._ui_snapshot_fresh = True
             return self._ui_detector_snapshot
         if not detector._lock.acquire(blocking=False):
+            self._ui_snapshot_fresh = False
+            if not self._panel_closing and not self._snapshot_retry_timer.isActive():
+                self._snapshot_retry_timer.start(100)
             now = time.monotonic()
             if now - getattr(self, '_last_detector_busy_log', 0) >= 30:
                 self._last_detector_busy_log = now
                 logger.warning("[SECTOR-UI-CACHE-BUSY] 后台评分持锁，使用上一轮界面快照")
             return getattr(self, '_ui_detector_snapshot', ([], []))
         try:
+            self._ui_snapshot_fresh = True
+            version = detector.data_version
             # Copy UI rows only; never recursively traverse per-stock kline/history payloads.
             def copy_row(info):
                 row = dict(info)
@@ -2984,6 +3075,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             detector._lock.release()
         snapshot[0].sort(key=lambda row: row.get('score', 0), reverse=True)
         self._ui_detector_snapshot = snapshot
+        self._ui_snapshot_version = version
         self._ui_snapshot_ts = time.monotonic()
         return snapshot
 
@@ -2994,6 +3086,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         return self._get_detector_ui_snapshot()[1]
 
     def _refresh_sector_list(self, reset_to_top: bool = False):
+        self._start_table_render(self.sector_table, self._iter_sector_rows(reset_to_top))
+
+    def _iter_sector_rows(self, reset_to_top=False):
+        favorite_sectors = self.favorite_sectors
+        favorite_stocks = self.favorite_stocks
         # 1. 安全检查
         if not hasattr(self, '_worker') or self._worker is None:
             return
@@ -3011,14 +3108,18 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 )
 
         # 3. 获取板块数据
-        sectors = self._get_ui_active_sectors()
+        sectors = list(self._get_ui_active_sectors())
 
         if not sectors:
             if hasattr(self, 'status_lbl') and qsize == 0:
                 self.status_lbl.setText("📝 目前无满足门槛的活跃板块 (或正在计算中)")
                 self.status_lbl.setStyleSheet("color: #AAAAAA;")
 
+            self._cancel_table_render(self.stock_table)
             self.sector_table.setRowCount(0)
+            self.stock_table.setRowCount(0)
+            self.stock_table._last_populated_sector = None
+            self._populate_watchlist()
             return
 
         now_str = datetime.now().strftime("%H:%M:%S")
@@ -3033,12 +3134,14 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         items = self.sector_table.selectedItems()
         if items:
             selected_sector = self.sector_table.item(items[0].row(), 0).data(Qt.ItemDataRole.UserRole)
+        selection_serial = self._sector_selection_serial
+        target_row = -1
 
         # [NEW] 5. Python Level Sorting
         col, asc = self._sector_sort_col, self._sector_sort_asc
         
         # # [NEW] 应用宏观查询过滤到板块列表
-        # if self._is_macro_active and self._macro_filtered_codes:
+        # if self._is_macro_active:
         #     filtered_sectors = []
         #     for s in sectors:
         #         # 判准逻辑：如果板块龙头或跟随者中有任何一个满足宏观查询，则显示该板块
@@ -3049,9 +3152,10 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
         # 计算每个板块符合当前过滤条件的个股数并存入 _filtered_count
         for sdata in sectors:
-            sdata['_filtered_count'] = self._get_filtered_stock_count(sdata)
+            sdata['_filtered_count'] = self._get_filtered_stock_count(sdata, favorites=favorite_stocks)
+            yield
 
-        is_fav = lambda x: 1 if x.get('sector', '') in self.favorite_sectors else 0
+        is_fav = lambda x: 1 if x.get('sector', '') in favorite_sectors else 0
 
         if col == 0: sectors.sort(key=lambda x: x.get('sector', ''), reverse=not asc)
         elif col == 1: sectors.sort(key=lambda x: x.get('score', 0), reverse=not asc)
@@ -3062,10 +3166,6 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         sectors.sort(key=is_fav, reverse=True)
 
         # 6. 表格渲染 (Dirty Check Update)
-        self._ui_refreshing = True
-        self.sector_table.setUpdatesEnabled(False)
-        self.sector_table.blockSignals(True)
-        
         current_rows = self.sector_table.rowCount()
         new_count = len(sectors)
         if current_rows != new_count:
@@ -3094,7 +3194,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 icon_char = "📊"
 
             # Col 0: Name
-            display_name = f"⭐ {icon_char} {sn}" if sn in self.favorite_sectors else f"{icon_char} {sn}"
+            display_name = f"⭐ {icon_char} {sn}" if sn in favorite_sectors else f"{icon_char} {sn}"
             self._update_cell(self.sector_table, i, 0, display_name, 
                             color=color, user_role=sn)
 
@@ -3122,28 +3222,28 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                             is_numeric=True)
 
             # Col 5: Tags
-            display_tags = f"[★重点] {tags}" if sn in self.favorite_sectors else tags
+            display_tags = f"[★重点] {tags}" if sn in favorite_sectors else tags
             self._update_cell(self.sector_table, i, 5, display_tags, font=self._small_font)
 
             if sn == selected_sector:
-                self.sector_table.selectRow(i)
-
-        # 7. 恢复 UI 状态标记 (解除更新锁定，解除信号屏蔽)
-        self.sector_table.setUpdatesEnabled(True)
-        self.sector_table.blockSignals(False)
-        self._ui_refreshing = False
+                target_row = i
+            yield
 
         # 8. 默认选中
-        if not self.sector_table.selectedItems() and self.sector_table.rowCount() > 0:
+        if target_row >= 0 and selection_serial == self._sector_selection_serial and not reset_to_top:
+            self.sector_table.selectRow(target_row)
+        elif not self.sector_table.selectedItems() and self.sector_table.rowCount() > 0:
             self.sector_table.selectRow(0)
             
         if reset_to_top and self.sector_table.rowCount() > 0:
             self.sector_table.selectRow(0)
             self.sector_table.scrollToTop()
 
+        self._ui_refreshing = False
+
         # 9. 联动刷新 (手动触发时，由于 _ui_refreshing=False，可以正常执行)
         if self.sector_table.selectedItems():
-            self._on_sector_table_selection_changed()
+            self._on_sector_table_selection_changed(link_software=False)
 
         # 10. 状态栏最终更新
         sub_cnt = len(self.detector._subscribed)
@@ -3199,13 +3299,16 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._populate_watchlist()
         
     # ------------------------------------------------------------------ sector select
-    def _on_sector_table_selection_changed(self):
+    def _on_sector_table_selection_changed(self, link_software=True):
         """板块表选中项变更 → 刷新个股列表"""
         if getattr(self, '_ui_refreshing', False):
             return
+        if link_software:
+            self._sector_selection_serial += 1
             
         curr_row = self.sector_table.currentRow()
         if curr_row < 0:
+            self._cancel_table_render(self.stock_table)
             self.stock_table.setRowCount(0)
             return
 
@@ -3236,7 +3339,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 self._populate_table(d, reset_to_top=reset_to_top)
                 
                 # [NEW] 联动逻辑：如果是用户光标切换（且不是正在刷新的静默状态），自动联动龙头
-                if self.sector_table.hasFocus():
+                if link_software and self.sector_table.hasFocus():
                     leader_code = d.get('leader')
                     if leader_code:
                         self._link_code(leader_code, focus_widget=self.sector_table)
@@ -3388,56 +3491,100 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self.query_input.lineEdit().setCursorPosition(0)
 
     def _run_macro_query_internal(self, query: str, is_auto_refresh: bool = False):
-        """核心查询逻辑提取：根据 query 计算匹配个股代码池，支持手动触发与背景数据自动同步"""
+        """One background query at a time, retaining only the newest pending request."""
+        if self._panel_closing:
+            return
+        if query != self._macro_query_str:
+            self._macro_filtered_codes = set()
         self._is_macro_active = True
         self._macro_query_str = query
-        try:
-            df = getattr(self, '_last_source_df', None)
-            if df is None or df.empty:
-                self._macro_filtered_codes = []
-                if not is_auto_refresh and hasattr(self, 'status_lbl'):
-                    self.status_lbl.setText("🔭 等待首轮完整行情到达后即可查询...")
-                    self.status_lbl.setStyleSheet("color: #FFA500;")
-                return
-
-            # 使用 query_engine 执行，支持自然语言解析
-            if query_engine:
-                res = query_engine.execute(df, query)
-            else:
-                res = df.query(query)
-            
-            if isinstance(res, pd.DataFrame):
-                # 兼容不同结构的 code 提取
-                if 'code' in res.columns:
-                    self._macro_filtered_codes = res['code'].tolist()
-                else:
-                    self._macro_filtered_codes = res.index.tolist()
-            else:
-                self._macro_filtered_codes = []
-            
-            # 更新 UI 反馈 (手动触发或匹配数量变化时显示)
-            count = len(self._macro_filtered_codes)
-            if not is_auto_refresh and hasattr(self, 'status_lbl'):
-                msg = f"✅ 过滤完成: {count} 只个股 (Source: {len(df)})"
-                self.status_lbl.setText(msg)
-                self.status_lbl.setStyleSheet("color: #00ff88; font-weight: bold;")
-            
-            # 同时同步到重点表顶部的标签
-            if hasattr(self, 'macro_info_lbl'):
-                self.macro_info_lbl.setText(f"🔍 宏过滤: {count} 只命中")
-                self.macro_info_lbl.setStyleSheet("color: #00ff88; font-weight: bold;" if count > 0 else "color: #888888;")
-                
-            # logger.debug(f"[MacroQuery] {query} -> {count} results (auto={is_auto_refresh})")
-        except Exception as e:
+        df = self._last_source_df
+        if df is None or df.empty:
             if not is_auto_refresh:
-                logger.error(f"[MacroQuery] Filter execution failed: {e}")
-                if hasattr(self, 'status_lbl'):
-                    self.status_lbl.setText(f"❌ 查询语法错误: {e}")
-                    self.status_lbl.setStyleSheet("color: #ff6666;")
-                if hasattr(self, 'macro_info_lbl'):
-                    self.macro_info_lbl.setText("❌ 语法错误")
-                    self.macro_info_lbl.setStyleSheet("color: #ff6666;")
-            self._macro_filtered_codes = []
+                self.status_lbl.setText('🔭 等待首轮完整行情到达后即可查询...')
+            return
+        key = (query, self._macro_source_version)
+        if key == self._macro_completed_key or key == self._macro_running_key:
+            return
+        self._macro_pending_job = (df, query, is_auto_refresh, key)
+        if self._macro_future is None:
+            self._start_macro_query()
+
+    def _start_macro_query(self):
+        job = self._macro_pending_job
+        self._macro_pending_job = None
+        if job is None or self._panel_closing:
+            return
+        df, query, auto, key = job
+        self._macro_running_key = key
+
+        def compute():
+            try:
+                frame = df.copy()
+                if query_engine:
+                    engine = type(query_engine)()
+                    result = engine.execute(frame, query)
+                    if engine.last_error:
+                        return key, auto, len(df), set(), engine.last_error
+                else:
+                    result = frame.query(query)
+                codes = set(result['code'].astype(str) if 'code' in result.columns
+                            else result.index.astype(str))
+                return key, auto, len(df), codes, ''
+            except Exception as exc:
+                logger.exception('[MacroQuery] 后台查询失败')
+                return key, auto, len(df), set(), str(exc)
+
+        def completed(future):
+            if self._panel_closing or future.cancelled():
+                return
+            try:
+                self.macro_query_ready.emit(future.result())
+            except RuntimeError:
+                pass  # Qt object was destroyed during shutdown.
+        try:
+            executor = getattr(self.main_window, 'view_executor', None)
+            if executor is None:
+                from concurrent.futures import ThreadPoolExecutor
+                executor = getattr(self, '_macro_owned_executor', None)
+                if executor is None:
+                    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='bidding_query')
+                    self._macro_owned_executor = executor
+            self._macro_future = executor.submit(compute)
+            self._macro_future.add_done_callback(completed)
+        except RuntimeError:
+            self._macro_future = None
+            self._macro_running_key = None
+            if not self._panel_closing:
+                logger.exception('[MacroQuery] 无法提交查询')
+
+    def _on_macro_query_ready(self, result):
+        self._macro_future = None
+        self._macro_running_key = None
+        if self._panel_closing:
+            return
+        key, auto, source_count, codes, error = result
+        try:
+            if not self._is_macro_active or key[0] != self._macro_query_str:
+                return
+            self._macro_filtered_codes = codes
+            self._macro_completed_key = key
+            count = len(codes)
+            if error:
+                self.status_lbl.setText(f'❌ 查询语法错误: {error}')
+                self.macro_info_lbl.setText('❌ 语法错误')
+            else:
+                if not auto:
+                    self.status_lbl.setText(f'✅ 过滤完成: {count} 只个股 (Source: {source_count})')
+                self.macro_info_lbl.setText(f'🔍 宏过滤: {count} 只命中')
+                self.macro_info_lbl.setStyleSheet('color: #00ff88;' if count else 'color: #888888;')
+            with self._update_lock:
+                self._force_update_requested = True
+                if not getattr(self, '_ui_refresh_pending', False):
+                    self._ui_refresh_pending = True
+                    QTimer.singleShot(0, self._flush_worker_refresh)
+        finally:
+            self._start_macro_query()
 
     def _on_query_history_context_menu(self, pos):
         """处理查询历史下拉项的右键删除逻辑"""
@@ -3613,7 +3760,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         # 1. 状态变量重置
         self._is_macro_active = False
         self._macro_query_str = ""
-        self._macro_filtered_codes = []
+        self._macro_filtered_codes = set()
+        self._macro_pending_job = None
+        self._macro_completed_key = None
         self._force_show_all_in_stock_table = False 
 
         # 2. UI 组件状态重置
@@ -3709,10 +3858,26 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                     
         return True
 
-    def _get_filtered_stock_count(self, data: dict) -> int:
+    def _get_filtered_stock_count(self, data: dict, favorites=None) -> int:
         """[ignoring loop detection]
         统计板块内个股中符合当前过滤条件（宏观过滤+搜索过滤）的数量。
         """
+        favorites = self.favorite_stocks if favorites is None else favorites
+        active_query = getattr(self, '_active_search_query', '')
+        penetrating = getattr(self, '_force_show_all_in_stock_table', False)
+        if not active_query or penetrating:
+            # Counts need only codes; avoid building a display dictionary for every stock.
+            from itertools import chain
+            candidates = data.get('race_candidates', [])
+            if candidates and not penetrating:
+                codes = (candidate['code'] for candidate in candidates)
+            else:
+                leader = data.get('leader')
+                codes = chain((leader,) if leader else (),
+                              (follower['code'] for follower in data.get('followers', [])))
+            if not self._is_macro_active:
+                return sum(1 for _ in codes)
+            return sum(1 for code in codes if code in self._macro_filtered_codes or code in favorites)
         stocks = []
         leader_code = data.get('leader', '')
         leader_name = data.get('leader_name', '未知')
@@ -3739,8 +3904,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                     if not r_data:
                         r_data = rc
                 
-                if self._is_macro_active and self._macro_filtered_codes:
-                    if code not in self._macro_filtered_codes and code not in self.favorite_stocks:
+                if self._is_macro_active:
+                    if code not in self._macro_filtered_codes and code not in favorites:
                         continue
                 
                 row_item = {
@@ -3761,8 +3926,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 stocks.append(row_item)
         else:
             l_pass = True
-            if self._is_macro_active and self._macro_filtered_codes:
-                if leader_code not in self._macro_filtered_codes and leader_code not in self.favorite_stocks:
+            if self._is_macro_active:
+                if leader_code not in self._macro_filtered_codes and leader_code not in favorites:
                     l_pass = False
             if l_pass and leader_code:
                 stocks.append({
@@ -3782,8 +3947,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 })
             for f in data.get('followers', []):
                 f_code = f['code']
-                if self._is_macro_active and self._macro_filtered_codes:
-                    if f_code not in self._macro_filtered_codes and f_code not in self.favorite_stocks:
+                if self._is_macro_active:
+                    if f_code not in self._macro_filtered_codes and f_code not in favorites:
                         continue
                 stocks.append({
                     'code': f_code,
@@ -3805,7 +3970,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         if active_query and not is_penetrating:
             filtered_count = 0
             for r in stocks:
-                if (r.get('code') in self.favorite_stocks) or self._evaluate_search_condition(active_query, r):
+                if (r.get('code') in favorites) or self._evaluate_search_condition(active_query, r):
                     filtered_count += 1
             return filtered_count
         else:
@@ -3813,6 +3978,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
     # ------------------------------------------------------------------ table fill
     def _populate_table(self, data: dict, reset_to_top: bool = False):
+        self._start_table_render(self.stock_table, self._iter_stock_rows(data, reset_to_top))
+
+    def _iter_stock_rows(self, data, reset_to_top=False):
+        favorite_stocks = self.favorite_stocks
+        selection_serial = self._stock_selection_serial
         leader_code   = data.get('leader', '')
         leader_name   = data.get('leader_name', leader_code)
         leader_pct    = data.get('leader_pct', 0.0)
@@ -3868,8 +4038,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                         r_data = rc
                 
                 # [NEW] 增加对宏观查询条件过滤的支持 (Stage 1 Filtering)
-                if self._is_macro_active and self._macro_filtered_codes:
-                    if code not in self._macro_filtered_codes and code not in self.favorite_stocks:
+                if self._is_macro_active:
+                    if code not in self._macro_filtered_codes and code not in favorite_stocks:
                         continue
 
                 if r_data:
@@ -3907,7 +4077,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             # Fallback: 使用传统的 Leader + Followers 结构
             rows = []
              # 龙头过滤
-            if not self._is_macro_active or (leader_code in self._macro_filtered_codes) or (leader_code in self.favorite_stocks):
+            if not self._is_macro_active or (leader_code in self._macro_filtered_codes) or (leader_code in favorite_stocks):
                 row_item = {
                     'code': leader_code, 
                     'name': leader_name,
@@ -3942,8 +4112,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             
             # 跟随股过滤
             for f in data.get('followers', []):
-                if self._is_macro_active and self._macro_filtered_codes:
-                    if f['code'] not in self._macro_filtered_codes and f['code'] not in self.favorite_stocks:
+                if self._is_macro_active:
+                    if f['code'] not in self._macro_filtered_codes and f['code'] not in favorite_stocks:
                         continue
                 f_klines = f.get('klines', [])
                 row_item = {
@@ -3983,7 +4153,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             filtered_rows = []
             for r in rows:
                 # 重点关注个股强制显示，绕过搜索过滤
-                if (r.get('code') in self.favorite_stocks) or self._evaluate_search_condition(active_query, r):
+                if (r.get('code') in favorite_stocks) or self._evaluate_search_condition(active_query, r):
                     filtered_rows.append(r)
             rows = filtered_rows
         
@@ -4034,7 +4204,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         # 稳定二次排序：确保重点关注的个股以及龙头在任何情况下都在最顶层优先展示
         # 优先级：重点关注个股优先展示在最上方，其次是龙头个股，其余跟随股按原本排序规则排列
         rows.sort(key=lambda r: (
-            1 if r.get('code') in self.favorite_stocks else 0,
+            1 if r.get('code') in favorite_stocks else 0,
             1 if '龙头' in r.get('role', '') else 0
         ), reverse=True)
         
@@ -4048,9 +4218,6 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         # if col == -1: ...
         # 龙头始终置顶
         # [FIX] 减少闪烁并保持选择状态
-        self.stock_table.setUpdatesEnabled(False)
-        self._is_populating = True
-        
         # 记录当前选中的代码，以便恢复
         if not self._last_selected_code and not reset_to_top:
             curr_row = self.stock_table.currentRow()
@@ -4128,7 +4295,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                     self._update_cell(self.stock_table, i, col_idx, r['code'], 
                                     user_role_v1=data.get('sector', '未知'))
                 elif col_key == "name":
-                    disp_name = f"⭐ {r['name']}" if r['code'] in self.favorite_stocks else r['name']
+                    disp_name = f"⭐ {r['name']}" if r['code'] in favorite_stocks else r['name']
                     self._update_cell(self.stock_table, i, col_idx, disp_name)
                 elif col_key == "role":
                     role_c = self._color_red if '龙头' in r['role'] else None
@@ -4204,11 +4371,17 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
             if r['code'] == self._last_selected_code:
                 target_row = i
+            yield
 
         self.stock_table._last_populated_sector = data.get('sector')
 
         # 恢复选中状态
-        if reset_to_top and self.stock_table.rowCount() > 0:
+        if self._last_selected_code and selection_serial != self._stock_selection_serial:
+            code_col = self.stock_cols.index('code') if 'code' in self.stock_cols else 0
+            target_row = next((row for row in range(self.stock_table.rowCount())
+                               if self.stock_table.item(row, code_col) is not None and
+                               self.stock_table.item(row, code_col).text() == self._last_selected_code), -1)
+        if reset_to_top and selection_serial == self._stock_selection_serial and self.stock_table.rowCount() > 0:
             self.stock_table.setCurrentCell(0, 0)
             self.stock_table.scrollToTop()
         elif target_row >= 0:
@@ -4219,10 +4392,6 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             # 没有任何选中的时候默认选第1个
             self.stock_table.setCurrentCell(0, 0)
         
-        self._is_populating = False
-        self.stock_table.setUpdatesEnabled(True)
-        
-
     def _on_sector_header_clicked(self, col):
         """Python-level sort for sector table"""
         if self._sector_sort_col == col:
@@ -4255,6 +4424,84 @@ class SectorBiddingPanel(QWidget, WindowMixin):
              
         self._populate_watchlist(reset_to_top=reset_top)
 
+    def _cancel_table_render(self, table):
+        job = self._table_render_jobs.get(table)
+        if job is not None:
+            job[0].stop()
+            self._table_render_jobs[table] = (job[0], None)
+        self._table_render_callbacks.pop(table, None)
+
+    def _start_table_render(self, table, rows):
+        """Replace pending paint work; each GUI turn renders at most 24 rows / 6ms."""
+        if self._panel_closing or not self.isVisible():
+            return
+        job = self._table_render_jobs.get(table)
+        if job is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(lambda t=table: self._advance_table_render(t))
+        else:
+            timer = job[0]
+            timer.stop()
+        self._table_render_jobs[table] = (timer, rows)
+        timer.start(0)
+
+    def _advance_table_render(self, table):
+        job = self._table_render_jobs.get(table)
+        if self._panel_closing or job is None or job[1] is None:
+            return
+        timer, rows = job
+        if not self.isVisible():
+            self._table_render_jobs[table] = (timer, None)
+            return
+        old_signals = table.blockSignals(True)
+        old_updates = table.updatesEnabled()
+        old_refreshing = getattr(self, '_ui_refreshing', False)
+        old_populating = self._is_populating
+        if table is self.sector_table:
+            self._ui_refreshing = True
+        else:
+            self._is_populating = True
+        table.setUpdatesEnabled(False)
+        finished = False
+        failed = False
+        try:
+            deadline = time.perf_counter() + 0.006
+            for _ in range(24):
+                next(rows)
+                if time.perf_counter() >= deadline:
+                    break
+        except StopIteration:
+            finished = True
+        except Exception:
+            finished = True
+            failed = True
+            logger.exception('[SectorBiddingPanel] Table render failed')
+        finally:
+            self._ui_refreshing = old_refreshing
+            self._is_populating = old_populating
+            table.blockSignals(old_signals)
+            table.setUpdatesEnabled(old_updates)
+        if self._table_render_jobs.get(table) is not job:
+            return
+        if finished:
+            self._table_render_jobs[table] = (timer, None)
+            callback = self._table_render_callbacks.pop(table, None)
+            if callback is not None and not failed:
+                try:
+                    callback()
+                except Exception:
+                    logger.exception('[SectorBiddingPanel] Selection restore failed')
+        else:
+            timer.start(1)
+
+    def _after_table_render(self, table, callback):
+        job = self._table_render_jobs.get(table)
+        if job is not None and job[1] is not None:
+            self._table_render_callbacks[table] = callback
+        else:
+            callback()
+
     def _update_cell(self, table, row, col, text, color=None, font=None, alignment=None, 
                      user_role=None, user_role_v1=None, is_numeric=False):
         """[INDUSTRIAL] Reuses table items and only updates if changed to minimize UI jitter."""
@@ -4272,9 +4519,24 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             item.setText(str(text))
             
         # 2. Visual Style (Cached check would be faster but Qt QColor/QFont internal check is decent)
-        if color: item.setForeground(color)
-        if font: item.setFont(font)
-        if alignment: item.setTextAlignment(alignment)
+        if getattr(item, '_cell_color', None) != color:
+            if color is None:
+                item.setData(Qt.ItemDataRole.ForegroundRole, None)
+            else:
+                item.setForeground(color)
+            item._cell_color = color
+        if getattr(item, '_cell_font', None) != font:
+            if font is None:
+                item.setData(Qt.ItemDataRole.FontRole, None)
+            else:
+                item.setFont(font)
+            item._cell_font = font
+        if getattr(item, '_cell_alignment', None) != alignment:
+            if alignment is None:
+                item.setData(Qt.ItemDataRole.TextAlignmentRole, None)
+            else:
+                item.setTextAlignment(alignment)
+            item._cell_alignment = alignment
         
         # 3. Metadata
         if user_role is not None:
@@ -4351,16 +4613,16 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
     # ── [NEW] Watchlist Support ──────────────────────────────────────
     def _populate_watchlist(self, reset_to_top: bool = False):
+        self._start_table_render(self.watchlist_table, self._iter_watchlist_rows(reset_to_top))
+
+    def _iter_watchlist_rows(self, reset_to_top=False):
         """填充底部当日重点表/龙头三日跟踪表"""
+        favorite_stocks = self.favorite_stocks
         mode = getattr(self, '_watchlist_mode', "NORMAL")
+        selection_serial = self._watchlist_selection_serial
         
         if mode in ["DRAGON_3D", "DRAGON_5D", "DRAGON_7D", "DRAGON_10D"]:
-            # [OPTIMIZED] 龙头多日跟踪模式：引入数据层版本校验，避免重复执行聚合
-            dv = getattr(self.detector, 'data_version', 0)
-            if not getattr(self, '_dragon_cache_data', None) or getattr(self, '_dragon_cache_v', -1) != dv:
-                self.detector._update_daily_dragon_top2() # 内部已实现版本脏检查
-                self._dragon_cache_v = dv
-            
+            # Sector aggregation publishes the tracker; rendering only reads its snapshot.
             all_history = getattr(self.detector, 'dragon_3day_history', []) # 实际已扩充至10日
             if not all_history:
                 self.watchlist_table.setRowCount(0)
@@ -4483,7 +4745,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             # Step 1: Filter existing watchlist items
             for w in watchlist:
                 # [NEW] 同时满足宏观查询 (如果激活)
-                if self._is_macro_active and self._macro_filtered_codes:
+                if self._is_macro_active:
                     if w['code'] not in self._macro_filtered_codes:
                         continue
 
@@ -4559,7 +4821,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self._update_cell(self.watchlist_table, i, 0, w['code'])
             
             # 2. 名称
-            disp_name = f"⭐ {w['name']}" if w['code'] in self.favorite_stocks else w['name']
+            disp_name = f"⭐ {w['name']}" if w['code'] in favorite_stocks else w['name']
             self._update_cell(self.watchlist_table, i, 1, disp_name)
             
             # 3. 涨幅
@@ -4605,17 +4867,16 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
             if w['code'] == selected_code:
                 target_row = i
+            yield
 
         if reset_to_top and self.watchlist_table.rowCount() > 0:
             self.watchlist_table.setCurrentCell(0, 0)
             self.watchlist_table.scrollToTop()
-        elif target_row >= 0:
+        elif target_row >= 0 and selection_serial == self._watchlist_selection_serial:
             # [OPTIMIZE] Selection Debouncing: Only set if the jump is significant or no current selection
             curr_w_row = self.watchlist_table.currentRow()
             if curr_w_row < 0 or abs(curr_w_row - target_row) > 0:
-                self.watchlist_table.blockSignals(True)
                 self.watchlist_table.setCurrentCell(target_row, 0)
-                self.watchlist_table.blockSignals(False)
         elif self.watchlist_table.rowCount() > 0 and not self.watchlist_table.selectedItems():
             self.watchlist_table.setCurrentCell(0, 0)
                 
@@ -4652,6 +4913,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     def _on_watchlist_clicked(self, row, col, link_software=True):
         """重点表点击联动：1. 代码外部联动(可选) 2. 自动定位板块 3. 在个股表中选中"""
         if row < 0: return
+        self._cancel_row_action(self.watchlist_table)
+        self._watchlist_selection_serial += 1
         item_code = self.watchlist_table.item(row, 0)
         item_sect = self.watchlist_table.item(row, 3) 
         item_date = self.watchlist_table.item(row, 4)
@@ -4672,6 +4935,16 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         # 1. 执行外部代码联动 (TDX/可视化器) - 仅在点击时，键盘上下键不触发
         if link_software:
             self._link_code(code, focus_widget=self.watchlist_table, specific_date=specific_date)
+
+        sector_job = self._table_render_jobs.get(self.sector_table)
+        if sector_job is not None and sector_job[1] is not None:
+            def navigate_after_render():
+                current_row = self.watchlist_table.currentRow()
+                current_item = self.watchlist_table.item(current_row, 0) if current_row >= 0 else None
+                if current_item is not None and current_item.text() == code:
+                    self._on_watchlist_clicked(current_row, col, link_software=False)
+            self._after_table_render(self.sector_table, navigate_after_render)
+            return
         
         # 2. 个股/板块定位：如果板块名存在，尝试联动左侧板块表并切换右侧个股视图
         if sector_name:
@@ -4693,12 +4966,15 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             if '(' in name_text: name_text = name_text.split('(')[0].strip() # 剔除数量
             
             for i in range(self.sector_table.rowCount()):
-                sn = self.sector_table.item(i, 0).data(Qt.ItemDataRole.UserRole)
+                sector_item = self.sector_table.item(i, 0)
+                if sector_item is None:
+                    continue
+                sn = sector_item.data(Qt.ItemDataRole.UserRole)
                 if sn == name_text or sn == sector_name or sn in parts or any(p in sn for p in parts):
                     # 如果当前已经选中了这一行，则 setCurrentCell 可能不会触发 refresh
                     # 我们手动触发以确保 _force_show_all 被应用
                     if self.sector_table.currentRow() == i:
-                        self._on_sector_table_selection_changed()
+                        self._on_sector_table_selection_changed(link_software=False)
                     else:
                         self.sector_table.setCurrentCell(i, 0)
                     target_sector = sn
@@ -4708,6 +4984,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             if target_sector:
                 # 给 populate_table 一点渲染完成的时间
                 def _select_in_stock_table():
+                    current_row = self.watchlist_table.currentRow()
+                    current_item = self.watchlist_table.item(current_row, 0) if current_row >= 0 else None
+                    if (self._panel_closing or current_item is None or current_item.text() != code or
+                            getattr(self.stock_table, '_last_populated_sector', None) != target_sector):
+                        return
                     # 如果点击的是板块溯源记录，则优先精准定位到 match_code
                     search_id = match_code if (is_sector_entry and match_code) else code
                     found = False
@@ -4724,7 +5005,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                     # 保持焦点以便键盘操作
                     self.watchlist_table.setFocus()
                     
-                QTimer.singleShot(100, _select_in_stock_table)
+                self._after_table_render(self.stock_table, _select_in_stock_table)
 
     def _on_watchlist_dblclick(self, row, col):
         """重点表双击：对应列执行不同动作"""
@@ -4880,12 +5161,14 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             return
         if not self.watchlist_table.hasFocus():
             return
+        self._watchlist_selection_serial += 1
         item = self.watchlist_table.item(row, 0)
         if item:
             code = item.text()
             # 键盘切换时延迟触发联动，支持外部软件联动 (TDX 等)
             from PyQt6.QtCore import QTimer
-            QTimer.singleShot(50, lambda: self._on_watchlist_clicked(row, 0, link_software=True))
+            self._queue_row_action(self.watchlist_table, row,
+                                   lambda r: self._on_watchlist_clicked(r, 0, link_software=True))
 
     def _follower_klines(self, code: str) -> List[dict]:
         if not hasattr(self, '_ui_kline_snapshot'):
@@ -4968,7 +5251,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             # 内部调用 _populate_table 时，如果我们需要 reset，可以通过某种方式告知
             # 这里简单起见，我们直接设置属性让后续刷新感知
             self.stock_table._temp_reset_to_top = reset_top
-            self._on_sector_table_selection_changed()
+            self._on_sector_table_selection_changed(link_software=False)
         else:
             # 兜底：如果左侧没选，尝试用缓存的板块刷新
             current_sector = getattr(self.stock_table, '_last_populated_sector', None)
@@ -5066,6 +5349,8 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     def on_stock_clicked(self, row, col, force_link=False):
         """点击个股行时触发联动 (TDX/可视化器)"""
         if row < 0: return
+        self._cancel_row_action(self.stock_table)
+        self._stock_selection_serial += 1
         
         # [REFINED-FIX] 核心修复：彻底废弃 col > 1 的限制逻辑。
         # 原因是 _populate_table 会默认选中 Row 0，导致点击首行时 currentCellChanged 信号失效。
@@ -5086,6 +5371,15 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         """将股票代码同步联动到主界面或外挂工具"""
         host = self.main_window
         if not host: return
+        if self._panel_closing or getattr(host, '_is_closing', False):
+            return
+        link_key = (str(code), specific_date, self._is_history_mode, self._history_date)
+        now = time.monotonic()
+        if (link_key == getattr(self, '_last_link_request', None) and
+                now - getattr(self, '_last_link_request_ts', 0) < 0.15):
+            return
+        self._last_link_request = link_key
+        self._last_link_request_ts = now
         
         try:
             # 🚀 [NEW] 核心修复：判断可视化窗口是否已打开，避免点击冷启动导致的 GIL 锁
@@ -5097,6 +5391,10 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             history_date = getattr(self, '_history_date', "")
             
             def _do_linkage_in_main_thread():
+                if self._panel_closing or getattr(host, '_is_closing', False):
+                    return
+                if link_key != self._last_link_request:
+                    return
                 # 🚀 [FIXED] 统一联动逻辑：竞价面板核心在于时间对齐
                 # [OPTIMIZE] 优先使用表格中透传的特定日期 (龙头多日追踪)，否则使用全局复盘日期
                 target_date = specific_date if specific_date else history_date
@@ -5110,8 +5408,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                          return
 
                 # 2. 正常实盘模式或无历史日期时
+                sender_handled = False
                 if hasattr(host, 'open_visualizer'):
                     host.open_visualizer(code)
+                    vis_var = getattr(host, 'vis_var', None)
+                    sender_handled = vis_var is None or bool(vis_var.get())
                 
                 # 2. 只有在没有综合接口时，才回退到简单的代码切换信号
                 else:
@@ -5122,15 +5423,19 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         
                 # 3. 如果主界面有 sender 对象，通过它发送 (处理 TDX/THS 联动)
                 # 在主线程调用以保证安全提取 Tk 变量并防止剪贴板竞争
-                if hasattr(host, 'sender') and host.sender:
+                if not sender_handled and hasattr(host, 'sender') and host.sender:
                     host.sender.send(code)
-                elif hasattr(self, 'sender') and self.sender:
+                elif not sender_handled and hasattr(self, 'sender') and self.sender:
                     # [NEW] 当独立运行或主窗口不具备 sender 时，使用本地 sender 联动
                     self.sender.send(code)
 
-            # 🛡️ 深度防护：优先通过 Tkinter 调度队列转发，确保完全运行在 Tk 主线程
+            # Qt callbacks must not call Tcl/Tk, even on the same OS thread.
+            # Hand over Python-only intent; Tk performs variable reads and linkage.
             if hasattr(host, 'tk_dispatch_queue'):
-                host.tk_dispatch_queue.put_nowait(_do_linkage_in_main_thread)
+                if hasattr(host, '_put_deduped_task'):
+                    host._put_deduped_task('sector_code_link', _do_linkage_in_main_thread)
+                else:
+                    host.tk_dispatch_queue.put_nowait(_do_linkage_in_main_thread)
             else:
                 # 兜底方案：使用 Qt 异步定时器 (适用于纯 Qt 宿主或旧版本)
                 from PyQt6.QtCore import QTimer
@@ -5160,6 +5465,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         # 只有在表格有焦点时，才是用户主动通过键盘切换的
         if not self.stock_table.hasFocus():
             return
+        self._stock_selection_serial += 1
             
         # 记录当前选中的代码
         try:
@@ -5172,7 +5478,39 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
         # 联动逻辑同点击，强制触发联动
         from PyQt6.QtCore import QTimer
-        QTimer.singleShot(50, lambda: self.on_stock_clicked(row, col, force_link=True))
+        self._queue_row_action(self.stock_table, row,
+                               lambda r: self.on_stock_clicked(r, col, force_link=True))
+
+    def _cancel_row_action(self, table):
+        job = self._row_action_jobs.get(table)
+        if job is not None:
+            job[0].stop()
+
+    def _queue_row_action(self, table, row, callback):
+        """Keep the latest keyboard selection; never act on a row replaced by refresh."""
+        code_col = self.stock_cols.index('code') if table is self.stock_table and 'code' in self.stock_cols else 0
+        item = table.item(row, code_col)
+        if item is None:
+            return
+        code = item.text()
+        job = self._row_action_jobs.get(table)
+        if job is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(lambda t=table: self._flush_row_action(t))
+        else:
+            timer = job[0]
+        self._row_action_jobs[table] = (timer, (code_col, code, callback))
+        timer.start(40)
+
+    def _flush_row_action(self, table):
+        if self._panel_closing or not self.isVisible() or not table.hasFocus():
+            return
+        _, (code_col, code, callback) = self._row_action_jobs[table]
+        row = table.currentRow()
+        item = table.item(row, code_col) if row >= 0 else None
+        if item is not None and item.text() == code:
+            callback(row)
 
     def _show_context_menu(self, pos):
         item = self.stock_table.itemAt(pos)
@@ -5301,7 +5639,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             self._refresh_sector_list()
             self._populate_watchlist()
             if self.sector_table.currentRow() >= 0:
-                self._on_sector_table_selection_changed()
+                self._on_sector_table_selection_changed(link_software=False)
         except Exception as e:
             logger.debug(f"Refresh favorites UI error: {e}")
 
@@ -5407,7 +5745,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     def _apply_strategy_and_refresh(self):
         self.manual_refresh()
         if self.sector_table.currentRow() >= 0:
-             self._on_sector_table_selection_changed()
+             self._on_sector_table_selection_changed(link_software=False)
 
     # ------------------------------------------------------------------ window state
     def _restore_geometry(self):
@@ -5742,7 +6080,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 self.sector_table.selectRow(i)
                 self.sector_table.scrollToItem(item, QTableWidget.ScrollHint.PositionAtCenter)
                 # 触发联动刷新右侧表
-                self._on_sector_table_selection_changed()
+                self._on_sector_table_selection_changed(link_software=False)
                 break
 
     # ------------------------------------------------------------------ misc

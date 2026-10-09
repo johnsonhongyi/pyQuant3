@@ -4635,6 +4635,12 @@ class BiddingMomentumDetector:
             if not _from_scheduler:
                 self.data_version += 1
 
+        # Publish tracker data with the sector result, including history/simulation callers.
+        try:
+            self._update_daily_dragon_top2()
+        except Exception:
+            logger.exception('[DragonTracker] Update failed')
+
     def _gc_old_sectors(self):
         """清理长时间不活跃的板块结果"""
         if not self.is_active_session():
