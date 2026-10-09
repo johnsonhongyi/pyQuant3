@@ -90,8 +90,11 @@ def reap_multiprocessing_children(deadline):
             except (psutil.NoSuchProcess, psutil.TimeoutExpired):
                 try:
                     desc.kill()
-                except Exception:
+                    desc.wait(timeout=max(0.0, deadline - time.monotonic()))
+                except psutil.NoSuchProcess:
                     pass
+                except (psutil.TimeoutExpired, psutil.AccessDenied):
+                    return False
 
     return True
 

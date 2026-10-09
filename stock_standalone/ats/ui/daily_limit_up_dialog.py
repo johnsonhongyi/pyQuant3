@@ -1511,6 +1511,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         # 1. 先保存旧模式的排序和列宽状态至内存 Cache
         old_mode = getattr(self, "current_mode", "TODAY")
         if old_mode != mode:
+            self._scan_request_revision = getattr(self, "_scan_request_revision", 0) + 1
             try:
                 self._save_sort_states(old_mode)
                 self._save_current_header_state(old_mode)
@@ -1556,6 +1557,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         else:
             date_str = self.combo_history_date.currentText()
             self.selected_history_date = date_str
+            self._scan_request_revision = getattr(self, "_scan_request_revision", 0) + 1
             self.current_mode = "HISTORY"
             btns = [self.btn_mode_today, self.btn_mode_radar, self.btn_mode_3d, self.btn_mode_5d, self.btn_mode_10d, self.btn_mode_ladder]
             if hasattr(self, "btn_mode_bubble"):
@@ -1631,8 +1633,9 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         return None
 
     def _on_btn_refresh_clicked(self):
-        """用户点击【🔄 刷新】按钮：强制重置 busy 锁，立即执行当前模式的完整刷新"""
-        self._scan_worker_busy = False
+        """合并刷新请求，保留在途扫描的互斥状态。"""
+        self._scan_request_revision = getattr(self, "_scan_request_revision", 0) + 1
+        self._scan_refresh_pending = bool(getattr(self, "_scan_worker_busy", False))
         self._last_refresh_time = 0.0
         self._refresh_data_for_mode()
 
@@ -1675,6 +1678,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                     self._apply_filter()
 
             self._scan_worker_busy = True
+            self._active_scan_revision = getattr(self, "_scan_request_revision", 0)
             _df_snap = df
             _engine = self.engine
             _extra_cols = self.extra_cols
@@ -1722,6 +1726,12 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
     def _on_scan_done(self, records: list, is_trade_day: bool, today_str: str) -> None:
         """后台扫描完成回调 — 在主线程执行 UI 渲染（由 QTimer.singleShot(0) 保证线程安全）"""
         self._scan_worker_busy = False
+        if (self.current_mode != "TODAY" or
+                getattr(self, "_active_scan_revision", 0) != getattr(self, "_scan_request_revision", 0)):
+            self._scan_refresh_pending = False
+            if self.current_mode == "TODAY":
+                QTimer.singleShot(0, self._refresh_data_for_mode)
+            return
         self.current_records = records
 
         # 异步归档（非交易日不写磁盘）
@@ -1748,7 +1758,9 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             pass
         self._apply_filter()
 
-
+        if getattr(self, "_scan_refresh_pending", False):
+            self._scan_refresh_pending = False
+            QTimer.singleShot(0, self._refresh_data_for_mode)
 
     def _make_column_subkey(self, r: Dict[str, Any], col_idx: int, is_descending: bool) -> tuple:
         """
@@ -2885,30 +2897,89 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             item.setToolTip("")
 
     def _populate_table_rows(self, records: List[Dict[str, Any]]):
-        """【极速原位填充】批量关闭重绘，复用已有单元格对象，支持重点关注置顶与金色高亮，保障 60fps 丝滑拖拽与浏览"""
+        """Render changed rows in bounded slices; newer refreshes replace pending work."""
+        if not hasattr(self, "_table_render_timer"):
+            self._table_render_timer = QTimer(self)
+            self._table_render_timer.timeout.connect(self._render_pending_table_rows)
+        fav_stocks = self.fav_manager.get_favorite_stocks() if getattr(self, "fav_manager", None) else set()
+        context = (frozenset(fav_stocks), tuple(self.extra_cols), self.table.columnCount(),
+                   getattr(self, "selected_history_date", ""))
+        snapshots = [dict(r, extra_cols=dict(r.get("extra_cols") or {})) for r in records]
+        fingerprints = [repr(r) for r in snapshots]
+        cache = getattr(self, "_row_render_fingerprints", [])
+        if context != getattr(self, "_table_render_context", None):
+            cache = []
+        self._table_render_context = context
+        if (getattr(self, "_table_render_state", None) is None and cache == fingerprints
+                and self.table.rowCount() == len(snapshots)):
+            return
+        self._table_render_timer.stop()
+        previous_state = getattr(self, "_table_render_state", None)
+        current = self.table.item(self.table.currentRow(), 0) if self.table.currentRow() >= 0 else None
+        self._table_render_state = {
+            "records": snapshots, "fingerprints": fingerprints, "cursor": 0,
+            "fav_stocks": set(fav_stocks),
+            "selected_code": previous_state["selected_code"] if previous_state else (current.text().strip() if current else None),
+            "scroll_v": self.table.verticalScrollBar().value(),
+            "scroll_h": self.table.horizontalScrollBar().value(),
+        }
+        self._row_render_fingerprints = (cache + [None] * len(snapshots))[:len(snapshots)]
         self._is_populating = True
         self.table.setSortingEnabled(False)
-        self.table.blockSignals(True)
+        self.table.setRowCount(len(snapshots))
+        self._render_pending_table_rows()
+
+    def _render_pending_table_rows(self):
+        state = getattr(self, "_table_render_state", None)
+        if state is None:
+            self._table_render_timer.stop()
+            return
+        state["scroll_v"] = self.table.verticalScrollBar().value()
+        state["scroll_h"] = self.table.horizontalScrollBar().value()
+        previous_signals = self.table.blockSignals(True)
+        previous_updates = self.table.updatesEnabled()
         self.table.setUpdatesEnabled(False)
-
-        # 记录当前选中代码以保持焦点
-        selected_code = None
-        curr_row = self.table.currentRow()
-        if curr_row >= 0:
-            c_it = self.table.item(curr_row, 0)
-            if c_it:
-                selected_code = c_it.text().strip()
-
-        saved_v = self.table.verticalScrollBar().value()
-        saved_h = self.table.horizontalScrollBar().value()
-
         try:
-            fav_stocks = self.fav_manager.get_favorite_stocks() if hasattr(self, 'fav_manager') and self.fav_manager else set()
+            deadline = time.perf_counter() + 0.012
+            rendered = 0
+            while state["cursor"] < len(state["records"]) and rendered < 8:
+                row = state["cursor"]
+                fingerprint = state["fingerprints"][row]
+                if self._row_render_fingerprints[row] != fingerprint:
+                    self._render_table_rows([state["records"][row]], row, state["fav_stocks"])
+                    self._row_render_fingerprints[row] = fingerprint
+                    rendered += 1
+                state["cursor"] += 1
+                if time.perf_counter() >= deadline:
+                    break
+        except Exception as exc:
+            logger.debug("Ladder table rendering failed: %s", exc)
+            state["cursor"] += 1
+        finally:
+            self.table.blockSignals(previous_signals)
+            self.table.setUpdatesEnabled(previous_updates)
+        if state["cursor"] < len(state["records"]):
+            if not self.isVisible():
+                self._table_render_timer.stop()
+            elif not self._table_render_timer.isActive():
+                self._table_render_timer.start(16)
+            return
+        self._table_render_timer.stop()
+        self._table_render_state = None
+        selected_code = state["selected_code"]
+        if selected_code:
+            for row in range(self.table.rowCount()):
+                item = self.table.item(row, 0)
+                if item and item.text().strip() == selected_code:
+                    self.table.setCurrentCell(row, 0)
+                    break
+        self.table.verticalScrollBar().setValue(state["scroll_v"])
+        self.table.horizontalScrollBar().setValue(state["scroll_h"])
+        self._is_populating = False
 
-            if self.table.rowCount() != len(records):
-                self.table.setRowCount(len(records))
-
-            for row_idx, r in enumerate(records):
+    def _render_table_rows(self, records: List[Dict[str, Any]], start_row: int, fav_stocks: set):
+        if records:
+            for row_idx, r in enumerate(records, start=start_row):
                 code = str(r.get("code", "")).zfill(6)
                 name = str(r.get("name", code))
                 price = _safe_float(r.get("price", 0.0))
@@ -3196,22 +3267,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                                      align=Qt.AlignmentFlag.AlignCenter,
                                      is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
-            # 恢复选中的焦点行
-            if selected_code:
-                for r_idx in range(self.table.rowCount()):
-                    it = self.table.item(r_idx, 0)
-                    if it and it.text().strip() == selected_code:
-                        self.table.setCurrentCell(r_idx, 0)
-                        break
 
-            self.table.verticalScrollBar().setValue(saved_v)
-            self.table.horizontalScrollBar().setValue(saved_h)
-
-        finally:
-            self.table.setSortingEnabled(False)  # 永远禁用 Qt 内置排序，由多级排序引擎完全接管
-            self._is_populating = False
-            self.table.blockSignals(False)
-            self.table.setUpdatesEnabled(True)
 
     def _on_current_cell_changed(self, currentRow: int, currentColumn: int, previousRow: int, previousColumn: int):
         """键盘上下键导航与鼠标点击行统一防抖入口 (即时更新状态栏决策提示，防抖合并真实切股联动)"""
@@ -4099,6 +4155,10 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 self.show_normal_position()
 
     def closeEvent(self, event):
+        if hasattr(self, "_table_render_timer"):
+            self._table_render_timer.stop()
+            self._table_render_state = None
+            self._is_populating = False
         self.hover_timer.stop()
         self.snap_timer.stop()
 
@@ -4126,6 +4186,8 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         event.accept()
 
     def hideEvent(self, event):
+        if hasattr(self, "_table_render_timer"):
+            self._table_render_timer.stop()
         if hasattr(self, 'hover_timer') and self.hover_timer and self.hover_timer.isActive():
             self.hover_timer.stop()
         is_trade_day = cct.get_trade_date_status() if hasattr(cct, "get_trade_date_status") else True
@@ -4152,6 +4214,9 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
     def showEvent(self, event):
         super().showEvent(event)
         # 仅在处于磁吸边缘或感应隐藏条状态时恢复定时器，普通正常居中展示时保持停止
+        if getattr(self, "_table_render_state", None) is not None:
+            self._is_populating = True
+            self._table_render_timer.start(16)
         if (self.anchor_edge is not None or getattr(self, "is_hidden_state", False)) and not getattr(self, "stays_on_top", False):
             if hasattr(self, 'hover_timer') and self.hover_timer and not self.hover_timer.isActive():
                 self.hover_timer.start()

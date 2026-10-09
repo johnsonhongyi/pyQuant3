@@ -395,8 +395,8 @@ def _prepare_stock_table(data, fav_stocks, sh_pct, extra_cols, filter_type, sear
         val_asc = not is_desc
 
         if is_num:
-            price_s = pd.to_numeric(df_filtered.get("price", 0.0), errors="coerce").fillna(0.0)
-            raw_s = pd.to_numeric(df_filtered.get(field, np.nan), errors="coerce")
+            price_s = pd.to_numeric(df_filtered.get("price", pd.Series(0.0, index=df_filtered.index)), errors="coerce").fillna(0.0)
+            raw_s = pd.to_numeric(df_filtered.get(field, pd.Series(np.nan, index=df_filtered.index)), errors="coerce")
             if field in ("price", "issue_price", "turnover", "float_mv_yi", "total_mv_yi", "amount_yi", "rank"):
                 is_empty = (raw_s <= 0.0) | raw_s.isna()
             else:
