@@ -20,13 +20,23 @@ def frame_fingerprint(df):
         return None
 
 
+class _DigestWriter:
+    def __init__(self, digest):
+        self.digest = digest
+
+    def write(self, data):
+        self.digest.update(data)
+        return memoryview(data).nbytes
+
+
 def send_content_fingerprint(df):
-    """Hash even object columns that pandas cannot hash, for send deduplication."""
-    result = frame_fingerprint(df)
-    if result is not None:
-        return result
+    """对传输内容做二进制摘要，避免 pandas 对大型 object 单元格生成字符串。"""
+    if df is None:
+        return None
     try:
-        return hashlib.blake2b(pickle.dumps(df, protocol=5), digest_size=16).digest()
+        digest = hashlib.blake2b(digest_size=16)
+        pickle.Pickler(_DigestWriter(digest), protocol=5).dump(df)
+        return digest.digest()
     except Exception:
         return None
 

@@ -2,6 +2,7 @@
 import os
 import json
 import shutil
+import time
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Union
 # Note: These should ideally be imported or passed in. 
@@ -90,7 +91,7 @@ def list_archives(archive_dir: str, prefix: str = "search_history") -> List[str]
     )
     return files
 
-def archive_file_tools(src_file: str, prefix: str, archive_dir: str, logger: Any, max_keep: int = 15) -> None:
+def archive_file_tools(src_file: str, prefix: str, archive_dir: str, logger: Any, max_keep: int = 15, deadline: Optional[float] = None) -> None:
     """通用备份函数，支持 JSON 和 SQLite 数据库文件"""
     if not os.path.exists(src_file):
         logger.info(f"⚠ {src_file} 不存在，跳过存档")
@@ -115,7 +116,7 @@ def archive_file_tools(src_file: str, prefix: str, archive_dir: str, logger: Any
 
     # 获取已有归档列表
     files = sorted(
-        [f for f in os.listdir(archive_dir) if f.startswith(prefix + "_")],
+        [f for f in os.listdir(archive_dir) if f.startswith(prefix + "_") and not f.endswith(".tmp")],
         reverse=True
     )
 
@@ -138,16 +139,53 @@ def archive_file_tools(src_file: str, prefix: str, archive_dir: str, logger: Any
     filename = f"{prefix}_{timestamp}{ext}"
     dest = os.path.join(archive_dir, filename)
 
+    tmp_dest = f"{dest}.{os.getpid()}.tmp"
     try:
-        shutil.copy2(src_file, dest)
+        if deadline is None:
+            shutil.copy2(src_file, tmp_dest)
+        else:
+            def check_deadline(*_):
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("退出归档时间预算已用完，保留已有存档和原库")
+
+            check_deadline()
+            if ext.lower() in (".db", ".sqlite", ".sqlite3"):
+                import sqlite3
+                from pathlib import Path
+                source = sqlite3.connect(Path(src_file).resolve().as_uri() + "?mode=ro", uri=True, timeout=0.2)
+                try:
+                    target = sqlite3.connect(tmp_dest, timeout=0.2)
+                    try:
+                        source.backup(target, pages=128, progress=check_deadline, sleep=0.01)
+                    finally:
+                        target.close()
+                finally:
+                    source.close()
+            else:
+                with open(src_file, "rb") as source, open(tmp_dest, "wb") as target:
+                    while True:
+                        check_deadline()
+                        chunk = source.read(512 * 1024)
+                        if not chunk:
+                            break
+                        target.write(chunk)
+            check_deadline()
+            shutil.copystat(src_file, tmp_dest)
+        os.replace(tmp_dest, dest)
         logger.info(f"✅ 已归档：{os.path.relpath(dest)}")
     except Exception as e:
         logger.info(f"⚠ 归档失败 {src_file} -> {e}")
         return
+    finally:
+        try:
+            if os.path.exists(tmp_dest):
+                os.remove(tmp_dest)
+        except OSError:
+            pass
 
     # 清理旧归档
     files = sorted(
-        [os.path.join(archive_dir, f) for f in os.listdir(archive_dir) if f.startswith(prefix + "_")],
+        [os.path.join(archive_dir, f) for f in os.listdir(archive_dir) if f.startswith(prefix + "_") and not f.endswith(".tmp")],
         key=os.path.getmtime,
         reverse=True
     )

@@ -7,6 +7,8 @@ logger = LoggerFactory.getLogger("PaperExecutionAdapter")
 from dataclasses import dataclass, field
 from datetime import datetime
 import math
+import threading
+import time
 from typing import Any
 
 from trading_kernel.core.risk import ApprovedOrder
@@ -108,6 +110,8 @@ class PaperExecutionAdapter(ExecutionAdapter):
         self._execution_block_reason = ""
         self._last_saved_fingerprint = ""
         self._is_simulation = False  # 是否为模拟/回测模式
+        self._t1_warning_lock = threading.Lock()
+        self._t1_warning_state = {}
         
         # 探测测试环境与物理持久化路径
         import os
@@ -120,6 +124,25 @@ class PaperExecutionAdapter(ExecutionAdapter):
         
         self._load_state()
         self._last_saved_fingerprint = self._get_trade_fingerprint()
+
+    def _log_t1_rejection(self, action, code, status, total, bought_today, available, requested):
+        now = time.monotonic()
+        key = (action, code)
+        facts = (status, total, bought_today, available, requested)
+        with self._t1_warning_lock:
+            previous = self._t1_warning_state.get(key)
+            if previous and previous[1] == facts and now - previous[0] < 30.0:
+                self._t1_warning_state[key] = (previous[0], facts, previous[2] + 1)
+                return
+            suppressed = previous[2] if previous else 0
+            if key not in self._t1_warning_state and len(self._t1_warning_state) >= 512:
+                self._t1_warning_state.pop(next(iter(self._t1_warning_state)))
+            self._t1_warning_state[key] = (now, facts, 0)
+        logger.warning(
+            "[T+1 Rule Gate] Rejected %s order for %s. Facts status: %s, total volume: %.4f, "
+            "bought today: %.4f, available to sell: %.4f, requested: %.4f; suppressed=%d.",
+            action, code, status, total, bought_today, available, requested, suppressed,
+        )
 
     def _get_trade_fingerprint(self) -> str:
         positions_data = {}
@@ -715,10 +738,9 @@ class PaperExecutionAdapter(ExecutionAdapter):
                 available_vol = float(facts.get("sellable_qty", 0.0) or 0.0)
                 bought_today_vol = float(facts.get("today_buy_qty", 0.0) or 0.0)
                 if sell_volume > available_vol:
-                    logger.warning(
-                        f"[T+1 Rule Gate] Rejected {action} order for {code}. "
-                        f"Facts status: {facts.get('t1_fact_status', 'MISSING')}, total volume: {pos.volume:.4f}, "
-                        f"bought today: {bought_today_vol:.4f}, available to sell: {available_vol:.4f}, requested: {sell_volume:.4f}."
+                    self._log_t1_rejection(
+                        action, code, facts.get('t1_fact_status', 'MISSING'), pos.volume,
+                        bought_today_vol, available_vol, sell_volume,
                     )
                     return False
 

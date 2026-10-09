@@ -682,7 +682,10 @@ class StockLiveStrategy:
             global _ipc_sender_stop, _ipc_sender_thread
             if '_ipc_sender_stop' in globals():
                 _ipc_sender_stop.set()
-                _ipc_queue.put("__STOP__") # 唤醒并终止
+                try:
+                    ipc_queue.put_nowait("__STOP__") # 唤醒并终止，满队列时由停止标志退出
+                except Full:
+                    pass
         except Exception as e:
             logger.debug(f"Error stopping IPC sender: {e}")
 
@@ -2565,8 +2568,17 @@ class StockLiveStrategy:
             if StockSelector:
                 try:
                     # 传入实时最新的 df_all_data 初始化，不仅补齐指标，还能供其他组件利用已实例化的最新数据集
-                    selector = StockSelector(df=df_all_data)
-                    cand_df = selector.get_candidates_df(force=False)
+                    selectors = self.__dict__.setdefault('_candidate_selectors', {})
+                    selector = selectors.get(resample)
+                    if selector is None:
+                        selector = StockSelector(df=df_all_data)
+                        selectors[resample] = selector
+                    else:
+                        selector.df_all_realtime = df_all_data
+                    try:
+                        cand_df = selector.get_candidates_df(force=False)
+                    finally:
+                        selector.df_all_realtime = None
                     if not cand_df.empty:
                          if 'code' in cand_df.columns and cand_df.index.name != 'code':
                              # 使用 copy 避免 SettingWithCopyWarning, 因为缓存的 df 是独立对象，但保守复制一次也可以，或者直接利用它
@@ -2640,7 +2652,9 @@ class StockLiveStrategy:
                             if isinstance(ext_status, dict):
                                 df_ext = ext_status.get('df')
                                 if df_ext is not None and not df_ext.empty:
-                                    all_55188 = df_ext.to_dict(orient='index')
+                                    fetch_codes = [str(k.split('_')[0]) for k in fetch_list]
+                                    selected_ext = df_ext.loc[df_ext.index.intersection(fetch_codes)]
+                                    all_55188 = selected_ext.to_dict(orient='index')
                         except Exception: pass
 
                     if self.realtime_service:
@@ -4559,7 +4573,7 @@ class StockLiveStrategy:
             # 过滤掉带采样的 key (e.g., '000001_5')
             codes = [c for c in codes if '_' not in c]
 
-        if f'{code}_{resample}' not in list(self.daily_history_cache.keys()):
+        if f'{code}_{resample}' not in self.daily_history_cache:
             codes.append(code)
         else:
             # logger.debug(f'code in hist_cache')
@@ -4572,11 +4586,16 @@ class StockLiveStrategy:
             # ⭐ [FIX] 异步抓取逻辑：如果不在缓存且未在抓取中，则投递到并行线程池
             for c in codes:
                 cache_key = f"{c}_{resample}"
-                if cache_key in self._pending_hist_fetches:
-                    continue
-                
-                self._pending_hist_fetches.add(cache_key)
-                self._io_executor.submit(self._async_fetch_history, c, resample)
+                with self._lock:
+                    if cache_key in self._pending_hist_fetches:
+                        continue
+                    self._pending_hist_fetches.add(cache_key)
+                try:
+                    self._io_executor.submit(self._async_fetch_history, c, resample)
+                except Exception:
+                    with self._lock:
+                        self._pending_hist_fetches.discard(cache_key)
+                    raise
                 
             self.last_daily_history_refresh = now
             # logger.debug(f"Daily history cache task submitted for {len(codes)} stocks.")
