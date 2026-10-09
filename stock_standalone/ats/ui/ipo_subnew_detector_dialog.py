@@ -278,6 +278,12 @@ class IPOScanWorker(QThread):
             pass
 
         # 1. 将全量代码切分成若干批次 (批量分组计算，杜绝单只零碎调度浪费性能)
+        try:
+            from ats.tdx_realtime_fetcher import TDXGlobalCachePool
+            pool = TDXGlobalCachePool.get_instance(startup_codes=self.codes)
+            pool._ensure_startup_codes_loaded(self.codes)
+        except Exception as exc:
+            logger.debug("新股批量历史缓存预载异常: %s", exc)
         batches = [self.codes[i:i + self.batch_size] for i in range(0, len(self.codes), self.batch_size)]
         tot_day_ms = 0.0
         tot_60f_ms = 0.0
@@ -392,7 +398,8 @@ class IPOScanWorker(QThread):
         if not self.is_running:
             return None
         return self.engine.analyze_stock(
-            code, day_df=day_df, df_60m=df_60m, segment_mode=self.segment_mode
+            code, day_df=day_df, df_60m=df_60m, segment_mode=self.segment_mode,
+            force_refresh=getattr(self, "force_refresh", False)
         )
 
     def stop(self):
@@ -546,6 +553,11 @@ class IPOSubnewDetectorDialog(QMainWindow):
 
         # 待渲染平滑队列与 30ms 分帧渲染定时器 (彻底消除多线程并发冲刷 UI 导致的掉帧、全表重排与顿卡)
         self._pending_render_queue = deque()
+        self._pending_render_codes = set()
+        self._pending_scan_result = None
+        self._pending_scan_codes = set()
+        self._priority_workers = set()
+        self._closing = False
         self._render_timer = QTimer(self)
         self._render_timer.timeout.connect(self._flush_pending_renders)
 
@@ -1155,21 +1167,25 @@ class IPOSubnewDetectorDialog(QMainWindow):
             self.save_persisted_state()
 
     def _eval_single_code_now(self, code: str):
-        """单只立即优先评估"""
-        def _task():
-            try:
-                sig = IPOVWAPDetectorEngine.get_instance().analyze_stock(
-                    code, force_refresh=True, segment_mode=self._get_current_segment_mode_key()
-                )
-                self.signals_map[code] = sig
-                self._update_table_row_data(sig)
-            except Exception:
-                pass
-        QTimer.singleShot(50, _task)
+        """单只优先评估也在后台运行，结果通过 Qt 信号交付。"""
+        if self._closing or any(code in worker.codes for worker in self._priority_workers):
+            return
+        worker = IPOScanWorker([code], segment_mode=self._get_current_segment_mode_key())
+        worker.force_refresh = True
+        self._priority_workers.add(worker)
+        worker.batch_analyzed.connect(self._on_batch_analyzed)
+        worker.finished.connect(self._on_priority_worker_finished)
+        worker.start(QThread.Priority.LowPriority)
+
+    def _on_priority_worker_finished(self):
+        worker = self.sender()
+        self._priority_workers.discard(worker)
+        if worker is not None:
+            worker.deleteLater()
 
     def trigger_scan(self):
         """触发新一轮后台扫描"""
-        if self.worker and self.worker.isRunning():
+        if self._closing or self._pending_scan_result is not None or (self.worker and self.worker.isRunning()):
             return
         if not self.monitored_codes:
             self.lbl_status.setText("📊 监控池为空，请在上方输入代码添加或点击【重置新股池】")
@@ -1207,52 +1223,88 @@ class IPOSubnewDetectorDialog(QMainWindow):
 
     def _on_batch_analyzed(self, batch_signals: List[VWAPDetectorSignal]):
         """【🚀 批量分组接收】整组多只信号批量压入平滑待渲染队列，彻底消灭单只零碎调度性能损耗"""
+        if self._closing:
+            return
         for sig in batch_signals:
+            if sig.code not in self.monitored_codes:
+                continue
             self.signals_map[sig.code] = sig
-            self._pending_render_queue.append(sig)
-        if not self._render_timer.isActive():
-            self._render_timer.start(40)
+            self._queue_table_render(sig)
 
     def _on_stock_analyzed(self, sig: VWAPDetectorSignal):
         """单只兼容接收 (如手动单只优先评估)"""
+        if self._closing or sig.code not in self.monitored_codes:
+            return
         self.signals_map[sig.code] = sig
-        self._pending_render_queue.append(sig)
+        self._queue_table_render(sig)
+
+    def _queue_table_render(self, sig: VWAPDetectorSignal):
+        if self._closing:
+            return
+        if sig.code not in self._pending_render_codes:
+            self._pending_render_codes.add(sig.code)
+            self._pending_render_queue.append(sig.code)
         if not self._render_timer.isActive():
-            self._render_timer.start(40)
+            self._render_timer.start(16)
 
     def _flush_pending_renders(self):
-        """【🚀 分帧错峰原地平滑刷新】每 40ms 原地更新至多 8 只，原地 setText 与调色，全程冻结排序，消灭重排风暴"""
+        """按代码合并更新，每帧最多 16 行/12ms，整批冻结排序。"""
         if not self._pending_render_queue:
             self._render_timer.stop()
             return
 
         self._is_table_updating = True
-        batch_size = 8
+        was_sorting = self.table.isSortingEnabled()
+        self.table.setSortingEnabled(False)
+        self.table.setUpdatesEnabled(False)
         try:
-            for _ in range(min(batch_size, len(self._pending_render_queue))):
-                sig = self._pending_render_queue.popleft()
-                self._update_table_row_data(sig, manage_sorting=False)
+            rows = {}
+            for row in range(self.table.rowCount()):
+                item = self.table.item(row, 0)
+                if item:
+                    rows["".join(ch for ch in item.text() if ch.isdigit()).zfill(6)] = row
+            deadline = time.perf_counter() + 0.012
+            for _ in range(min(16, len(self._pending_render_queue))):
+                code = self._pending_render_queue.popleft()
+                self._pending_render_codes.discard(code)
+                self._pending_scan_codes.discard(code)
+                sig = self.signals_map.get(code)
+                if sig is not None and code in rows:
+                    self._update_table_row_data(sig, target_row=rows[code], manage_sorting=False)
+                if time.perf_counter() >= deadline:
+                    break
+        except Exception as exc:
+            logger.debug("新股分帧渲染异常: %s", exc)
         finally:
+            self.table.setSortingEnabled(was_sorting)
+            self.table.setUpdatesEnabled(True)
             self._is_table_updating = False
 
         if not self._pending_render_queue:
             self._render_timer.stop()
+        if self._pending_scan_result is not None and not self._pending_scan_codes:
+            result = self._pending_scan_result
+            self._pending_scan_result = None
+            self._complete_scan_ui(*result)
 
     def _on_scan_finished(self, count: int, cost: float, perf_summary: Optional[Dict[str, Any]] = None):
-        # 若仍有排队渲染未完成，单次强制刷新剩余全部
+        if self._closing:
+            return
         if self._pending_render_queue:
-            try:
-                while self._pending_render_queue:
-                    sig = self._pending_render_queue.popleft()
-                    self._update_table_row_data(sig, manage_sorting=False)
-            finally:
-                pass
-            self._render_timer.stop()
+            self._pending_scan_result = (count, cost, perf_summary)
+            self._pending_scan_codes = set(self._pending_render_queue)
+            if not self._render_timer.isActive():
+                self._render_timer.start(16)
+            return
+        self._complete_scan_ui(count, cost, perf_summary)
 
-        # 统一任务完成集中持久化 (5-10分钟统一持久化，绝不实时写盘)
+    def _complete_scan_ui(self, count: int, cost: float, perf_summary: Optional[Dict[str, Any]] = None):
+        # 沿用缓存归档节流策略，文件锁、解码及落盘均在后台执行。
         try:
             from ats.tdx_realtime_fetcher import TDXGlobalCachePool
-            TDXGlobalCachePool.get_instance().flush_if_due(interval=300.0)
+            pool = TDXGlobalCachePool._instance
+            if pool is not None:
+                pool.request_flush_if_due()
         except Exception:
             pass
 
@@ -1770,6 +1822,7 @@ class IPOSubnewDetectorDialog(QMainWindow):
                 self.ipc_df = self.ipc_mgr.get_current_df(tuple(self.monitored_codes))
         self._is_table_updating = True
         self.table.setSortingEnabled(False)
+        self.table.setUpdatesEnabled(False)
         try:
             n_extra = len(self.extra_cols)
             total_cols = 18 + n_extra
@@ -1826,13 +1879,14 @@ class IPOSubnewDetectorDialog(QMainWindow):
 
                 # 若已有信号数据，立即填充
                 if code in self.signals_map:
-                    self._update_table_row_data(self.signals_map[code], target_row=row, manage_sorting=False)
+                    self._queue_table_render(self.signals_map[code])
 
             self.table.setSortingEnabled(True)
             if len(self.monitored_codes) > 0 and self.table.currentRow() < 0:
                 self.table.setCurrentCell(0, 0)
         finally:
             self._is_table_updating = False
+            self.table.setUpdatesEnabled(True)
             QTimer.singleShot(0, self.adjust_columns_to_viewport)
 
     def _update_table_row_data(self, sig: VWAPDetectorSignal, target_row: Optional[int] = None, manage_sorting: bool = True):
@@ -2192,55 +2246,9 @@ class IPOSubnewDetectorDialog(QMainWindow):
             self._is_table_updating = prev_updating
 
     def _refresh_all_table_arbitrations(self):
-
-        """【集中仲裁原地极速反哺】全池统筹完成后，原地极速更新全表各行操盘决议，彻底消除单股盲区"""
-        n_extra = len(self.extra_cols)
-        desc_col = 15 + n_extra
-        was_sorting = self.table.isSortingEnabled()
-        if was_sorting:
-            self.table.setSortingEnabled(False)
-        try:
-            for r in range(self.table.rowCount()):
-                it_c = self.table.item(r, 0)
-                if not it_c:
-                    continue
-                code = "".join(ch for ch in it_c.text().strip() if ch.isdigit()).zfill(6)
-                sig = self.signals_map.get(code)
-                if not sig:
-                    continue
-                desc_text = getattr(sig, "global_arbitration_desc", "") or sig.signal_desc
-                desc_fg = None
-                role = getattr(sig, "global_fleet_role", "")
-                if role == "CLIMAX_EXIT" or getattr(sig, "is_climax_exit", False):
-                    desc_fg = QColor("#ff4444")
-                elif role == "STOP_LOSS" or sig.signal_type == "WEAK_EXIT":
-                    desc_fg = QColor("#ff5555")
-                elif role == "LEADER" or sig.signal_type == "IPO_FIRST_BUY":
-                    desc_fg = QColor("#00ff88")
-                elif role == "VANGUARD":
-                    desc_fg = QColor("#00e5ff")
-                elif role == "FOLLOWER":
-                    desc_fg = QColor("#8f93a8")
-                elif role == "ICE_ABORT":
-                    desc_fg = QColor("#66fcf1")
-                elif getattr(sig, "horse_race_rank", 999) <= 2 and sig.is_above_vwap:
-                    desc_fg = QColor("#00ff88")
-                
-                it_desc = self.table.item(r, desc_col)
-                if it_desc:
-                    it_desc.setText(desc_text)
-                    it_desc.setToolTip(desc_text)
-                    if desc_fg:
-                        it_desc.setForeground(desc_fg)
-                else:
-                    it_desc = QTableWidgetItem(desc_text)
-                    it_desc.setToolTip(desc_text)
-                    if desc_fg:
-                        it_desc.setForeground(desc_fg)
-                    self.table.setItem(r, desc_col, it_desc)
-        finally:
-            if was_sorting:
-                self.table.setSortingEnabled(True)
+        """仲裁结果交给有时间预算的渲染队列，避免再次整表同步刷新。"""
+        for sig in self.signals_map.values():
+            self._queue_table_render(sig)
 
     def _on_open_command_room(self):
         """【🚢 集中交易总指挥室】非模态独立展示，支持点击直接联动定位主看板与全系统联动"""
@@ -2939,7 +2947,7 @@ class IPOSubnewDetectorDialog(QMainWindow):
                             if it_c:
                                 cd = it_c.text().strip()
                                 if cd in self.signals_map:
-                                    self._update_table_row_data(self.signals_map[cd], target_row=r, manage_sorting=False)
+                                    self._queue_table_render(self.signals_map[cd])
             except Exception as e_ipcdf:
                 logger.debug(f"从 IPC 获取实时行情异常: {e_ipcdf}")
 
@@ -2998,10 +3006,10 @@ class IPOSubnewDetectorDialog(QMainWindow):
                     "version": confirm.get("version"), "target_trade_date": today}
                 sig.extra_data = metrics
                 self.signals_map[code] = sig
-                self._pending_render_queue.append(sig)
+                self._queue_table_render(sig)
                 updated = True
             if updated and not self._render_timer.isActive():
-                self._render_timer.start(40)
+                self._render_timer.start(16)
             if updated and hasattr(self, "_command_room_dlg") and self._command_room_dlg and self._command_room_dlg.isVisible():
                 self._command_room_dlg.refresh_data()
         except Exception as exc:
@@ -3029,6 +3037,8 @@ class IPOSubnewDetectorDialog(QMainWindow):
                     return
                 self._stream_ui_pending = True
             def _ui_update():
+                if self._closing:
+                    return
                 with self._stream_ui_lock:
                     self._stream_ui_pending = False
                     df = self.ipc_df
@@ -3070,7 +3080,7 @@ class IPOSubnewDetectorDialog(QMainWindow):
                                     else:
                                         metrics["ipo_order_intent"] = bias
                                     sig.extra_data = metrics
-                                self._update_table_row_data(sig, target_row=r, manage_sorting=False)
+                                self._queue_table_render(sig)
 
                     # 🚀 [IPC LINKAGE] 若集中交易指挥室处于展示状态，同步刷新赛马排位与持仓
                     if hasattr(self, "_command_room_dlg") and self._command_room_dlg is not None:
@@ -3092,6 +3102,12 @@ class IPOSubnewDetectorDialog(QMainWindow):
 
     def closeEvent(self, event):
         """窗口关闭时集中保存配置并安全清理全部定时器与后台任务"""
+        self._closing = True
+        self._pending_render_queue.clear()
+        self._pending_render_codes.clear()
+        self._pending_scan_result = None
+        for worker in tuple(self._priority_workers):
+            worker.stop()
         for timer_name in ("_render_timer", "ipc_timer", "refresh_timer", "_auto_sync_timer", "_linkage_timer"):
             if hasattr(self, timer_name):
                 t = getattr(self, timer_name)

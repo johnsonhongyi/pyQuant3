@@ -577,6 +577,7 @@ class TDXGlobalCachePool:
     def __init__(self, startup_codes=None):
         self._mutex = threading.RLock()
         self._decode_lock = threading.Lock()
+        self._flush_dispatch_lock = threading.Lock()
         self._history_request_locks = {}
         self._seed_flush_inflight = False
         self._seed_flush_tokens = {}
@@ -1136,7 +1137,65 @@ class TDXGlobalCachePool:
             repaired_count = 0
             skipped_count = 0
 
+            # Validate decoded private buffers before locking the resident cache.
+            prepared_history = {}
+            prepared_incremental = {}
+            remote_hist = payload.get("history_static_bars", {})
+            if isinstance(remote_hist, dict):
+                for k, v in remote_hist.items():
+                    if codes is not None and str(k).zfill(6) not in codes:
+                        continue
+                    if not isinstance(v, dict) or not isinstance(v.get("records"), (list, CompactBarRecords)):
+                        skipped_count += 1
+                        continue
+                    # 记录级自愈修复
+                    try:
+                        repaired_recs, was_repaired = self._validate_and_repair_records(
+                            v["records"], today_str, int(v.get("days", 10)), k
+                        )
+                    except (TypeError, ValueError, AttributeError):
+                        skipped_count += 1
+                        continue
+                    if not repaired_recs:
+                        skipped_count += 1
+                        continue
+                    if was_repaired:
+                        v = dict(v)
+                        v["records"] = repaired_recs
+                        # 重建 last_cum_vol/amt 以与修复后的 records 保持一致
+                        if repaired_recs:
+                            last_r = repaired_recs[-1]
+                            v["last_cum_vol"] = float(last_r.get("cum_vol_shares", v.get("last_cum_vol", 0.0)))
+                            v["last_cum_amt"] = float(last_r.get("cum_amt", v.get("last_cum_amt", 0.0)))
+                            if normalize_tdx_target(k)[0]:
+                                v["last_cum_pv"] = sum(safe_float(r.get("close")) * safe_float(r.get("bar_vol")) for r in repaired_recs)
+                        repaired_count += 1
+                    if not self._validate_history_entry(k, v, today_str):
+                        skipped_count += 1
+                        continue
+                    v["records"] = CompactBarRecords(v["records"])
+                    v["_quality_len"] = len(v["records"])
+                    prepared_history[k] = v
+
+            remote_inc = payload.get("incremental_intraday_pool", {})
+            if isinstance(remote_inc, dict):
+                for k, v in remote_inc.items():
+                    if codes is not None and isinstance(k, tuple) and k and str(k[0]).zfill(6) not in codes:
+                        continue
+                    if not isinstance(k, tuple) or not k or not isinstance(v, dict):
+                        skipped_count += 1
+                        continue
+                    if not self._validate_incremental_entry(k, v, today_str) or (can_rollover and str(v.get("date") or "") < today_str):
+                        skipped_count += 1
+                        continue
+                    v["_quality_len"] = len(v["df"])
+                    prepared_incremental[k] = v
+
             with self._mutex:
+                if snapshot is not None:
+                    snapshot['resident_codes'] = (set(self._history_static_bars)
+                        | {key[0] for key in self._incremental_intraday_pool}
+                        | set(self._daily_metrics_cache) | set(self._shares_cache))
                 def _cache_generation(entry: Dict[str, Any]) -> int:
                     try:
                         return int(entry.get("_cache_generation", 0))
@@ -1168,65 +1227,20 @@ class TDXGlobalCachePool:
                             self._multi_day_df_cache.pop(key, None)
 
                 # ── 静态历史分时：三层校验后写入 ──
-                remote_hist = payload.get("history_static_bars", {})
-                if isinstance(remote_hist, dict):
-                    for k, v in remote_hist.items():
-                        if codes is not None and str(k).zfill(6) not in codes:
-                            continue
-                        if not isinstance(v, dict) or not isinstance(v.get("records"), (list, CompactBarRecords)):
-                            skipped_count += 1
-                            continue
-                        if _cache_generation(v) < self._cache_generations.get(str(k).zfill(6), 0):
-                            continue
-                        # 记录级自愈修复
-                        try:
-                            repaired_recs, was_repaired = self._validate_and_repair_records(
-                                v["records"], today_str, int(v.get("days", 10)), k
-                            )
-                        except (TypeError, ValueError, AttributeError):
-                            skipped_count += 1
-                            continue
-                        if not repaired_recs:
-                            skipped_count += 1
-                            continue
-                        if was_repaired:
-                            v = dict(v)
-                            v["records"] = repaired_recs
-                            # 重建 last_cum_vol/amt 以与修复后的 records 保持一致
-                            if repaired_recs:
-                                last_r = repaired_recs[-1]
-                                v["last_cum_vol"] = float(last_r.get("cum_vol_shares", v.get("last_cum_vol", 0.0)))
-                                v["last_cum_amt"] = float(last_r.get("cum_amt", v.get("last_cum_amt", 0.0)))
-                                if normalize_tdx_target(k)[0]:
-                                    v["last_cum_pv"] = sum(safe_float(r.get("close")) * safe_float(r.get("bar_vol")) for r in repaired_recs)
-                            repaired_count += 1
-                        if not self._validate_history_entry(k, v, today_str):
-                            skipped_count += 1
-                            continue
-                        v["records"] = CompactBarRecords(v["records"])
-                        v["_quality_len"] = len(v["records"])
-                        local_entry = self._history_static_bars.get(k)
-                        if local_entry is None or v.get("updated_at", 0) > local_entry.get("updated_at", 0):
-                            self._history_static_bars[k] = v
+                for k, v in prepared_history.items():
+                    if _cache_generation(v) < self._cache_generations.get(str(k).zfill(6), 0):
+                        continue
+                    local_entry = self._history_static_bars.get(k)
+                    if local_entry is None or v.get("updated_at", 0) > local_entry.get("updated_at", 0):
+                        self._history_static_bars[k] = v
 
                 # ── 增量分时池：三层校验后写入 ──
-                remote_inc = payload.get("incremental_intraday_pool", {})
-                if isinstance(remote_inc, dict):
-                    for k, v in remote_inc.items():
-                        if codes is not None and isinstance(k, tuple) and k and str(k[0]).zfill(6) not in codes:
-                            continue
-                        if not isinstance(k, tuple) or not k or not isinstance(v, dict):
-                            skipped_count += 1
-                            continue
-                        if _cache_generation(v) < self._cache_generations.get(str(k[0]).zfill(6), 0):
-                            continue
-                        if not self._validate_incremental_entry(k, v, today_str) or (can_rollover and str(v.get("date") or "") < today_str):
-                            skipped_count += 1
-                            continue
-                        v["_quality_len"] = len(v["df"])
-                        local_inc = self._incremental_intraday_pool.get(k)
-                        if local_inc is None or v.get("updated_at", 0) > local_inc.get("updated_at", 0):
-                            self._incremental_intraday_pool[k] = v
+                for k, v in prepared_incremental.items():
+                    if _cache_generation(v) < self._cache_generations.get(str(k[0]).zfill(6), 0):
+                        continue
+                    local_inc = self._incremental_intraday_pool.get(k)
+                    if local_inc is None or v.get("updated_at", 0) > local_inc.get("updated_at", 0):
+                        self._incremental_intraday_pool[k] = v
 
                 remote_metrics = payload.get("daily_metrics_cache", {})
                 if isinstance(remote_metrics, dict):
@@ -1283,6 +1297,27 @@ class TDXGlobalCachePool:
             logger.debug(f"[TDXGlobalCachePool] 从 RamDisk 载入缓存异常: {e}")
             return False
 
+    def request_flush_if_due(self, interval: float = 1800.0) -> bool:
+        """Coalesce UI flush requests onto one background writer."""
+        if not self._flush_dispatch_lock.acquire(blocking=False):
+            return False
+
+        def _flush():
+            try:
+                self.flush_if_due(interval=interval)
+            except Exception as exc:
+                logger.debug("后台缓存归档异常: %s", exc)
+            finally:
+                self._flush_dispatch_lock.release()
+
+        try:
+            threading.Thread(target=_flush, daemon=True, name="TDXCacheFlush").start()
+            return True
+        except Exception as exc:
+            self._flush_dispatch_lock.release()
+            logger.debug("后台缓存归档启动异常: %s", exc)
+            return False
+
     def flush_if_due(self, interval: float = 1800.0) -> bool:
         """
         交易时段每 30 分钟合并持久化；收盘后有变化时额外保存一次。
@@ -1335,9 +1370,18 @@ class TDXGlobalCachePool:
                                 | set(self._daily_metrics_cache) | set(self._shares_cache)
                                 if loaded is not None else None)
                     local_generations = dict(self._cache_generations)
-                    remote_snapshot = {}
-                    self._load_from_ramdisk(force=True, sync_rollover=False, restore_vwap=False,
-                                            snapshot=remote_snapshot)
+                remote_snapshot = {}
+                self._load_from_ramdisk(force=True, sync_rollover=False, restore_vwap=False,
+                                        snapshot=remote_snapshot)
+                with self._mutex:
+                    if resident is not None:
+                        resident.update(remote_snapshot.get('resident_codes', ()))
+                        resident.update(self._startup_loaded_codes or ())
+                        for mapping in (self._history_static_bars, self._incremental_intraday_pool,
+                                        self._daily_metrics_cache):
+                            for key, entry in mapping.items():
+                                if isinstance(entry, dict) and entry.get('updated_at', 0) >= now:
+                                    resident.add(str(key[0] if isinstance(key, tuple) else key).zfill(6))
                     remote_generations = remote_snapshot.get('cache_generations', {})
                     merged_vwap = {
                         code: state for code, state in remote_snapshot.get('vwap_states', {}).items()
@@ -1729,10 +1773,13 @@ class TDXGlobalCachePool:
 
     # ── 2. 多日分时最终结果短效缓存 ──
     def peek_multi_day_df(self, code: str, days: int, max_age: float = 120.0) -> Optional[pd.DataFrame]:
-        """Only read resident data; completed sessions remain usable before today's first minute."""
+        """Read resident data without waiting for background cache loads or flushes."""
         clean, days = str(code).zfill(6), int(days)
         today = datetime.now().strftime("%Y-%m-%d")
-        with self._mutex:
+        if not self._mutex.acquire(blocking=False):
+            return None
+        records = None
+        try:
             candidates = []
             for (symbol, horizon), (frame, stamp, date) in self._multi_day_df_cache.items():
                 if symbol == clean and horizon >= days and frame is not None and not frame.empty:
@@ -1747,14 +1794,17 @@ class TDXGlobalCachePool:
                 entry = getattr(self, "_history_static_bars", {}).get(clean)
                 if entry and entry.get("records") and entry.get("days", 0) >= days:
                     records = entry["records"]
-                    frame = (records.to_frame() if isinstance(records, CompactBarRecords)
-                             else pd.DataFrame(records))
-                    if "time" in frame:
-                        frame.set_index("time", inplace=True)
-                    candidates.append(frame)
-            if not candidates:
-                return None
-            frame = max(candidates, key=len).copy()
+        finally:
+            self._mutex.release()
+        if records is not None:
+            frame = (records.to_frame() if isinstance(records, CompactBarRecords)
+                     else pd.DataFrame(records))
+            if "time" in frame:
+                frame.set_index("time", inplace=True)
+            candidates.append(frame)
+        if not candidates:
+            return None
+        frame = max(candidates, key=len).copy()
         if "date" not in frame:
             return None
         dates = frame["date"].astype(str)
