@@ -59,6 +59,11 @@ try:
     from PyQt6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView
 except ImportError:
     QtWidgets = QtCore = QtGui = None
+
+try:
+    from ats.performance import record as _ats_record
+except Exception:
+    _ats_record = None
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.completion import WordCompleter
@@ -1172,7 +1177,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
         self._process_dispatch_queue()
         # Tk owns native Windows dispatch; only flush Qt's posted events here.
-        self._qt_event_after_id = self.after(16, self._process_qt_events)
+        self._qt_event_after_id = self.after(50, self._process_qt_events)
 
 
         self.sender = StockSender(self.tdx_var, self.ths_var, self.dfcf_var, callback=self.update_send_status)
@@ -2533,7 +2538,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if getattr(self, '_is_pumping_events', False):
             return
         if getattr(self, '_dispatch_running', False):
-            self._qt_event_after_id = self.after(16, self._process_qt_events)
+            self._qt_event_after_id = self.after(50, self._process_qt_events)
             return
         self._is_pumping_events = True
         try:
@@ -2558,7 +2563,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._is_pumping_events = False
             if not getattr(self, '_is_closing', False):
                 try:
-                    self._qt_event_after_id = self.after(16, self._process_qt_events)
+                    self._qt_event_after_id = self.after(50, self._process_qt_events)
                 except tk.TclError:
                     pass
 
@@ -2648,9 +2653,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if t_name.startswith("<bound method "):
                         t_name = t_name.replace("<bound method ", "").split(" of ")[0]
                     
-                    # 限制长度
-                    t_name = t_name[:60]
-                    self._record_latency_sample(f"ui_task:{t_name}", task_dur)
+                    # 限制长度并采样记录（降低超轻微任务的锁与采样损耗）
+                    if task_dur >= 5.0 or (processed_count % 5 == 0):
+                        t_name_sampled = t_name[:60]
+                        self._record_latency_sample(f"ui_task:{t_name_sampled}", task_dur)
                     
                     # 持久化统计 (跨多次 dispatch 累加)
                     if not hasattr(self, '_cycle_audit'):
@@ -6810,9 +6816,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._snapshot_version = getattr(self, '_snapshot_version', 0) + 1
             version = self._snapshot_version
             self._compute_inflight = getattr(self, '_compute_inflight', 0) + 1
+            captured_sort = self._capture_sort_state() if hasattr(self, '_capture_sort_state') else None
+            captured_sort_items = tuple(vars(captured_sort).items()) if captured_sort and hasattr(captured_sort, '__dict__') else ()
             view_context = (query, cur_res, getattr(self, 'sortby_col', None),
                             bool(getattr(self, 'sortby_col_ascend', False)),
-                            tuple(vars(self._capture_sort_state()).items()))
+                            captured_sort_items)
             self._compute_view_context = view_context
 
             # 首批行情交付基础内存和显示，不等待指标计算，也不提前驱动交易。
@@ -6827,12 +6835,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self._sync_market_frame_state(daily, resampled, context[1])
                     if (getattr(self, '_last_value', ''), self.global_values.getkey('resample') or 'd',
                         getattr(self, 'sortby_col', None), bool(getattr(self, 'sortby_col_ascend', False)),
-                        tuple(vars(self._capture_sort_state()).items())) != context:
+                        (tuple(vars(self._capture_sort_state()).items()) if hasattr(self, '_capture_sort_state') else ())) != context:
                         return
                     self.refresh_tree(d, force=True, source_version=('initial', v))
                     self._first_market_frame_shown = True
                     logger.info("[MarketPipeline] 首批行情已显示: rows=%s version=%s", len(d), v)
-                self._put_deduped_task('initial_market_frame', show_first_frame)
+                if hasattr(self, '_put_deduped_task'):
+                    self._put_deduped_task('initial_market_frame', show_first_frame)
 
             # 9. 提交 CPU 重计算到 compute_executor
             try:
@@ -6844,7 +6853,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     getattr(self, 'sortby_col', None),
                     getattr(self, 'sortby_col_ascend', False),
                     getattr(self, 'feature_marker', None),
-                    full_df_res, query=query, sort_state=self._capture_sort_state()
+                    full_df_res, query, captured_sort
                 )
             except Exception:
                 self._compute_inflight = 0
@@ -17866,15 +17875,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # ✅ 检测是否只是排序（数据相同但顺序不同）
                 # 如果是排序操作，或者是强制刷新，强制全量刷新以确保顺序正确
                 force_full = force or columns_changed or updater_columns_changed
-                if hasattr(self, '_last_df_codes'):
-                    current_codes = df['code'].astype(str).tolist()
-                    # 如果code集合相同但顺序不同，说明是排序操作
-                    if set(current_codes) == set(self._last_df_codes) and current_codes != self._last_df_codes:
-                        force_full = True
-                        logger.debug(f"[TreeUpdater] 检测到排序操作，执行全量刷新")
-                
-                # 保存当前的code列表用于下次比较
-                self._last_df_codes = df['code'].astype(str).tolist()
+                if not force_full and hasattr(self, '_last_df_codes_tuple'):
+                    current_codes_tuple = tuple(df['code'].values)
+                    last_tuple = self._last_df_codes_tuple
+                    if len(current_codes_tuple) == len(last_tuple) and current_codes_tuple != last_tuple:
+                        # 快速比对元素集合是否相同（判定为纯顺序变更）
+                        if set(current_codes_tuple) == set(last_tuple):
+                            force_full = True
+                            logger.debug(f"[TreeUpdater] 检测到排序操作，执行全量刷新")
+                    self._last_df_codes_tuple = current_codes_tuple
+                else:
+                    self._last_df_codes_tuple = tuple(df['code'].values)
                 
                 # 执行增量更新
                 # 颜色/图标依赖的业务字段不能随可见列裁剪掉。
@@ -22470,10 +22481,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def _record_latency_sample(self, component, duration_ms):
         """Keep bounded component latency samples for manual percentile reports."""
         try:
-            from ats.performance import record
-            record(str(component), max(0.0, float(duration_ms)),
-                   producer_session=getattr(self, '_sync_session', None),
-                   producer_version=getattr(self, '_last_vis_bus_version', None))
+            if _ats_record is not None:
+                _ats_record(str(component), max(0.0, float(duration_ms)),
+                           producer_session=getattr(self, '_sync_session', None),
+                           producer_version=getattr(self, '_last_vis_bus_version', None))
             sample = (str(component), max(0.0, float(duration_ms)))
             with self._latency_samples_lock:
                 self._latency_samples.append(sample)

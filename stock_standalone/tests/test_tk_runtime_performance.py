@@ -36,7 +36,12 @@ def pump_owner():
     owner = SimpleNamespace(global_values=SimpleNamespace(getkey=lambda _key: 'd'),
                             compute_executor=Mock(), _run_compute_async=Mock(),
                             _on_compute_done=Mock(), _sort_dataframe=lambda df: df)
-    owner.compute_executor.submit.side_effect = lambda *_args: Future()
+    def submit_mock(*_args):
+        fut = Future()
+        fut.set_result(None)
+        return fut
+    owner.compute_executor.submit.side_effect = submit_mock
+    owner._on_compute_done.side_effect = lambda f, v, frc=False: setattr(owner, '_compute_inflight', 0)
     pump = method('instock_MonitorTK.py', 'StockMonitorApp', '_process_tree_data_async',
                   same_fingerprint=same_fingerprint,
                   frame_fingerprint=Mock(side_effect=AssertionError('full-table hash in pump')))

@@ -10,6 +10,16 @@ from typing import Dict, List, Tuple, Optional, Any
 from JohnsonUtil import LoggerFactory
 logger = LoggerFactory.getLogger()
 
+try:
+    from global_favorites import GlobalFavoriteManager
+except Exception:
+    GlobalFavoriteManager = None
+
+try:
+    from JohnsonUtil import commonTips as cct
+except Exception:
+    cct = None
+
 class TreeviewIncrementalUpdater:
     """
     Treeview增量更新器
@@ -121,6 +131,14 @@ class TreeviewIncrementalUpdater:
         prepared_until = 0
         batch_size = min(64, max(1, self.chunk_size))
 
+        # 🚀 [PERF OPTIMIZE] 帧外预提取一次全局自选，供所有分批闭包复用
+        favorites = set()
+        if GlobalFavoriteManager is not None:
+            try:
+                favorites = GlobalFavoriteManager().get_favorite_stocks()
+            except Exception:
+                pass
+
         def render_batch():
             nonlocal position, delete_position, rows, prepared_until
             self._render_after_id = None
@@ -140,15 +158,10 @@ class TreeviewIncrementalUpdater:
                     delete_position += 1
                     if time.perf_counter() >= deadline:
                         break
-                try:
-                    from global_favorites import GlobalFavoriteManager
-                    favorites = GlobalFavoriteManager().get_favorite_stocks()
-                except Exception:
-                    favorites = set()
                 while delete_position == len(removed) and position < len(df):
                     if position == prepared_until:
                         prepared_until = min(position + batch_size, len(df))
-                        rows = iter(self._prepare_rows(df.iloc[position:prepared_until]))
+                        rows = iter(self._prepare_rows(df.iloc[position:prepared_until], fav_stocks=favorites))
                     code, values, row_data = next(rows)
                     tags = []
                     if self.feature_marker and self.feature_marker.enable_colors:
@@ -179,7 +192,9 @@ class TreeviewIncrementalUpdater:
                     if time.perf_counter() >= deadline:
                         break
                 if delete_position < len(removed) or position < len(df):
-                    self._render_after_id = self.root.after(1, render_batch)
+                    # ⚡ [P0-FIX] 16ms 间隔（~60fps）让 Tk 事件循环有时间处理滚动/点击
+                    # 原 after(1,...) 仅留 1ms 间隙，5000 行需 80 批 × 12ms = ~1s 持续霸占事件循环
+                    self._render_after_id = self.root.after(16, render_batch)
                 else:
                     self._chunked_insert_pending = False
                     if self._selection_request:
@@ -232,7 +247,7 @@ class TreeviewIncrementalUpdater:
             logger.info(f"[TreeviewUpdater] 全量刷新(批量优化): {added}行, 耗时{duration:.3f}s")
             return (added, 0, 0)
     
-    def _prepare_rows_fast(self, df: pd.DataFrame) -> list:
+    def _prepare_rows_fast(self, df: pd.DataFrame, fav_stocks: Optional[set] = None) -> list:
         """
         极速预处理 - 最大化性能优化版本
         
@@ -255,12 +270,13 @@ class TreeviewIncrementalUpdater:
         feature_marker = self.feature_marker
         
         # 🚀 [PERF OPTIMIZE] 提取 GlobalFavoriteManager 状态，避免循环中重复获取锁与导包
-        fav_stocks = set()
-        try:
-            from global_favorites import GlobalFavoriteManager
-            fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
-        except Exception:
-            pass
+        if fav_stocks is None:
+            fav_stocks = set()
+            if GlobalFavoriteManager is not None:
+                try:
+                    fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+                except Exception:
+                    pass
         
         # 预提取 code 列
         if 'code' in df.columns:
@@ -404,11 +420,11 @@ class TreeviewIncrementalUpdater:
         return rows_data
         
     
-    def _prepare_rows(self, df: pd.DataFrame) -> list:
+    def _prepare_rows(self, df: pd.DataFrame, fav_stocks: Optional[set] = None) -> list:
         """
         预处理所有行数据 - 使用快速方法
         """
-        return self._prepare_rows_fast(df)
+        return self._prepare_rows_fast(df, fav_stocks=fav_stocks)
     
     def _batch_insert_with_displaycolumns_optimization(
         self, rows_data: List[Tuple[str, list, Optional[dict]]]
@@ -612,7 +628,7 @@ class TreeviewIncrementalUpdater:
         # 检查是否还有更多数据
         if end_idx < len(rows_data):
             # 安排下一批次（1ms 延迟，让 UI 有机会响应）
-            self.root.after(1, self._chunked_insert, rows_data, end_idx, start_time)
+            self.root.after(16, self._chunked_insert, rows_data, end_idx, start_time)
         else:
             # 插入完成
             self._chunked_insert_pending = False
