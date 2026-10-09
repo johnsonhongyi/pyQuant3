@@ -60,20 +60,6 @@ logger = LoggerFactory.getLogger()
 
 SETTINGS_SECTION = "sector_bidding_panel_persistence"
 
-# ⭐ [GIL_MONITOR] 引入最后调用追踪器（零侵入，import 失败时降级为 no-op）
-try:
-    from tk_gil_monitor import last_call as _last_call, gil_mark as _gil_mark
-    def _gil_yield(tag=""):
-        import time, sys; time.sleep(0); sys._getframe()
-    _GIL_MONITOR_AVAILABLE = True
-except Exception:
-    class _NoopTracker:
-        def get(self): return {}
-        def dump(self): return ""
-        class _data: pass
-    _last_call = _NoopTracker()
-    def _gil_yield(tag=""): pass
-    _GIL_MONITOR_AVAILABLE = False
 
 
 def _ascii_kline(klines: List[dict], width: int = 24, last_close: float = 0) -> str:
@@ -1232,8 +1218,6 @@ class DataProcessWorker(QThread):
         # 节流控制
         # =========================================================================
         self._last_emit_ts = 0.0
-        self._last_slow_log_ts = 0.0
-        self._last_stall_log_ts = 0.0   # [NEW] 独立节流: STALL 日志防刷屏 (30s)
         self._last_error_log_ts = 0.0
 
         # =========================================================================
@@ -1371,7 +1355,6 @@ class DataProcessWorker(QThread):
 
             has_work = False
 
-            work_start_t = time.perf_counter()
 
             try:
 
@@ -1448,19 +1431,7 @@ class DataProcessWorker(QThread):
             # 动态 Sleep
             # ================================================================
 
-            work_dur = time.perf_counter() - work_start_t
 
-            if work_dur > 0.5:
-
-                now = time.time()
-
-                if now - self._last_slow_log_ts > 30:
-
-                    self._last_slow_log_ts = now
-
-                    self._safe_log_warning(
-                        f"⚠️ [Worker] Slow cycle: {work_dur:.2f}s"
-                    )
 
             if has_work:
                 time.sleep(self.busy_sleep)
@@ -1488,28 +1459,18 @@ class DataProcessWorker(QThread):
                 return
 
             active_codes = df.index.tolist() if hasattr(df, 'index') else []
-            is_full = len(df) > 3000
-            start_time = time.perf_counter()
 
             # ================================================================
-            # 注册代码 + GIL 埋点
+            # 注册代码
             # ================================================================
-            self._safe_log_debug("⏱️ [Worker][DEBUG] Calling detector.register_codes...")
-            try: _gil_mark("register_codes:start")
-            except Exception: pass
 
             if hasattr(self.detector, "register_codes"):
                 self.detector.register_codes(df)
 
-            try: _gil_mark("register_codes:end")
-            except Exception: pass
 
             # ================================================================
-            # 分片处理 + GIL 埋点
+            # 分片处理
             # ================================================================
-            self._safe_log_debug("⏱️ [Worker][DEBUG] Calling detector.update_scores...")
-            try: _gil_mark("update_scores:start")
-            except Exception: pass
 
             total = len(active_codes)
             if total > 0:
@@ -1521,32 +1482,16 @@ class DataProcessWorker(QThread):
                         + traceback.format_exc()
                     )
 
-            try: _gil_mark("update_scores:end")
-            except Exception: pass
 
             time.sleep(0)  # [YIELD] 强制物理让出 GIL 给主 UI 线程
-            try: import sys; sys._getframe()  # 强制调度器切换
-            except Exception: pass
 
             # ================================================================
-            # 超时告警与状态保存
+            # 保存最新行情
             # ================================================================
-            dur = time.perf_counter() - start_time
-            if dur > 0.3:
-                # now_ts = time.time()
-                # if now_ts - self._last_stall_log_ts > 30:  # 30s 节流，防止每轮行情都刷 STALL 日志
-                #     self._last_stall_log_ts = now_ts
-                #     # [FIX] _score_codes 在 start_update_scores 内同步赋值，update_scores() 返回时已就位
-                #     # 代表本轮 Chunk Scheduler 实际计划处理的过滤后代码量（非上一轮滞后值）
-                #     actual_count = len(getattr(self.detector, '_score_codes', []) or [])
-                #     self._safe_log_warning(f"⚠️ [STALL] update_scores ({'full' if is_full else 'incremental'}) input:{total} computed:{actual_count} slow: {dur:.3f}s")
-                actual_count = len(getattr(self.detector, '_score_codes', []) or [])
-                self._safe_log_warning(f"⚠️ [STALL] update_scores ({'full' if is_full else 'incremental'}) input:{total} computed:{actual_count} slow: {dur:.3f}s")
             self.latest_df = df
 
             # [🚀 PERF] 异步分片模式下，此处立即 emit 会导致空刷新抢占 _last_refresh_ts，
             # 从而使真正的打分完毕回调因 5s 节流被丢弃。一切刷新统一由 on_score_finished 回调触发。
-            self._safe_log_debug("⏱️ [Worker][DEBUG] Async scoring started. Skipping sync emit.")
 
         except Exception:
             self._safe_log_error(
@@ -1561,20 +1506,14 @@ class DataProcessWorker(QThread):
     def _process_force_recalc(self):
 
         try:
-            start_time = time.perf_counter()
-            self._safe_log_debug("⏱️ [Worker][DEBUG] Calling detector.update_scores(force=True)...")
 
             self.detector.update_scores(force=True)
 
             time.sleep(0)  # [YIELD] 强制物理让出 GIL 给主 UI 线程
 
-            dur = time.perf_counter() - start_time
-            if dur > 0.3:
-                self._safe_log_warning(f"⚠️ [STALL] update_scores (force) slow: {dur:.3f}s")
 
             # [FIX] data_version 由 update_scores 内部统一管理
             self.latest_df = None
-            self._safe_log_debug("⏱️ [Worker][DEBUG] Async force scoring started. Skipping sync emit.")
 
         except Exception:
             self._safe_log_error(
@@ -2964,9 +2903,6 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
     def _on_worker_finished(self, _=None):
         """在主线程被调用，由后台真正计算完毕后触发UI更新"""
-        # ⭐ [GIL_MONITOR] 埋点
-        try: _last_call._data.update({'time': __import__('time').time(), 'func': 'SectorBiddingPanel._on_worker_finished', 'thread': __import__('threading').current_thread().name, 'args_repr': ''})
-        except Exception: pass
         df = getattr(self._worker, 'latest_df', None)
         # [NEW] 捕获并更新最新的全量行情数据源，确保宏观查询使用的是包含 nclose, ral 等全量字段的 df
         if df is not None:
@@ -3004,7 +2940,6 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         """同一批完成通知只渲染一次，宏查询使用执行时的最新行情。"""
         with self._update_lock:
             self._force_update_requested = False
-        started = time.perf_counter()
         try:
             if getattr(self, '_is_macro_active', False) and getattr(self, '_macro_query_str', ''):
                 self._run_macro_query_internal(self._macro_query_str, is_auto_refresh=True)
@@ -3019,9 +2954,6 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         finally:
             with self._update_lock:
                 self._ui_refresh_pending = False
-            elapsed_ms = (time.perf_counter() - started) * 1000
-            if elapsed_ms > 500:
-                logger.warning("[SECTOR-UI-SLOW] refresh elapsed=%.1fms", elapsed_ms)
 
     def _get_detector_ui_snapshot(self):
         """Never make the shared Tk/Qt GUI wait for the scoring worker's lock."""
@@ -3062,9 +2994,6 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         return self._get_detector_ui_snapshot()[1]
 
     def _refresh_sector_list(self, reset_to_top: bool = False):
-        # ⭐ [GIL_MONITOR] 埋点：记录进入时刻，Watchdog 可识别"UI 渲染中"
-        try: _last_call._data.update({'time': __import__('time').time(), 'func': 'SectorBiddingPanel._refresh_sector_list', 'thread': __import__('threading').current_thread().name, 'args_repr': ''})
-        except Exception: pass
         # 1. 安全检查
         if not hasattr(self, '_worker') or self._worker is None:
             return
