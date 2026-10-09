@@ -1397,10 +1397,15 @@ class PRServiceGUI:
                 if frame is not None and not frame.empty:
                     # IPC 保留唯一完整底座，界面只持有人气池；叠加尚未被下一轮 IPC 覆盖的 TDX 盘口。
                     if self.current_df is not None and not self.current_df.empty:
+                        missing = self.current_df.index[~self.current_df.index.isin(frame.index)]
+                        if codes is not None:
+                            missing = missing[missing.isin(codes)]
+                        if len(missing):
+                            frame = pd.concat([frame, self.current_df.loc[missing]])
                         rows = frame.index.intersection(self.current_df.index)
                         for col in ('trade', 'price', 'close', 'open', 'high', 'low', 'last_close',
                                     'percent', 'change_pct', 'volume', 'vol', 'amount', 'vwap', 'bid1', 'ask1'):
-                            if col in frame.columns and col in self.current_df.columns and len(rows):
+                            if col in self.current_df.columns and len(rows):
                                 frame.loc[rows, col] = self.current_df.loc[rows, col]
                     return frame
             if self.current_df is not None and not self.current_df.empty:
