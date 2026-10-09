@@ -17,6 +17,13 @@ prepend-rules:
   - DOMAIN-SUFFIX,local,DIRECT
   - DOMAIN-SUFFIX,lan,DIRECT
 
+  # Keep ChatGPT, authentication, challenges and assets on the same egress.
+  - DOMAIN-SUFFIX,chatgpt.com,Research + AI
+  - DOMAIN-SUFFIX,openai.com,Research + AI
+  - DOMAIN-SUFFIX,oaistatic.com,Research + AI
+  - DOMAIN-SUFFIX,oaiusercontent.com,Research + AI
+  - DOMAIN,challenges.cloudflare.com,Research + AI
+
   # ----------------------------------------------------------------------------
   # 1. 核心股票行情与金融数据 API (强制直连，毫秒级响应)
   # ----------------------------------------------------------------------------
