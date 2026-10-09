@@ -11,6 +11,8 @@ import argparse
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
+    from ats.subprocess_stdio import ensure_sbc_stdio
+    ensure_sbc_stdio()
 
 # Ensure workspace root is in path (Nuitka / PyInstaller / dev 统一兼容的物理根目录方案)
 try:
@@ -82,11 +84,13 @@ if __name__ == "__main__":
         except SystemExit as se:
             sys.exit(se.code if isinstance(se.code, int) else 0)
         except BaseException as e:
+            import traceback
+            traceback.print_exc()
             try:
                 run_sbc.quit_and_save_all_sbc_windows()
             except Exception:
                 pass
-            sys.exit(0)
+            sys.exit(1)
 
     # 💡 新股次新股超短检测工具独立子进程分发 (对齐 --sbc-hold 独立子进程规范)
     is_ipo_subproc = (

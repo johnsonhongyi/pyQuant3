@@ -716,28 +716,40 @@ def test_cached_name_and_ipo_do_not_initialize_or_request(monkeypatch):
     sys_utils._SINA_ENGINE.get_code_cname.assert_not_called()
 
 
-@pytest.mark.parametrize("snapshot_only", [False, True])
+@pytest.mark.parametrize("snapshot_only", [False, True, None, "corrupt", "bom"])
 def test_snapshot_restores_all_codes_after_group_exit(qapp, monkeypatch, tmp_path, snapshot_only):
     import json
     import run_sbc
     path = tmp_path / "snapshot.json"
     codes = [f"60010{i}" for i in range(10)]
     snapshot = {"codes": codes, "windows": [{"code": codes[0]}]}
-    if not snapshot_only:
+    if snapshot_only == "corrupt":
+        path.write_text('{', encoding='utf-8')
+    elif snapshot_only == "bom":
+        path.write_text(json.dumps({"recent_history_snapshots": [snapshot]}), encoding="utf-8-sig")
+    elif not snapshot_only:
         path.write_text(json.dumps({"recent_history_snapshots": [snapshot]}), encoding="utf-8")
     monkeypatch.setattr(run_sbc, "_get_launcher_layout_cfg_path", lambda: str(path))
+    if snapshot_only == "bom":
+        assert run_sbc.get_launcher_history_snapshots() == [snapshot]
     monkeypatch.setattr(run_sbc, "_is_restoring_holdings", False)
     monkeypatch.setattr(run_sbc, "_begin_sbc_startup_batch", MagicMock())
     monkeypatch.setattr(run_sbc, "_end_sbc_startup_batch", MagicMock())
     monkeypatch.setattr(run_sbc, "open_sbc_chart_dialog", lambda parent, code, **kwargs: MagicMock(code=code))
     queue = []
     monkeypatch.setattr(run_sbc, "QTimer", SimpleNamespace(singleShot=lambda delay, callback: queue.append(callback)))
+    layout = MagicMock()
+    monkeypatch.setattr(run_sbc, "rearrange_all_sbc_windows", layout)
+    monkeypatch.setattr(run_sbc, "save_launcher_holdings_windows", MagicMock())
     qapp.setProperty("is_app_exiting", True)
     qapp.setProperty("_has_saved_on_quit", True)
-    windows = run_sbc.restore_launcher_holdings_windows(snapshot_index=1, snapshot_data=snapshot if snapshot_only else None)
+    windows = run_sbc.restore_launcher_holdings_windows(
+        snapshot_index=1 if snapshot_only is not None else None,
+        snapshot_data=snapshot if snapshot_only in (True, "corrupt") else None)
     while queue:
         queue.pop(0)()
     assert [window.code for window in windows] == codes
+    layout.assert_called_once()
     assert not run_sbc._is_restoring_holdings
     assert not qapp.property("_has_saved_on_quit")
 

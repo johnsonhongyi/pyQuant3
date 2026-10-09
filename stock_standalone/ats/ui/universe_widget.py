@@ -1089,15 +1089,18 @@ class UniverseTreeWidget(QWidget):
                     label = f"📌 快照 1 (最新 [{t_show}]): {code_summary}"
 
                 act = menu_snap.addAction(label)
-                def _make_trigger(idx, c_list):
+                def _make_trigger(idx, snapshot):
+                    import copy
+                    selected = copy.deepcopy(snapshot)
+                    c_list = selected.get("codes", [])
                     def _do_switch():
                         logger.info(f"[UniverseWidget] 操盘手点击加载历史快照 {idx}: {c_list}")
-                        proc = mgr.launch_holdings_watcher(snapshot_idx=idx)
+                        proc = mgr.launch_holdings_watcher(snapshot_idx=idx, snapshot_data=selected)
                         self._update_launcher_btn_state(running=True)
                         self._notify_status(f"📈 [SBC Launcher] 已成功恢复历史快照 {idx} ({len(c_list)} 只标的) 并平铺重排")
                     return _do_switch
 
-                act.triggered.connect(_make_trigger(snap_idx, codes))
+                act.triggered.connect(_make_trigger(snap_idx, snap))
         except Exception as err:
             logger.warning(f"[UniverseWidget] 构造历史快照菜单异常: {err}")
 

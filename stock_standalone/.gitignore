@@ -63,3 +63,6 @@ data/ipo_learning/shadow_observations.sqlite
 /InStock/
 !tests/test_ats_compact_memory.py
 !tests/test_tk_compact_memory.py
+!tests/test_ats_snapshot_ipo_memory.py
+!tests/test_popularity_memory_bounds.py
+!tests/test_sbc_default_code.py

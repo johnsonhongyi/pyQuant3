@@ -475,7 +475,9 @@ def batch_fetch_60m_kline_fast(
                 clean_code, category="60m", count=count
             )
             if df_60m is not None and not df_60m.empty:
-                result[clean_code] = df_60m.copy()
+                # fetch_kline_bars already returns an independent frame.
+                result[clean_code] = (df_60m if isinstance(shared_fetcher, TDXRealtimeFetcher)
+                                      else df_60m.copy())
         except Exception as exc:
             logger.debug("获取标的 %s 真实60F异常: %s", clean_code, exc)
     return result
@@ -497,8 +499,7 @@ class IPOVWAPDetectorEngine:
         # 短期内存评估缓存 (避免高频轮询重复计算相同周期的 K 线)
         self._eval_cache: Dict[str, Tuple[VWAPDetectorSignal, float]] = {}
         self._cache_ttl = 2.0  # 2 秒 TTL
-        # 盘中历史前 9 天分时长效缓存 (标的代码 -> (日期YYYY-MM-DD, 历史DataFrame))
-        # 彻底攻克“现在还是慢”：首次拉取 10 天分时并缓存前 9 天；高频轮询仅拉取当天 1 天(20ms)，内存拼接极速重算 VWAP
+        # Legacy attribute retained; historical bars reside in the shared TDX pool.
         self._history_multi_day_cache: Dict[str, Tuple[str, pd.DataFrame]] = {}
 
         # Feature Flag: enable_intraday_volume_normalization
@@ -617,18 +618,6 @@ class IPOVWAPDetectorEngine:
                         df_multi = self.fetcher.fetch_multi_day_intraday_bars(
                             clean_code, days=available_days
                         )
-
-        # 维护 _history_multi_day_cache 兼容性
-        if df_multi is not None and not df_multi.empty and "date" in df_multi.columns:
-            try:
-                dates = sorted(df_multi["date"].astype(str).unique())
-                if len(dates) > 1:
-                    last_d = dates[-1]
-                    df_hist_part = df_multi[df_multi["date"].astype(str) < last_d].copy()
-                    if not df_hist_part.empty:
-                        self._history_multi_day_cache[clean_code] = (today_date_str, df_hist_part)
-            except Exception:
-                pass
 
         cost_ms = (time.perf_counter() - t0) * 1000
         return df_multi, cost_ms

@@ -211,10 +211,15 @@ class SBCProcessManager:
                 dead_keys.append(key)
         for k in dead_keys:
             proc = self._procs.pop(k, None)
-            status_path = getattr(proc, "_sbc_closed_path", None)
-            if status_path:
+            self._cleanup_process_files(proc)
+
+    @staticmethod
+    def _cleanup_process_files(proc):
+        for name in ("_sbc_closed_path", "_sbc_snapshot_path"):
+            path = getattr(proc, name, None)
+            if path:
                 try:
-                    os.remove(status_path)
+                    os.remove(path)
                 except OSError:
                     pass
 
@@ -268,8 +273,9 @@ class SBCProcessManager:
             app_root = get_app_root()
             flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
             env = os.environ.copy()
-            # 💡 核心隔离：剥离 PyInstaller 父进程临时解压目录环境变量，避免子进程锁死父进程 _MEIxxxxx 导致退出报 PYI-10032 警告
+            # 盯盘随 ATS 退出并由父进程等待关闭，复用其解包资源以减少内存和启动开销。
             env.pop("_MEIPASS2", None)
+            env.pop("PYINSTALLER_RESET_ENVIRONMENT", None)
             env["ATS_SBC_SUBPROCESS"] = "1"
             env["SBC_IS_HOLDINGS_LAUNCHER"] = "1"
             env.pop("SBC_RESTORE_SNAPSHOT", None)
@@ -277,9 +283,19 @@ class SBCProcessManager:
                 env["SBC_RESTORE_SNAPSHOT"] = json.dumps(snapshot_data, ensure_ascii=False)
             closed_path = os.path.join(tempfile.gettempdir(), f"ats_sbc_closed_{uuid.uuid4().hex}")
             env["ATS_SBC_CLOSED_PATH"] = closed_path
+            snapshot_path = None
+            if snapshot_data is not None:
+                snapshot_path = closed_path + ".snapshot.json"
+                try:
+                    with open(snapshot_path, "x", encoding="utf-8") as handle:
+                        handle.write(env["SBC_RESTORE_SNAPSHOT"])
+                    cmd.extend(["--snapshot-file", snapshot_path])
+                    env.pop("SBC_RESTORE_SNAPSHOT", None)
+                except OSError as exc:
+                    logger.warning("[SBCLauncher] 快照文件交接失败，使用环境变量: %s", exc)
             try:
                 import run_sbc
-                env["SBC_LAYOUT_CONFIG_PATH"] = run_sbc._get_launcher_layout_cfg_path()
+                env["SBC_LAYOUT_CONFIG_PATH"] = os.path.abspath(run_sbc._get_launcher_layout_cfg_path())
             except Exception:
                 pass
             env["ATS_MAIN_PID"] = str(os.getpid())
@@ -289,6 +305,7 @@ class SBCProcessManager:
             # bootloader 仍在 C 层执行清理并写控制台，与 ATS 并发写控制台产生内核锁竞争，
             # 导致 ATS 退出时永久卡死在控制台 WriteConsole 调用上。
             sbc_log_path = _get_sbc_log_path("sbc_holdings")
+            env["ATS_SBC_LOG_PATH"] = sbc_log_path
             sbc_log_fh = _open_sbc_log(sbc_log_path)
 
             logger.info(f"[SBCLauncher] 🚀 正在启动持仓盯盘独立多进程: {' '.join(cmd)}")
@@ -311,9 +328,15 @@ class SBCProcessManager:
                     self._procs[f"__retired_holdings_{previous.pid}__"] = previous
                 self._procs["__holdings_launcher__"] = proc
                 proc._sbc_closed_path = closed_path
+                proc._sbc_snapshot_path = snapshot_path
                 logger.info(f"[SBCLauncher] ✅ 成功调起持仓盯盘独立进程 (PID={proc.pid})，日志: {sbc_log_path}")
                 return proc
             except Exception as e:
+                if snapshot_path:
+                    try:
+                        os.remove(snapshot_path)
+                    except OSError:
+                        pass
                 if sbc_log_fh is not subprocess.DEVNULL:
                     try: sbc_log_fh.close()
                     except Exception: pass
@@ -326,9 +349,10 @@ class SBCProcessManager:
             os.environ["SBC_LAYOUT_CONFIG_PATH"] = run_sbc._get_launcher_layout_cfg_path()
             os.environ["SBC_IS_HOLDINGS_LAUNCHER"] = "1"
             restored = run_sbc.restore_launcher_holdings_windows(snapshot_index=snapshot_idx, snapshot_data=snapshot_data)
-            if not restored:
+            if not restored and snapshot_idx is None and snapshot_data is None and not run_sbc._is_restoring_holdings:
                 from ats.ui.intraday_strategy_dialog import open_sbc_chart_dialog
-                dlg = open_sbc_chart_dialog(None, code="600733", period_mode="10d")
+                from ats.ui.sbc_preferences import get_sbc_default_code
+                dlg = open_sbc_chart_dialog(None, code=get_sbc_default_code(), period_mode="10d")
                 if dlg:
                     dlg.show()
                     restored = [dlg]
@@ -565,12 +589,8 @@ class SBCProcessManager:
             logger.error(f"[SBCLauncher] 关闭持仓盯盘进程异常: {e}")
             return False
         finally:
-            status_path = getattr(proc, "_sbc_closed_path", None)
-            if status_path and proc.poll() is not None:
-                try:
-                    os.remove(status_path)
-                except OSError:
-                    pass
+            if proc.poll() is not None:
+                self._cleanup_process_files(proc)
 
     def activate_launcher_windows(self):
         """尝试将所有 SBC 窗口置顶激活 (同时支持进程内与独立子进程窗口)"""
@@ -640,13 +660,15 @@ class SBCProcessManager:
             app_root = get_app_root()
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
             env = os.environ.copy()
-            # 💡 核心隔离：剥离 PyInstaller 父进程临时解压目录环境变量
+            # 与持仓盯盘一致，复用父进程解包资源。
             env.pop("_MEIPASS2", None)
+            env.pop("PYINSTALLER_RESET_ENVIRONMENT", None)
             env["ATS_SBC_SUBPROCESS"] = "1"
             env["ATS_MAIN_PID"] = str(os.getpid())
 
             # ⭐ [FIX] 同上：切断控制台句柄继承，防止 SBC bootloader 清理时与 ATS 争控制台锁
             sbc_log_path = _get_sbc_log_path(f"sbc_{c_clean}")
+            env["ATS_SBC_LOG_PATH"] = sbc_log_path
             sbc_log_fh = _open_sbc_log(sbc_log_path)
 
             logger.info(f"[SBCLauncher] 🚀 正在启动标的 {c_clean} 的独立 SBC 进程: {' '.join(cmd)}")
