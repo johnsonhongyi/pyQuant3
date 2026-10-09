@@ -1,5 +1,22 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-09 20:30 【桌面窗口坐标分类布局管理器双击实际位置自动替换与表格列手动调整自动持久化闭环】(`webTools/window_manager/ui.py`, `tests/test_window_layout_double_click_and_column_persistence.py`)
+- [x] **【问题 1 根因穿透与单项坐标替换修复】**：
+    - 查明当前桌面实际位置列若包含实际窗口标题（如 `[通达信金融终端(开心果交易版)V2025.01 - [版面-龙头战法]] 1225,-1001,1584,943`）或调试前缀，原 `on_table_cell_double_clicked` 中使用的纯正则 `re.match(r"^-?\d+,-?\d+,\d+,\d+$", cur_text)` 因要求首尾完全匹配而直接判定为 False，导致双击单元格被完全静默忽略；
+    - 在 `refresh_current_positions` 中将探测到的纯净四元坐标直接写入 `cur_item.setData(QtCore.Qt.ItemDataRole.UserRole, real_pos)`，并在 ToolTip 中添加直观交互提示；
+    - 抽象提取稳健的坐标解析器 `_extract_coord_str`，优先从 `UserRole` 提取，并以 `re.search` 正则向后兼容任意包含标题/状态的文本，同时校验 `Width > 0 and Height > 0` 杜绝异常脏数据；
+    - 封装 `replace_row_position_with_actual(row)`：遵循原版优秀设计，双击第 2 列或右键菜单选择“替换为当前实际位置”时**仅更新页面表格配置坐标与内存字典，绝不自动写入磁盘**，方便用户实时点击“应用布局”进行窗口摆放测试；仅在用户测试满意后手动点击右下角“保存当前配置”时才真正落盘，同时在日志区输出明确的“仅更新页面，未保存至磁盘，可点击测试布局”可解释性提示；
+    - 在退出 (`force_quit`) 与关闭 (`closeEvent`) 移除全量 `config_manager.save()`，杜绝退出时将未确认的测试坐标意外固化到磁盘；
+- [x] **【问题 2 根因穿透与表格列手动调整自动持久化落地】**：
+    - 查明原表头使用了 `QHeaderView.ResizeMode.Stretch` 与 `ResizeMode.ResizeToContents`，Qt 在此模式下强制禁止用户鼠标拖动表头分割线调整列宽，且无任何列宽记忆与落盘机制；
+    - 将主表格全部 3 列模式统一重构为 `QHeaderView.ResizeMode.Interactive`，同时设置 `setStretchLastSection(False)`，彻底解放表头列宽鼠标自由拖拽调整与双击自适应；
+    - 实现 `restore_table_column_widths`（从配置文件读取 `table_column_widths` 列表，缺省平滑回退 `[260, 220, 400]`）与 `save_table_column_widths`；
+    - 在 `init_ui` 末尾完成控件布局后统一恢复列宽并开启 `sectionResized` 监听，引入 `_ui_initialized` 防御锁，杜绝启动初期界面自适应事件冲掉已有用户配置；
+    - 实现专用的 1.5 秒列宽防抖自动落盘机制（`request_save_column_widths_debounced`），同时在手动保存、关闭窗口 (`closeEvent`) 与安全退出 (`force_quit`) 建立多层强力持久化保底；
+- [x] **【全套自动化回归测试 100% 纯绿秒级通过】**：
+    - 新增 `tests/test_window_layout_double_click_and_column_persistence.py` 覆盖 5 大核心场景（复杂文本坐标提取、列宽 Interactive 交互与跨会话恢复、双击实际位置自动替换与持久化、未运行/最小化异常保护、用户拖动防抖落盘），1.96 秒全部纯绿通过；
+    - `python -m py_compile` 0 语法错误，UTF-8（无 BOM）保存。
+
 ## 2026-10-09 18:48 【MonitorTK 性能与内存深度审核及视图滚动卡顿/点击延迟根治闭环】(`stock_standalone/20261009_1848_task.md`, `performance_optimizer.py`, `instock_MonitorTK.py`, `sector_bidding_panel.py`, `tests/test_tk_runtime_performance.py`)
 - [x] **【根因诊断穿透与 6 大卡顿瓶颈定性】**：
     - 查明分批渲染 `_render_in_chunks` 使用 `after(1, ...)` 极小间隔（1ms），5000+ 行数据拆分 80 批次渲染近 1 秒持续紧密霸占 Tkinter 事件循环，导致 Windows 鼠标滚动和单击事件严重被饿死；

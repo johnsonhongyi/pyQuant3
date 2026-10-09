@@ -3858,7 +3858,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
     show_ui_signal = QtCore.pyqtSignal()
     log_signal = QtCore.pyqtSignal(str)
     
-    def __init__(self):
+    def __init__(self, config_manager=None):
         super().__init__()
         self.setWindowTitle("股票交易终端 - 窗口坐标分类管理器")
         self._wm_show_msg_id = core.get_wm_show_msg_id()
@@ -3866,7 +3866,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.scale_factor = self._get_dpi_scale_factor()
             
         self._hotkey_hook = None
-        self.config_manager = core.ConfigManager()
+        self.config_manager = config_manager if config_manager is not None else core.ConfigManager()
         self.current_bound_hotkey = self.config_manager.config_data.get("global_hotkey", "ctrl+alt+w")
         
         # 自动检测/添加静态路由，并保存结果以在 UI 准备好后输出日志
@@ -4165,6 +4165,9 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             if hasattr(self, "_window_save_debounce"):
                 self._window_save_debounce.clear()
             self.save_window_position_qt_visual(self, "WindowPosManagerUI")
+            if hasattr(self, '_col_save_timer') and self._col_save_timer.isActive():
+                self._col_save_timer.stop()
+                self._execute_silent_column_save()
         except Exception as e:
             print(f"[WARN] Failed to save position on force_quit: {e}")
         try:
@@ -4211,6 +4214,9 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             if hasattr(self, "_window_save_debounce"):
                 self._window_save_debounce.clear()
             self.save_window_position_qt_visual(self, "WindowPosManagerUI")
+            if hasattr(self, '_col_save_timer') and self._col_save_timer.isActive():
+                self._col_save_timer.stop()
+                self._execute_silent_column_save()
         except Exception as e:
             print(f"[WARN] Failed to save position on closeEvent: {e}")
         if hasattr(self, 'tray_icon') and self.tray_icon.isVisible():
@@ -4934,9 +4940,11 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             "配置坐标 (X,Y,Width,Height)", 
             "当前桌面实际位置 (不一致标红)"
         ])
-        self.table_widget.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.table_widget.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        self.table_widget.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header = self.table_widget.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(False)
         self.table_widget.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table_widget.itemChanged.connect(self.on_table_item_changed)
         self.table_widget.cellClicked.connect(self.on_table_cell_clicked)
@@ -5183,6 +5191,11 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         # 应用持久化的日志框高度 (默认 110px 原版协调舒适比例)
         saved_log_h = int(self.config_manager.config_data.get("log_panel_height", 110))
         self.set_log_panel_height(saved_log_h, save=False)
+
+        # 应用持久化的表格列宽并开启手动调整持久化监听
+        self.restore_table_column_widths()
+        self.table_widget.horizontalHeader().sectionResized.connect(self.on_table_column_resized)
+        self._ui_initialized = True
 
         self.log("界面加载完毕。")
 
@@ -6086,12 +6099,153 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                         mapping[title] = pos_str
         return mapping
 
+    @staticmethod
+    def _extract_coord_str(text: str, pure_data: str = None) -> str:
+        """从实际位置显示文本或内部数据中稳健提取 X,Y,Width,Height 坐标字符串"""
+        if pure_data:
+            s_data = str(pure_data).strip()
+            if re.match(r"^-?\d+,-?\d+,\d+,\d+$", s_data):
+                parts = s_data.split(',')
+                try:
+                    if int(parts[2]) > 0 and int(parts[3]) > 0:
+                        return s_data
+                except ValueError:
+                    pass
+        if not text:
+            return ""
+        text = text.strip()
+        m = re.search(r"(-?\d+,-?\d+,\d+,\d+)", text)
+        if m:
+            cand = m.group(1).strip()
+            parts = cand.split(',')
+            if len(parts) == 4:
+                try:
+                    if int(parts[2]) > 0 and int(parts[3]) > 0:
+                        return cand
+                except ValueError:
+                    pass
+        return ""
+
+    def replace_row_position_with_actual(self, row: int):
+        """将指定行(row)的配置坐标快速替换为当前桌面的实际位置并持久化"""
+        cur_item = self.table_widget.item(row, 2)
+        pos_item = self.table_widget.item(row, 1)
+        title_item = self.table_widget.item(row, 0)
+        
+        if not (cur_item and pos_item and title_item):
+            return
+            
+        title = title_item.text().strip()
+        cur_text = cur_item.text().strip()
+        pure_pos = cur_item.data(QtCore.Qt.ItemDataRole.UserRole)
+        target_pos = self._extract_coord_str(cur_text, pure_pos)
+        
+        if target_pos:
+            cfg_text = pos_item.text().strip()
+            if target_pos != cfg_text:
+                pos_item.setText(target_pos)
+                pos_item.setFont(QtGui.QFont("Segoe UI", weight=QtGui.QFont.Weight.Bold))
+                
+                # 若已有配置中无启动路径，尝试自动补齐
+                old_exe_path = pos_item.data(QtCore.Qt.ItemDataRole.UserRole)
+                if not old_exe_path:
+                    titles_to_try = [title]
+                    if title.endswith('.py') and not title.startswith('py'):
+                        titles_to_try.append(title.replace('.py', '.exe'))
+                    elif title.endswith('.exe'):
+                        titles_to_try.append(title.replace('.exe', '.py'))
+                    for t in titles_to_try:
+                        found = core.find_windows_by_title_safe(t)
+                        if found:
+                            ext_path = core.get_exe_path(found[0][0])
+                            if ext_path:
+                                pos_item.setData(QtCore.Qt.ItemDataRole.UserRole, ext_path)
+                            break
+
+                self.save_current_table_to_memory()
+                self.refresh_current_positions()
+                self.log(f"🎯 单项快速替换: 已将 '{title}' 的配置坐标更新为桌面实际位置 [{target_pos}] (仅更新页面数据，未写入磁盘，可用于布局测试)")
+            else:
+                self.log(f"ℹ️ '{title}' 配置坐标与当前桌面实际位置已完全一致 [{target_pos}]，无需替换。")
+        else:
+            if "[未运行]" in cur_text:
+                self.log(f"⚠️ 无法替换: 目标窗口 '{title}' 当前未运行，无实际桌面位置。")
+            elif "[最小化中]" in cur_text:
+                self.log(f"⚠️ 无法替换: 目标窗口 '{title}' 当前处于最小化状态，请先还原窗口。")
+            else:
+                self.log(f"⚠️ 无法替换: 未能从当前实际位置提取到有效坐标: '{cur_text}'")
+
+    def restore_table_column_widths(self):
+        """从持久化配置中恢复表格各列宽度，若无则采用默认舒适宽度"""
+        self._is_restoring_columns = True
+        try:
+            saved_widths = self.config_manager.config_data.get("table_column_widths")
+            default_widths = [260, 220, 400]
+            if isinstance(saved_widths, (list, tuple)) and len(saved_widths) >= 3:
+                for col in range(3):
+                    try:
+                        w = int(saved_widths[col])
+                        if w >= 40:
+                            self.table_widget.setColumnWidth(col, w)
+                        else:
+                            self.table_widget.setColumnWidth(col, default_widths[col])
+                    except (ValueError, TypeError):
+                        self.table_widget.setColumnWidth(col, default_widths[col])
+            else:
+                for col, w in enumerate(default_widths):
+                    self.table_widget.setColumnWidth(col, w)
+        except Exception as e:
+            logger.debug(f"恢复表格列宽异常: {e}")
+        finally:
+            self._is_restoring_columns = False
+
+    def save_table_column_widths(self):
+        """将当前表格各列的实际宽度保存到 config_manager 内存配置中"""
+        try:
+            if getattr(self, '_is_restoring_columns', False):
+                return None
+            col_count = self.table_widget.columnCount()
+            if col_count >= 3:
+                widths = [self.table_widget.columnWidth(c) for c in range(col_count)]
+                if all(w > 30 for w in widths):
+                    self.config_manager.config_data["table_column_widths"] = widths
+                    return widths
+        except Exception as e:
+            logger.debug(f"保存表格列宽异常: {e}")
+        return None
+
+    def on_table_column_resized(self, logical_index, old_size, new_size):
+        """响应用户手动调整表格列宽事件，执行防抖自动持久化落盘"""
+        if not getattr(self, '_ui_initialized', False) or getattr(self, '_is_restoring_columns', False):
+            return
+        self.save_table_column_widths()
+        self.request_save_column_widths_debounced()
+
+    def request_save_column_widths_debounced(self):
+        """列宽调整专用的短防抖存盘（1.5秒），避免拖拽过程中频繁刷写磁盘"""
+        if not hasattr(self, '_col_save_timer'):
+            self._col_save_timer = QtCore.QTimer(self)
+            self._col_save_timer.setSingleShot(True)
+            self._col_save_timer.timeout.connect(self._execute_silent_column_save)
+            
+        self._col_save_timer.start(1500)
+
+    def _execute_silent_column_save(self):
+        """执行列宽调整的自动落盘保存"""
+        self.save_table_column_widths()
+        try:
+            if self.config_manager.save():
+                logger.debug("✅ 表格列宽调整已自动持久化落盘到 window_layout_config.json")
+        except Exception as e:
+            logger.debug(f"保存列宽配置到磁盘异常: {e}")
+
     def save_current_table_to_memory(self):
         """将当前表格的修改暂存进内存中的 config_manager"""
         current_res = self.get_current_selected_resolution()
         if current_res:
             mapping = self.get_table_data()
             self.config_manager.set_resolution_mapping(current_res, mapping)
+        self.save_table_column_widths()
 
     def on_table_item_changed(self, item):
         """当单元格数据改变时，自动同步暂存到内存，并刷新状态比对"""
@@ -6415,8 +6569,11 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 if left < -10000 and top < -10000:
                     cur_item.setText("[最小化中]")
                     cur_item.setForeground(QtGui.QColor("#eab308")) # 黄色
+                    cur_item.setData(QtCore.Qt.ItemDataRole.UserRole, "")
+                    cur_item.setToolTip("⚠️ 窗口当前处于最小化状态")
                 else:
                     real_pos = f"{left},{top},{width},{height}"
+                    cur_item.setData(QtCore.Qt.ItemDataRole.UserRole, real_pos)
                     # 💡 若使用了通配符、语义占位符或命中不同名称的个股，将实际窗口名标注出来
                     is_wildcard = '*' in title or '?' in title or core.is_tdx_semantic_sub_title(title)
                     is_title_diff = bool(found_actual_title and found_actual_title != title)
@@ -6432,14 +6589,16 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                         
                     host_rel = core.get_window_host_relation(found_hwnd)
                     tip_prefix = f"🎯 通配当前命中: '{found_actual_title}'\n" if is_wildcard or is_title_diff else ""
+                    double_click_tip = "💡 双击此单元格可快速替换配置坐标为桌面实际位置\n" if real_pos != cfg_pos else "✅ 当前位置已与配置一致\n"
                     if host_rel.get("is_sub_window"):
                         h_t = host_rel.get('host_title', '') or '主程序'
-                        cur_item.setToolTip(f"{tip_prefix}💡 附属浮窗 (宿主程序: {h_t})\n右键可选用‘📦 整体操作窗口’进行联动对齐")
-                    elif tip_prefix:
-                        cur_item.setToolTip(tip_prefix.strip())
+                        cur_item.setToolTip(f"{tip_prefix}{double_click_tip}💡 附属浮窗 (宿主程序: {h_t})\n右键可选用‘📦 整体操作窗口’进行联动对齐")
+                    else:
+                        cur_item.setToolTip(f"{tip_prefix}{double_click_tip}".strip())
             else:
                 cur_item.setText("[未运行]")
                 cur_item.setForeground(QtGui.QColor("#6b7280")) # 灰色，未检测到
+                cur_item.setData(QtCore.Qt.ItemDataRole.UserRole, "")
                 cur_item.setToolTip("")
                 
         self.table_widget.blockSignals(False)
@@ -6958,6 +7117,13 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
 
         menu.addSeparator()
         apply_single_action = menu.addAction("🎯 应用该窗口坐标 (移动至配置位置)")
+        
+        cur_item = self.table_widget.item(row, 2)
+        cand_pos = self._extract_coord_str(cur_item.text().strip(), cur_item.data(QtCore.Qt.ItemDataRole.UserRole)) if cur_item else ""
+        replace_pos_action = None
+        if cand_pos and pos_item and cand_pos != pos_item.text().strip():
+            replace_pos_action = menu.addAction(f"🔄 替换为当前实际位置 [{cand_pos}]")
+            
         apply_overall_action = menu.addAction("📦 整体操作窗口 (主程序与附属浮窗联动)")
         apply_all_action = menu.addAction("🚀 应用当前方案所有窗口布局")
         
@@ -7024,6 +7190,8 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 QMessageBox.information(self, "提示", f"桌面当前未检测到运行中的窗口: '{title}'\n可尝试通过右键菜单‘🚀 启动程序’启动它。")
             elif status == "error":
                 QMessageBox.warning(self, "错误", msg)
+        elif replace_pos_action and action == replace_pos_action:
+            self.replace_row_position_with_actual(row)
         elif apply_overall_action and action == apply_overall_action:
             current_res = self.get_current_selected_resolution()
             mapping = self.config_manager.get_resolution_mapping(current_res) if current_res else {}
@@ -7471,20 +7639,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 )
                 self.log(f"⚠️ 置顶激活失败，未匹配到窗口: '{title}'")
         elif column == 2:
-            cur_item = self.table_widget.item(row, 2)
-            pos_item = self.table_widget.item(row, 1)
-            title_item = self.table_widget.item(row, 0)
-            
-            if cur_item and pos_item and title_item:
-                cur_text = cur_item.text().strip()
-                # 只有是合格的 X,Y,W,H 坐标格式才可更新
-                if re.match(r"^-?\d+,-?\d+,\d+,\d+$", cur_text):
-                    cfg_text = pos_item.text().strip()
-                    if cur_text != cfg_text:
-                        pos_item.setText(cur_text)
-                        self.refresh_current_positions()
-                        self.save_current_table_to_memory()
-                        self.log(f"🎯 单项快速回填: 已将 '{title_item.text()}' 的配置坐标更新为桌面实际位置 [{cur_text}]")
+            self.replace_row_position_with_actual(row)
         else:
             item = self.table_widget.item(row, column)
             if item and (item.flags() & QtCore.Qt.ItemFlag.ItemIsEditable):
@@ -7493,6 +7648,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
     def save_all_config(self):
         """物理保存当前内存中的所有配置到 config.json 文件"""
         self.save_current_table_to_memory()
+        self.save_table_column_widths()
         
         new_hk = self.le_hotkey.text().strip()
         if new_hk:
