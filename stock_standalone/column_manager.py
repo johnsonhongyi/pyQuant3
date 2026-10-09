@@ -3,6 +3,7 @@ import tkinter as tk
 from tkinter import ttk
 import os
 import json
+import traceback
 from stock_logic_utils import  toast_message
 from JohnsonUtil import LoggerFactory
 
@@ -58,6 +59,8 @@ class ColumnSetManager(tk.Toplevel):
         # ---------- 状态 ----------
         self.current_set = list(self.config.get("current", self.default_cols.copy()))
         self.saved_sets = list(self.config.get("sets", []))
+        self.all_columns = list(dict.fromkeys([*self.all_columns, *self.current_set]))
+        self._columns_dirty = True
         self._chk_vars = {}
         self._drag_data = {"widget": None, "start_x": 0, "start_y": 0, "idx": None}
         self._resize_job = None
@@ -250,7 +253,18 @@ class ColumnSetManager(tk.Toplevel):
     # ---------------------------
     # 列选择区更新（Checkbuttons 自动排列）
     # ---------------------------
+    def set_available_columns(self, columns):
+        columns = list(dict.fromkeys([*columns, *self.current_set]))
+        if columns != self.all_columns:
+            self.all_columns = columns
+            self._columns_dirty = True
+        if self._columns_dirty and self.state() != 'withdrawn':
+            self.update_grid()
+
     def update_grid(self):
+        if not self.winfo_exists():
+            return
+        self._columns_dirty = False
         # 清空旧的 checkbuttons
         for w in self.inner_frame.winfo_children():
             w.destroy()
@@ -307,6 +321,8 @@ class ColumnSetManager(tk.Toplevel):
     # 当前组合标签显示 + 拖拽重排
     # ---------------------------
     def refresh_current_tags(self):
+        if not self.winfo_exists():
+            return
         # 清空
         for w in self.current_frame.winfo_children():
             try:
@@ -330,7 +346,6 @@ class ColumnSetManager(tk.Toplevel):
 
         for idx, col in enumerate(self.current_set):
             lbl = tk.Label(self.current_frame, text=col, bd=1, relief="solid", padx=6, pady=2, bg="#e8e8e8")
-            lbl.update_idletasks()
             try:
                 w_req = lbl.winfo_reqwidth()
             except tk.TclError:
@@ -678,7 +693,7 @@ class ColumnSetManager(tk.Toplevel):
             if callable(self.on_apply_callback):
                 self.on_apply_callback(list(self.current_set))
         except Exception:
-            pass
+            logger.exception("应用当前列组合失败")
 
     def apply_current_set(self):
         if not self.current_set:
@@ -691,13 +706,17 @@ class ColumnSetManager(tk.Toplevel):
             # save_display_config 是外部函数（如果定义则调用）
             save_display_config(config_file=CONFIG_FILE,config=self.config)
         except Exception:
-            pass
+            logger.exception("保存列组合配置失败")
+            toast_message(self, "保存组合失败，请查看日志")
+            return
         # 回调主视图更新列
         try:
             if callable(self.on_apply_callback):
                 self.on_apply_callback(list(self.current_set))
         except Exception:
-            pass
+            logger.exception("应用列组合失败")
+            toast_message(self, "应用组合失败，请查看日志")
+            return
         toast_message(self, "组合已应用")
         # self.destroy()
         self.open_column_manager_editor()

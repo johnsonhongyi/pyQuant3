@@ -860,7 +860,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         tree_frame = tk.Frame(self)
         tree_frame.pack(fill="both", expand=True)
         global DISPLAY_COLS
-        self.tree = ttk.Treeview(tree_frame, columns=["code"] + DISPLAY_COLS, show="headings")
+        try:
+            self.ColManagerconfig = load_display_config(CONFIG_FILE, DEFAULT_DISPLAY_COLS)
+            if not isinstance(self.ColManagerconfig, dict):
+                raise ValueError("列配置必须是对象")
+        except Exception:
+            logger.exception("加载自定义列配置失败，使用默认列")
+            self.ColManagerconfig = {"current": DEFAULT_DISPLAY_COLS, "sets": []}
+        # 列布局来自配置，不能等待后台指标计算后才恢复。
+        configured_cols = self.ColManagerconfig.get("current") or DEFAULT_DISPLAY_COLS
+        if not isinstance(configured_cols, (list, tuple)):
+            logger.warning("自定义列列表格式错误，使用默认列")
+            configured_cols = DEFAULT_DISPLAY_COLS
+        configured_cols = [c for c in configured_cols if isinstance(c, str) and c]
+        self.current_cols = list(dict.fromkeys(["code", *configured_cols]))
+        self.tree = ttk.Treeview(tree_frame, columns=self.current_cols, show="headings")
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscroll=vsb.set, xscroll=hsb.set)
@@ -873,9 +887,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         bind_mouse_scroll(self.tree)
 
 
-        self.current_cols = ["code"] + DISPLAY_COLS
         # TreeView 列头
-        for col in ["code"] + DISPLAY_COLS:
+        for col in self.current_cols:
             width = 80 if col=="name" else 60
             self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, self.sortby_col_ascend))
             self.tree.column(col, width=width, anchor="center", minwidth=50)
@@ -1193,7 +1206,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 启动自选股状态心跳轮询
         self.after(500, self._poll_favorites_loop)
 
-        self.bind("<Alt-c>", lambda e:self.open_column_manager())
+        self.bind("<Alt-c>", lambda e:self.open_column_manager() or "break")
+        self.bind("<Alt-C>", lambda e:self.open_column_manager() or "break")
         self.bind("<Control-slash>", lambda e: self.open_indicator_help())
         
 
@@ -4800,7 +4814,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._open_column_manager_job = self._schedule_after(1000, self.open_column_manager)
 
     def open_column_manager(self):
+        all_columns = list(dict.fromkeys([
+            *self.df_all.columns, *DEFAULT_DISPLAY_COLS, *self.current_cols
+        ]))
         if self.ColumnSetManager is not None and self.ColumnSetManager.winfo_exists():
+            self.ColumnSetManager.set_available_columns(all_columns)
+            if self.ColumnSetManager._columns_dirty:
+                self.ColumnSetManager.update_grid()
             if self.ColumnSetManager.state() != "withdrawn" and self.ColumnSetManager.focus_displayof() == self.ColumnSetManager:
                 self.ColumnSetManager.withdraw()
             else:
@@ -4808,51 +4828,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.ColumnSetManager.lift()
                 self.ColumnSetManager.focus_force()
         else:
-            if not self.df_all.empty:
-                self.ColManagerconfig = load_display_config(config_file=CONFIG_FILE,default_cols=DEFAULT_DISPLAY_COLS)
-                # 创建新窗口
-                self.global_dict['keep_all_columns'] = True  # 开启"发现模式": 允许后台获取所有列供用户选择
-                self.ColumnSetManager = ColumnSetManager(
-                    self,
-                    self.df_all.columns,
-                    self.ColManagerconfig,
-                    self.update_treeview_cols,  # 回调更新函数
-                    default_cols=self.current_cols,  # 默认列
-                    logger=logger,  # logger
-                        )
-                # 关闭时清理引用
-                self.ColumnSetManager.protocol("WM_DELETE_WINDOW", self.on_close_column_manager)
-                self.ColumnSetManager.bind("<Alt-c>", lambda e: self.ColumnSetManager.withdraw())
-            else:
-                self._schedule_after(1000,self._on_open_column_manager)
+            self.ColManagerconfig = load_display_config(config_file=CONFIG_FILE,default_cols=DEFAULT_DISPLAY_COLS)
+            self.global_dict['keep_all_columns'] = True
+            self.ColumnSetManager = ColumnSetManager(
+                self, all_columns, self.ColManagerconfig, self.update_treeview_cols,
+                default_cols=self.current_cols, logger=logger)
+            self.ColumnSetManager.protocol("WM_DELETE_WINDOW", self.on_close_column_manager)
+            self.ColumnSetManager.bind("<Alt-c>", lambda e: self.ColumnSetManager.withdraw() or "break")
+            self.ColumnSetManager.bind("<Alt-C>", lambda e: self.ColumnSetManager.withdraw() or "break")
+            self.ColumnSetManager.lift()
+            self.ColumnSetManager.focus_force()
 
     def open_column_manager_init(self):
-        def _on_open_column_manager_init():
-            if self._open_column_manager_job:
-                self.after_cancel(self._open_column_manager_job)
-            self._open_column_manager_job = self._schedule_after(1000, self.open_column_manager_init)
-        
-        if self.ColumnSetManager is not None and self.ColumnSetManager.winfo_exists():
-            self.ColumnSetManager.open_column_manager_editor()
-        else:
-            if not self.df_all.empty:
-                self.ColManagerconfig = load_display_config(config_file=CONFIG_FILE,default_cols=DEFAULT_DISPLAY_COLS)
-                # 创建新窗口
-                if hasattr(self, 'global_dict') and self.global_dict is not None:
-                    self.global_dict['keep_all_columns'] = True
-                self.ColumnSetManager = ColumnSetManager(
-                    self,
-                    self.df_all.columns,
-                    self.ColManagerconfig,
-                    self.update_treeview_cols,  # 回调更新函数
-                    default_cols=self.current_cols,  # 默认列
-                    auto_apply_on_init=True     #   ✅ 初始化自动执行 apply_current_set()
-                        )
-                # 关闭时清理引用
-                self.ColumnSetManager.protocol("WM_DELETE_WINDOW", self.on_close_column_manager)
-                # DISPLAY_COLS = self.current_cols
-            else:
-                self._schedule_after(1000,_on_open_column_manager_init)
+        # 启动只应用配置，按 Alt+C 时再创建编辑器，避免空数据轮询和隐藏窗口布局。
+        self.global_dict['keep_all_columns'] = True
+        self.update_treeview_cols(self.current_cols)
+        self._setup_tree_columns(self.tree, self.current_cols, sort_callback=self.sort_by_column)
 
     def on_close_column_manager(self):
         if self.ColumnSetManager is not None:
@@ -6215,9 +6206,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     new_columns.append(col)
 
 
-            # 只保留 DataFrame 中存在的列，避免 TclError
-            new_columns = [c for c in new_columns if c in self.df_all.columns or c == "code"]
-
             self.update_treeview_cols(new_columns)
 
 
@@ -6770,11 +6758,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             bool(getattr(self, 'sortby_col_ascend', False)))
             self._compute_view_context = view_context
 
-            # 首批行情只更新显示，不等待历史恢复/情绪计算，也不提前驱动交易。
+            # 首批行情交付基础内存和显示，不等待指标计算，也不提前驱动交易。
             if sync_ui and df is not None and not getattr(self, '_first_market_frame_shown', False):
-                def show_first_frame(d=df.copy(), context=view_context, v=version):
+                initial_full_df = full_df.copy()
+                initial_full_res = (initial_full_df if full_df_res is None or full_df_res is full_df
+                                    else full_df_res.copy())
+                def show_first_frame(d=df.copy(), daily=initial_full_df, resampled=initial_full_res,
+                                     context=view_context, v=version):
                     if getattr(self, '_is_closing', False) or getattr(self, '_first_market_frame_shown', False):
                         return
+                    self._sync_market_frame_state(daily, resampled, context[1])
                     if (getattr(self, '_last_value', ''), self.global_values.getkey('resample') or 'd',
                         getattr(self, 'sortby_col', None), bool(getattr(self, 'sortby_col_ascend', False))) != context:
                         return
@@ -7049,9 +7042,25 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                    bool(getattr(self, 'sortby_col_ascend', False)))
                 if view_context is not None and current_context != view_context:
                     self._last_ui_bus_version = 0
-                    return
+                    if current_context[1] != cur_res:
+                        # 旧周期结果不能覆盖当前周期视图，日线缓存仍然有效。
+                        self._sync_market_frame_state(full_df, full_df_res, cur_res)
+                        self._last_applied_compute_version = version
+                        return
+                    # 历史条件/排序切换不应丢弃完整指标或等待下一轮重计算。
+                    if display_df is not None and current_context[0] != view_context[0]:
+                        source = full_df_res if cur_res != 'd' and full_df_res is not None else full_df
+                        display_df = (query_engine.execute(source, current_context[0]) if query_engine
+                                      else source.query(current_context[0], engine='python')
+                                      if current_context[0] else source)
+                    final_ui_force = True
+                else:
+                    final_ui_force = final_force or not getattr(self, '_last_applied_compute_version', 0)
                 self._last_applied_compute_version = version
-                self._apply_tree_data_sync(full_df, display_df, cur_res, final_force, full_df_res)
+                self._apply_tree_data_sync(full_df, display_df, cur_res, final_ui_force, full_df_res)
+            except Exception:
+                logger.exception("交付行情结果失败: version=%s", version)
+                self._last_ui_bus_version = 0
             finally:
                 self._is_ui_sync_pending = False
         if df is not None:
@@ -7099,6 +7108,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as exc:
             logger.warning("[NextDayWatch] cycle failed without affecting market feed: %s", exc)
 
+    def _sync_market_frame_state(self, full_df, full_df_res, cur_res):
+        """主线程交付行情缓存；预览帧不触发交易或信号计算。"""
+        with self._df_lock:
+            self.df_all = full_df
+            if cur_res == (self.global_values.getkey('resample') or 'd'):
+                self.df_all_res = full_df_res if full_df_res is not None else full_df
+        self._data_update_version = getattr(self, '_data_update_version', 0) + 1
+        if getattr(self, 'selector', None):
+            self.selector.df_all_realtime = full_df
+            self.selector.resample = 'd'
+        manager = self.ColumnSetManager
+        if manager is not None and manager.winfo_exists():
+            all_columns = list(dict.fromkeys([
+                *full_df.columns, *DEFAULT_DISPLAY_COLS, *self.current_cols
+            ]))
+            manager.set_available_columns(all_columns)
+
     def _apply_tree_data_sync(self, full_df, ui_df=None, cur_res='d', force=False, full_df_res=None):
         """
         Sync step: update internal state and Tkinter UI on the main thread.
@@ -7121,9 +7147,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 last_hash = getattr(self, '_last_apply_df_hash', -1)
                 has_update = True
                 
-                with self._df_lock:
-                    self.df_all = full_df
-                    self.df_all_res = full_df_res if full_df_res is not None else full_df
+                self._sync_market_frame_state(full_df, full_df_res, cur_res)
                 
 
                 # 动态字段补齐后的查询已在 compute 执行，空结果也必须正常交付界面。
@@ -7153,8 +7177,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if is_qt_win_alive(getattr(self, '_racing_panel_win', None)):
                     self._racing_panel_win.df_all = full_df
                 
-                self._data_update_version = getattr(self, "_data_update_version", 0) + 1
-
                 # TK only freezes the premarket candidate cohort; ATS owns intraday TDX confirmation.
                 try:
                     now_hm = cct.get_now_time_int()
@@ -7229,7 +7251,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         self._is_gui_rendering = True
                         try:
                             # 1. 刷新主 Treeview (核心任务)
-                            self.refresh_tree(ui_df, skip_sort=True,
+                            self.refresh_tree(ui_df, force=force, skip_sort=True,
                                               source_version=self._data_update_version)
                             self._first_market_frame_shown = True
                         finally:
@@ -17810,20 +17832,24 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             df.insert(0, 'code', df.index.astype(str))
 
         # 要显示的列顺序
-        cols_to_show = [c for c in self.current_cols if c in df.columns]
+        cols_to_show = list(self.current_cols)
+        columns_changed = tuple(self.tree["columns"]) != tuple(cols_to_show)
+        if columns_changed:
+            self.reset_tree_columns(self.tree, cols_to_show, self.sort_by_column)
         
         # ✅ 使用增量更新机制
         if self._use_incremental_update and hasattr(self, 'tree_updater'):
             try:
                 # 更新列配置（如果列发生变化）
-                if tuple(self.tree_updater.columns) != tuple(cols_to_show):
+                updater_columns_changed = tuple(self.tree_updater.columns) != tuple(cols_to_show)
+                if updater_columns_changed:
                     diff_cols = set(self.tree_updater.columns) ^ set(cols_to_show)
                     self.tree_updater.columns = cols_to_show
                     logger.info(f"[TreeUpdater] 列配置变更: {len(cols_to_show)}列 (差异示例: {list(diff_cols)[:3]})")
                 
                 # ✅ 检测是否只是排序（数据相同但顺序不同）
                 # 如果是排序操作，或者是强制刷新，强制全量刷新以确保顺序正确
-                force_full = force
+                force_full = force or columns_changed or updater_columns_changed
                 if hasattr(self, '_last_df_codes'):
                     current_codes = df['code'].astype(str).tolist()
                     # 如果code集合相同但顺序不同，说明是排序操作
@@ -17835,7 +17861,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self._last_df_codes = df['code'].astype(str).tolist()
                 
                 # 执行增量更新
-                added, updated, deleted = self.tree_updater.update(df[cols_to_show], force_full=force_full)
+                # 颜色/图标依赖的业务字段不能随可见列裁剪掉。
+                feature_cols = ['grade', 'percent', 'volume', 'category', 'price', 'trade',
+                                'high4', 'max5', 'max10', 'hmax', 'hmax60', 'low4', 'low10',
+                                'low60', 'lmin', 'min5', 'cmean', 'hv', 'lv', 'llowvol',
+                                'lastdu4', 'ma5d', 'ma20d', 'ma60d']
+                update_cols = list(dict.fromkeys([
+                    *cols_to_show, *(c for c in feature_cols if c in df.columns)
+                ]))
+                added, updated, deleted = self.tree_updater.update(
+                    df.reindex(columns=update_cols), force_full=force_full)
                 
                 # 恢复选中状态
                 if self.select_code:
@@ -17900,7 +17935,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         all_cols = list(dict.fromkeys(all_cols_list))
         
         # 💡 [ZERO-COPY] 不做 full copy, 仅做 column view
-        df_view = df[all_cols]
+        df_view = df.reindex(columns=all_cols)
         
         # 建立索引映射
         col_map = {col: i for i, col in enumerate(all_cols)}
@@ -21583,19 +21618,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 return
 
         # 4. 结果处理与 UI 更新
-        if df_filtered.empty or (len(df_filtered) == len(df_all) and combined_query):
-            if df_filtered.empty:
-                self.status_var.set("❌ 无匹配结果")
-                return
-            else:
-                # 获取引擎内部的具体错误信息
-                err_info = query_engine.last_error if query_engine else "未知查询错误"
-                # 记录详细日志便于调试
-                logger.warning(f"Query Logic Error: {err_info} | Query: {combined_query}")
-                # 精简错误提示，防止撑开状态栏
-                short_err = (err_info[:25] + "...") if len(err_info) > 25 else err_info
-                self.status_var.set(f"⚠️ 语法错误: {short_err}")
-                return
+        err_info = query_engine.last_error if query_engine else ""
+        if err_info:
+            logger.warning("Query Logic Error: %s | Query: %s", err_info, combined_query)
+            short_err = (err_info[:25] + "...") if len(err_info) > 25 else err_info
+            self.status_var.set(f"⚠️ 语法错误: {short_err}")
+            return
+        if df_filtered.empty:
+            self.refresh_tree(df_filtered, force=True)
+            self.status_var.set("❌ 无匹配结果")
+            return
         
         # 优化状态栏显示：匹配数/总数 | 查询缩略
         rows_all = len(df_all)

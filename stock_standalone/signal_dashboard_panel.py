@@ -26,7 +26,6 @@ from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QPoint, QByteArray, QModelIndex
 import threading
 import time
 from PyQt6.QtGui import QColor, QFont, QBrush
-from JohnsonUtil.commonTips import timed_ctx
 from JohnsonUtil import commonTips as cct
 try:
     from sector_focus_engine import get_focus_controller
@@ -2700,103 +2699,99 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         if model: model.beginResetModel()
 
         try:
-            with timed_ctx(f"_sort_table_python({table.rowCount()})", warn_ms=200):
-                row_count = table.rowCount()
-                col_count = table.columnCount()
-                if row_count <= 1: return
-                reverse = (sort_order == Qt.SortOrder.DescendingOrder)
+            row_count = table.rowCount()
+            col_count = table.columnCount()
+            if row_count <= 1: return
+            reverse = (sort_order == Qt.SortOrder.DescendingOrder)
 
-                # Phase 1: Extraction
-                with timed_ctx("  [Phase 1] Extraction", warn_ms=100):
-                    rows_data = []
-                    sel_model = table.selectionModel()
-                    idx0 = QModelIndex()
-                    for r in range(row_count):
-                        it_sort = table.item(r, col_idx)
-                        sort_val = it_sort.data(self._ROLE_NUMERIC) if it_sort else None
-                        if sort_val is None and it_sort: sort_val = it_sort.text()
-                        
-                        # ⭐ 提取代码 (第 0 列) 作为辅助排序键，保证主排序值相同时排序有明显的交替变化反应
-                        it_code = table.item(r, 0)
-                        code_val = it_code.text() if it_code else ""
-                        
-                        is_selected = sel_model.isRowSelected(r, idx0) if sel_model else False
-                        row_items = [table.takeItem(r, c) for c in range(col_count)]
-                        rows_data.append({
-                            'sort_val': sort_val if sort_val is not None else "", 
-                            'code_val': code_val,
-                            'items': row_items, 
-                            'hidden': table.isRowHidden(r), 
-                            'selected': is_selected
-                        })
+            # Phase 1: Extraction
+            rows_data = []
+            sel_model = table.selectionModel()
+            idx0 = QModelIndex()
+            for r in range(row_count):
+                it_sort = table.item(r, col_idx)
+                sort_val = it_sort.data(self._ROLE_NUMERIC) if it_sort else None
+                if sort_val is None and it_sort: sort_val = it_sort.text()
 
-                # Phase 2: Sort
-                with timed_ctx("  [Phase 2] Python Sort", warn_ms=50):
-                    def safe_key(v):
-                        # [FIX] 使用二元组 (is_numeric, value) 解决 float 与 str 不可比较的问题
-                        if isinstance(v, (int, float)): return (0, float(v))
-                        try: 
-                            val_str = str(v).replace("%", "").replace(",", "").strip()
-                            if not val_str: return (1, "") # 空字符串排在后面
-                            return (0, float(val_str))
-                        except: 
-                            return (1, str(v)) # 非数字作为字符串排在后面
-                    rows_data.sort(key=lambda x: (safe_key(x["sort_val"]), x["code_val"]), reverse=reverse)
+                # ⭐ 提取代码 (第 0 列) 作为辅助排序键，保证主排序值相同时排序有明显的交替变化反应
+                it_code = table.item(r, 0)
+                code_val = it_code.text() if it_code else ""
 
-                    # 稳定二次排序：重点关注的个股 or 板块在任何情况下都在最顶层优先展示
-                    from global_favorites import GlobalFavoriteManager
-                    fav_mgr = GlobalFavoriteManager()
+                is_selected = sel_model.isRowSelected(r, idx0) if sel_model else False
+                row_items = [table.takeItem(r, c) for c in range(col_count)]
+                rows_data.append({
+                    'sort_val': sort_val if sort_val is not None else "",
+                    'code_val': code_val,
+                    'items': row_items,
+                    'hidden': table.isRowHidden(r),
+                    'selected': is_selected
+                })
 
-                    # 动态查找代码、个股名称、板块名称列索引，防止在板块热力表中因“龙头名称”与“板块名称”共存而产生索引覆盖
-                    stock_code_col = -1
-                    stock_name_col = -1
-                    sector_name_col = -1
-                    for j in range(col_count):
-                        h_item = table.horizontalHeaderItem(j)
-                        if h_item:
-                            h_text = h_item.text().strip()
-                            if h_text in ["代码", "龙头"]:
-                                stock_code_col = j
-                            elif h_text in ["名称", "龙头名称"]:
-                                stock_name_col = j
-                            elif h_text in ["板块名称", "所属板块", "板块/内容"]:
-                                sector_name_col = j
+            # Phase 2: Sort
+            def safe_key(v):
+                # [FIX] 使用二元组 (is_numeric, value) 解决 float 与 str 不可比较的问题
+                if isinstance(v, (int, float)): return (0, float(v))
+                try:
+                    val_str = str(v).replace("%", "").replace(",", "").strip()
+                    if not val_str: return (1, "") # 空字符串排在后面
+                    return (0, float(val_str))
+                except:
+                    return (1, str(v)) # 非数字作为字符串排在后面
+            rows_data.sort(key=lambda x: (safe_key(x["sort_val"]), x["code_val"]), reverse=reverse)
 
-                    def get_fav_priority(row_dict):
-                        items = row_dict["items"]
-                        # 1. 优先查个股代码是否收藏
-                        if stock_code_col >= 0 and stock_code_col < len(items) and items[stock_code_col]:
-                            code = items[stock_code_col].text().strip()
-                            for icon in ['⭐', '🔔']:
-                                code = code.replace(icon, '').strip()
-                            if code in fav_mgr.favorite_stocks:
-                                return 1
-                        # 2. 查个股名称是否收藏
-                        if stock_name_col >= 0 and stock_name_col < len(items) and items[stock_name_col]:
-                            name = items[stock_name_col].text().strip()
-                            for icon in ['⭐', '🔔']:
-                                name = name.replace(icon, '').strip()
-                            if name in fav_mgr.favorite_stocks:
-                                return 1
-                        # 3. 查板块名称是否收藏
-                        if sector_name_col >= 0 and sector_name_col < len(items) and items[sector_name_col]:
-                            sec = items[sector_name_col].text().strip()
-                            for icon in ['⭐', '★重点', '[★重点]', '🔔']:
-                                sec = sec.replace(icon, '').strip()
-                            if sec in fav_mgr.favorite_sectors:
-                                return 1
-                        return 0
+            # 稳定二次排序：重点关注的个股 or 板块在任何情况下都在最顶层优先展示
+            from global_favorites import GlobalFavoriteManager
+            fav_mgr = GlobalFavoriteManager()
 
-                    rows_data.sort(key=get_fav_priority, reverse=True)
+            # 动态查找代码、个股名称、板块名称列索引，防止在板块热力表中因“龙头名称”与“板块名称”共存而产生索引覆盖
+            stock_code_col = -1
+            stock_name_col = -1
+            sector_name_col = -1
+            for j in range(col_count):
+                h_item = table.horizontalHeaderItem(j)
+                if h_item:
+                    h_text = h_item.text().strip()
+                    if h_text in ["代码", "龙头"]:
+                        stock_code_col = j
+                    elif h_text in ["名称", "龙头名称"]:
+                        stock_name_col = j
+                    elif h_text in ["板块名称", "所属板块", "板块/内容"]:
+                        sector_name_col = j
 
-                # Phase 3: Write-back
-                with timed_ctx("  [Phase 3] Write-back", warn_ms=100):
-                    table.clearSelection()
-                    for r, row in enumerate(rows_data):
-                        table.setRowHidden(r, row["hidden"])
-                        for c, item in enumerate(row["items"]):
-                            if item: table.setItem(r, c, item)
-                        if row["selected"]: table.selectRow(r)
+            def get_fav_priority(row_dict):
+                items = row_dict["items"]
+                # 1. 优先查个股代码是否收藏
+                if stock_code_col >= 0 and stock_code_col < len(items) and items[stock_code_col]:
+                    code = items[stock_code_col].text().strip()
+                    for icon in ['⭐', '🔔']:
+                        code = code.replace(icon, '').strip()
+                    if code in fav_mgr.favorite_stocks:
+                        return 1
+                # 2. 查个股名称是否收藏
+                if stock_name_col >= 0 and stock_name_col < len(items) and items[stock_name_col]:
+                    name = items[stock_name_col].text().strip()
+                    for icon in ['⭐', '🔔']:
+                        name = name.replace(icon, '').strip()
+                    if name in fav_mgr.favorite_stocks:
+                        return 1
+                # 3. 查板块名称是否收藏
+                if sector_name_col >= 0 and sector_name_col < len(items) and items[sector_name_col]:
+                    sec = items[sector_name_col].text().strip()
+                    for icon in ['⭐', '★重点', '[★重点]', '🔔']:
+                        sec = sec.replace(icon, '').strip()
+                    if sec in fav_mgr.favorite_sectors:
+                        return 1
+                return 0
+
+            rows_data.sort(key=get_fav_priority, reverse=True)
+
+            # Phase 3: Write-back
+            table.clearSelection()
+            for r, row in enumerate(rows_data):
+                table.setRowHidden(r, row["hidden"])
+                for c, item in enumerate(row["items"]):
+                    if item: table.setItem(r, c, item)
+                if row["selected"]: table.selectRow(r)
         finally:
             # 4. 释放重置闸门并恢复
             if model: model.endResetModel()
@@ -2836,18 +2831,17 @@ class SignalDashboardPanel(QWidget, WindowMixin):
     def _do_deferred_sort(self):
         # \"\"\"执行实际的延迟排序操作\"\"\"
         self._deferred_sort_pending = False # 释放挂起标志
-        with timed_ctx("_do_deferred_sort", warn_ms=200):
-            current_tab_text = self.tabs.tabText(self.tabs.currentIndex())
-            table = self.tables.get(current_tab_text)
-            if not table: return
-            
-            # 提取已保存的排序状态
-            sort_col = getattr(table, '_sort_col', table.horizontalHeader().sortIndicatorSection())
-            sort_order = getattr(table, '_sort_order', table.horizontalHeader().sortIndicatorOrder())
-            
-            # 执行高效排序
-            self._sort_table_python(table, sort_col, sort_order)
-            table.horizontalHeader().setSectionsClickable(True)
+        current_tab_text = self.tabs.tabText(self.tabs.currentIndex())
+        table = self.tables.get(current_tab_text)
+        if not table: return
+
+        # 提取已保存的排序状态
+        sort_col = getattr(table, '_sort_col', table.horizontalHeader().sortIndicatorSection())
+        sort_order = getattr(table, '_sort_order', table.horizontalHeader().sortIndicatorOrder())
+
+        # 执行高效排序
+        self._sort_table_python(table, sort_col, sort_order)
+        table.horizontalHeader().setSectionsClickable(True)
 
     def _fast_update_cell(self, table, r_idx, c_idx, text, color_key=None, bold=False, bg_key=None, numeric_val=None, data=None):
         """[PERF] 极速单元格更新逻辑：
@@ -3464,111 +3458,109 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # [PERF] 强制显示上限
         dragons = dragons[:200]
 
-        # [PERF] 性能分析上下文
-        with timed_ctx("engine_refresh_dragon_table", warn_ms=300):
-            if getattr(self, '_engine_ctrl', None):
-                table._render_version = getattr(self._engine_ctrl, '_dragon_render_version', 0)
+        if getattr(self, '_engine_ctrl', None):
+            table._render_version = getattr(self._engine_ctrl, '_dragon_render_version', 0)
 
-            current_selection = None
-            sel_items = table.selectedItems()
-            if sel_items: 
-                it = table.item(sel_items[0].row(), 1) # code col
-                if it: current_selection = it.data(self._ROLE_TEXT)
+        current_selection = None
+        sel_items = table.selectedItems()
+        if sel_items:
+            it = table.item(sel_items[0].row(), 1) # code col
+            if it: current_selection = it.data(self._ROLE_TEXT)
 
-            sort_col = getattr(table, '_sort_col', table.horizontalHeader().sortIndicatorSection())
-            sort_order = getattr(table, '_sort_order', table.horizontalHeader().sortIndicatorOrder())
+        sort_col = getattr(table, '_sort_col', table.horizontalHeader().sortIndicatorSection())
+        sort_order = getattr(table, '_sort_order', table.horizontalHeader().sortIndicatorOrder())
+
+        def _get_sort_key(d):
+            if sort_col == 0: return d.get('status_label', '')
+            if sort_col == 1: return d.get('code', '')
+            if sort_col == 2: return d.get('name', '')
+            if sort_col == 3: return d.get('sector', '')
+            if sort_col == 4: return d.get('current_pct', 0.0)
+            if sort_col == 5: return d.get('cum_pct', 0.0)
+            if sort_col == 6: return d.get('tracked_days', 0)
+            if sort_col == 7: return d.get('consecutive_new_highs', 0)
+            if sort_col == 8: return d.get('dff', 0.0)
+            if sort_col == 9: return d.get('vwap', 0.0)
+            if sort_col == 10: return d.get('last_update', '')
+            if sort_col == 11: return d.get('tags', '')
+        dragons = sorted(dragons, key=_get_sort_key, reverse=(sort_order == Qt.SortOrder.DescendingOrder))
+
+        # 稳定二次排序：确保重点关注的个股在任何情况下都在最顶层优先展示
+        from global_favorites import GlobalFavoriteManager
+        fav_mgr = GlobalFavoriteManager()
+        is_fav = lambda x: 1 if x.get('code', '') in fav_mgr.favorite_stocks else 0
+        dragons.sort(key=is_fav, reverse=True)
+
+        was_sorting = table.isSortingEnabled()
+        table.setSortingEnabled(False)
+        table.setUpdatesEnabled(False)
+        table.viewport().setUpdatesEnabled(False)
+        table.blockSignals(True)
+
+        if table.rowCount() != len(dragons):
+            table.setRowCount(len(dragons))
             
-            def _get_sort_key(d):
-                if sort_col == 0: return d.get('status_label', '')
-                if sort_col == 1: return d.get('code', '')
-                if sort_col == 2: return d.get('name', '')
-                if sort_col == 3: return d.get('sector', '')
-                if sort_col == 4: return d.get('current_pct', 0.0)
-                if sort_col == 5: return d.get('cum_pct', 0.0)
-                if sort_col == 6: return d.get('tracked_days', 0)
-                if sort_col == 7: return d.get('consecutive_new_highs', 0)
-                if sort_col == 8: return d.get('dff', 0.0)
-                if sort_col == 9: return d.get('vwap', 0.0)
-                if sort_col == 10: return d.get('last_update', '')
-                if sort_col == 11: return d.get('tags', '')
-            dragons = sorted(dragons, key=_get_sort_key, reverse=(sort_order == Qt.SortOrder.DescendingOrder))
-            
-            # 稳定二次排序：确保重点关注的个股在任何情况下都在最顶层优先展示
-            from global_favorites import GlobalFavoriteManager
-            fav_mgr = GlobalFavoriteManager()
-            is_fav = lambda x: 1 if x.get('code', '') in fav_mgr.favorite_stocks else 0
-            dragons.sort(key=is_fav, reverse=True)
+        code_to_row = {}
 
-            was_sorting = table.isSortingEnabled()
-            table.setSortingEnabled(False)
-            table.setUpdatesEnabled(False)
-            table.viewport().setUpdatesEnabled(False)
-            table.blockSignals(True)
+        # [🚀 FAST SYNC UPDATE] 全量同步脏检查渲染：消除混合事件循环下 QTimer 堆积带来的假死
+        try:
+            for i in range(len(dragons)):
+                d = dragons[i]
+                st_lbl = d.get('status_label', '')
+                st_color = "#FFD700" if '龙' in st_lbl else ("#00ff00" if '候' in st_lbl else "#ffffff")
+                self._fast_update_cell(table, i, 0, st_lbl, color_key=st_color)
 
-            if table.rowCount() != len(dragons):
-                table.setRowCount(len(dragons))
-                
-            code_to_row = {}
-            
-            # [🚀 FAST SYNC UPDATE] 全量同步脏检查渲染：消除混合事件循环下 QTimer 堆积带来的假死
-            try:
-                for i in range(len(dragons)):
-                    d = dragons[i]
-                    st_lbl = d.get('status_label', '')
-                    st_color = "#FFD700" if '龙' in st_lbl else ("#00ff00" if '候' in st_lbl else "#ffffff")
-                    self._fast_update_cell(table, i, 0, st_lbl, color_key=st_color)
-                    
-                    code = d.get('code', '')
-                    code_to_row[code] = i 
-                    
-                    c_color = "#ffff00" if code.startswith('30') else "#00ffff"
-                    self._fast_update_cell(table, i, 1, code, color_key=c_color, bold=True)
-                    
-                    stock_name = d.get('name', '')
-                    is_fav_stock = code in fav_mgr.favorite_stocks
-                    display_name = f"⭐ {stock_name}" if is_fav_stock else stock_name
-                    self._fast_update_cell(table, i, 2, display_name, bold=('龙' in st_lbl) or is_fav_stock)
-                    
-                    sec_name = d.get('sector', '')
-                    is_fav_sec = sec_name in fav_mgr.favorite_sectors
-                    display_sec = f"⭐ {sec_name}" if is_fav_sec else sec_name
-                    self._fast_update_cell(table, i, 3, display_sec, bold=is_fav_sec)
-                    
-                    c_pct = d.get('current_pct', 0.0)
-                    cp_color = "#ff4444" if c_pct > 0 else ("#44ff44" if c_pct < 0 else "#ffffff")
-                    self._fast_update_cell(table, i, 4, f"{c_pct:+.2f}%", color_key=cp_color, numeric_val=c_pct)
-                    
-                    cum_pct = d.get('cum_pct', 0.0)
-                    cum_color = "#FFD700" if cum_pct > 5 else ("#ff4444" if cum_pct > 0 else "#ffffff")
-                    self._fast_update_cell(table, i, 5, f"{cum_pct:+.2f}%", color_key=cum_color, numeric_val=cum_pct)
-                    
-                    self._fast_update_cell(table, i, 6, d.get('tracked_days', 0), numeric_val=d.get('tracked_days', 0))
-                    
-                    nh_days = d.get('consecutive_new_highs', 0)
-                    nh_color = "#ff4500" if nh_days >= 3 else "#ffffff"
-                    self._fast_update_cell(table, i, 7, nh_days, color_key=nh_color, numeric_val=nh_days)
-                    
-                    dff = d.get('dff', 0.0)
-                    dff_color = "#00ff88" if dff > 0 else "#ffffff"
-                    self._fast_update_cell(table, i, 8, dff, color_key=dff_color, numeric_val=dff)
-                    self._fast_update_cell(table, i, 9, d.get('vwap', 0.0), numeric_val=d.get('vwap', 0.0))
-                    
-                    up_time = d.get('last_update', '')
-                    if len(up_time) > 19: up_time = up_time[11:19]
-                    self._fast_update_cell(table, i, 10, up_time)
-                    self._fast_update_cell(table, i, 11, d.get('tags', ''))
+                code = d.get('code', '')
+                code_to_row[code] = i
 
-            except Exception as e:
-                logger.warning(f"[DRAGON_REFRESH] render error: {e}")
-            finally:
-                table.viewport().setUpdatesEnabled(True)
-                table.setUpdatesEnabled(True)
-                if current_selection and current_selection in code_to_row:
-                    target_row = code_to_row[current_selection]
-                    table.selectRow(target_row)
-                table.setSortingEnabled(was_sorting)
-                table.blockSignals(False)
-                table.viewport().update()
+                c_color = "#ffff00" if code.startswith('30') else "#00ffff"
+                self._fast_update_cell(table, i, 1, code, color_key=c_color, bold=True)
+
+                stock_name = d.get('name', '')
+                is_fav_stock = code in fav_mgr.favorite_stocks
+                display_name = f"⭐ {stock_name}" if is_fav_stock else stock_name
+                self._fast_update_cell(table, i, 2, display_name, bold=('龙' in st_lbl) or is_fav_stock)
+
+                sec_name = d.get('sector', '')
+                is_fav_sec = sec_name in fav_mgr.favorite_sectors
+                display_sec = f"⭐ {sec_name}" if is_fav_sec else sec_name
+                self._fast_update_cell(table, i, 3, display_sec, bold=is_fav_sec)
+
+                c_pct = d.get('current_pct', 0.0)
+                cp_color = "#ff4444" if c_pct > 0 else ("#44ff44" if c_pct < 0 else "#ffffff")
+                self._fast_update_cell(table, i, 4, f"{c_pct:+.2f}%", color_key=cp_color, numeric_val=c_pct)
+
+                cum_pct = d.get('cum_pct', 0.0)
+                cum_color = "#FFD700" if cum_pct > 5 else ("#ff4444" if cum_pct > 0 else "#ffffff")
+                self._fast_update_cell(table, i, 5, f"{cum_pct:+.2f}%", color_key=cum_color, numeric_val=cum_pct)
+
+                self._fast_update_cell(table, i, 6, d.get('tracked_days', 0), numeric_val=d.get('tracked_days', 0))
+
+                nh_days = d.get('consecutive_new_highs', 0)
+                nh_color = "#ff4500" if nh_days >= 3 else "#ffffff"
+                self._fast_update_cell(table, i, 7, nh_days, color_key=nh_color, numeric_val=nh_days)
+
+                dff = d.get('dff', 0.0)
+                dff_color = "#00ff88" if dff > 0 else "#ffffff"
+                self._fast_update_cell(table, i, 8, dff, color_key=dff_color, numeric_val=dff)
+                self._fast_update_cell(table, i, 9, d.get('vwap', 0.0), numeric_val=d.get('vwap', 0.0))
+
+                up_time = d.get('last_update', '')
+                if len(up_time) > 19: up_time = up_time[11:19]
+                self._fast_update_cell(table, i, 10, up_time)
+                self._fast_update_cell(table, i, 11, d.get('tags', ''))
+
+        except Exception as e:
+            logger.warning(f"[DRAGON_REFRESH] render error: {e}")
+        finally:
+            table.viewport().setUpdatesEnabled(True)
+            table.setUpdatesEnabled(True)
+            if current_selection and current_selection in code_to_row:
+                target_row = code_to_row[current_selection]
+                table.selectRow(target_row)
+            table.setSortingEnabled(was_sorting)
+            table.blockSignals(False)
+            table.viewport().update()
 
     def _refresh_sector_table(self, sectors: List[dict], force=False):
         table = self.tables.get("🔥 板块热力")
@@ -3693,101 +3685,99 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # [PERF] 强制显示上限，防止数据爆炸导致 GUI 卡死
         trends = trends[:100]
         
-        # [PERF] 性能分析上下文
-        with timed_ctx("_refresh_strategic_table", warn_ms=300):
-            if getattr(self, '_engine_ctrl', None):
-                table._render_version = getattr(self._engine_ctrl, '_strategic_render_version', 0)
+        if getattr(self, '_engine_ctrl', None):
+            table._render_version = getattr(self._engine_ctrl, '_strategic_render_version', 0)
 
-            current_selection = None
-            sel_items = table.selectedItems()
-            if sel_items: 
-                it = table.item(sel_items[0].row(), 1)
-                if it: current_selection = it.data(self._ROLE_TEXT)
+        current_selection = None
+        sel_items = table.selectedItems()
+        if sel_items:
+            it = table.item(sel_items[0].row(), 1)
+            if it: current_selection = it.data(self._ROLE_TEXT)
 
-            sort_col = getattr(table, '_sort_col', table.horizontalHeader().sortIndicatorSection())
-            sort_order = getattr(table, '_sort_order', table.horizontalHeader().sortIndicatorOrder())
-            
-            def _get_sort_key(t):
-                if sort_col == 0: return t.get('trend_type', '')
-                if sort_col == 1: return t.get('code', '')
-                if sort_col == 2: return t.get('name', '')
-                if sort_col == 3: return str(t.get('stage_label', '')) # 使用 label 排序
-                if sort_col == 4: return t.get('sector', '')
-                if sort_col == 5: return t.get('score', 0.0)
-                if sort_col == 6: return t.get('upper_score', 0.0)
-                if sort_col == 7: return t.get('resonance', 0.0)
-                if sort_col == 8: return t.get('updated_at', '')
-                if sort_col == 9: return t.get('reason', '')
-            trends = sorted(trends, key=_get_sort_key, reverse=(sort_order == Qt.SortOrder.DescendingOrder))
-            
-            # 稳定二次排序：确保重点关注的个股在任何情况下都在最顶层优先展示
-            from global_favorites import GlobalFavoriteManager
-            fav_mgr = GlobalFavoriteManager()
-            is_fav = lambda x: 1 if x.get('code', '') in fav_mgr.favorite_stocks else 0
-            trends.sort(key=is_fav, reverse=True)
+        sort_col = getattr(table, '_sort_col', table.horizontalHeader().sortIndicatorSection())
+        sort_order = getattr(table, '_sort_order', table.horizontalHeader().sortIndicatorOrder())
 
-            # [PERF] 极致锁定：停止一切布局重绘
-            was_sorting = table.isSortingEnabled()
-            table.setSortingEnabled(False)
-            table.setUpdatesEnabled(False)
-            table.blockSignals(True)
-            table.verticalHeader().setUpdatesEnabled(False)
-            table.horizontalHeader().setUpdatesEnabled(False)
-            vp = table.viewport()
-            vp.setUpdatesEnabled(False)
+        def _get_sort_key(t):
+            if sort_col == 0: return t.get('trend_type', '')
+            if sort_col == 1: return t.get('code', '')
+            if sort_col == 2: return t.get('name', '')
+            if sort_col == 3: return str(t.get('stage_label', '')) # 使用 label 排序
+            if sort_col == 4: return t.get('sector', '')
+            if sort_col == 5: return t.get('score', 0.0)
+            if sort_col == 6: return t.get('upper_score', 0.0)
+            if sort_col == 7: return t.get('resonance', 0.0)
+            if sort_col == 8: return t.get('updated_at', '')
+            if sort_col == 9: return t.get('reason', '')
+        trends = sorted(trends, key=_get_sort_key, reverse=(sort_order == Qt.SortOrder.DescendingOrder))
 
-            try:
-                if table.rowCount() != len(trends):
-                    table.setRowCount(len(trends))
+        # 稳定二次排序：确保重点关注的个股在任何情况下都在最顶层优先展示
+        from global_favorites import GlobalFavoriteManager
+        fav_mgr = GlobalFavoriteManager()
+        is_fav = lambda x: 1 if x.get('code', '') in fav_mgr.favorite_stocks else 0
+        trends.sort(key=is_fav, reverse=True)
 
-                # [PERF] 建立快速索引
-                code_to_row = {}
-                for i, t in enumerate(trends):
-                    self._fast_update_cell(table, i, 0, t.get('trend_type', ''))
-                    
-                    code = t.get('code', '')
-                    code_to_row[code] = i
-                    c_color = "#00ffff" if not code.startswith('30') else "#ffff00"
-                    self._fast_update_cell(table, i, 1, code, color_key=c_color, bold=True)
-                    
-                    stock_name = t.get('name', '')
-                    is_fav_stock = code in fav_mgr.favorite_stocks
-                    display_name = f"⭐ {stock_name}" if is_fav_stock else stock_name
-                    self._fast_update_cell(table, i, 2, display_name, bold=is_fav_stock)
-                    
-                    self._fast_update_cell(table, i, 3, t.get('stage', ''))
-                    
-                    sec_name = t.get('sector', '')
-                    is_fav_sec = sec_name in fav_mgr.favorite_sectors
-                    display_sec = f"⭐ {sec_name}" if is_fav_sec else sec_name
-                    self._fast_update_cell(table, i, 4, display_sec, bold=is_fav_sec)
-                    
-                    sc = t.get('score', 0.0)
-                    sc_color = "#ff0000" if sc > 80 else ("#ffaa00" if sc > 60 else "#ffffff")
-                    self._fast_update_cell(table, i, 5, sc, color_key=sc_color, numeric_val=sc)
-                    self._fast_update_cell(table, i, 6, t.get('upper_score', 0.0), numeric_val=t.get('upper_score', 0.0))
-                    self._fast_update_cell(table, i, 7, t.get('resonance', 0.0), numeric_val=t.get('resonance', 0.0))
-                    
-                    self._fast_update_cell(table, i, 8, t.get('updated_at', ''))
-                    # [PERF] 限制长文本长度，防止渲染卡顿
-                    reason_str = str(t.get('reason', ''))
-                    if len(reason_str) > 100: reason_str = reason_str[:100] + "..."
-                    self._fast_update_cell(table, i, 9, reason_str)
+        # [PERF] 极致锁定：停止一切布局重绘
+        was_sorting = table.isSortingEnabled()
+        table.setSortingEnabled(False)
+        table.setUpdatesEnabled(False)
+        table.blockSignals(True)
+        table.verticalHeader().setUpdatesEnabled(False)
+        table.horizontalHeader().setUpdatesEnabled(False)
+        vp = table.viewport()
+        vp.setUpdatesEnabled(False)
 
-                # [PERF] O(1) 快速恢复选中态
-                if current_selection and current_selection in code_to_row:
-                    target_row = code_to_row[current_selection]
-                    table.selectRow(target_row)
-                        
-            finally:
-                # [PERF] 恢复布局并触发一次性刷新
-                vp.setUpdatesEnabled(True)
-                table.verticalHeader().setUpdatesEnabled(True)
-                table.horizontalHeader().setUpdatesEnabled(True)
-                table.setSortingEnabled(was_sorting)
-                table.blockSignals(False)
-                table.setUpdatesEnabled(True)
-                table.viewport().update()
+        try:
+            if table.rowCount() != len(trends):
+                table.setRowCount(len(trends))
+
+            # [PERF] 建立快速索引
+            code_to_row = {}
+            for i, t in enumerate(trends):
+                self._fast_update_cell(table, i, 0, t.get('trend_type', ''))
+
+                code = t.get('code', '')
+                code_to_row[code] = i
+                c_color = "#00ffff" if not code.startswith('30') else "#ffff00"
+                self._fast_update_cell(table, i, 1, code, color_key=c_color, bold=True)
+
+                stock_name = t.get('name', '')
+                is_fav_stock = code in fav_mgr.favorite_stocks
+                display_name = f"⭐ {stock_name}" if is_fav_stock else stock_name
+                self._fast_update_cell(table, i, 2, display_name, bold=is_fav_stock)
+
+                self._fast_update_cell(table, i, 3, t.get('stage', ''))
+
+                sec_name = t.get('sector', '')
+                is_fav_sec = sec_name in fav_mgr.favorite_sectors
+                display_sec = f"⭐ {sec_name}" if is_fav_sec else sec_name
+                self._fast_update_cell(table, i, 4, display_sec, bold=is_fav_sec)
+
+                sc = t.get('score', 0.0)
+                sc_color = "#ff0000" if sc > 80 else ("#ffaa00" if sc > 60 else "#ffffff")
+                self._fast_update_cell(table, i, 5, sc, color_key=sc_color, numeric_val=sc)
+                self._fast_update_cell(table, i, 6, t.get('upper_score', 0.0), numeric_val=t.get('upper_score', 0.0))
+                self._fast_update_cell(table, i, 7, t.get('resonance', 0.0), numeric_val=t.get('resonance', 0.0))
+
+                self._fast_update_cell(table, i, 8, t.get('updated_at', ''))
+                # [PERF] 限制长文本长度，防止渲染卡顿
+                reason_str = str(t.get('reason', ''))
+                if len(reason_str) > 100: reason_str = reason_str[:100] + "..."
+                self._fast_update_cell(table, i, 9, reason_str)
+
+            # [PERF] O(1) 快速恢复选中态
+            if current_selection and current_selection in code_to_row:
+                target_row = code_to_row[current_selection]
+                table.selectRow(target_row)
+                    
+        finally:
+            # [PERF] 恢复布局并触发一次性刷新
+            vp.setUpdatesEnabled(True)
+            table.verticalHeader().setUpdatesEnabled(True)
+            table.horizontalHeader().setUpdatesEnabled(True)
+            table.setSortingEnabled(was_sorting)
+            table.blockSignals(False)
+            table.setUpdatesEnabled(True)
+            table.viewport().update()
 
     def _on_signal_received(self, event: BusEvent):
         """[BACKGROUND THREAD] state overwrite + dirty keys set"""
@@ -3998,7 +3988,6 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def _process_batch_signals(self):
         """批量处理 UI 更新，确保滚动条稳定"""
-        # with timed_ctx("_process_batch_signals", warn_ms=200):
         if not self._table_update_buffer:
             return
         
@@ -4075,9 +4064,6 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 table.viewport().update()
                 
             self._is_updating_ui = False
-            batch_dur = (time.perf_counter() - batch_start) * 1000
-            if batch_dur > 50:
-                logger.debug(f"📊 [DASHBOARD_PERF] Batch processed {processed_count} signals in {batch_dur:.1f}ms (TotalReceived={len(events_raw)})")
             
         # 恢复/修正滚动位置
         for name, table in self.tables.items():
@@ -4142,7 +4128,6 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         if not name:
             name = code
 
-        append_start = time.perf_counter()
         pattern = payload.get('pattern', payload.get('subtype', 'ALERT'))
         detail = payload.get('detail', payload.get('message', ''))
         score = payload.get('score', 0.0)
@@ -4167,10 +4152,6 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         if matched_cats == 0:
             self._insert_row(self.tables["其它信号"], time_str, code, name, pattern, detail, count, score, grade, payload)
         
-        append_dur = (time.perf_counter() - append_start) * 1000
-        # 节流日志，仅输出严重延迟
-        if append_dur > 150:
-            logger.debug(f"⚠️ [DASHBOARD_PERF] _append_to_tables cost {append_dur:.1f}ms for {code} (matches={matched_cats})")
 
     def _get_pattern_color(self, pattern, detail, grade=""):
         if grade == "极高":
@@ -4196,7 +4177,6 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         return self._colors.get(color_str, self._colors["#ffffff"])
 
     def _insert_row(self, table, time_str, code, name, pattern, detail, count, score, grade='', payload=None):
-        insert_start = time.perf_counter()
         was_sorting = table.isSortingEnabled()
         if was_sorting:
             table.setSortingEnabled(False)
@@ -4342,9 +4322,6 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         finally: 
             if was_sorting and not table.isSortingEnabled():
                 table.setSortingEnabled(True)
-            insert_dur = (time.perf_counter() - insert_start) * 1000
-            if insert_dur > 20:
-                 logger.debug(f"⚠️ [DASHBOARD_PERF] _insert_row cost {insert_dur:.1f}ms for {name}({code})")
 
     def _flash_row(self, table, row, is_priority_bg=False, priority_bg_brush=None):
         try:
@@ -4372,7 +4349,6 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def _refresh_all_tables(self):
         """[PERF v4.0] 极致 O(N) 全量刷新，彻底根治 L2917 循环内的 O(N^2) 性能陷阱"""
-        start_t = time.perf_counter()
         
         # 1. 预案锁定
         active_sortings = {}
@@ -4475,8 +4451,6 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 self._limit_table_column_widths(table)
                 table.viewport().update()
                 
-        dur = (time.perf_counter() - start_t) * 1000
-        logger.info(f"🔄 [DASHBOARD_PERF] Optimized Full refresh cost {dur:.1f}ms for {len(self._all_events)} events")
 
     def _fill_row_data(self, table, row_idx, p, timestamp=None):
         """纯粹的数据填充逻辑，不触发任何布局改变信号"""

@@ -94,19 +94,13 @@ class TreeviewMixin:
 
     def update_treeview_cols(self, new_cols: list[str]) -> None:
         try:
-            if not hasattr(self, 'df_all') or self.df_all is None or self.df_all.empty:
-                logger.warning("⚠️ df_all为空,无法更新列配置")
-                self._pending_cols = new_cols
-                return
-            
-            valid_cols = [c for c in new_cols if c in self.df_all.columns]
-            if not valid_cols:
-                valid_cols = list(self.df_all.columns)[:5]
-            
-            if 'code' not in valid_cols and 'code' in self.df_all.columns:
-                valid_cols = ["code"] + valid_cols
+            # 选择的列可能仍在后台计算，不能因首帧缺字段丢失保存的布局。
+            valid_cols = list(dict.fromkeys([
+                "code", *(c for c in new_cols if isinstance(c, str) and c)
+            ]))
  
-            if valid_cols == getattr(self, 'current_cols', []):
+            if (valid_cols == getattr(self, 'current_cols', [])
+                    and tuple(self.tree["columns"]) == tuple(valid_cols)):
                 return
  
             self.current_cols = valid_cols
@@ -114,8 +108,6 @@ class TreeviewMixin:
             
             self.tree["displaycolumns"] = ()
             self.tree["columns"] = ()
-            self.tree.update_idletasks()
- 
             self.tree["columns"] = cols
             self.tree["displaycolumns"] = cols
             self.tree.configure(show="headings")
