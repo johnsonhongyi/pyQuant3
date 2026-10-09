@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "sources": {
+    "JSONData/tdx_channel_factory.py": "add5373781ad395b4da5c156ba4203e796c8fc018c391a9aaa9ba273791d8d05",
+    "JSONData/tdx_data_Day.py": "0d62030d3c2904a8b2996085ffda84df7fdb8103cf46aca50bdd33db5646297d",
+    "ats/channel_bottom_reversal_strategy.py": "3cfa87d056cf69610cd49cdfb57c96224361ad1030e005e45f0d6fc1bbdc1075"
+  }
+}

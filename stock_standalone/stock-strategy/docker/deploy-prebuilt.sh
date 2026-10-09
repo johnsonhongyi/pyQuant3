@@ -3,6 +3,10 @@
 set -Eeuo pipefail
 umask 077
 
+command -v flock >/dev/null 2>&1 || { echo 'flock is required.' >&2; exit 1; }
+exec 9>/run/lock/stockstrategy-deploy.lock
+flock -n 9 || { echo 'Another deployment is running.' >&2; exit 1; }
+
 ARCHIVE=
 RELEASE=
 if [ "$#" -ge 1 ]; then ARCHIVE="$1"; fi
