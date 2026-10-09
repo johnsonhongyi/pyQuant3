@@ -1960,6 +1960,12 @@ class SBCChartCanvas(QWidget):
             act_copy.triggered.connect(_copy_info)
             menu.addAction(act_copy)
 
+        if parent_win and hasattr(parent_win, '_on_set_default_code'):
+            from ats.ui.sbc_preferences import get_sbc_default_code
+            act_default = QAction(f"设置默认股票代码（当前：{get_sbc_default_code()}）…", menu)
+            act_default.triggered.connect(parent_win._on_set_default_code)
+            menu.addAction(act_default)
+
         # 2. ❌ 退出查价十字线 (若激活)
         if getattr(self, '_crosshair_active', False):
             act_exit_cross = QAction("❌ 退出十字查价线 (Esc)", self)
@@ -5622,6 +5628,24 @@ class SBCIntradayChartDialog(QWidget):
 
         if save:
             self._save_sbc_geometry()
+
+    def _on_set_default_code(self):
+        from PyQt6.QtWidgets import QInputDialog
+        from ats.ui.sbc_preferences import get_sbc_default_code, set_sbc_default_code
+        code, accepted = QInputDialog.getText(
+            self, "设置默认股票代码", "默认股票代码（六位数字）：", text=get_sbc_default_code(),
+        )
+        if not accepted:
+            return
+        try:
+            set_sbc_default_code(code)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "默认股票代码未保存", str(exc))
+            return
+        QMessageBox.information(
+            self, "默认股票代码已保存",
+            f"默认股票代码：{get_sbc_default_code()}\n下次无持仓或可恢复快照时使用此代码。",
+        )
 
     def _do_save_sbc_geometry(self):
         """

@@ -42,6 +42,7 @@ from ats.ui.intraday_strategy_dialog import (
     _end_sbc_startup_batch,
 )
 from sys_utils import ensure_backend_tk_running
+from ats.ui.sbc_preferences import get_sbc_default_code
 
 
 def _get_launcher_layout_cfg_path() -> str:
@@ -408,7 +409,7 @@ def get_launcher_history_snapshots() -> List[dict]:
     cfg_path = _get_launcher_layout_cfg_path()
     if os.path.exists(cfg_path):
         try:
-            with open(cfg_path, "r", encoding="utf-8") as f:
+            with open(cfg_path, "r", encoding="utf-8-sig") as f:
                 data = json.load(f)
             snapshots = data.get("recent_history_snapshots", [])
             if isinstance(snapshots, list):
@@ -416,6 +417,39 @@ def get_launcher_history_snapshots() -> List[dict]:
         except Exception:
             pass
     return []
+
+
+def _snapshot_window_items(snapshot, period_modes=None):
+    """Restore the full symbol list even when saved window metadata is partial."""
+    unique = {}
+    for item in snapshot.get("windows", []) or []:
+        if not isinstance(item, dict):
+            continue
+        code = "".join(filter(str.isdigit, str(item.get("code", "")))).zfill(6)
+        if len(code) == 6 and code != "000000":
+            unique.setdefault(code, dict(item, code=code))
+    for value in snapshot.get("codes", []) or []:
+        code = "".join(filter(str.isdigit, str(value))).zfill(6)
+        if len(code) == 6 and code != "000000" and code not in unique:
+            unique[code] = dict(code=code, period_mode=(period_modes or {}).get(code, "10d"))
+    return list(unique.values())
+
+
+def _consume_restore_snapshot(snapshot_path=None):
+    raw = os.environ.pop("SBC_RESTORE_SNAPSHOT", "null")
+    if snapshot_path:
+        try:
+            with open(snapshot_path, "r", encoding="utf-8-sig") as handle:
+                snapshot = json.load(handle)
+            if isinstance(snapshot, dict):
+                return snapshot
+        except (OSError, ValueError) as exc:
+            print(f"[SBC Launcher] 快照文件交接读取失败: {exc}")
+    try:
+        snapshot = json.loads(raw)
+        return snapshot if isinstance(snapshot, dict) else None
+    except (TypeError, ValueError):
+        return None
 
 
 def switch_to_history_snapshot(snapshot_idx: int) -> List[SBCIntradayChartDialog]:
@@ -432,7 +466,7 @@ def switch_to_history_snapshot(snapshot_idx: int) -> List[SBCIntradayChartDialog
 
     target_snap = snapshots[snapshot_idx - 1]
     snap_time = target_snap.get("time", "未知时间")
-    win_list = target_snap.get("windows", [])
+    win_list = _snapshot_window_items(target_snap)
     if not win_list:
         return []
 
@@ -576,35 +610,36 @@ def restore_launcher_holdings_windows(snapshot_index: Optional[int] = None, snap
             try:
                 data = {}
                 if os.path.exists(cfg_path):
-                    with open(cfg_path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
+                    try:
+                        with open(cfg_path, "r", encoding="utf-8-sig") as f:
+                            data = json.load(f)
+                        if not isinstance(data, dict):
+                            data = {}
+                    except (OSError, ValueError) as exc:
+                        print(f"[SBC Launcher] 配置读取失败，继续使用已选快照: {cfg_path}: {exc}")
                 has_initialized_config = bool(snapshot_data is not None or data.get("initialized", False) or "sbc_holdings_windows" in data or "sbc_open_windows" in data)
                 snapshots = data.get("recent_history_snapshots", [])
 
                 win_list = []
                 if snapshot_data is not None or (snapshot_index is not None and isinstance(snapshots, list) and 1 <= snapshot_index <= len(snapshots)):
                     snap = snapshot_data if snapshot_data is not None else snapshots[snapshot_index - 1]
-                    win_list = [dict(item) for item in snap.get("windows", []) if isinstance(item, dict)]
-                    present = {str(item.get("code", "")).zfill(6) for item in win_list}
-                    for code in snap.get("codes", []):
-                        clean = str(code).zfill(6)
-                        if clean not in present:
-                            win_list.append(dict(code=clean, period_mode=data.get("sbc_period_modes", {}).get(clean, "10d")))
-                            present.add(clean)
+                    win_list = _snapshot_window_items(snap, data.get("sbc_period_modes", {}))
                     snap_time = snap.get("time", "历史快照")
-                    print(f"[SBC Launcher] 📂 操盘手指定加载第 {snapshot_index} 组历史快照 ({snap_time})，共 {len(win_list)} 个窗口...")
+                    print(f"[SBC Launcher] 操盘手指定加载第 {snapshot_index} 组历史快照 ({snap_time})，共 {len(win_list)} 个窗口...")
                 else:
                     win_list = data.get("sbc_holdings_windows") or data.get("sbc_open_windows") or []
                     # 💡 灾备兜底：若当前 win_list 为空，优先从 recent_history_snapshots[0] 历史快照提取
                     if not win_list:
                         if snapshots and isinstance(snapshots, list) and isinstance(snapshots[0], dict):
-                            snap_win_list = snapshots[0].get("windows", [])
+                            snap_win_list = _snapshot_window_items(snapshots[0], data.get("sbc_period_modes", {}))
                             if snap_win_list:
                                 win_list = snap_win_list
                                 snap_time = snapshots[0].get("time", "历史快照")
-                                print(f"[SBC Launcher] 🛡 当前盯盘配置为空，已自动从最近历史快照 ({snap_time}) 灾备回退恢复 {len(win_list)} 个窗口！")
+                                print(f"[SBC Launcher] 当前盯盘配置为空，已自动从最近历史快照 ({snap_time}) 灾备回退恢复 {len(win_list)} 个窗口！")
 
-                restore_in_batches(win_list, data)
+                needs_layout = any(isinstance(item, dict) and
+                                   ("x" not in item or "y" not in item) for item in win_list)
+                restore_in_batches(win_list, data, auto_layout=needs_layout)
             except Exception as e:
                 print(f"[SBC Launcher] 读取历史盯盘配置异常: {e}")
 
@@ -639,6 +674,7 @@ def main():
         dest="holdings", action="store_true", help="单独启动 SBC 持仓窗口组",
     )
     parser.add_argument("--snapshot", "-s", type=int, help="持仓模式下加载指定历史快照组")
+    parser.add_argument("--snapshot-file", help="父进程传入的冻结快照文件")
     parser.add_argument("--code", "-c", dest="code", help="指定 6 位股票代码")
     parser.add_argument("stock_code", nargs="?", help="指定 6 位股票代码（兼容位置参数）")
     parser.add_argument("period", nargs="?", default="10d", help="初始周期，例如 1d、5d、10d（默认 10d）")
@@ -731,11 +767,18 @@ def main():
                 if sys.platform == "win32":
                     import ctypes
                     kernel32 = ctypes.windll.kernel32
+                    kernel32.OpenProcess.restype = ctypes.c_void_p
+                    kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+                    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
                     SYNCHRONIZE = 0x00100000
                     h_proc = kernel32.OpenProcess(SYNCHRONIZE, False, _parent_pid)
+                    parent_exited = not h_proc
                     if h_proc:
-                        kernel32.CloseHandle(h_proc)
-                    else:
+                        try:
+                            parent_exited = kernel32.WaitForSingleObject(h_proc, 0) == 0
+                        finally:
+                            kernel32.CloseHandle(h_proc)
+                    if parent_exited:
                         print(f"\n[SBC Launcher] 探针检测到父进程 (PID={_parent_pid}) 已关闭，自动保存持仓盯盘并退出...")
                         quit_and_save_all_sbc_windows()
                         app_inst = QApplication.instance()
@@ -761,17 +804,19 @@ def main():
             window.show()
     else:
         # 💡 无参启动：专门用来盯持仓的盘 (支持通过 --snapshot N 指定加载哪一组历史快照)
-        selected_snapshot = None
-        try:
-            selected_snapshot = json.loads(os.environ.pop("SBC_RESTORE_SNAPSHOT", "null"))
-            if not isinstance(selected_snapshot, dict):
-                selected_snapshot = None
-        except (TypeError, ValueError):
-            pass
+        selected_snapshot = _consume_restore_snapshot(args.snapshot_file)
+        print(f"[SBC Launcher] 恢复入口: snapshot={snapshot_idx}, "
+              f"payload_codes={len(selected_snapshot.get('codes', [])) if selected_snapshot else 0}, "
+              f"config={_get_launcher_layout_cfg_path()}")
         restored = restore_launcher_holdings_windows(snapshot_index=snapshot_idx, snapshot_data=selected_snapshot)
         if not restored and not _is_restoring_holdings:
-            # 若持仓亦为空，启动默认 600733 (严禁读取 ATS 的 recent_codes，彻底杜绝配置串扰)
-            code = "600733"
+            if snapshot_idx is not None or args.snapshot_file or selected_snapshot is not None:
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.warning(None, "盯盘快照恢复失败",
+                                    "未能创建所选快照的窗口。请检查 SBC 子进程日志中的具体异常。")
+                sys.exit(1)
+            # 无持仓和可恢复快照时使用用户持久化的默认股票代码。
+            code = get_sbc_default_code()
             period = "10d"
             print(f"[SBC Launcher] 无持仓与历史记录，启动默认 SBC 窗口: 标的代码={code}, 周期={period}")
             window = open_sbc_chart_dialog(code=code, period_mode=period)

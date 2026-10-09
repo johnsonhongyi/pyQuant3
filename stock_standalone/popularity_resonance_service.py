@@ -73,7 +73,7 @@ def fetch_realtime_quotes(codes: list[str]) -> dict[str, dict]:
                 lc = float(q.get("last_close", 0.0))
                 pct = round((p - lc) / lc * 100.0, 2) if (lc > 0 and p > 0) else 0.0
                 try:
-                    name = resolve_stock_name(c) or "--"
+                    name = resolve_stock_name(c, allow_heavy=False) or "--"
                 except Exception:
                     name = "--"
                 result[c] = {

@@ -62,6 +62,7 @@ class IPCSyncManager:
         self.port = port
         self.service_name = service_name
         self.data_callback = data_callback
+        self.callback_codes_provider = None
         self.logger = logger
         self.silent_bind_fail = silent_bind_fail
         self.stale_sync_interval = stale_sync_interval
@@ -119,10 +120,12 @@ class IPCSyncManager:
                 pass
         self.log_info("同步管理器已停止监听")
 
-    def get_current_df(self):
-        """线程安全地获取当前同步的行情 DataFrame"""
+    def get_current_df(self, codes=None):
+        """线程安全获取独立快照；可按代码取行，保留全部列与原始精度。"""
         with self.df_lock:
             if self.current_df is not None:
+                if codes is not None:
+                    return self.current_df.take(self.current_df.index.isin(codes).nonzero()[0])
                 return self.current_df.copy()
             return None
 
@@ -315,15 +318,16 @@ class IPCSyncManager:
                 return
             length = struct.unpack("!I", len_buf)[0]
             
-            data = b""
+            data = bytearray()
             while len(data) < length:
                 packet = conn.recv(min(length - len(data), 65536))
                 if not packet:
                     break
-                data += packet
+                data.extend(packet)
                 
             if len(data) == length:
                 payload = pickle.loads(data)
+                del data, packet
                 if isinstance(payload, tuple) and len(payload) >= 2:
                     cmd, body = payload[0], payload[1]
                     if cmd == 'UPDATE_DF_DATA':
@@ -440,7 +444,9 @@ class IPCSyncManager:
         # 4. 触发外部 UI 渲染或业务处理回调
         if self.data_callback:
             try:
-                self.data_callback(self.get_current_df())
+                provider = self.callback_codes_provider
+                codes = provider() if provider is not None else None
+                self.data_callback(self.get_current_df(codes))
             except Exception as cb_err:
                 self.log_error(f"执行数据回调失败: {cb_err}")
 

@@ -1080,7 +1080,7 @@ def get_cached_stock_name(code_clean: str) -> str:
     return resolve_stock_name(code_clean, cached_only=True)
 
 
-def resolve_stock_name(code_clean: str, *, cached_only: bool = False) -> str:
+def resolve_stock_name(code_clean: str, *, cached_only: bool = False, allow_heavy: bool = True) -> str:
     """
     高精度、多通道、带内存与磁盘高速持久化缓存的个股名字解析器。
     专门根治“个股_XXXXXX”或代码数字做名字等 placeholder 占位符问题。
@@ -1120,21 +1120,22 @@ def resolve_stock_name(code_clean: str, *, cached_only: bool = False) -> str:
     # 0.5 优先使用本地内置 of sina_data 行情引擎极速解析
     try:
         global _SINA_ENGINE
-        if _SINA_ENGINE is None:
-            from JSONData import sina_data
-            _SINA_ENGINE = sina_data.Sina(readonly=True)
-        local_name = _SINA_ENGINE.get_code_cname(code_clean)
-        if local_name and not local_name.startswith("个股_") and not local_name.isdigit() and local_name != code_clean:
-            logger.info(f"[resolve_stock_name] Channel 0.5 (Sina Engine) resolved {code_clean} -> {local_name}")
-            _save_to_name_cache(code_clean, local_name)
-            return local_name
+        if allow_heavy:
+            if _SINA_ENGINE is None:
+                from JSONData import sina_data
+                _SINA_ENGINE = sina_data.Sina(readonly=True)
+            local_name = _SINA_ENGINE.get_code_cname(code_clean)
+            if local_name and not local_name.startswith("个股_") and not local_name.isdigit() and local_name != code_clean:
+                logger.info(f"[resolve_stock_name] Channel 0.5 (Sina Engine) resolved {code_clean} -> {local_name}")
+                _save_to_name_cache(code_clean, local_name)
+                return local_name
     except Exception as e:
         logger.warning(f"[resolve_stock_name] Sina local engine failed: {e}", exc_info=True)
 
     # 1. 优先从 top_all.h5 里面解析
     base_dir = get_app_root()
     import pandas as pd
-    for path in [r'g:\top_all.h5', os.path.join(base_dir, 'top_all.h5'), os.path.join(os.getcwd(), 'top_all.h5')]:
+    for path in ([r'g:\top_all.h5', os.path.join(base_dir, 'top_all.h5'), os.path.join(os.getcwd(), 'top_all.h5')] if allow_heavy else ()):
         if os.path.exists(path):
             try:
                 from JSONData.tdx_hdf5_api import read_hdf_safe

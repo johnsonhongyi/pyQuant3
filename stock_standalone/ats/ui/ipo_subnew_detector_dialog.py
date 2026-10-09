@@ -18,6 +18,7 @@ import time
 import math
 import logging
 import warnings
+import threading
 from datetime import datetime
 from collections import deque
 from typing import List, Dict, Optional, Set, Any, Tuple
@@ -325,7 +326,7 @@ class IPOScanWorker(QThread):
                 if not self.is_running:
                     break
                 try:
-                    sig = self._analyze_one(c, day_df_map.get(c), kline_60m_map.get(c))
+                    sig = self._analyze_one(c, day_df_map.pop(c, None), kline_60m_map.pop(c, None))
                     if sig:
                         batch_results.append(sig)
                         count += 1
@@ -357,6 +358,8 @@ class IPOScanWorker(QThread):
             # ── 步骤 C: 整组批量交付 UI ──
             if batch_results:
                 self.batch_analyzed.emit(batch_results)
+            day_df_map.clear()
+            kline_60m_map.clear()
 
         cost = time.time() - t0
         all_stock_costs.sort(key=lambda x: x[1], reverse=True)
@@ -398,6 +401,7 @@ class IPOScanWorker(QThread):
 
 class IPOSubnewDetectorDialog(QMainWindow):
     """新股次新股超短检测独立主窗口"""
+    _stream_ui_update_requested = pyqtSignal(object)
 
     def __init__(self, initial_code: Optional[str] = None):
         super().__init__(None)
@@ -514,6 +518,10 @@ class IPOSubnewDetectorDialog(QMainWindow):
         self.signals_map: Dict[str, VWAPDetectorSignal] = {}
         self.extra_cols: List[str] = get_ipo_detector_extra_cols()
         self.ipc_df: Optional[pd.DataFrame] = None
+        self._stream_ui_lock = threading.Lock()
+        self._stream_ui_pending = False
+        self._stream_ui_update_requested.connect(
+            self._run_stream_ui_update, Qt.ConnectionType.QueuedConnection)
 
         # 列布局由 BaseATSTableWidget 的统一持久化器管理。
         self._header_persistence_initialized = False
@@ -544,7 +552,10 @@ class IPOSubnewDetectorDialog(QMainWindow):
         # 0. 初始化新股次新专属实时行情 IPC 流式订阅管理器 (端口 26675，支持全量快照与增量广播实时推送)
         try:
             from ats.network.tk_ipc_subscriber import get_ipo_ipc_subscriber
-            self.ipc_mgr = get_ipo_ipc_subscriber(data_callback=self._on_tk_stream_data, auto_start=True)
+            self.ipc_mgr = get_ipo_ipc_subscriber(data_callback=self._on_tk_stream_data, auto_start=False)
+            self.ipc_mgr.callback_codes_provider = lambda: tuple(self.monitored_codes)
+            if not self.ipc_mgr._listener_running:
+                self.ipc_mgr.start()
         except Exception as e_ipcmgr:
             logger.debug(f"初始化专属 IPC 流式订阅管理器异常: {e_ipcmgr}")
             self.ipc_mgr = None
@@ -1176,9 +1187,17 @@ class IPOSubnewDetectorDialog(QMainWindow):
         self.worker.stock_analyzed.connect(self._on_stock_analyzed)
         self.worker.scan_finished.connect(self._on_scan_finished)
         self.worker.perf_log_emitted.connect(self._on_perf_log_received)
+        self.worker.finished.connect(self._on_scan_worker_finished)
         # 🛡️ 明确降级为 LowPriority，保障 GUI 主线程 60fps 丝滑响应，鼠标滚轮与键盘翻页零卡顿
         from PyQt6.QtCore import QThread
         self.worker.start(QThread.Priority.LowPriority)
+
+    def _on_scan_worker_finished(self):
+        worker = self.sender()
+        if worker is self.worker:
+            self.worker = None
+        if worker is not None:
+            worker.deleteLater()
 
     def _on_perf_log_received(self, text: str):
         """实时将后台 Worker 发送的分组性能审计日志打印并滚入内嵌控制台 (仅在开启模式下追加)"""
@@ -1745,6 +1764,10 @@ class IPOSubnewDetectorDialog(QMainWindow):
 
     def _rebuild_table_rows(self):
         """根据当前 monitored_codes 重建表格行"""
+        # 新增标的立即从完整底座补齐慢字段，不等待下一次推送。
+        if getattr(self, "ipc_mgr", None):
+            with self._stream_ui_lock:
+                self.ipc_df = self.ipc_mgr.get_current_df(tuple(self.monitored_codes))
         self._is_table_updating = True
         self.table.setSortingEnabled(False)
         try:
@@ -2858,10 +2881,16 @@ class IPOSubnewDetectorDialog(QMainWindow):
                 try:
                     import ctypes
                     kernel32 = ctypes.windll.kernel32
+                    kernel32.OpenProcess.restype = ctypes.c_void_p
+                    kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+                    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
                     SYNCHRONIZE = 0x00100000
                     h_proc = kernel32.OpenProcess(SYNCHRONIZE, False, main_pid)
                     if h_proc:
-                        kernel32.CloseHandle(h_proc)
+                        try:
+                            is_parent_alive = kernel32.WaitForSingleObject(h_proc, 0) != 0
+                        finally:
+                            kernel32.CloseHandle(h_proc)
                     else:
                         is_parent_alive = False
                 except Exception:
@@ -2897,10 +2926,10 @@ class IPOSubnewDetectorDialog(QMainWindow):
             self._rebuild_table_rows()
 
         # 5. 从全局 IPC 同步管理器获取最新实时行情快照 (实时回补连阳/DFF/ch_bc2等自定义列)
-        if getattr(self, "ipc_mgr", None):
+        if getattr(self, "ipc_mgr", None) and (self.ipc_df is None or self.ipc_df.empty):
             try:
-                df_now = self.ipc_mgr.get_current_df()
-                if df_now is not None and not df_now.empty and len(df_now) > 100:
+                df_now = self.ipc_mgr.get_current_df(tuple(self.monitored_codes))
+                if df_now is not None and not df_now.empty:
                     was_empty = (self.ipc_df is None or self.ipc_df.empty)
                     self.ipc_df = df_now
                     # 若首次拿到实时行情，且表格已有行，触发快速刷新回补自定义列
@@ -2978,6 +3007,9 @@ class IPOSubnewDetectorDialog(QMainWindow):
         except Exception as exc:
             logger.debug("同步 ATS 次日候选异动到检测中心失败: %s", exc)
 
+    def _run_stream_ui_update(self, callback):
+        callback()
+
     def _on_tk_stream_data(self, df: pd.DataFrame):
         """
         【⚡ TK 流式数据直达回调】
@@ -2991,9 +3023,18 @@ class IPOSubnewDetectorDialog(QMainWindow):
         if not is_trading and current_ipc_df is not None and not current_ipc_df.empty:
             return
         try:
-            self.ipc_df = df
+            with self._stream_ui_lock:
+                self.ipc_df = df
+                if self._stream_ui_pending:
+                    return
+                self._stream_ui_pending = True
             def _ui_update():
+                with self._stream_ui_lock:
+                    self._stream_ui_pending = False
+                    df = self.ipc_df
                 try:
+                    if df is None or df.empty:
+                        return
                     if getattr(self, "_is_table_updating", False):
                         return
                     for r in range(self.table.rowCount()):
@@ -3041,8 +3082,10 @@ class IPOSubnewDetectorDialog(QMainWindow):
                 except Exception as e:
                     logger.debug(f"UI 刷新流式数据异常: {e}")
 
-            QTimer.singleShot(0, _ui_update)
+            self._stream_ui_update_requested.emit(_ui_update)
         except Exception as e:
+            with self._stream_ui_lock:
+                self._stream_ui_pending = False
             logger.debug(f"_on_tk_stream_data 异常: {e}")
 
 

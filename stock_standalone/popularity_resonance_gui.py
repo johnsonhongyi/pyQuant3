@@ -141,8 +141,8 @@ class _DynamicIPCSyncProxy:
     def __init__(self, owner):
         self.owner = owner
 
-    def get_current_df(self):
-        return self.owner.get_current_df()
+    def get_current_df(self, codes=None):
+        return self.owner.get_current_df(codes)
 
     def request_full_sync(self):
         return self.owner.request_dynamic_ipc_sync()
@@ -252,6 +252,13 @@ class PRServiceGUI:
         # 使用单个常驻 IPC 订阅：冷启动收全量基线，后续接收增量更新。
         self.current_df = None
         self.df_lock = threading.Lock()
+        self._realtime_ui_lock = threading.Lock()
+        self._realtime_ui_pending = False
+        self._pending_tdx_quotes = {}
+        self._pending_ui_actions = set()
+        self._popularity_codes_snapshot = ()
+        self._tdx_poll_state = (5.0, False, ())
+        self._realtime_ui_timer = self.root.after(100, self._drain_realtime_updates)
         self._ipc_sync_in_progress = False
         self._ipc_sync_manager = None
         self.sync_manager = _DynamicIPCSyncProxy(self)
@@ -337,7 +344,7 @@ class PRServiceGUI:
             return
         self._ipc_baseline_ready.set()
         try:
-            self.root.after(0, self._on_ipc_baseline_received)
+            self._queue_realtime_update(action="_on_ipc_baseline_received")
         except Exception as e:
             service_logger.warning(f"IPC基线就绪回调排队失败: {e}")
 
@@ -357,7 +364,7 @@ class PRServiceGUI:
             f"[查询就绪] TDX API 行情接收完成 ({quote_count}/{requested_count} 只)，允许执行过滤与命中统计"
         )
         try:
-            self.root.after(0, self._on_query_data_ready)
+            self._queue_realtime_update(action="_on_query_data_ready")
         except Exception as e:
             service_logger.warning(f"TDX行情就绪回调排队失败: {e}")
 
@@ -386,7 +393,7 @@ class PRServiceGUI:
             service_logger.warning(f"TDX查询工作线程异常: {e}")
         finally:
             try:
-                self.root.after(0, self._finish_query_tdx_sync)
+                self._queue_realtime_update(action="_finish_query_tdx_sync")
             except Exception as e:
                 # Tk 已关闭时无法排队重试；清除标志避免对象留下永久假忙状态。
                 self._tdx_query_sync_started = False
@@ -469,7 +476,7 @@ class PRServiceGUI:
         # 2. 从全量行情中筛选出属于当前人气榜个股的切片
         test_df = pd.DataFrame()
         if hasattr(self, "sync_manager") and all_codes:
-            full_df = self.sync_manager.get_current_df()
+            full_df = self.sync_manager.get_current_df(all_codes)
             if full_df is not None and not full_df.empty:
                 valid_codes = [c for c in all_codes if c in full_df.index]
                 if valid_codes:
@@ -790,6 +797,16 @@ class PRServiceGUI:
 
     def on_close(self):
         self._shutdown_event.set()
+        timer = getattr(self, "_realtime_ui_timer", None)
+        if timer is not None:
+            self.root.after_cancel(timer)
+        with self._realtime_ui_lock:
+            self._pending_tdx_quotes.clear()
+            self._pending_ui_actions.clear()
+            self._realtime_ui_pending = False
+        with self.df_lock:
+            self.current_df = None
+        self._last_test_df_hits = None
         self.is_running = False
         try:
             self.sync_manager.stop()
@@ -844,7 +861,7 @@ class PRServiceGUI:
         if current_view_date != today or not self._ipc_baseline_ready.is_set():
             return False
 
-        codes = list(codes) if codes is not None else self.get_all_displayed_codes()
+        codes = list(codes) if codes is not None else list(self._tdx_poll_state[2])
         if not codes:
             codes = [str(c).strip().zfill(6) for c in getattr(self, 'resonance_codes', []) if str(c).strip()]
         if not codes:
@@ -879,9 +896,7 @@ class PRServiceGUI:
 
             self._last_test_df_hits = None
             self._mark_tdx_api_data_received(len(tdx_quotes), len(codes))
-            cur_df = self.get_current_df()
-            if hasattr(self, 'root') and self.root:
-                self.root.after(0, lambda: self.refresh_realtime_fields(df=cur_df, tdx_quotes=tdx_quotes))
+            self._queue_realtime_update(tdx_quotes=tdx_quotes)
             return True
         except Exception as e:
             service_logger.debug(f"TDX API 实时刷新异常: {e}")
@@ -997,7 +1012,7 @@ class PRServiceGUI:
             while getattr(self, "root", None) and not self._shutdown_event.is_set():
                 try:
                     # 动态读取当前 TDX 刷新间隔 (默认跟随 cct.ats_tdx_interval，如 5.0s；支持图2独立微调)
-                    sleep_sec = max(1.0, min(self._get_current_tdx_interval(), 60.0))
+                    sleep_sec, _, _ = self._tdx_poll_state
                     if self._shutdown_event.wait(timeout=sleep_sec):
                         break
 
@@ -1009,7 +1024,7 @@ class PRServiceGUI:
                     today = time.strftime("%Y-%m-%d")
 
                     # 1. ⚡ [高频主通道] TDX API 秒级盘口拉取与刷新（开启自动刷新、交易时间内且处于今日复盘）
-                    if self._is_tdx_auto_refresh_enabled() and is_work_time and getattr(self, 'current_date', today) == today:
+                    if self._tdx_poll_state[1] and is_work_time and getattr(self, 'current_date', today) == today:
                         # 仅在全网爬虫真正处于写入树表的极短瞬间避让，绝不因后台常驻等待线程而阻断秒级实时盘口！
                         if not getattr(self, '_is_crawling', False):
                             self.refresh_realtime_from_tdx()
@@ -1373,12 +1388,81 @@ class PRServiceGUI:
         except Exception as e:
             messagebox.showerror("错误", f"取消重点关注失败: {e}")
 
-    def get_current_df(self):
-        """线程安全获取内存中最新已拉取的行情 DataFrame"""
+    def get_current_df(self, codes=None):
+        """获取独立快照，可按代码取行；默认完整数据接口保持不变。"""
         with self.df_lock:
+            manager = getattr(self, "_ipc_sync_manager", None)
+            if manager is not None:
+                frame = manager.get_current_df(codes)
+                if frame is not None and not frame.empty:
+                    # IPC 保留唯一完整底座，界面只持有人气池；叠加尚未被下一轮 IPC 覆盖的 TDX 盘口。
+                    if self.current_df is not None and not self.current_df.empty:
+                        rows = frame.index.intersection(self.current_df.index)
+                        for col in ('trade', 'price', 'close', 'open', 'high', 'low', 'last_close',
+                                    'percent', 'change_pct', 'volume', 'vol', 'amount', 'vwap', 'bid1', 'ask1'):
+                            if col in frame.columns and col in self.current_df.columns and len(rows):
+                                frame.loc[rows, col] = self.current_df.loc[rows, col]
+                    return frame
             if self.current_df is not None and not self.current_df.empty:
+                if codes is not None:
+                    return self.current_df.take(self.current_df.index.isin(codes).nonzero()[0])
                 return self.current_df.copy()
         return None
+
+    def _get_popularity_codes(self):
+        codes = set()
+        cached = getattr(self, "_last_data_cache", {}) or {}
+        for key in ("em_data", "ths_data", "lh_data", "tgb_data", "quotes"):
+            data = cached.get(key, {}) or {}
+            if isinstance(data, dict):
+                codes.update(str(c).strip().zfill(6) for c in data)
+            elif isinstance(data, list):
+                codes.update(str(item["code"]).strip().zfill(6)
+                             for item in data if isinstance(item, dict) and item.get("code"))
+        codes.update(str(item["code"]).strip().zfill(6)
+                     for item in cached.get("resonance_results", [])
+                     if isinstance(item, dict) and item.get("code"))
+        codes.update(str(c).strip().zfill(6) for c in getattr(self, "resonance_codes", []) if c)
+        if not codes:
+            codes.update(self.get_all_displayed_codes())
+        return codes
+
+    def _queue_realtime_update(self, tdx_quotes=None, action=None):
+        """后台只写固定容量的最新状态，不调用 Tk，也不保留旧整市场快照。"""
+        with self._realtime_ui_lock:
+            if self._shutdown_event.is_set():
+                return
+            self._realtime_ui_pending = True
+            if tdx_quotes:
+                self._pending_tdx_quotes.update(tdx_quotes)
+            if action:
+                self._pending_ui_actions.add(action)
+
+    def _drain_realtime_updates(self):
+        self._realtime_ui_timer = None
+        if self._shutdown_event.is_set():
+            return
+        try:
+            self._tdx_poll_state = (
+                max(1.0, min(self._get_current_tdx_interval(), 60.0)),
+                self._is_tdx_auto_refresh_enabled(), tuple(self.get_all_displayed_codes()),
+            )
+            self._popularity_codes_snapshot = tuple(self._get_popularity_codes())
+            with self._realtime_ui_lock:
+                pending = self._realtime_ui_pending
+                quotes, self._pending_tdx_quotes = self._pending_tdx_quotes, {}
+                actions, self._pending_ui_actions = self._pending_ui_actions, set()
+                self._realtime_ui_pending = False
+            for action in ("_on_ipc_baseline_received", "_on_query_data_ready", "_finish_query_tdx_sync"):
+                if action in actions:
+                    getattr(self, action)()
+            if pending:
+                self.refresh_realtime_fields(self.get_current_df(self._get_popularity_codes()), quotes)
+        except Exception as exc:
+            service_logger.warning(f"实时行情主线程刷新异常: {exc}")
+        finally:
+            if not self._shutdown_event.is_set():
+                self._realtime_ui_timer = self.root.after(100, self._drain_realtime_updates)
 
     def request_dynamic_ipc_sync(self, timeout=8.0):
         """确保常驻 IPC 订阅已启动，并等待冷启动全量基线；后续数据由 TK 增量推送。"""
@@ -1406,6 +1490,7 @@ class PRServiceGUI:
                     return self.get_current_df()
             # 服务工厂可能返回进程内已存在的实例，始终绑定当前窗口回调。
             manager.data_callback = self._on_ipc_data_updated
+            manager.callback_codes_provider = lambda: self._popularity_codes_snapshot
             manager.stale_sync_interval = None
 
             start_t = time.time()
@@ -1436,7 +1521,7 @@ class PRServiceGUI:
 
     def on_realtime_data_updated(self, df):
         """当主程序通过 Socket 推送最新的 DataFrame 时的回调"""
-        self.root.after(0, lambda: self.refresh_realtime_fields(df))
+        self._queue_realtime_update()
 
     def refresh_realtime_fields(self, df=None, tdx_quotes=None):
         today = time.strftime("%Y-%m-%d")
@@ -1470,7 +1555,7 @@ class PRServiceGUI:
         self._last_realtime_today = today
 
         if df is None:
-            df = self.get_current_df()
+            df = self.get_current_df(self._get_popularity_codes())
 
         # 🚀 [TDX 实时直连守护] 若当前未传入 df 且内存中尚无行情，通过 TDX API 立即拉取所有展示股票的盘口
         if (df is None or df.empty) and not tdx_quotes:
@@ -2386,8 +2471,10 @@ class PRServiceGUI:
                 c.get("resonance_results", []),
                 c.get("quotes", {})
             )
-        elif hasattr(self, 'sync_manager') and self.sync_manager.get_current_df() is not None:
-            self.update_all_tables_from_ipc(self.sync_manager.get_current_df())
+        elif hasattr(self, 'sync_manager'):
+            df = self.get_current_df(self._get_popularity_codes())
+            if df is not None:
+                self.update_all_tables_from_ipc(df)
 
     # ── 固定基础列（包含分段涨速%、VWAP偏离%等核心实战决策列）──
     _BASE_FIXED_COLS = ("idx", "code", "name", "val", "price", "velocity", "vwap_dev", "dff2", "dff3", "rank")
@@ -3435,6 +3522,7 @@ class PRServiceGUI:
             "resonance_results": resonance_results,
             "quotes": quotes
         }
+        self._popularity_codes_snapshot = tuple(self._get_popularity_codes())
 
         # 实时/缓存模式重新切回实时的自定义列配置 (仅结构变化时重构，保护已调列宽)
         _, _, _extra_cols = self._get_all_cols()
@@ -3450,7 +3538,7 @@ class PRServiceGUI:
 
         # 获取最新的行情快照 DataFrame
         df = getattr(self, "sync_manager", None)
-        df_cache = df.get_current_df() if df is not None else None
+        df_cache = df.get_current_df(self._get_popularity_codes()) if df is not None else None
 
         # 获取全局自选股代码集合
         try:
@@ -3605,7 +3693,7 @@ class PRServiceGUI:
                 if name == "--" or not name.strip():
                     try:
                         from sys_utils import resolve_stock_name
-                        name = resolve_stock_name(code_str)
+                        name = resolve_stock_name(code_str, allow_heavy=False)
                     except Exception:
                         name = "--"
 
@@ -3800,7 +3888,7 @@ class PRServiceGUI:
             if name == "--" or not name.strip():
                 try:
                     from sys_utils import resolve_stock_name
-                    name = resolve_stock_name(code_str)
+                    name = resolve_stock_name(code_str, allow_heavy=False)
                 except Exception:
                     name = "--"
 
@@ -4235,7 +4323,7 @@ class PRServiceGUI:
                 if name == "--" or not name.strip():
                     try:
                         from sys_utils import resolve_stock_name
-                        name = resolve_stock_name(code)
+                        name = resolve_stock_name(code, allow_heavy=False)
                     except Exception:
                         name = "--"
 
@@ -4453,7 +4541,9 @@ class PRServiceGUI:
             # 自动保存为压缩过的 .csv.gz 格式
             csv_path = os.path.join(csv_dir, f"popularity_resonance_{today}.csv.gz")
 
-            current_df = self.sync_manager.get_current_df()
+            codes = set(em_data) | set(ths_data) | set(lh_data) | set(tgb_data) | set(all_quotes)
+            codes.update(r["code"] for r in resonance_results if r.get("code"))
+            current_df = self.sync_manager.get_current_df(codes)
 
             rows = []
             for r in resonance_results:
@@ -4718,7 +4808,7 @@ class PRServiceGUI:
             if not name or name == '--':
                 try:
                     from sys_utils import resolve_stock_name
-                    name = resolve_stock_name(code_str)
+                    name = resolve_stock_name(code_str, allow_heavy=False)
                 except Exception:
                     name = code_str
             if name.startswith("★ "):
@@ -4806,7 +4896,7 @@ class PRServiceGUI:
             if not name or name == "--" or not str(name).strip():
                 try:
                     from sys_utils import resolve_stock_name
-                    name = resolve_stock_name(code)
+                    name = resolve_stock_name(code, allow_heavy=False)
                 except Exception:
                     name = "--"
 
@@ -5256,7 +5346,7 @@ class PRServiceGUI:
         has_history_df = hasattr(self, "_history_df") and self._history_df is not None and not self._history_df.empty
         is_history_mode = (current_view_date != today) and has_history_df
 
-        df_all = self.sync_manager.get_current_df()
+        df_all = self.sync_manager.get_current_df(self._get_popularity_codes())
         # 自动对齐列：如果处于历史模式且已加载历史数据，则直接对齐当前历史列结构，否则使用实时配置列
         if is_history_mode:
             csv_cols = self._history_df.columns.tolist()
@@ -5342,7 +5432,7 @@ class PRServiceGUI:
                         if name == "--" or not name.strip():
                             try:
                                 from sys_utils import resolve_stock_name
-                                name = resolve_stock_name(code_str)
+                                name = resolve_stock_name(code_str, allow_heavy=False)
                             except Exception:
                                 name = "--"
                         pct_val = row.get("percent", 0.0)
@@ -5399,7 +5489,7 @@ class PRServiceGUI:
                 if name == "--" or not name.strip():
                     try:
                         from sys_utils import resolve_stock_name
-                        name = resolve_stock_name(code_str)
+                        name = resolve_stock_name(code_str, allow_heavy=False)
                     except Exception:
                         name = "--"
 
@@ -5477,7 +5567,7 @@ class PRServiceGUI:
                     if c_name == "--" or not c_name.strip():
                         try:
                             from sys_utils import resolve_stock_name
-                            c_name = resolve_stock_name(c_code)
+                            c_name = resolve_stock_name(c_code, allow_heavy=False)
                         except Exception:
                             c_name = "--"
 
