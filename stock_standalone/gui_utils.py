@@ -3,6 +3,7 @@ import sys
 import os
 import ctypes
 import platform
+import time
 import tkinter as tk
 from tkinter import ttk
 import tkinter.font as tkfont
@@ -25,29 +26,60 @@ logger = LoggerFactory.getLogger("instock_TK.GUI")
 # 全局缓存显示器信息
 MONITORS: List[Tuple[int, int, int, int]] = []
 
+def configure_treeview_rendering(tree: ttk.Treeview) -> bool:
+    """Remove the redundant cell layout wrapper on the standard Windows theme."""
+    if platform.system() != "Windows":
+        return False
+    style = ttk.Style(tree)
+    base = tree.cget("style") or "Treeview"
+    try:
+        cell = style.layout(base + ".Cell")
+    except tk.TclError:
+        return False
+    if (len(cell) != 1 or cell[0][0] != "Treedata.padding" or
+            len(cell[0][1].get("children", ())) != 1 or
+            cell[0][1]["children"][0][0] != "Treeitem.text"):
+        return False
+    fast = "Fast." + base
+    style.layout(fast + ".Cell", cell[0][1]["children"])
+    tree.configure(style=fast)
+    return True
+
 def bind_mouse_scroll(widget: Any, speed: int = 3) -> None:
     """支持 Alt/Shift + 滚轮及直接水平滚动的通用鼠标滚轮绑定"""
     system = platform.system()
+    remainder = {"x": 0.0, "y": 0.0}
+
+    def scroll(delta, axis, multiplier=speed):
+        widget._last_scroll_time = time.monotonic()
+        remainder[axis] += delta * multiplier
+        units = int(remainder[axis])
+        if units:
+            remainder[axis] -= units
+            view_scroll = widget.yview_scroll if axis == "y" else widget.xview_scroll
+            view_scroll(-units, "units")
+        # Stop the Treeview class binding from handling the same event again.
+        return "break"
 
     def on_vertical_scroll(event):
-        widget.yview_scroll(-int(event.delta / 120) * speed, "units")
+        return scroll(event.delta / 120, "y")
 
     def on_horizontal_scroll(event):
-        widget.xview_scroll(-int(event.delta / 120) * speed, "units")
+        return scroll(event.delta / 120, "x")
 
     if system == "Windows":
         widget.bind("<MouseWheel>", on_vertical_scroll)
         widget.bind("<Shift-MouseWheel>", on_horizontal_scroll)
         widget.bind("<Alt-MouseWheel>", on_horizontal_scroll)
     elif system == "Darwin":  # macOS
-        widget.bind("<MouseWheel>", lambda e: widget.yview_scroll(-int(e.delta), "units"))
-        widget.bind("<Shift-MouseWheel>", lambda e: widget.xview_scroll(-int(e.delta), "units"))
-        widget.bind("<Alt-MouseWheel>", lambda e: widget.xview_scroll(-int(e.delta), "units"))
+        widget.bind("<MouseWheel>", lambda e: scroll(e.delta, "y", 1))
+        widget.bind("<Shift-MouseWheel>", lambda e: scroll(e.delta, "x", 1))
+        widget.bind("<Alt-MouseWheel>", lambda e: scroll(e.delta, "x", 1))
     else:  # Linux
-        widget.bind("<Button-4>", lambda e: widget.yview_scroll(-1, "units"))
-        widget.bind("<Button-5>", lambda e: widget.yview_scroll(1, "units"))
-        widget.bind("<Shift-Button-4>", lambda e: widget.xview_scroll(-1, "units"))
-        widget.bind("<Shift-Button-5>", lambda e: widget.xview_scroll(1, "units"))
+        widget.bind("<Button-4>", lambda e: scroll(1, "y", 1))
+        widget.bind("<Button-5>", lambda e: scroll(-1, "y", 1))
+        widget.bind("<Shift-Button-4>", lambda e: scroll(1, "x", 1))
+        widget.bind("<Shift-Button-5>", lambda e: scroll(-1, "x", 1))
 
 def enable_native_horizontal_scroll(tree: ttk.Treeview, speed: int = 5) -> None:
     """为 Treeview 添加跨平台水平滚动支持"""
