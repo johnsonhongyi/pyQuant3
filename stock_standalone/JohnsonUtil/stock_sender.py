@@ -82,6 +82,7 @@ class StockSender:
 
         # [REFACTORED] 改为惰性启动线程，杜绝多窗口实例化导致的后台线程堆积泄露
         self._worker = None
+        self._worker_start_lock = threading.Lock()
 
     def close(self):
         """[NEW] 停止工作线程并清理资源"""
@@ -147,10 +148,11 @@ class StockSender:
     # ----------------- 核心分发与工作循环 ----------------- #
     def _ensure_worker_alive(self):
         """确保物理发送工作线程在需要时存活"""
-        if self._worker is None or not self._worker.is_alive():
-            self._running = True
-            self._worker = threading.Thread(target=self._worker_loop, name="StockSenderWorker", daemon=True)
-            self._worker.start()
+        with self._worker_start_lock:
+            if self._worker is None or not self._worker.is_alive():
+                self._running = True
+                self._worker = threading.Thread(target=self._worker_loop, name="StockSenderWorker", daemon=True)
+                self._worker.start()
 
     def send(self, stock_code, auto=False):
         """
@@ -171,6 +173,22 @@ class StockSender:
             'dfcf': self._get_flag(self.dfcf_var)
         }
 
+        self._ensure_worker_alive()
+        task = (stock_code, flags, auto)
+        try:
+            self._task_queue.put_nowait(task)
+        except queue.Full:
+            try:
+                self._task_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._task_queue.put_nowait(task)
+            except queue.Full:
+                pass
+
+    def _push_linkage(self, stock_code, flags, auto=False):
+        """Worker-only proxy startup/recovery; never wait on IPC in a Tk callback."""
         # [ROOT-FIX] 核心变更：转发到 LinkageManagerProxy (Proxy)
         if os.environ.get("IN_LINKAGE_PROCESS_MARK") != "1":
             try:
@@ -185,7 +203,7 @@ class StockSender:
                 
                 # 投递到独立的后台进程进行节流与重叠执行
                 get_link_manager().push(stock_code, flags=flags, auto=auto)
-                return
+                return True
             except Exception as e:
                 # 记录报错到 linkage_err.log，但允许降级 Fallback 到本地直接发送通道
                 try:
@@ -198,16 +216,7 @@ class StockSender:
                 except:
                     pass
 
-        # 如果是 Linkage 进程本身，或者代理推送失败/异常，则 Fallback 使用本地队列与物理发送通道
-        self._ensure_worker_alive()
-
-        # 状态覆盖：如果队列满了，丢弃旧任务，确保时效性
-        try:
-            if self._task_queue.full():
-                self._task_queue.get_nowait()
-            self._task_queue.put_nowait((stock_code, flags, auto))
-        except:
-            pass
+        return False
 
     def _worker_loop(self):
         """
@@ -231,7 +240,10 @@ class StockSender:
                     break
 
                 if task:
-                    self._latest_task = task
+                    code, flags, auto = task
+                    # The proxy already owns its throttle; retain local timing
+                    # only for fallback, as before moving proxy IO off the GUI.
+                    self._latest_task = None if self._push_linkage(code, flags, auto=auto) else task
 
                 if self._latest_task:
                     now = time.time()

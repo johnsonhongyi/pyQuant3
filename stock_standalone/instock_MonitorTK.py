@@ -112,7 +112,7 @@ from data_utils import (
     calc_compute_volume, calc_indicators, fetch_and_process, send_code_via_pipe,test_opt
 )
 from gui_utils import (
-    bind_mouse_scroll, get_monitor_by_point, rearrange_monitors_per_screen,get_monitor_index_for_window,
+    bind_mouse_scroll, configure_treeview_rendering, get_monitor_by_point, rearrange_monitors_per_screen,get_monitor_index_for_window,
     is_window_covered_pg
 )
 from tk_gui_modules.dpi_mixin import DPIMixin
@@ -886,8 +886,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         configured_cols = [c for c in configured_cols if isinstance(c, str) and c]
         self.current_cols = list(dict.fromkeys(["code", *configured_cols]))
         self.tree = ttk.Treeview(tree_frame, columns=self.current_cols, show="headings")
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
+        configure_treeview_rendering(self.tree)
+
+        def scroll_tree(axis, *args):
+            self.tree._last_scroll_time = time.monotonic()
+            getattr(self.tree, axis + 'view')(*args)
+
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=lambda *args: scroll_tree('y', *args))
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=lambda *args: scroll_tree('x', *args))
         self.tree.configure(yscroll=vsb.set, xscroll=hsb.set)
 
         vsb.pack(side="right", fill="y")
@@ -2654,7 +2660,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         t_name = t_name.replace("<bound method ", "").split(" of ")[0]
                     
                     # 限制长度并采样记录（降低超轻微任务的锁与采样损耗）
-                    if task_dur >= 5.0 or (processed_count % 5 == 0):
+                    self._ui_task_sample_count = getattr(self, '_ui_task_sample_count', 0) + 1
+                    if task_dur >= 5.0 or (self._ui_task_sample_count % 5 == 0):
                         t_name_sampled = t_name[:60]
                         self._record_latency_sample(f"ui_task:{t_name_sampled}", task_dur)
                     
@@ -8250,6 +8257,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                 send_tdx_Key = (self.select_code != stock_code)
                 self.select_code = stock_code
+                if send_tdx_Key:
+                    self.tree._last_scroll_time = time.monotonic()
+                    self._strategy_report_version = getattr(self, '_strategy_report_version', 0) + 1
+                    self._pending_strategy_report = None
 
                 stock_code = str(stock_code).zfill(6)
                 logger.debug(f'stock_code:{stock_code}')
@@ -11469,21 +11480,61 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"Push logic error: {e}")
 
     def test_strategy_for_stock(self, code, name):
+        """Queue analysis from a GUI-captured row, retaining only the latest request."""
+        if getattr(self, '_is_closing', False):
+            return
+        self._strategy_report_version = getattr(self, '_strategy_report_version', 0) + 1
+        cur_resample = str(self.global_values.getkey("resample") or 'd').lower().strip()
+        frame = self.df_all_res if (cur_resample != 'd' and
+                                    getattr(self, 'df_all_res', None) is not None) else self.df_all
+        if code not in frame.index:
+            self._pending_strategy_report = None
+            messagebox.showwarning("数据缺失", f"未找到代码 {code} 的数据")
+            return
+        self._pending_strategy_report = (self._strategy_report_version, code, name,
+                                         frame.loc[code].copy())
+        self._start_strategy_report()
+
+    def _start_strategy_report(self):
+        if getattr(self, '_strategy_report_future', None) is not None:
+            return
+        request = getattr(self, '_pending_strategy_report', None)
+        self._pending_strategy_report = None
+        if request is None or getattr(self, '_is_closing', False):
+            return
+        version, code, name, row = request
+
+        def completed(future):
+            def deliver():
+                self._strategy_report_future = None
+                try:
+                    if (not getattr(self, '_is_closing', False) and
+                            version == self._strategy_report_version):
+                        report_text, result, price, error = future.result()
+                        if error:
+                            messagebox.showerror("测试失败", f"策略测试出错: {error}")
+                        else:
+                            self._show_strategy_report_window(code, name, report_text, result, price=price)
+                finally:
+                    self._start_strategy_report()
+            self._put_deduped_task('strategy_report_done', deliver)
+
+        try:
+            self._strategy_report_future = self.view_executor.submit(
+                self._compute_strategy_report, code, name, row)
+            self._strategy_report_future.add_done_callback(completed)
+        except RuntimeError:
+            self._strategy_report_future = None
+            if not getattr(self, '_is_closing', False):
+                logger.exception('Strategy report submission failed')
+
+    def _compute_strategy_report(self, code, name, row):
         """
         测试选中股票的买卖策略并生成分析报告
         用于验证数据完整性和策略决策
         """
         try:
             from intraday_decision_engine import IntradayDecisionEngine
-            # 检查数据是否存在
-            cur_resample = str(self.global_values.getkey("resample") or 'd').lower().strip()
-            df_active = self.df_all_res if (cur_resample != 'd' and hasattr(self, 'df_all_res') and self.df_all_res is not None) else self.df_all
-            if code not in df_active.index:
-                messagebox.showwarning("数据缺失", f"未找到代码 {code} 的数据")
-                return
-            
-            row = df_active.loc[code]
-            
             # 构建行情数据字典
             row_dict = row.to_dict() if hasattr(row, 'to_dict') else dict(row)
             
@@ -11561,6 +11612,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 day_df = self.live_strategy.daily_history_cache.get(cache_key, pd.DataFrame())
                 if day_df.empty:
                     day_df = self.live_strategy.daily_history_cache.get(code, pd.DataFrame())
+                day_df = day_df.copy()
                 
                 # 2. 获取当前仓位状态
                 monitors = self.live_strategy.get_monitors()
@@ -11711,14 +11763,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 获取当前测试价用于模拟成交
             price = row_dict.get('trade', row_dict.get('now', 0))
             
-            # 创建报告窗口
-            self._show_strategy_report_window(code, name, report_text, result, price=price)
+            return report_text, result, price, ''
             
         except Exception as e:
             logger.error(f"Strategy test error: {e}")
-            import traceback
-            traceback.print_exc()
-            messagebox.showerror("测试失败", f"策略测试出错: {e}")
+            logger.debug('Strategy report calculation failed', exc_info=True)
+            return '', None, 0.0, str(e)
 
     def _show_strategy_report_window(self, code, name, report_text, result, price=0.0):
         """显示策略测试报告窗口 (窗口复用模式 - 优化版)"""
@@ -17872,20 +17922,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self.tree_updater.columns = cols_to_show
                     logger.info(f"[TreeUpdater] 列配置变更: {len(cols_to_show)}列 (差异示例: {list(diff_cols)[:3]})")
                 
-                # ✅ 检测是否只是排序（数据相同但顺序不同）
-                # 如果是排序操作，或者是强制刷新，强制全量刷新以确保顺序正确
-                force_full = force or columns_changed or updater_columns_changed
-                if not force_full and hasattr(self, '_last_df_codes_tuple'):
-                    current_codes_tuple = tuple(df['code'].values)
-                    last_tuple = self._last_df_codes_tuple
-                    if len(current_codes_tuple) == len(last_tuple) and current_codes_tuple != last_tuple:
-                        # 快速比对元素集合是否相同（判定为纯顺序变更）
-                        if set(current_codes_tuple) == set(last_tuple):
-                            force_full = True
-                            logger.debug(f"[TreeUpdater] 检测到排序操作，执行全量刷新")
-                    self._last_df_codes_tuple = current_codes_tuple
-                else:
-                    self._last_df_codes_tuple = tuple(df['code'].values)
+                # Force bypasses refresh throttling, not the per-row dirty cache.
+                force_full = columns_changed or updater_columns_changed
                 
                 # 执行增量更新
                 # 颜色/图标依赖的业务字段不能随可见列裁剪掉。
@@ -17928,9 +17966,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.current_df = df
         
         # 调整列宽 (⚡ [OPTIMIZE] 降低调整频率，仅在列变动或每20次刷新时调整)
-        if not hasattr(self, "_last_adjust_cols") or self._last_adjust_cols != self.current_cols or getattr(self, "_update_count", 0) % 20 == 0:
-            self.adjust_column_widths()
-            self._last_adjust_cols = list(self.current_cols)
+        update_count = getattr(self, "_update_count", 0)
+        if (getattr(self, "_last_adjust_cols", None) != self.current_cols or
+                (update_count % 20 == 0 and getattr(self, '_last_width_adjust_count', None) != update_count)):
+            self._last_width_adjust_count = update_count
+            self._request_column_width_adjustment()
         logger.debug(f'refresh_tree_finish')
         # 更新状态栏
         self.update_status()
@@ -18056,6 +18096,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.tree.see(target_iid)
 
 
+    def _request_column_width_adjustment(self):
+        if getattr(self, '_column_adjust_after_id', None) is not None:
+            return
+
+        def apply():
+            self._column_adjust_after_id = None
+            if getattr(self, '_is_closing', False):
+                return
+            if time.monotonic() - getattr(self.tree, '_last_scroll_time', 0) < 0.08:
+                self._column_adjust_after_id = self.after(100, apply)
+                return
+            self.adjust_column_widths()
+            self._last_adjust_cols = list(self.current_cols)
+
+        self._column_adjust_after_id = self.after(100, apply)
+
     def adjust_column_widths(self):
         """根据当前 self.current_df 和 tree 的列调整列宽（只作用在 display 的列）"""
         if not hasattr(self, "tree") or not self.tree.winfo_exists():
@@ -18077,7 +18133,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 跳过不存在于 df 的列
             if df_sample.empty or col not in df_sample.columns:
                 # 仍要确保列有最小宽度
-                self.tree.column(col, width=int(50 * scaled_val))
+                width = int(50 * scaled_val)
+                if int(self.tree.column(col, 'width')) != width:
+                    self.tree.column(col, width=width)
                 continue
             
             # ⚡ 性能优化的计算方式：获取采样列值转换为字符串列表计算最大长度
@@ -18099,7 +18157,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # 极窄技术指标列
                 width = int(45 * self.scale_factor)
 
-            self.tree.column(col, width=int(width))
+            if int(self.tree.column(col, 'width')) != int(width):
+                self.tree.column(col, width=int(width))
         logger.debug(f'adjust_column_widths optimized done (rows:{len(df_sample)}) :{len(cols)}')
     # ----------------- 排序 ----------------- #
     # ----------------- 多级排序相关辅助函数 ----------------- #

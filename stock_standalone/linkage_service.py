@@ -5,6 +5,7 @@ LinkageService - 独立联动与 IO 处理进程
 """
 
 import multiprocessing
+import threading
 import queue
 import time
 import os
@@ -21,9 +22,6 @@ try:
     from JohnsonUtil import commonTips as cct
 except ImportError:
     cct = None
-
-# [ROOT-FIX] 设置标记，防止本进程内部调用 StockSender 时再次通过 Proxy 转发导致无限递归
-os.environ["IN_LINKAGE_PROCESS_MARK"] = "1"
 
 # 获取日志
 logger = LoggerFactory.getLogger("LinkageService")
@@ -136,6 +134,7 @@ class LinkageService:
             logger.error(f"Execution error for {code}: {e}")
 
 def _start_linkage_worker(q, last_active_val):
+    os.environ["IN_LINKAGE_PROCESS_MARK"] = "1"
     try:
         service = LinkageService(q, last_active_val)
         service.run()
@@ -237,7 +236,10 @@ class LinkageManagerProxy:
 
     def stop(self):
         try:
-            self.queue.put("EXIT")
+            try:
+                self.queue.put_nowait("EXIT")
+            except queue.Full:
+                pass
             self.process.join(timeout=0.5)
             if self.process.is_alive():
                 self.process.terminate()
@@ -245,8 +247,10 @@ class LinkageManagerProxy:
         except: pass
 
 global_manager = None
+_manager_lock = threading.Lock()
 def get_link_manager():
     global global_manager
-    if global_manager is None:
-        global_manager = LinkageManagerProxy()
+    with _manager_lock:
+        if global_manager is None:
+            global_manager = LinkageManagerProxy()
     return global_manager

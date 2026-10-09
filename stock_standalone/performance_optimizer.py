@@ -5,6 +5,7 @@
 """
 
 import time
+import copy
 import pandas as pd
 from typing import Dict, List, Tuple, Optional, Any
 from JohnsonUtil import LoggerFactory
@@ -63,6 +64,8 @@ class TreeviewIncrementalUpdater:
         self._render_generation = 0
         self._render_after_id = None
         self._selection_request = None
+        self._pending_render = None
+        self._render_columns = tuple(columns)
         
     def update(self, df: pd.DataFrame, force_full: bool = False) -> Tuple[int, int, int]:
         """
@@ -100,9 +103,16 @@ class TreeviewIncrementalUpdater:
             return self._incremental_update(df)
     
     def _render_in_chunks(self, df, force_full):
-        """Prepare and apply bounded batches; a newer frame cancels old callbacks."""
+        """Prepare off-thread, then apply short batches with input priority."""
+        if self._chunked_insert_pending:
+            self._pending_render = (df, force_full)
+            if force_full or tuple(self.columns) != self._render_columns:
+                self._render_generation += 1
+            return (0, 0, 0)
         self._render_generation += 1
         generation = self._render_generation
+        frame_start = time.perf_counter()
+        self._render_columns = tuple(self.columns)
         if self._render_after_id is not None:
             self.root.after_cancel(self._render_after_id)
             self._render_after_id = None
@@ -123,91 +133,198 @@ class TreeviewIncrementalUpdater:
         new_codes = set(codes)
         order_matches = tuple(self._item_map.get(code) for code in codes) == children
         removed = [code for code in self._item_map if code not in new_codes]
+        following = dict(zip(children, (*children[1:], None))) if not order_matches else {}
+        preceding = dict(zip(children, (None, *children[:-1]))) if not order_matches else {}
+        head = children[0] if children else None
+
+        def unlink(iid):
+            nonlocal head
+            before, after = preceding.pop(iid, None), following.pop(iid, None)
+            if before is None:
+                head = after
+            else:
+                following[before] = after
+            if after is not None:
+                preceding[after] = before
+
         counts = [len(new_codes - self._item_map.keys()), 0, len(removed)]
         self._chunked_insert_pending = True
         position = 0
         delete_position = 0
         rows = iter(())
         prepared_until = 0
+        paused_for_input = False
         batch_size = min(64, max(1, self.chunk_size))
+        executor = getattr(self.root, 'view_executor', None)
+        future = None
+        if executor is not None:
+            marker = copy.copy(self.feature_marker)
+            if marker is not None:
+                marker.tree = None
+            # The worker must not own a root/widget reference, even for cleanup.
+            preparer = type(self)(None, list(self.columns), feature_marker=marker)
+            try:
+                future = executor.submit(preparer._prepare_render_rows, df.copy())
+            except RuntimeError:
+                if getattr(self.root, '_is_closing', False):
+                    self._chunked_insert_pending = False
+                    return (0, 0, 0)
+                logger.exception('[TreeviewUpdater] Background preparation unavailable')
 
         # 🚀 [PERF OPTIMIZE] 帧外预提取一次全局自选，供所有分批闭包复用
         favorites = set()
-        if GlobalFavoriteManager is not None:
+        if future is None and GlobalFavoriteManager is not None:
             try:
                 favorites = GlobalFavoriteManager().get_favorite_stocks()
             except Exception:
                 pass
 
+        def finish():
+            self._chunked_insert_pending = False
+            record = getattr(self.root, '_record_latency_sample', None)
+            if record is not None:
+                record('tree_render_frame', (time.perf_counter() - frame_start) * 1000)
+            pending, self._pending_render = self._pending_render, None
+            if pending is not None and not getattr(self.root, '_is_closing', False):
+                selection_request = self._selection_request
+                self._render_in_chunks(*pending)
+                if selection_request:
+                    self.restore_selection(*selection_request)
+
         def render_batch():
-            nonlocal position, delete_position, rows, prepared_until
+            nonlocal position, delete_position, rows, prepared_until, paused_for_input
             self._render_after_id = None
-            if generation != self._render_generation:
-                return
             if getattr(self.root, '_is_closing', False):
                 self._chunked_insert_pending = False
+                self._pending_render = None
                 return
-            deadline = time.perf_counter() + 0.012
+            scrolling = time.monotonic() - getattr(self.tree, '_last_scroll_time', 0) < 0.08
+            paused_for_input = paused_for_input or scrolling
+            if future is not None and not future.done():
+                self._render_after_id = self.root.after(8, render_batch)
+                return
+            if generation != self._render_generation:
+                finish()
+                return
+            # Do not rewrite/reorder rows while the user is actively scrolling.
+            if scrolling:
+                self._render_after_id = self.root.after(8, render_batch)
+                return
+            if paused_for_input and self._pending_render is not None:
+                finish()
+                return
+            batch_start = time.perf_counter()
+            deadline = batch_start + 0.004
             try:
+                if future is not None and prepared_until == 0:
+                    rows = iter(future.result())
+                    prepared_until = len(df)
                 # Deletion, formatting, tag calculation and Tcl writes all yield.
                 while delete_position < len(removed):
                     code = removed[delete_position]
-                    self.tree.delete(self._item_map.pop(code))
+                    iid = self._item_map.pop(code)
+                    self.tree.delete(iid)
+                    unlink(iid)
                     self._values_cache.pop(code, None)
                     self._tags_cache.pop(code, None)
                     delete_position += 1
                     if time.perf_counter() >= deadline:
                         break
                 while delete_position == len(removed) and position < len(df):
-                    if position == prepared_until:
+                    if future is None and position == prepared_until:
                         prepared_until = min(position + batch_size, len(df))
                         rows = iter(self._prepare_rows(df.iloc[position:prepared_until], fav_stocks=favorites))
                     code, values, row_data = next(rows)
-                    tags = []
-                    if self.feature_marker and self.feature_marker.enable_colors:
+                    tags = row_data if future is not None else []
+                    if future is None and self.feature_marker and self.feature_marker.enable_colors:
                         try:
                             tags.extend(self.feature_marker.get_tags_for_row(row_data) or ())
                         except Exception:
                             logger.debug('行颜色计算失败: %s', code, exc_info=True)
-                    if code in favorites:
+                    if future is None and code in favorites:
                         grade = str(row_data.get('grade', 'C')).upper()
                         tags.append('favorite_S' if 'S' in grade else
                                     'favorite_A' if 'A' in grade else 'favorite')
                     values, tags = tuple(values), tuple(tags)
                     iid = self._item_map.get(code)
                     if iid is None:
-                        iid = self.tree.insert('', 'end', values=values, tags=tags)
+                        iid = self.tree.insert('', position, values=values, tags=tags)
                         self._item_map[code] = iid
                     else:
-                        if (force_full or self._values_cache.get(code) != values
-                                or self._tags_cache.get(code) != tags):
-                            self.tree.item(iid, values=values, tags=tags)
+                        cached = self._values_cache.get(code)
+                        options = {}
+                        changed = force_full or cached != values
+                        if changed:
+                            dirty = ([i for i, value in enumerate(values) if value != cached[i]]
+                                     if not force_full and cached is not None and len(cached) == len(values)
+                                     else None)
+                            if dirty is not None and len(dirty) <= 2:
+                                for i in dirty:
+                                    self.tree.set(iid, self.columns[i], values[i])
+                            else:
+                                options['values'] = values
+                        if force_full or self._tags_cache.get(code) != tags:
+                            options['tags'] = tags
+                        if options:
+                            self.tree.item(iid, **options)
+                        if changed or options:
                             counts[1] += 1
                         # Moving existing items preserves selection and avoids full rebuilds.
                         if not order_matches:
-                            self.tree.move(iid, '', 'end')
+                            if iid != head:
+                                self.tree.move(iid, '', position)
+                            unlink(iid)
                     self._values_cache[code] = values
                     self._tags_cache[code] = tags
                     position += 1
                     if time.perf_counter() >= deadline:
                         break
                 if delete_position < len(removed) or position < len(df):
-                    # ⚡ [P0-FIX] 16ms 间隔（~60fps）让 Tk 事件循环有时间处理滚动/点击
-                    # 原 after(1,...) 仅留 1ms 间隙，5000 行需 80 批 × 12ms = ~1s 持续霸占事件循环
-                    self._render_after_id = self.root.after(16, render_batch)
+                    self._render_after_id = self.root.after(8, render_batch)
                 else:
-                    self._chunked_insert_pending = False
-                    if self._selection_request:
+                    if self._selection_request and self._pending_render is None:
                         code, scroll = self._selection_request
                         self._selection_request = None
                         if self.tree.selection() == previous_selection:
+                            self._chunked_insert_pending = False
                             self.restore_selection(code, scroll)
+                    finish()
             except Exception:
-                self._chunked_insert_pending = False
                 logger.exception('[TreeviewUpdater] 分批刷新失败')
+                finish()
+            finally:
+                record = getattr(self.root, '_record_latency_sample', None)
+                if record is not None:
+                    record('tree_render_batch', (time.perf_counter() - batch_start) * 1000)
 
         render_batch()
         return tuple(counts)
+
+    def _prepare_render_rows(self, df):
+        """Worker-only formatting; no Tcl/Tk calls are allowed here."""
+        favorites = set()
+        if GlobalFavoriteManager is not None:
+            try:
+                favorites = GlobalFavoriteManager().get_favorite_stocks()
+            except Exception:
+                logger.debug('Favorite snapshot unavailable', exc_info=True)
+        prepared = self._prepare_rows(df, fav_stocks=favorites)
+        result = []
+        for number, (code, values, row_data) in enumerate(prepared):
+            tags = []
+            if self.feature_marker and self.feature_marker.enable_colors:
+                try:
+                    tags.extend(self.feature_marker.get_tags_for_row(row_data) or ())
+                except Exception:
+                    logger.debug('Row tags unavailable: %s', code, exc_info=True)
+            if code in favorites:
+                grade = str(row_data.get('grade', 'C')).upper()
+                tags.append('favorite_S' if 'S' in grade else
+                            'favorite_A' if 'A' in grade else 'favorite')
+            result.append((code, tuple(values), tuple(tags)))
+            if number and number % 128 == 0:
+                time.sleep(0)
+        return result
 
     def _full_refresh(self, df: pd.DataFrame, callback: Optional[callable] = None) -> Tuple[int, int, int]:
         """
@@ -286,7 +403,6 @@ class TreeviewIncrementalUpdater:
         
         # 获取需要转换为 float 或 int 格式化的自定义列
         try:
-            from JohnsonUtil import commonTips as cct
             co2float_cols = cct.CFG.co2float
             co2int_cols = getattr(cct.CFG, 'co2int', ["ch_tc2", "ch_bc2", "ch_nod", "pdays"])
         except Exception:
@@ -411,6 +527,8 @@ class TreeviewIncrementalUpdater:
                 values[name_idx] = "【重点】" + values[name_idx]
             
             rows_data.append((code, values, row_data))
+            if i and i % 128 == 0:
+                time.sleep(0)
             # 更新缓存（仅在准备数据时，真正更新在 update 方法中）
         
         prep_time = time.time() - prep_start
