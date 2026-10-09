@@ -151,6 +151,24 @@ def test_gui_keeps_small_pool_while_full_public_snapshot_remains_compatible():
     pd.testing.assert_frame_equal(gui._ipc_sync_manager.current_df, baseline)
 
 
+def test_gui_preserves_tdx_only_rows_fields_and_snapshot_isolation():
+    gui = gui_harness()
+    baseline = pd.DataFrame({'trade': [10.1234567890123], 'ma20d': [9.]}, index=['000001'])
+    local = pd.DataFrame({'trade': [11.1234567890123, 22.9876543210987],
+                          'ma20d': [9., 21.], 'vwap': [10.9876543210987, 21.1234567890123]},
+                         index=['000001', '688146'])
+    gui._ipc_sync_manager = manager_with_frame(baseline.copy())
+    gui.current_df = local.copy()
+    for codes in (None, ['000001', '688146'], ['000001'], ['688146'], []):
+        result = gui.get_current_df(codes)
+        expected = local if codes is None else local.loc[local.index.isin(codes)]
+        pd.testing.assert_frame_equal(result, expected)
+        if not result.empty:
+            result.loc[result.index[0], ['trade', 'vwap']] = -1.
+        pd.testing.assert_frame_equal(gui.current_df, local)
+        pd.testing.assert_frame_equal(gui._ipc_sync_manager.current_df, baseline)
+
+
 def test_lightweight_name_resolution_skips_sina_and_hdf(monkeypatch, tmp_path):
     import builtins
     import http.client
