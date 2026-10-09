@@ -49,6 +49,10 @@ class TreeviewIncrementalUpdater:
         self._chunked_insert_pending = False  # 是否有分块插入正在进行
         self._pending_callback: Optional[callable] = None  # 分块完成后的回调
         self._values_cache: Dict[str, tuple] = {}  # ✅ [NEW] code -> values缓存，避免读取Treeview
+        self._tags_cache = {}
+        self._render_generation = 0
+        self._render_after_id = None
+        self._selection_request = None
         
     def update(self, df: pd.DataFrame, force_full: bool = False) -> Tuple[int, int, int]:
         """
@@ -61,9 +65,12 @@ class TreeviewIncrementalUpdater:
         Returns:
             (新增行数, 更新行数, 删除行数)
         """
+        if self.root is not None:
+            return self._render_in_chunks(df, force_full)
         if df is None or df.empty:
+            deleted = len(self._item_map)
             self._clear_all()
-            return (0, 0, len(self._item_map))
+            return (0, 0, deleted)
         
         # 确保code列存在
         if 'code' not in df.columns:
@@ -82,6 +89,111 @@ class TreeviewIncrementalUpdater:
         else:
             return self._incremental_update(df)
     
+    def _render_in_chunks(self, df, force_full):
+        """Prepare and apply bounded batches; a newer frame cancels old callbacks."""
+        self._render_generation += 1
+        generation = self._render_generation
+        if self._render_after_id is not None:
+            self.root.after_cancel(self._render_after_id)
+            self._render_after_id = None
+        self._selection_request = None
+        if df is None:
+            df = pd.DataFrame()
+        previous_selection = self.tree.selection()
+        children = self.tree.get_children()
+        existing_ids = set(children)
+        # User actions may remove rows directly; discard obsolete Tcl item IDs.
+        for code, iid in list(self._item_map.items()):
+            if iid not in existing_ids:
+                self._item_map.pop(code, None)
+                self._values_cache.pop(code, None)
+                self._tags_cache.pop(code, None)
+        codes = (df['code'].astype(str).tolist() if 'code' in df.columns
+                 else df.index.astype(str).tolist())
+        new_codes = set(codes)
+        order_matches = tuple(self._item_map.get(code) for code in codes) == children
+        removed = [code for code in self._item_map if code not in new_codes]
+        counts = [len(new_codes - self._item_map.keys()), 0, len(removed)]
+        self._chunked_insert_pending = True
+        position = 0
+        delete_position = 0
+        rows = iter(())
+        prepared_until = 0
+        batch_size = min(64, max(1, self.chunk_size))
+
+        def render_batch():
+            nonlocal position, delete_position, rows, prepared_until
+            self._render_after_id = None
+            if generation != self._render_generation:
+                return
+            if getattr(self.root, '_is_closing', False):
+                self._chunked_insert_pending = False
+                return
+            deadline = time.perf_counter() + 0.012
+            try:
+                # Deletion, formatting, tag calculation and Tcl writes all yield.
+                while delete_position < len(removed):
+                    code = removed[delete_position]
+                    self.tree.delete(self._item_map.pop(code))
+                    self._values_cache.pop(code, None)
+                    self._tags_cache.pop(code, None)
+                    delete_position += 1
+                    if time.perf_counter() >= deadline:
+                        break
+                try:
+                    from global_favorites import GlobalFavoriteManager
+                    favorites = GlobalFavoriteManager().get_favorite_stocks()
+                except Exception:
+                    favorites = set()
+                while delete_position == len(removed) and position < len(df):
+                    if position == prepared_until:
+                        prepared_until = min(position + batch_size, len(df))
+                        rows = iter(self._prepare_rows(df.iloc[position:prepared_until]))
+                    code, values, row_data = next(rows)
+                    tags = []
+                    if self.feature_marker and self.feature_marker.enable_colors:
+                        try:
+                            tags.extend(self.feature_marker.get_tags_for_row(row_data) or ())
+                        except Exception:
+                            logger.debug('行颜色计算失败: %s', code, exc_info=True)
+                    if code in favorites:
+                        grade = str(row_data.get('grade', 'C')).upper()
+                        tags.append('favorite_S' if 'S' in grade else
+                                    'favorite_A' if 'A' in grade else 'favorite')
+                    values, tags = tuple(values), tuple(tags)
+                    iid = self._item_map.get(code)
+                    if iid is None:
+                        iid = self.tree.insert('', 'end', values=values, tags=tags)
+                        self._item_map[code] = iid
+                    else:
+                        if (force_full or self._values_cache.get(code) != values
+                                or self._tags_cache.get(code) != tags):
+                            self.tree.item(iid, values=values, tags=tags)
+                            counts[1] += 1
+                        # Moving existing items preserves selection and avoids full rebuilds.
+                        if not order_matches:
+                            self.tree.move(iid, '', 'end')
+                    self._values_cache[code] = values
+                    self._tags_cache[code] = tags
+                    position += 1
+                    if time.perf_counter() >= deadline:
+                        break
+                if delete_position < len(removed) or position < len(df):
+                    self._render_after_id = self.root.after(1, render_batch)
+                else:
+                    self._chunked_insert_pending = False
+                    if self._selection_request:
+                        code, scroll = self._selection_request
+                        self._selection_request = None
+                        if self.tree.selection() == previous_selection:
+                            self.restore_selection(code, scroll)
+            except Exception:
+                self._chunked_insert_pending = False
+                logger.exception('[TreeviewUpdater] 分批刷新失败')
+
+        render_batch()
+        return tuple(counts)
+
     def _full_refresh(self, df: pd.DataFrame, callback: Optional[callable] = None) -> Tuple[int, int, int]:
         """
         全量刷新 - 优化版
@@ -202,7 +314,8 @@ class TreeviewIncrementalUpdater:
                 'hmax': None, 'hmax60': None,
                 'low4': None, 'low10': None, 'low60': None,
                 'lmin': None, 'min5': None, 'cmean': None,
-                'hv': None, 'lv': None, 'llowvol': None, 'lastdu4': None
+                'hv': None, 'lv': None, 'llowvol': None, 'lastdu4': None,
+                'ma5d': None, 'ma20d': None, 'ma60d': None
             }
             for k in feature_cols:
                 if k in df.columns:
@@ -263,7 +376,10 @@ class TreeviewIncrementalUpdater:
                         'hv': fd['hv'][i] if fd['hv'] else 0,
                         'lv': fd['lv'][i] if fd['lv'] else 0,
                         'llowvol': fd['llowvol'][i] if fd['llowvol'] else 0,
-                        'lastdu4': fd['lastdu4'][i] if fd['lastdu4'] else 0
+                        'lastdu4': fd['lastdu4'][i] if fd['lastdu4'] else 0,
+                        'ma5d': fd['ma5d'][i] if fd['ma5d'] else 0,
+                        'ma20d': fd['ma20d'][i] if fd['ma20d'] else 0,
+                        'ma60d': fd['ma60d'][i] if fd['ma60d'] else 0
                     })
                     
                     # 添加图标
@@ -838,6 +954,9 @@ class TreeviewIncrementalUpdater:
         Returns:
             是否成功恢复选中
         """
+        if self._chunked_insert_pending:
+            self._selection_request = (code, scroll_to_view)
+            return False
         if code and code in self._item_map:
             iid = self._item_map[code]
             self.tree.selection_set(iid)

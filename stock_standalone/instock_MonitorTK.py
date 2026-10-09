@@ -579,6 +579,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         _compute_workers = min(4, getattr(cct, 'livestrategy_max_workers', 4))
         self.pump_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pump")
         self.compute_executor = ThreadPoolExecutor(max_workers=_compute_workers, thread_name_prefix="compute")
+        self.view_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix='view')
         self.executor = self.compute_executor  # 🛡️ 向后兼容别名
         logger.info(f"✅ Layered ThreadPool: pump=1 compute={_compute_workers} (Config: {cct.livestrategy_max_workers})")
         # 🔷 [VERSION] 快照版本号 + inflight 计数器
@@ -586,6 +587,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._compute_inflight     = 0
         self._compute_max_inflight = 1
         self._pending_tree_data = None
+        self._task_storage = {}
+        self._pending_task_keys = set()
+        self._task_storage_lock = threading.Lock()
         
         # 💥 关键修复: 必须在创建任何窗口(包括 root)之前设置 DPI 感知
         # 否则非客户区(标题栏)无法正确缩放
@@ -634,6 +638,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         from PyQt6 import QtWidgets
         if not QtWidgets.QApplication.instance():
             self.app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
+        self._qt_app = QtWidgets.QApplication.instance()
+        self._qt_app.setQuitOnLastWindowClosed(False)
 
         self.title("Stock Monitor")
         self.initial_w, self.initial_h, self.initial_x, self.initial_y  = self.load_window_position(self, "main_window", default_width=1200, default_height=480)
@@ -1115,7 +1121,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.tree_updater = TreeviewIncrementalUpdater(
                     self.tree, 
                     self.current_cols,
-                    feature_marker=feature_marker_instance
+                    feature_marker=feature_marker_instance,
+                    root=self, chunk_size=64
                 )
                 self.df_cache = DataFrameCache(ttl=5)  # 5秒缓存
                 self.perf_monitor = PerformanceMonitor("TreeUpdate")
@@ -1164,6 +1171,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._register_hwnd_to_mru(self.winfo_id())
             
         self._process_dispatch_queue()
+        # Tk owns native Windows dispatch; only flush Qt's posted events here.
+        self._qt_event_after_id = self.after(16, self._process_qt_events)
 
 
         self.sender = StockSender(self.tdx_var, self.ths_var, self.dfcf_var, callback=self.update_send_status)
@@ -1726,6 +1735,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def _inject_focus_engine(self, full_df):
         """[ASYNC] 将焦点引擎注入操作100%卸载至后台线程"""
+        if getattr(self, '_is_closing', False):
+            return
+        previous = getattr(self, '_focus_inject_future', None)
+        if previous is not None and not previous.done():
+            return
         def _do_inject():
             try:
                 from sector_focus_engine import get_focus_controller
@@ -1775,7 +1789,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except Exception as _fe:
                 logger.debug(f"[SectorFocusEngine] inject failed: {_fe}")
         
-        self.executor.submit(_do_inject)
+        self._focus_inject_future = self.executor.submit(_do_inject)
 
 
     def _bg_get_realtime_price_map(self, codes=None):
@@ -2471,36 +2485,29 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         [AGGRESSIVE AGGREGATOR] 高性能任务聚合（末尾胜出模式）。
         如果主线程繁忙，新任务会覆盖存储区中的旧任务函数，但确保队列中只有一个触发标记。
         """
-        if not hasattr(self, '_task_storage'):
-            self._task_storage = {} # 存储每个 key 对应的最新执行函数
-        if not hasattr(self, '_pending_task_keys'):
-            self._pending_task_keys = set()
-            
-        # ⭐ 核心：始终更新存储区为“最新”版本（Latest Wins）
-        self._task_storage[key] = task_fn
-
-        # 如果对应的触发标记已在队列中，则直接返回，避免队列膨胀
-        if key in self._pending_task_keys:
-            return 
-
-        self._pending_task_keys.add(key)
+        with self._task_storage_lock:
+            if getattr(self, '_is_closing', False):
+                return
+            if (key.startswith('extra_') and hasattr(self, 'tk_dispatch_queue')
+                    and self.tk_dispatch_queue.qsize() > 100):
+                return
+            self._task_storage[key] = task_fn
+            if key in self._pending_task_keys:
+                return
+            self._pending_task_keys.add(key)
         
         def _aggregator_wrapper():
             try:
                 # 执行时从存储区取出当前最新的函数
-                fn = self._task_storage.pop(key, None)
-                self._pending_task_keys.discard(key)
+                with self._task_storage_lock:
+                    fn = self._task_storage.pop(key, None)
+                    self._pending_task_keys.discard(key)
                 if fn: fn()
             except Exception as e:
                 logger.error(f"Aggregated task [{key}] error: {e}")
         
         _aggregator_wrapper.key = f"agg:[{key}]"
         if hasattr(self, 'tk_dispatch_queue'):
-            # 控制队列深度：如果主线程跟不上，且队列过长，则启动丢弃策略
-            if self.tk_dispatch_queue.qsize() > 100:
-                if key.startswith('extra_'): 
-                    self._task_storage.pop(key, None)
-                    return
             self.tk_dispatch_queue.put(_aggregator_wrapper)
         else:
             self._schedule_after(0, _aggregator_wrapper)
@@ -2515,6 +2522,45 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.error(f"Failed to schedule dispatch: {e}")
             self._dispatch_scheduled = False
+
+    def _process_qt_events(self):
+        """Flush Qt work without nesting a Windows message loop inside a Tk callback."""
+        self._qt_event_after_id = None
+        if getattr(self, '_is_closing', False):
+            return
+        if threading.current_thread() is not threading.main_thread():
+            return
+        if getattr(self, '_is_pumping_events', False):
+            return
+        if getattr(self, '_dispatch_running', False):
+            self._qt_event_after_id = self.after(16, self._process_qt_events)
+            return
+        self._is_pumping_events = True
+        try:
+            qt_app = QApplication.instance()
+            if qt_app is not None:
+                if sys.platform == 'win32':
+                    # processEvents() also dispatches Tk HWND messages while _tkinter's
+                    # Tcl thread state is cleared inside this Python callback. That can
+                    # abort Python in PyEval_RestoreThread; a Python guard cannot fix it.
+                    qt_app.sendPostedEvents()
+                    qt_app.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+                    # Qt's Win32 dispatcher supports a foreign native message loop.
+                    # Wake its hidden window; Tk dispatches it after this callback returns.
+                    dispatcher = qt_app.eventDispatcher()
+                    if dispatcher is not None:
+                        dispatcher.wakeUp()
+                else:
+                    qt_app.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 4)
+        except Exception:
+            logger.exception('[QtHeartbeat] Event dispatch failed')
+        finally:
+            self._is_pumping_events = False
+            if not getattr(self, '_is_closing', False):
+                try:
+                    self._qt_event_after_id = self.after(16, self._process_qt_events)
+                except tk.TclError:
+                    pass
 
     def _process_dispatch_queue(self):
         """[KISS-STABLE] 权威单心跳消费泵：自适应轮询 + Qt事件派发 + 100%防死锁"""
@@ -4177,6 +4223,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._is_closing = True
         if hasattr(self, '_app_exiting'):
             self._app_exiting.set()
+        qt_event_job = getattr(self, '_qt_event_after_id', None)
+        if qt_event_job is not None:
+            try:
+                self.after_cancel(qt_event_job)
+            except tk.TclError:
+                pass
+            self._qt_event_after_id = None
         try:
             import sys_utils
             sys_utils.register_link_callback(None)
@@ -4279,7 +4332,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             #    executor(调度层) -> pump_executor(中转层) -> compute_executor(计算层)
             # 防止主调度线程向已关闭计算池提交任务导致 RuntimeError
             # ---------------------------------------------------------
-            for pool_name in ['executor', 'pump_executor', 'compute_executor']:
+            for pool_name in ['view_executor', 'executor', 'pump_executor', 'compute_executor']:
                 pool = getattr(self, pool_name, None)
                 if pool:
                     try:
@@ -6709,7 +6762,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 repr(getattr(self, 'feature_marker', None)),
                 query, bool(sync_ui),
             )
-            if not query and not force and same_fingerprint(getattr(self, '_last_processed_df_hash', None), df_hash):
+            if not force and same_fingerprint(getattr(self, '_last_processed_df_hash', None), df_hash):
                 return
 
             t_hash = time.time()
@@ -6718,12 +6771,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             target_full_df = full_df_res if (full_df_res is not None and not full_df_res.empty) else full_df
             target_df_raw = df_raw_res if df_raw_res is not None else df_raw
 
-            if query:
+            if query and not getattr(self, '_first_market_frame_shown', False):
                 from query_engine_util import query_engine
                 try:
-                    df = query_engine.execute(target_full_df, query)
+                    df = type(query_engine)().execute(target_full_df, query)
                 except Exception:
                     df = target_full_df
+            elif query:
+                # Enriched filtering runs once in compute; pump only schedules the frame.
+                df = target_full_df
             else:
                 df = _sanitize(target_df_raw) if target_df_raw is not None else target_full_df.copy()
                 
@@ -6755,7 +6811,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             version = self._snapshot_version
             self._compute_inflight = getattr(self, '_compute_inflight', 0) + 1
             view_context = (query, cur_res, getattr(self, 'sortby_col', None),
-                            bool(getattr(self, 'sortby_col_ascend', False)))
+                            bool(getattr(self, 'sortby_col_ascend', False)),
+                            tuple(vars(self._capture_sort_state()).items()))
             self._compute_view_context = view_context
 
             # 首批行情交付基础内存和显示，不等待指标计算，也不提前驱动交易。
@@ -6769,7 +6826,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         return
                     self._sync_market_frame_state(daily, resampled, context[1])
                     if (getattr(self, '_last_value', ''), self.global_values.getkey('resample') or 'd',
-                        getattr(self, 'sortby_col', None), bool(getattr(self, 'sortby_col_ascend', False))) != context:
+                        getattr(self, 'sortby_col', None), bool(getattr(self, 'sortby_col_ascend', False)),
+                        tuple(vars(self._capture_sort_state()).items())) != context:
                         return
                     self.refresh_tree(d, force=True, source_version=('initial', v))
                     self._first_market_frame_shown = True
@@ -6786,7 +6844,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     getattr(self, 'sortby_col', None),
                     getattr(self, 'sortby_col_ascend', False),
                     getattr(self, 'feature_marker', None),
-                    full_df_res, query=query
+                    full_df_res, query=query, sort_state=self._capture_sort_state()
                 )
             except Exception:
                 self._compute_inflight = 0
@@ -6802,7 +6860,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # Pump 阶段完成，释放 processing 标志，允许 update_tree 提交下一帧
             self._is_processing_tree_data = False
 
-    def _run_compute_async(self, full_df, df, sync_ui, cur_res, version, force=False, sortby_col=None, sortby_col_ascend=False, feature_marker=None, full_df_res=None, query=""):
+    def _run_compute_async(self, full_df, df, sync_ui, cur_res, version, force=False, sortby_col=None, sortby_col_ascend=False, feature_marker=None, full_df_res=None, query="", sort_state=None):
         """
         [Compute Thread] CPU 重计算区。严禁直接操作 UI 或调用 _put_deduped_task。
         结果仅通过 return 值传递，由 _on_compute_done->pump->_handle_compute_result 写入 UI。
@@ -6883,7 +6941,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if query:
                 try:
                     from query_engine_util import query_engine
-                    df = query_engine.execute(target_source, query)
+                    df = type(query_engine)().execute(target_source, query)
                 except Exception as e:
                     logger.warning(f"[Compute] Query failed after enrichment: {e}")
             elif df is not None and not df.empty:
@@ -6896,53 +6954,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         ).fillna(50)
 
             if df is not None and not df.empty:
-                # 4. [PERF] CPU预计算：在后台线程完成 Treeview 的排序运算，彻底解放 UI 线程
-                try:
-                    from global_favorites import GlobalFavoriteManager
-                    fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
-                    df = df.copy()
-                    if 'code' not in df.columns:
-                        df['code'] = df.index.astype(str)
-                    df['is_fav'] = df['code'].apply(lambda x: 1 if str(x).strip().zfill(6) in fav_stocks else 0)
-                except Exception as e:
-                    logger.warning(f"Failed to check favorites in compute sort: {e}")
-                    df['is_fav'] = 0
-
-                if sortby_col and sortby_col in df.columns:
-                    try:
-                        if sortby_col == 'name' and feature_marker:
-                            fm = feature_marker
-                            cols = df.columns.tolist()
-                            feat_idx = {c: i+1 for i, c in enumerate(cols)} # index 0 is row Index
-                            scores = []
-                            for row in df.itertuples(name=None):
-                                icon = fm.get_icon_fast(row, feat_idx)
-                                prio = fm.get_priority_score(icon)
-                                name_val = row[feat_idx['name']] if 'name' in feat_idx else ''
-                                scores.append((prio, str(name_val)))
-                            
-                            score_series = pd.Series(scores, index=df.index)
-                            df['prio_score'] = score_series
-                            df = df.sort_values(by=['is_fav', 'prio_score'], ascending=[False, sortby_col_ascend])
-                            df.drop(columns=['prio_score'], inplace=True)
-                        else:
-                            is_num = pd.api.types.is_numeric_dtype(df[sortby_col])
-                            if is_num:
-                                df = df.sort_values(by=['is_fav', sortby_col], ascending=[False, sortby_col_ascend])
-                            else:
-                                try:
-                                    df['_sort_num_col'] = pd.to_numeric(df[sortby_col], errors='coerce').fillna(0)
-                                    df = df.sort_values(by=['is_fav', '_sort_num_col'], ascending=[False, sortby_col_ascend])
-                                    df.drop(columns=['_sort_num_col'], inplace=True)
-                                except Exception:
-                                    df = df.sort_values(by=['is_fav', sortby_col], ascending=[False, sortby_col_ascend])
-                    except Exception as e:
-                        logger.warning(f"[Compute Sorting] 预排序计算失败: {e}")
-                else:
-                    df = df.sort_values(by='is_fav', ascending=False)
-
-                if 'is_fav' in df.columns:
-                    df.drop(columns=['is_fav'], inplace=True)
+                # Apply the same frozen multi-column/MainU/feature ordering as manual sorting.
+                df = self._sort_dataframe(df.copy(), sort_state or self._capture_sort_state())
 
             # 4. 策略引擎 (fire-and-forget, 内置节流)
             if not full_df.empty:
@@ -7039,7 +7052,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 current_context = (getattr(self, '_last_value', ''),
                                    self.global_values.getkey('resample') or 'd',
                                    getattr(self, 'sortby_col', None),
-                                   bool(getattr(self, 'sortby_col_ascend', False)))
+                                   bool(getattr(self, 'sortby_col_ascend', False)),
+                                   tuple(vars(self._capture_sort_state()).items()))
                 if view_context is not None and current_context != view_context:
                     self._last_ui_bus_version = 0
                     if current_context[1] != cur_res:
@@ -7048,11 +7062,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         self._last_applied_compute_version = version
                         return
                     # 历史条件/排序切换不应丢弃完整指标或等待下一轮重计算。
-                    if display_df is not None and current_context[0] != view_context[0]:
+                    if display_df is not None:
+                        self._sync_market_frame_state(full_df, full_df_res, cur_res)
+                        self._last_applied_compute_version = version
                         source = full_df_res if cur_res != 'd' and full_df_res is not None else full_df
-                        display_df = (query_engine.execute(source, current_context[0]) if query_engine
-                                      else source.query(current_context[0], engine='python')
-                                      if current_context[0] else source)
+                        def deliver_view(filtered, error):
+                            if error:
+                                logger.warning('刷新查询失败: %s', error)
+                                return
+                            if version != getattr(self, '_last_applied_compute_version', 0):
+                                return
+                            self._last_applied_compute_version = version
+                            self._apply_tree_data_sync(full_df, filtered, cur_res, True, full_df_res)
+                        self._request_view_work(source, current_context[0], deliver_view)
+                        return
                     final_ui_force = True
                 else:
                     final_ui_force = final_force or not getattr(self, '_last_applied_compute_version', 0)
@@ -7284,12 +7307,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self._monitor_windows_restored = True
                     self._schedule_after(2000, self.restore_all_monitor_windows)
 
-                # 🧹 周期性手动 GC (根据反馈：按 50 次更新触发一次，降低卡顿)
+                # Count completed deliveries without forcing a synchronous heap scan.
                 if not hasattr(self, '_update_count'): self._update_count = 0
                 self._update_count += 1
-                if self._update_count % 50 == 0:
-                    gc.collect()
-                    logger.debug(f"🧹 [GC] Periodical cycle triggered at update #{self._update_count}")
                     
                 # [THROTTLE] 策略检查已移至后台分析 worker
     
@@ -7446,9 +7466,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 except Exception as gc_err:
                     logger.warning(f"Error clearing Sina cache in GC loop: {gc_err}")
 
-            # 6. 强制执行垃圾回收
-            cleaned = gc.collect()
-            logger.debug(f"🛡️ [GC] Periodic memory optimization completed. gc.collect() cleared {cleaned} objects.")
+            # Let Python collect cycles incrementally; a full heap scan stalls Tk and Qt.
         except Exception as e:
             logger.warning(f"Error in controlled_gc_loop: {e}")
 
@@ -7462,7 +7480,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """[EXTRA] 计算全盘统计概览 (上涨/下跌/指数/温度)，通过主线程分步执行或线程池"""
         if getattr(self, '_is_closing', False):
             return
-            
+        previous = getattr(self, '_market_stats_future', None)
+        if previous is not None and not previous.done():
+            return
+
         # 预先导入，避免线程内 import 触发 GIL 异常
         try:
             from market_pulse_engine import DailyPulseEngine
@@ -7670,7 +7691,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         logger.error(f"Async stats aggregation failed: {e}")
                 
                 if hasattr(self, 'executor'):
-                    self.executor.submit(_async_stats_aggregation)
+                    self._market_stats_future = self.executor.submit(_async_stats_aggregation)
                 else:
                     threading.Thread(target=_async_stats_aggregation, daemon=True).start()
         except:
@@ -17777,21 +17798,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if df is None:
             df = self.current_df.copy() if hasattr(self, 'current_df') else None
 
-        # ⚡ [PERF] 排序计算已转移到 compute_executor 预计算，UI线程直接应用排序好的 df
-        # [NEW] 针对 UI 端的搜索、过滤等操作产生的未排序 df 进行补齐排序
-        # [FORCE SORT] 如果当前有活跃的排序状态（多级或单级），即使 skip_sort=True，也必须强制重排序以保持状态
-        tree_obj = getattr(self, 'tree', None)
-        has_active_sort = False
-        if tree_obj:
-            has_active_sort = bool(getattr(tree_obj, 'sort_level1_col', None) or getattr(tree_obj, 'sortby_col', None))
-        else:
-            has_active_sort = bool(getattr(self, 'sort_level1_col', None) or getattr(self, 'sortby_col', None))
-
-        if df is not None and not df.empty and (not skip_sort or has_active_sort):
-            try:
-                df = self._sort_dataframe(df)
-            except Exception as e:
-                logger.warning(f"[UI Sorting] 界面重排序失败: {e}")
+        # Computed frames are already sorted; manual views are sorted in the background.
+        if df is not None and not df.empty and not skip_sort:
+            def deliver_sorted(sorted_df, error):
+                if error:
+                    logger.warning('[UI Sorting] 界面重排序失败: %s', error)
+                    return
+                self.refresh_tree(sorted_df, force=True, skip_sort=True,
+                                  scroll_to_view=scroll_to_view, source_version=source_version)
+            self._request_view_work(df, '', deliver_sorted)
+            return
 
         # 若 df 为空，更新状态并返回
         if df is None or df.empty:
@@ -18076,10 +18092,92 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         logger.debug(f'adjust_column_widths optimized done (rows:{len(df_sample)}) :{len(cols)}')
     # ----------------- 排序 ----------------- #
     # ----------------- 多级排序相关辅助函数 ----------------- #
-    def _sort_dataframe(self, df):
+    def _capture_sort_state(self):
+        from types import SimpleNamespace
+        tree = getattr(self, 'tree', None)
+        names = ('sort_level1_col', 'sort_level1_asc', 'sort_level2_col', 'sort_level2_asc',
+                 'sort_level3_col', 'sort_level3_asc', 'sortby_col', 'sortby_col_ascend')
+        defaults = {name: True if name.endswith('_asc') else
+                     False if name.endswith('_ascend') else None for name in names}
+        return SimpleNamespace(**{name: getattr(tree, name, getattr(self, name, defaults[name]))
+                                  for name in names})
+
+    def _view_work_context(self):
+        return (getattr(self, '_last_value', ''), self.global_values.getkey('resample') or 'd',
+                tuple(vars(self._capture_sort_state()).items()))
+
+    def _request_view_work(self, source, query, on_ready):
+        """GUI submits one query/sort job and retains only the newest pending view."""
+        if getattr(self, '_is_closing', False):
+            return
+        self._pending_view_work = (source, query, on_ready, self._view_work_context(),
+                                   self._capture_sort_state(), getattr(self, '_data_update_version', 0))
+        if getattr(self, '_view_work_future', None) is not None:
+            return
+        self._start_view_work()
+
+    def _start_view_work(self):
+        if getattr(self, '_view_work_future', None) is not None:
+            return
+        job = getattr(self, '_pending_view_work', None)
+        self._pending_view_work = None
+        if job is None or getattr(self, '_is_closing', False):
+            return
+        source, query, on_ready, context, sort_state, data_version = job
+
+        def compute_view():
+            try:
+                frame = source.copy()
+                if query:
+                    if query_engine:
+                        engine = type(query_engine)()
+                        frame = engine.execute(frame, query)
+                        if engine.last_error:
+                            return None, engine.last_error
+                    else:
+                        frame = frame.query(query, engine='python')
+                return self._sort_dataframe(frame, sort_state), ''
+            except Exception as exc:
+                logger.exception('后台查询/排序失败')
+                return None, str(exc)
+
+        def completed(future):
+            def deliver():
+                self._view_work_future = None
+                try:
+                    if (not getattr(self, '_is_closing', False) and context == self._view_work_context()
+                            and data_version == getattr(self, '_data_update_version', 0)):
+                        frame, error = future.result()
+                        on_ready(frame, error)
+                finally:
+                    self._start_view_work()
+            self._put_deduped_task('view_work_done', deliver)
+        try:
+            self._view_work_future = self.view_executor.submit(compute_view)
+            self._view_work_future.add_done_callback(completed)
+        except RuntimeError:
+            self._view_work_future = None
+            if not getattr(self, '_is_closing', False):
+                logger.exception('提交后台查询失败')
+
+    def _feature_name_sort_keys(self, df, marker):
+        indices = {column: index + 1 for index, column in enumerate(df.columns)}
+        keys = []
+        name_index = indices.get('name')
+        for number, row in enumerate(df.itertuples(name=None)):
+            try:
+                priority = marker.get_priority_score(marker.get_icon_fast(row, indices))
+            except Exception:
+                priority = 0
+            keys.append((priority, str(row[name_index]) if name_index is not None else ''))
+            if number and number % 128 == 0:
+                time.sleep(0)  # Yield the GIL during feature-based sorting.
+        return pd.Series(keys, index=df.index)
+
+    def _sort_dataframe(self, df, sort_state=None):
         """对 DataFrame 应用当前的排序规则 (支持多级 and 单级排序)"""
         # 收集已绑定的多级排序级别，优先从 tree 实例上读取属性，防御同步偏差
-        tree = getattr(self, 'tree', None)
+        tree = sort_state if sort_state is not None else getattr(self, 'tree', None)
         
         sort_l1_col = getattr(tree, 'sort_level1_col', None) if tree else getattr(self, 'sort_level1_col', None)
         sort_l1_asc = getattr(tree, 'sort_level1_asc', True) if tree else getattr(self, 'sort_level1_asc', True)
@@ -18140,18 +18238,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     by_cols.append(temp_col)
                     ascending_list.append(asc_val)
                 elif col_name == 'name' and getattr(self, '_use_feature_marking', False) and hasattr(self, 'feature_marker'):
-                    fm = self.feature_marker
-                    def _get_row_priority(r):
-                        row_dict = r.to_dict()
-                        row_dict['price'] = row_dict.get('price', row_dict.get('trade', 0))
-                        try:
-                            icon = fm.get_icon_for_row(row_dict)
-                            prio = fm.get_priority_score(icon)
-                        except Exception:
-                            prio = 0
-                        return (prio, row_dict.get('name', ''))
-                    
-                    sort_keys = df.apply(_get_row_priority, axis=1)
+                    sort_keys = self._feature_name_sort_keys(df, self.feature_marker)
                     temp_col = '_temp_name_sort_key'
                     df[temp_col] = sort_keys
                     by_cols.append(temp_col)
@@ -18196,18 +18283,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         df_sorted.drop(columns=['is_fav'], errors='ignore', inplace=True)
                     return df_sorted
                 elif sort_col == 'name' and getattr(self, '_use_feature_marking', False) and hasattr(self, 'feature_marker'):
-                    fm = self.feature_marker
-                    def _get_row_priority(r):
-                        row_dict = r.to_dict()
-                        row_dict['price'] = row_dict.get('price', row_dict.get('trade', 0))
-                        try:
-                            icon = fm.get_icon_for_row(row_dict)
-                            prio = fm.get_priority_score(icon)
-                        except Exception:
-                            prio = 0
-                        return (prio, row_dict.get('name', ''))
-                    
-                    sort_keys = df.apply(_get_row_priority, axis=1)
+                    sort_keys = self._feature_name_sort_keys(df, self.feature_marker)
                     df['_prio_sort_key'] = sort_keys
                     df_sorted = df.sort_values(by=['is_fav', '_prio_sort_key'], ascending=[False, sort_asc])
                     df_sorted.drop(columns=['_prio_sort_key'], errors='ignore', inplace=True)
@@ -18255,8 +18331,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def trigger_multi_level_sort(self):
         """手动触发多级排序"""
-        df_sorted = self._sort_dataframe(self.current_df)
-        self.refresh_tree(df_sorted, force=True, skip_sort=True)
+        self.refresh_tree(self.current_df, force=True)
         self.tree.yview_moveto(0)
 
     def set_multi_sort_level(self, col_name, level):
@@ -21600,54 +21675,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.status_var.set("当前数据为空")
             return
 
-        # 3. 执行查询 (全面移向新引擎)
-        if not query_engine:
-            logger.error("PandasQueryEngine not found! Using legacy fallback.")
-            try:
-                df_filtered = df_all.query(combined_query, engine='python')
-            except Exception as e:
-                self.status_var.set(f"查询失败: {e}")
+        def deliver_search(df_filtered, error):
+            if error:
+                self.status_var.set(f"⚠️ 语法错误: {error[:25]}")
                 return
-        else:
-            # 执行强大且具备 SQL 映射、向量化降级的查询
-            try:
-                df_filtered = query_engine.execute(df_all, combined_query)
-            except Exception as e:
-                logger.exception(f"Query Engine Critical Crash: {e} | Query: {combined_query}")
-                self.status_var.set(f"❌ 引擎故障: {str(e)[:15]}")
+            self.refresh_tree(df_filtered, force=True, skip_sort=True)
+            if df_filtered.empty:
+                self.status_var.set("❌ 无匹配结果")
                 return
-
-        # 4. 结果处理与 UI 更新
-        err_info = query_engine.last_error if query_engine else ""
-        if err_info:
-            logger.warning("Query Logic Error: %s | Query: %s", err_info, combined_query)
-            short_err = (err_info[:25] + "...") if len(err_info) > 25 else err_info
-            self.status_var.set(f"⚠️ 语法错误: {short_err}")
-            return
-        if df_filtered.empty:
-            self.refresh_tree(df_filtered, force=True)
-            self.status_var.set("❌ 无匹配结果")
-            return
-        
-        # 优化状态栏显示：匹配数/总数 | 查询缩略
-        rows_all = len(df_all)
-        rows_hit = len(df_filtered)
-        # disp_query = combined_query[:30].replace('\n', ' ')
-        # self.status_var.set(f"✨ 匹配:{rows_hit}/{rows_all} | Q:{disp_query}...")
-        # self.status_var2.set("")
-        
-        # 异步刷新 Treeview 提高响应性
-        self._schedule_after(10, lambda: self.refresh_tree(df_filtered, force=True))
-        
-        if df_filtered.empty:
-            return
-        self.on_test_code()
-        self.auto_refresh_detail_window()
-        self.update_category_result(df_filtered)
-        if not hasattr(self, "_start_init_show_concept_detail_window"):
-            # 已经创建过，直接显示
-            self.show_concept_detail_window()
-            self._start_init_show_concept_detail_window = True
+            self.on_test_code()
+            self.auto_refresh_detail_window()
+            self.update_category_result(df_filtered)
+            if not hasattr(self, '_start_init_show_concept_detail_window'):
+                self.show_concept_detail_window()
+                self._start_init_show_concept_detail_window = True
+        self.status_var.set('正在后台查询...')
+        self._request_view_work(df_all, combined_query, deliver_search)
 
     def on_test_code(self,onclick=False):
         # if self.query_manager.current_key == 'history2':
@@ -21698,15 +21741,43 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         else:
             df_code = df_all
 
-        results = self.query_manager.test_code(df_code)
+        self._pending_history_hits = (df_code, self.query_manager.current_history,
+                                      [dict(record) for record in self.query_manager.current_history])
+        if getattr(self, '_history_hits_future', None) is None:
+            self._start_history_hits()
 
-        # 更新当前历史的命中结果
-        for i, r in enumerate(results):
-            if i < len(self.query_manager.current_history):
-                self.query_manager.current_history[i]["hit"] = r["hit"]
+    def _start_history_hits(self):
+        if getattr(self, '_history_hits_future', None) is not None:
+            return
+        job = getattr(self, '_pending_history_hits', None)
+        self._pending_history_hits = None
+        if job is None or getattr(self, '_is_closing', False):
+            return
+        frame, history, records = job
 
-        self.query_manager.refresh_tree()
-        # toast_message(self, f"{code} 测试完成，共 {len(results)} 条规则")
+        def completed(future):
+            def deliver():
+                self._history_hits_future = None
+                try:
+                    results = future.result()
+                    current = self.query_manager.current_history
+                    if (current is history and [r.get('query') for r in current]
+                            == [r.get('query') for r in records]):
+                        for record, result in zip(current, results):
+                            record['hit'] = result['hit']
+                        self.query_manager.refresh_tree()
+                except Exception:
+                    logger.exception('历史规则命中统计失败')
+                finally:
+                    self._start_history_hits()
+            self._put_deduped_task('history_hits_done', deliver)
+        try:
+            self._history_hits_future = self.compute_executor.submit(test_code_against_queries, frame, records)
+            self._history_hits_future.add_done_callback(completed)
+        except RuntimeError:
+            self._history_hits_future = None
+            if not getattr(self, '_is_closing', False):
+                logger.exception('提交历史命中统计失败')
 
 
 
