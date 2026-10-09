@@ -116,6 +116,7 @@ from gui_utils import (
     is_window_covered_pg
 )
 from tk_gui_modules.dpi_mixin import DPIMixin
+from tk_gui_modules.column_viewport import ColumnViewportTreeview
 from strategy_manager import StrategyManager
 from tk_gui_modules.window_mixin import WindowMixin
 from tk_gui_modules.treeview_mixin import TreeviewMixin
@@ -885,7 +886,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             configured_cols = DEFAULT_DISPLAY_COLS
         configured_cols = [c for c in configured_cols if isinstance(c, str) and c]
         self.current_cols = list(dict.fromkeys(["code", *configured_cols]))
-        self.tree = ttk.Treeview(tree_frame, columns=self.current_cols, show="headings")
+        self.tree = ColumnViewportTreeview(tree_frame, columns=self.current_cols, show="headings")
         configure_treeview_rendering(self.tree)
 
         def scroll_tree(axis, *args):

@@ -70,6 +70,8 @@ data/ipo_learning/shadow_observations.sqlite
 !tests/test_tk_detector_loading.py
 !tests/test_tk_runtime_performance.py
 !tests/test_tk_input_responsiveness.py
+!tests/test_tk_column_viewport.py
 !design/tk_interaction_benchmark_20261009.json
 !design/tk_interaction_scenarios_verified_20261009.json
+!design/tk_column_viewport_benchmark_20261009.json
 .build_validation/
