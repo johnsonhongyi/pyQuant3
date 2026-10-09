@@ -2969,17 +2969,17 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
     def _on_worker_finished(self, _=None):
         """在主线程被调用，由后台真正计算完毕后触发UI更新"""
-        if self._panel_closing:
+        if getattr(self, '_panel_closing', False):
             return
         self._ui_snapshot_ts = -1
         self._ui_snapshot_version = -1
         df = getattr(self._worker, 'latest_df', None)
         # [NEW] 捕获并更新最新的全量行情数据源，确保宏观查询使用的是包含 nclose, ral 等全量字段的 df
         if df is not None:
-            if df is not self._last_source_df:
-                self._macro_source_version += 1
+            if df is not getattr(self, '_last_source_df', None):
+                self._macro_source_version = getattr(self, '_macro_source_version', 0) + 1
             self._last_source_df = df
-        if not self.isVisible():
+        if hasattr(self, 'isVisible') and not self.isVisible():
             return
             
         try:
@@ -2997,7 +2997,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 # 只有触发强制刷新（如用户交互）或行情周期到了才真正重绘
                 should_refresh = self._force_update_requested or (now - self._last_refresh_ts >= limit) 
                 if (not should_refresh or getattr(self, '_ui_refresh_pending', False)
-                        or self._snapshot_retry_timer.isActive()):
+                        or (hasattr(self, '_snapshot_retry_timer') and self._snapshot_retry_timer.isActive())):
                     return
                 self._ui_refresh_pending = True
             
@@ -3013,17 +3013,19 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
     def _flush_worker_refresh(self):
         """同一批完成通知只渲染一次，宏查询使用执行时的最新行情。"""
-        if self._panel_closing:
+        if getattr(self, '_panel_closing', False):
             return
         try:
-            if not self.isVisible():
-                self._snapshot_retry_timer.stop()
+            if hasattr(self, 'isVisible') and not self.isVisible():
+                if hasattr(self, '_snapshot_retry_timer'):
+                    self._snapshot_retry_timer.stop()
                 return
-            self._get_detector_ui_snapshot()
-            if not getattr(self, '_ui_snapshot_fresh', False):
-                if not self._snapshot_retry_timer.isActive():
-                    self._snapshot_retry_timer.start(100)
-                return
+            if hasattr(self, '_get_detector_ui_snapshot'):
+                self._get_detector_ui_snapshot()
+                if not getattr(self, '_ui_snapshot_fresh', True):
+                    if hasattr(self, '_snapshot_retry_timer') and not self._snapshot_retry_timer.isActive():
+                        self._snapshot_retry_timer.start(100)
+                    return
             with self._update_lock:
                 self._force_update_requested = False
             if getattr(self, '_is_macro_active', False) and getattr(self, '_macro_query_str', ''):
@@ -3042,14 +3044,17 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
     def _get_detector_ui_snapshot(self):
         """Never make the shared Tk/Qt GUI wait for the scoring worker's lock."""
-        detector = self.detector
+        detector = getattr(self, 'detector', None)
+        if detector is None:
+            self._ui_snapshot_fresh = True
+            return getattr(self, '_ui_detector_snapshot', ([], []))
         if (hasattr(self, '_ui_detector_snapshot') and
-                getattr(self, '_ui_snapshot_version', -1) == detector.data_version):
+                getattr(self, '_ui_snapshot_version', -1) == getattr(detector, 'data_version', -1)):
             self._ui_snapshot_fresh = True
             return self._ui_detector_snapshot
         if not detector._lock.acquire(blocking=False):
             self._ui_snapshot_fresh = False
-            if not self._panel_closing and not self._snapshot_retry_timer.isActive():
+            if not getattr(self, '_panel_closing', False) and (hasattr(self, '_snapshot_retry_timer') and not self._snapshot_retry_timer.isActive()):
                 self._snapshot_retry_timer.start(100)
             now = time.monotonic()
             if now - getattr(self, '_last_detector_busy_log', 0) >= 30:
@@ -3492,7 +3497,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
     def _run_macro_query_internal(self, query: str, is_auto_refresh: bool = False):
         """One background query at a time, retaining only the newest pending request."""
-        if self._panel_closing:
+        if getattr(self, '_panel_closing', False):
             return
         if query != self._macro_query_str:
             self._macro_filtered_codes = set()
@@ -3513,7 +3518,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     def _start_macro_query(self):
         job = self._macro_pending_job
         self._macro_pending_job = None
-        if job is None or self._panel_closing:
+        if job is None or getattr(self, '_panel_closing', False):
             return
         df, query, auto, key = job
         self._macro_running_key = key
@@ -3536,7 +3541,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 return key, auto, len(df), set(), str(exc)
 
         def completed(future):
-            if self._panel_closing or future.cancelled():
+            if getattr(self, '_panel_closing', False) or future.cancelled():
                 return
             try:
                 self.macro_query_ready.emit(future.result())
@@ -3555,13 +3560,13 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         except RuntimeError:
             self._macro_future = None
             self._macro_running_key = None
-            if not self._panel_closing:
+            if not getattr(self, '_panel_closing', False):
                 logger.exception('[MacroQuery] 无法提交查询')
 
     def _on_macro_query_ready(self, result):
         self._macro_future = None
         self._macro_running_key = None
-        if self._panel_closing:
+        if getattr(self, '_panel_closing', False):
             return
         key, auto, source_count, codes, error = result
         try:
@@ -4433,7 +4438,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
     def _start_table_render(self, table, rows):
         """Replace pending paint work; each GUI turn renders at most 24 rows / 6ms."""
-        if self._panel_closing or not self.isVisible():
+        if getattr(self, '_panel_closing', False) or not self.isVisible():
             return
         job = self._table_render_jobs.get(table)
         if job is None:
@@ -4448,7 +4453,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
     def _advance_table_render(self, table):
         job = self._table_render_jobs.get(table)
-        if self._panel_closing or job is None or job[1] is None:
+        if getattr(self, '_panel_closing', False) or job is None or job[1] is None:
             return
         timer, rows = job
         if not self.isVisible():
@@ -4986,7 +4991,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 def _select_in_stock_table():
                     current_row = self.watchlist_table.currentRow()
                     current_item = self.watchlist_table.item(current_row, 0) if current_row >= 0 else None
-                    if (self._panel_closing or current_item is None or current_item.text() != code or
+                    if (getattr(self, '_panel_closing', False) or current_item is None or current_item.text() != code or
                             getattr(self.stock_table, '_last_populated_sector', None) != target_sector):
                         return
                     # 如果点击的是板块溯源记录，则优先精准定位到 match_code
@@ -5371,7 +5376,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         """将股票代码同步联动到主界面或外挂工具"""
         host = self.main_window
         if not host: return
-        if self._panel_closing or getattr(host, '_is_closing', False):
+        if getattr(self, '_panel_closing', False) or getattr(host, '_is_closing', False):
             return
         link_key = (str(code), specific_date, self._is_history_mode, self._history_date)
         now = time.monotonic()
@@ -5391,7 +5396,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             history_date = getattr(self, '_history_date', "")
             
             def _do_linkage_in_main_thread():
-                if self._panel_closing or getattr(host, '_is_closing', False):
+                if getattr(self, '_panel_closing', False) or getattr(host, '_is_closing', False):
                     return
                 if link_key != self._last_link_request:
                     return
@@ -5504,7 +5509,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         timer.start(40)
 
     def _flush_row_action(self, table):
-        if self._panel_closing or not self.isVisible() or not table.hasFocus():
+        if getattr(self, '_panel_closing', False) or not self.isVisible() or not table.hasFocus():
             return
         _, (code_col, code, callback) = self._row_action_jobs[table]
         row = table.currentRow()
