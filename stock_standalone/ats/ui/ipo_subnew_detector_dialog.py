@@ -290,6 +290,7 @@ class IPOScanWorker(QThread):
         tot_bars_ms = 0.0
         tot_strat_ms = 0.0
         all_stock_costs = []
+        linkage_records = []
 
         start_msg = f"[IPO-SCAN] 启动批量顺序扫描: 共 {len(self.codes)} 只标的 | 切分 {len(batches)} 组 (每组至多 {self.batch_size} 只)"
         if self.perf_log_enabled:
@@ -336,6 +337,17 @@ class IPOScanWorker(QThread):
                     if sig:
                         batch_results.append(sig)
                         count += 1
+                        extra = getattr(sig, "extra_data", {}) or {}
+                        linkage_records.append({
+                            "symbol": getattr(sig, "code", ""),
+                            "name": getattr(sig, "name", ""),
+                            "signal_type": getattr(sig, "signal_type", ""),
+                            "signal_tier": getattr(sig, "signal_tier", ""),
+                            "horse_race_score": getattr(sig, "horse_race_score", None),
+                            "horse_race_rank": getattr(sig, "horse_race_rank", None),
+                            "is_ipo_first_day": getattr(sig, "is_ipo_first_day", False),
+                            "source_bar_as_of": extra.get("ipo_source_bar_as_of", ""),
+                        })
                         p_bars = sig.extra_data.get("_perf_bars_ms", 0.0)
                         p_strat = sig.extra_data.get("_perf_strat_ms", 0.0)
                         p_tot = sig.extra_data.get("_perf_total_ms", 0.0)
@@ -366,6 +378,24 @@ class IPOScanWorker(QThread):
                 self.batch_analyzed.emit(batch_results)
             day_df_map.clear()
             kline_60m_map.clear()
+
+        if self.is_running and not getattr(self, "force_refresh", False):
+            try:
+                from JohnsonUtil import commonTips as cct
+                from system_linkage_context import SystemLinkageContextClient, build_ipo_linkage_evidence
+
+                evidence = build_ipo_linkage_evidence(linkage_records, len(self.codes))
+                if evidence:
+                    trade_date, as_of, payload = evidence
+                    publisher = SystemLinkageContextClient(cct)
+                    if publisher.prepare_source_publisher():
+                        publisher.publish_source_snapshot("ats.ipo", trade_date, as_of, payload)
+                        threading.Thread(
+                            target=publisher.flush_pending_source_evidence,
+                            name="ATSIPOLinkagePublisher", daemon=True,
+                        ).start()
+            except Exception as exc:
+                logger.debug("ATS IPO context evidence remains unavailable: %s", exc, exc_info=True)
 
         cost = time.time() - t0
         all_stock_costs.sort(key=lambda x: x[1], reverse=True)

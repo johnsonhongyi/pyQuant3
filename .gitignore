@@ -188,6 +188,7 @@ stock_standalone/.agent_hub/*
 stock_standalone/.agent_hub_runtime/*
 stock_standalone/.pytest_tmp/*
 stock_standalone/tests/*
+!stock_standalone/tests/test_global_favorites_linkage.py
 stock_standalone/tests/test_sbc_*.py
 stock_standalone/tests/test_archive_build_exe.py
 stock_standalone/pytest-of-Johnson/*

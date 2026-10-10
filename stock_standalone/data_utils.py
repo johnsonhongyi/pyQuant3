@@ -11,9 +11,19 @@ np = cct.LazyModule('numpy')
 from JohnsonUtil.commonTips import timed_ctx
 from JohnsonUtil import LoggerFactory
 from JSONData import tdx_data_Day as tdd
+from JSONData.sina_data import Sina
 from JSONData import stockFilter as stf
 from tdx_utils import clean_bad_columns, sanitize, clean_expired_tdx_file
 from db_utils import get_indb_df
+from system_linkage_quotes import (
+    LINKAGE_QUOTE_BATCH_SIZE,
+    LINKAGE_QUOTE_CACHE_SIZE,
+    collect_linkage_quote_batch,
+    frame_quote_row,
+    normalize_supported_stock_code,
+    quote_row_status,
+    schedule_linkage_quote_fetch,
+)
 import re
 winlimit = cct.winlimit
 loop_counter_limit = cct.loop_counter_limit
@@ -3364,6 +3374,12 @@ def fetch_and_process(
     loop_counter = 0  # 循环计数
     df_all = None
     force_init_latch = False  # ⭐ [Cut 2] 跨 loop 锁存信号，防止被中间的 continue 吞掉
+    linkage_quote_cursor = 0
+    linkage_quote_last_fetch = 0.0
+    linkage_quote_cache = pd.DataFrame()
+    linkage_quote_cache_at = {}
+    linkage_quote_cache_revision = None
+    linkage_quote_failures = {}
     while True:
         loop_counter += 1
         try:
@@ -3569,6 +3585,122 @@ def fetch_and_process(
                 logger.info("top_now.empty no data fetched")
                 time.sleep(duration_sleep_time)
                 continue
+
+            linkage_quotes = pd.DataFrame()
+            linkage_favorites_revision = 0
+            linkage_favorite_codes = g_values.getkey('linkage_monitor_codes', []) or []
+            try:
+                linkage_favorites_revision = int(
+                    g_values.getkey('linkage_favorites_revision', 0) or 0
+                )
+                linkage_market_active = bool(cct.get_trade_date_status()) and (
+                    930 <= now_int <= 1130 or 1300 <= now_int <= 1500
+                )
+                latest_trade_date = cct.get_last_trade_date()
+                if linkage_quote_cache_revision != linkage_favorites_revision:
+                    linkage_quote_cache = pd.DataFrame()
+                    linkage_quote_cache_at = {}
+                    linkage_quote_failures = {}
+                    linkage_quote_cache_revision = linkage_favorites_revision
+                supported_favorites = set()
+                for value in linkage_favorite_codes:
+                    code = normalize_supported_stock_code(value)
+                    if code:
+                        supported_favorites.add(code)
+                if not linkage_quote_cache.empty:
+                    cached_codes = linkage_quote_cache.index.astype(str).str.strip().str.zfill(6)
+                    keep_cache = cached_codes.isin(supported_favorites)
+                    removed_codes = set(cached_codes[~keep_cache])
+                    linkage_quote_cache = linkage_quote_cache.loc[keep_cache].copy()
+                    for removed_code in removed_codes:
+                        linkage_quote_cache_at.pop(removed_code, None)
+                        linkage_quote_failures.pop(removed_code, None)
+
+                now_monotonic = time.monotonic()
+                fresh_cache_codes = []
+                for code in supported_favorites:
+                    cached_row = frame_quote_row(linkage_quote_cache, code)
+                    if cached_row is not None and quote_row_status(
+                        cached_row, latest_trade_date, linkage_market_active,
+                        now_monotonic - linkage_quote_cache_at.get(code, 0.0),
+                    ) == 'ready':
+                        fresh_cache_codes.append(code)
+                schedule_frame = top_now.copy()
+                if fresh_cache_codes:
+                    if 'code' in schedule_frame.columns:
+                        frame_codes = schedule_frame['code'].astype(str).str.strip().str.zfill(6)
+                        schedule_frame = schedule_frame.loc[~frame_codes.isin(fresh_cache_codes)]
+                    else:
+                        frame_codes = schedule_frame.index.astype(str).str.strip().str.zfill(6)
+                        schedule_frame = schedule_frame.loc[~frame_codes.isin(fresh_cache_codes)]
+                    cache_codes = linkage_quote_cache.index.astype(str).str.strip().str.zfill(6)
+                    fresh_cache_rows = linkage_quote_cache.loc[cache_codes.isin(fresh_cache_codes)]
+                    schedule_frame = pd.concat([schedule_frame, fresh_cache_rows], sort=False)
+                linkage_scan_cursor = linkage_quote_cursor
+                linkage_statuses, linkage_codes, next_cursor = schedule_linkage_quote_fetch(
+                    linkage_favorite_codes, schedule_frame, latest_trade_date,
+                    linkage_market_active, cursor=linkage_scan_cursor,
+                    limit=LINKAGE_QUOTE_BATCH_SIZE, frame_age_seconds=0,
+                )
+                if linkage_codes and now_monotonic - linkage_quote_last_fetch >= 5.0:
+                    fetched_quotes, linkage_statuses, linkage_quote_cursor = collect_linkage_quote_batch(
+                        linkage_favorite_codes, schedule_frame, latest_trade_date,
+                        linkage_market_active,
+                        lambda codes: Sina(readonly=True).get_stock_list_data(
+                            codes, force_network=True
+                        ),
+                        cursor=linkage_scan_cursor,
+                        limit=LINKAGE_QUOTE_BATCH_SIZE, frame_age_seconds=0,
+                    )
+                    linkage_quote_last_fetch = now_monotonic
+                    fetched_code_set = set()
+                    if fetched_quotes is not None and not fetched_quotes.empty:
+                        fetched_codes = fetched_quotes.index.astype(str).str.strip().str.zfill(6)
+                        fetched_code_set = set(fetched_codes)
+                        previous_codes = linkage_quote_cache.index.astype(str).str.strip().str.zfill(6)
+                        linkage_quote_cache = pd.concat([
+                            linkage_quote_cache.loc[~previous_codes.isin(set(fetched_codes))],
+                            fetched_quotes,
+                        ], sort=False)
+                        for code in fetched_codes:
+                            linkage_quote_cache_at[code] = now_monotonic
+                            linkage_quote_failures.pop(code, None)
+                    for code in linkage_codes:
+                        if code not in fetched_code_set:
+                            failure_status = linkage_statuses.get(code, 'pending_fetch')
+                            if failure_status in ('quota_limited', 'pending_fetch'):
+                                linkage_quote_failures[code] = failure_status
+                else:
+                    linkage_quote_cursor = next_cursor
+                if len(linkage_quote_cache) > LINKAGE_QUOTE_CACHE_SIZE:
+                    cached_codes = linkage_quote_cache.index.astype(str).str.strip().str.zfill(6)
+                    oldest_codes = sorted(
+                        cached_codes,
+                        key=lambda code: linkage_quote_cache_at.get(code, 0.0),
+                    )[:len(linkage_quote_cache) - LINKAGE_QUOTE_CACHE_SIZE]
+                    linkage_quote_cache = linkage_quote_cache.loc[~cached_codes.isin(oldest_codes)]
+                    for code in oldest_codes:
+                        linkage_quote_cache_at.pop(code, None)
+
+                cached_codes = linkage_quote_cache.index.astype(str).str.strip().str.zfill(6)
+                for code in set(cached_codes):
+                    cached_row = frame_quote_row(linkage_quote_cache, code)
+                    cached_status = quote_row_status(
+                        cached_row, latest_trade_date, linkage_market_active,
+                        time.monotonic() - linkage_quote_cache_at.get(code, 0.0),
+                    )
+                    if linkage_statuses.get(code) != 'ready':
+                        linkage_statuses[code] = linkage_quote_failures.get(code, cached_status)
+                linkage_quotes = linkage_quote_cache.copy()
+                for code in list(linkage_quote_failures):
+                    if linkage_statuses.get(code) == 'ready':
+                        linkage_quote_failures.pop(code, None)
+                for code in linkage_quote_failures:
+                    linkage_statuses[code] = linkage_quote_failures[code]
+            except Exception:
+                logger.exception("Favorite-only quote collection failed; base market snapshot remains usable")
+                linkage_quotes = linkage_quote_cache.copy()
+                linkage_statuses = {}
             logger.info(f"resample Main  top_now:{len(top_now)} market : {market}  resample: {resample} flag.value : {flag.value} blkname :{blkname} st_key_sort:{st_key_sort}")
             # 合并与计算
             detect_val = detect_calc_support_var.value if hasattr(detect_calc_support_var, 'value') else False
@@ -3702,7 +3834,10 @@ def fetch_and_process(
                 'filtered_ui_data': df_all,
                 'full_snapshot_res': top_all_res,
                 'filtered_ui_data_res': df_all_res,
-                'resample_ui': resample_ui
+                'resample_ui': resample_ui,
+                'linkage_quotes': linkage_quotes,
+                'linkage_quote_statuses': linkage_statuses,
+                'linkage_favorites_revision': linkage_favorites_revision,
             }
             try:
                 queue.put(data_packet, block=True, timeout=10)

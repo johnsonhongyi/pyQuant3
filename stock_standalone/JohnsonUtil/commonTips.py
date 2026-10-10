@@ -745,6 +745,16 @@ class GlobalConfig:
         )
         # [NEW] 鼠标左键选择右键粘贴功能开关：是否存储在系统剪贴板中 (True=保留供粘贴, False=默认不保存在剪贴板)
         self.copy_paste_save = self.get_with_writeback("general", "copy_paste_save", fallback=False, value_type="bool")
+        self.linkage_enabled = self.get_with_writeback("general", "linkage_enabled", fallback=False, value_type="bool")
+        self.ipc_bind_host = self.get_with_writeback("general", "ipc_bind_host", fallback="auto_lan", value_type="str")
+        self.ipc_advertise_host = self.get_with_writeback("general", "ipc_advertise_host", fallback="auto", value_type="str")
+        self.ipc_linkage_port = self.get_with_writeback("general", "ipc_linkage_port", fallback=26676, value_type="int")
+        self.ipc_node_id = self.get_with_writeback("general", "ipc_node_id", fallback="", value_type="str")
+        self.ipc_workspace_id = self.get_with_writeback("general", "ipc_workspace_id", fallback="", value_type="str")
+        self.ipc_peer_allowlist = self.get_with_writeback("general", "ipc_peer_allowlist", fallback=[], value_type="list")
+        self.ipc_key_file = self.get_with_writeback("general", "ipc_key_file", fallback="", value_type="str")
+        self.stock_strategy_base_url = self.get_with_writeback("general", "stock_strategy_base_url", fallback="", value_type="str")
+        self.stock_strategy_token_file = self.get_with_writeback("general", "stock_strategy_token_file", fallback="", value_type="str")
         # [NEW] SBC 分时盯盘窗口 Esc 键退出功能开关 (默认 True 开启，按 Esc 关闭窗口；False 则维持清除高亮防误触)
         self.ats_sbc_close = self.get_with_writeback("general", "ats_sbc_close", fallback=True, value_type="bool")
         # [NEW] 次新股情绪感知与自学习监控控制台 Tab 5 开关 (默认 False 关闭不挂载主界面，避免卡顿；支持独立 CLI 启动)
@@ -998,6 +1008,16 @@ CFG = GlobalConfig(conf_ini)
 initGlobalValue: int = CFG.init_value
 clean_terminal: List[str] = CFG.clean_terminal
 copy_paste_save: bool = CFG.copy_paste_save
+linkage_enabled: bool = CFG.linkage_enabled
+ipc_bind_host: str = CFG.ipc_bind_host
+ipc_advertise_host: str = CFG.ipc_advertise_host
+ipc_linkage_port: int = CFG.ipc_linkage_port
+ipc_node_id: str = CFG.ipc_node_id
+ipc_workspace_id: str = CFG.ipc_workspace_id
+ipc_peer_allowlist: List[str] = CFG.ipc_peer_allowlist
+ipc_key_file: str = CFG.ipc_key_file
+stock_strategy_base_url: str = CFG.stock_strategy_base_url
+stock_strategy_token_file: str = CFG.stock_strategy_token_file
 ats_sbc_close: bool = CFG.ats_sbc_close
 ipo_learning_console: bool = CFG.ipo_learning_console
 ipo_detector: bool = getattr(CFG, "ipo_detector", False)
@@ -1042,6 +1062,16 @@ winlimit: int = CFG.winlimit
 loglevel: str = CFG.loglevel
 cleanRAMdiskTemp: bool = CFG.cleanRAMdiskTemp
 copy_paste_save: bool = CFG.copy_paste_save
+linkage_enabled: bool = CFG.linkage_enabled
+ipc_bind_host: str = CFG.ipc_bind_host
+ipc_advertise_host: str = CFG.ipc_advertise_host
+ipc_linkage_port: int = CFG.ipc_linkage_port
+ipc_node_id: str = CFG.ipc_node_id
+ipc_workspace_id: str = CFG.ipc_workspace_id
+ipc_peer_allowlist: List[str] = CFG.ipc_peer_allowlist
+ipc_key_file: str = CFG.ipc_key_file
+stock_strategy_base_url: str = CFG.stock_strategy_base_url
+stock_strategy_token_file: str = CFG.stock_strategy_token_file
 ats_sbc_close: bool = CFG.ats_sbc_close
 ipo_learning_console: bool = CFG.ipo_learning_console
 ipo_detector: bool = getattr(CFG, "ipo_detector", False)

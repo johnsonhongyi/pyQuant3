@@ -1,0 +1,698 @@
+"""Authenticated, bounded JSON bridge for cross-machine watchlist commands."""
+
+import hashlib
+import hmac
+import ipaddress
+import json
+import logging
+import os
+import re
+import socket
+import sqlite3
+import threading
+import time
+import contextlib
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
+
+from sys_utils import get_app_root
+
+logger = logging.getLogger("system_linkage_gateway")
+_MAX_BODY_BYTES = 64 * 1024
+_CLIENT_READ_TIMEOUT_SEC = 5.0
+_SIGNATURE_WINDOW_SEC = 60
+_MAX_COMMAND_AGE_SEC = 5 * 60
+_PRIVATE_IPV4 = tuple(ipaddress.ip_network(value) for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+_NODE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,96}$")
+_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_SYMBOL_RE = re.compile(r"^(\d{6})\.(SH|SZ)$", re.IGNORECASE)
+_ASHARE_PREFIXES = {
+    "SH": ("600", "601", "603", "605", "688", "689"),
+    "SZ": ("000", "001", "002", "003", "300", "301"),
+}
+_SECURITY_DIRECTORY_CACHE = {}
+_SECURITY_DIRECTORY_LOCK = threading.Lock()
+
+
+def _utc_timestamp(value):
+    if not isinstance(value, str) or len(value) > 40:
+        raise ValueError("invalid_timestamp")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("timestamp_timezone_required")
+    return parsed.astimezone(timezone.utc).timestamp()
+
+
+def _is_private_ip(value):
+    try:
+        address = ipaddress.ip_address(value)
+        return address.version == 4 and any(address in network for network in _PRIVATE_IPV4)
+    except ValueError:
+        return False
+
+
+def _resolve_bind_host(config):
+    configured = str(getattr(config, "ipc_bind_host", "auto_lan") or "auto_lan").strip()
+    remote = str(getattr(config, "stock_strategy_base_url", "") or "").strip()
+    if configured.lower() not in ("auto", "auto_lan"):
+        try:
+            address = ipaddress.ip_address(configured)
+        except ValueError as error:
+            raise ValueError("ipc_bind_host must be a literal IP or auto_lan") from error
+        if address.is_unspecified or address.version != 4:
+            raise ValueError("linkage gateway requires a specific IPv4 bind address")
+        if not address.is_loopback and not _is_private_ip(configured):
+            raise ValueError("linkage gateway bind address must be private or loopback")
+        return configured
+    if not remote:
+        raise ValueError("stock_strategy_base_url is required for auto_lan binding")
+    parsed = urlsplit(remote)
+    if not parsed.hostname:
+        raise ValueError("stock_strategy_base_url is invalid")
+    try:
+        remote_address = ipaddress.ip_address(parsed.hostname)
+    except ValueError:
+        records = socket.getaddrinfo(parsed.hostname, parsed.port or 80, socket.AF_INET, socket.SOCK_DGRAM)
+        if not records:
+            raise ValueError("stock_strategy_base_url host did not resolve")
+        remote_address = ipaddress.ip_address(records[0][4][0])
+    if remote_address.is_loopback:
+        return "127.0.0.1"
+    if remote_address.version != 4 or not _is_private_ip(str(remote_address)):
+        raise ValueError("auto_lan only supports a configured private IPv4 Go address")
+    route = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        route.connect((str(remote_address), parsed.port or 80))
+        local_address = route.getsockname()[0]
+    finally:
+        route.close()
+    if not _is_private_ip(local_address):
+        raise ValueError("no private LAN route to stock-strategy was found")
+    return local_address
+
+
+def _load_security_directory():
+    """Read the local stock directory without importing its network-refresh path."""
+    path = os.path.join(get_app_root(), "JSONData", "stock_codes.conf")
+    try:
+        info = os.stat(path)
+        if info.st_size <= 0 or info.st_size > 2 * 1024 * 1024:
+            return None
+        cache_key = (info.st_mtime_ns, info.st_size)
+        with _SECURITY_DIRECTORY_LOCK:
+            cached = _SECURITY_DIRECTORY_CACHE.get(path)
+            if cached and cached[0] == cache_key:
+                return cached[1]
+            with open(path, "r", encoding="utf-8-sig") as source:
+                payload = json.load(source)
+            raw_codes = payload.get("stock") if isinstance(payload, dict) else None
+            if not isinstance(raw_codes, list):
+                return None
+            codes = frozenset(
+                value for value in raw_codes
+                if isinstance(value, str) and re.fullmatch(r"\d{6}", value)
+            )
+            if not codes:
+                return None
+            _SECURITY_DIRECTORY_CACHE[path] = (cache_key, codes)
+            return codes
+    except (OSError, UnicodeError, ValueError, TypeError) as error:
+        logger.warning("Security directory unavailable (%s)", type(error).__name__)
+        return None
+
+
+class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    block_on_close = False
+
+    def __init__(self, address, handler, max_clients=8):
+        self._client_slots = threading.BoundedSemaphore(max_clients)
+        super().__init__(address, handler)
+
+    def process_request(self, request, client_address):
+        if not self._client_slots.acquire(blocking=False):
+            try:
+                request.sendall(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n")
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self._client_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._client_slots.release()
+
+
+class SystemLinkageGateway:
+    """Owns the desktop inbox, HMAC verification and serial favorite writer."""
+
+    def __init__(self, config, dispatch_to_ui=None, manager_factory=None, database_path=None):
+        self.config = config
+        self.dispatch_to_ui = dispatch_to_ui
+        self.manager_factory = manager_factory
+        self.database_path = database_path or os.path.join(get_app_root(), "system_linkage.sqlite3")
+        self.node_id = str(getattr(config, "ipc_node_id", "") or "").strip()
+        self.workspace_id = str(getattr(config, "ipc_workspace_id", "") or "").strip()
+        self._allowlist = list(getattr(config, "ipc_peer_allowlist", []) or [])
+        self._stop_event = threading.Event()
+        self._worker = None
+        self._server = None
+        self._server_thread = None
+        self._key = None
+        self._bound_host = None
+        self._port = int(getattr(config, "ipc_linkage_port", 26676) or 26676)
+        self._notification_lock = threading.Lock()
+        self._notification_retry_after = {}
+        self._init_database()
+
+    def _connect(self):
+        connection = sqlite3.connect(self.database_path, timeout=3.0)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout=3000")
+        connection.execute("PRAGMA synchronous=FULL")
+        return connection
+
+    @contextlib.contextmanager
+    def _db(self):
+        connection = self._connect()
+        try:
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def _init_database(self):
+        os.makedirs(os.path.dirname(os.path.abspath(self.database_path)), exist_ok=True)
+        with self._db() as connection:
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA synchronous=FULL")
+            connection.execute("PRAGMA busy_timeout=3000")
+            connection.executescript("""
+                CREATE TABLE IF NOT EXISTS linkage_operations (
+                    operation_id TEXT PRIMARY KEY,
+                    request_id TEXT NOT NULL UNIQUE,
+                    body_hash TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    result TEXT NOT NULL DEFAULT '{}',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    next_attempt REAL NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS linkage_nonces (
+                    nonce_key TEXT PRIMARY KEY,
+                    timestamp INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS linkage_consumer_health (
+                    consumer TEXT PRIMARY KEY,
+                    last_seen REAL NOT NULL,
+                    favorites_revision INTEGER NOT NULL DEFAULT 0,
+                    quote_status TEXT NOT NULL DEFAULT 'unknown'
+                );
+            """)
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(linkage_operations)")}
+            if "attempts" not in columns:
+                connection.execute("ALTER TABLE linkage_operations ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+            if "next_attempt" not in columns:
+                connection.execute("ALTER TABLE linkage_operations ADD COLUMN next_attempt REAL NOT NULL DEFAULT 0")
+
+    def _load_key(self):
+        key_file = str(getattr(self.config, "ipc_key_file", "") or "").strip()
+        if not key_file:
+            raise ValueError("ipc_key_file is required")
+        key_file = os.path.expandvars(os.path.expanduser(key_file))
+        with open(key_file, "rb") as file_obj:
+            raw_key = file_obj.read(4096)
+        try:
+            key_text = raw_key.decode("ascii").strip()
+            if len(key_text) >= 64 and len(key_text) % 2 == 0 and re.fullmatch(r"[0-9a-fA-F]+", key_text):
+                key = bytes.fromhex(key_text)
+            else:
+                key = raw_key
+        except UnicodeDecodeError:
+            key = raw_key
+        if len(key) < 32:
+            raise ValueError("ipc_key_file must contain at least 32 bytes")
+        return key
+
+    def _validate_config(self):
+        if not _NODE_RE.fullmatch(self.node_id) or not _NODE_RE.fullmatch(self.workspace_id):
+            raise ValueError("ipc_node_id and ipc_workspace_id must be configured")
+        if not isinstance(self._allowlist, (list, tuple)) or not self._allowlist:
+            raise ValueError("ipc_peer_allowlist must contain the Go peer IP or CIDR")
+        if not 1 <= self._port <= 65535:
+            raise ValueError("ipc_linkage_port is outside the valid range")
+        for entry in self._allowlist:
+            network = ipaddress.ip_network(str(entry).strip(), strict=False)
+            if not (network.is_private or network.is_loopback):
+                raise ValueError("ipc_peer_allowlist must only contain private peer ranges")
+        self._key = self._load_key()
+        self._bound_host = _resolve_bind_host(self.config)
+
+    def start(self):
+        if not bool(getattr(self.config, "linkage_enabled", False)):
+            return None
+        if self._server is not None:
+            return self.registration()
+        self._validate_config()
+        gateway = self
+
+        class Handler(BaseHTTPRequestHandler):
+            server_version = "LinkageBridge/1"
+            sys_version = ""
+            timeout = _CLIENT_READ_TIMEOUT_SEC
+
+            def log_message(self, format_string, *args):
+                logger.info("linkage peer=%s %s", self.client_address[0], format_string % args)
+
+            def _reply(self, status, value):
+                content = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(content)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Linkage-Schema-Version", "1")
+                self.end_headers()
+                self.wfile.write(content)
+
+            def _body(self):
+                try:
+                    length = int(self.headers.get("Content-Length", "-1"))
+                except ValueError:
+                    length = -1
+                if length < 0 or length > _MAX_BODY_BYTES:
+                    raise ValueError("invalid_content_length")
+                return self.rfile.read(length)
+
+            def _auth(self, body):
+                try:
+                    peer = ipaddress.ip_address(self.client_address[0])
+                    if not any(peer in ipaddress.ip_network(str(item).strip(), strict=False)
+                               for item in gateway._allowlist):
+                        return False
+                    node = self.headers.get("X-Linkage-Node-ID", "")
+                    workspace = self.headers.get("X-Linkage-Workspace-ID", "")
+                    timestamp_text = self.headers.get("X-Linkage-Timestamp", "")
+                    nonce = self.headers.get("X-Linkage-Nonce", "")
+                    signature = self.headers.get("X-Linkage-Signature", "")
+                    timestamp = int(timestamp_text)
+                    if (node != gateway.node_id or workspace != gateway.workspace_id
+                            or str(timestamp) != timestamp_text or abs(time.time() - timestamp) > _SIGNATURE_WINDOW_SEC
+                            or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", nonce)
+                            or not re.fullmatch(r"[0-9a-fA-F]{64}", signature)):
+                        return False
+                    path = urlsplit(self.path).path
+                    if urlsplit(self.path).query:
+                        path += "?" + urlsplit(self.path).query
+                    canonical = "\n".join((self.command, path, hashlib.sha256(body).hexdigest(),
+                                            timestamp_text, nonce, node, workspace)).encode("utf-8")
+                    expected = hmac.new(gateway._key, canonical, hashlib.sha256).hexdigest()
+                    if not hmac.compare_digest(expected, signature.lower()):
+                        return False
+                    nonce_key = f"{node}:{workspace}:{nonce}"
+                    with gateway._db() as connection:
+                        connection.execute("DELETE FROM linkage_nonces WHERE timestamp < ?", (int(time.time()) - 600,))
+                        connection.execute("INSERT INTO linkage_nonces(nonce_key,timestamp) VALUES(?,?)",
+                                           (nonce_key, timestamp))
+                    return True
+                except sqlite3.IntegrityError:
+                    return False
+                except Exception:
+                    return False
+
+            def do_GET(self):
+                if self.path == "/bridge/v1/health":
+                    return self._reply(200, {"status": "ok", "schema_version": 1})
+                body = b""
+                if not self._auth(body):
+                    return self._reply(401, {"code": "unauthorized", "error": "authentication failed"})
+                prefix = "/bridge/v1/operations/"
+                if self.path.startswith(prefix):
+                    operation_id = self.path[len(prefix):]
+                    if not _ID_RE.fullmatch(operation_id):
+                        return self._reply(400, {"code": "invalid_operation_id", "error": "invalid operation id"})
+                    result = gateway.get_operation(operation_id)
+                    if result is None:
+                        return self._reply(404, {"code": "not_found", "error": "operation not found"})
+                    return self._reply(200, result)
+                return self._reply(404, {"code": "not_found", "error": "route not found"})
+
+            def do_POST(self):
+                if urlsplit(self.path).path != "/bridge/v1/commands":
+                    return self._reply(404, {"code": "not_found", "error": "route not found"})
+                try:
+                    body = self._body()
+                except ValueError:
+                    return self._reply(413, {"code": "invalid_content_length", "error": "request body exceeds limit"})
+                if not self._auth(body):
+                    return self._reply(401, {"code": "unauthorized", "error": "authentication failed"})
+                try:
+                    command = gateway.validate_command(json.loads(body.decode("utf-8")))
+                    status, result = gateway.accept_command(command, hashlib.sha256(body).hexdigest())
+                    return self._reply(status, result)
+                except ValueError as error:
+                    code = str(error)
+                    status = 409 if code.endswith("_conflict") else 400
+                    return self._reply(status, {"code": code, "error": "invalid linkage command"})
+                except sqlite3.OperationalError:
+                    return self._reply(503, {"code": "storage_unavailable", "error": "command could not be persisted"})
+
+        self._server = _BoundedThreadingHTTPServer((self._bound_host, self._port), Handler, max_clients=8)
+        self._server_thread = threading.Thread(target=self._server.serve_forever,
+                                               name="SystemLinkageHTTP", daemon=True)
+        self._worker = threading.Thread(target=self._worker_loop, name="SystemLinkageWorker", daemon=True)
+        self._server_thread.start()
+        self._worker.start()
+        return self.registration()
+
+    def registration(self):
+        host = str(getattr(self.config, "ipc_advertise_host", "auto") or "auto").strip()
+        if host.lower() == "auto":
+            host = self._bound_host or ""
+        return {"node_id": self.node_id, "workspace_id": self.workspace_id,
+                "protocol_version": 1, "address": host, "port": self._port,
+                "capabilities": ["WATCHLIST_ADD"], "status": "online" if self._server else "stopped"}
+
+    def stop(self):
+        server = self._server
+        self._server = None
+        self._stop_event.set()
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        for thread in (self._server_thread, self._worker):
+            if thread and thread.is_alive():
+                thread.join(timeout=3.0)
+        self._server_thread = None
+        self._worker = None
+
+    def validate_command(self, command):
+        if not isinstance(command, dict) or command.get("schema_version") != 1:
+            raise ValueError("unsupported_schema")
+        if command.get("type") != "WATCHLIST_ADD" or command.get("instrument_type") != "stock":
+            raise ValueError("unsupported_command")
+        request_id = str(command.get("request_id", ""))
+        operation_id = str(command.get("operation_id", ""))
+        if not _ID_RE.fullmatch(request_id) or not _ID_RE.fullmatch(operation_id):
+            raise ValueError("invalid_request_id")
+        if command.get("workspace_id") != self.workspace_id:
+            raise ValueError("wrong_workspace")
+        target_nodes = command.get("target_node_ids")
+        if not isinstance(target_nodes, list) or self.node_id not in target_nodes or len(target_nodes) > 10:
+            raise ValueError("wrong_target")
+        symbol_match = _SYMBOL_RE.fullmatch(str(command.get("symbol", "")).upper())
+        if not symbol_match:
+            raise ValueError("unsupported_symbol")
+        code, exchange = symbol_match.groups()
+        if not code.startswith(_ASHARE_PREFIXES[exchange]):
+            raise ValueError("unsupported_instrument")
+        security_codes = _load_security_directory()
+        if security_codes is None:
+            raise ValueError("security_directory_unavailable")
+        if code not in security_codes:
+            raise ValueError("unknown_security")
+        created_at = str(command.get("created_at", ""))
+        expires_at = str(command.get("expires_at", ""))
+        created = _utc_timestamp(created_at)
+        expires = _utc_timestamp(expires_at)
+        now = time.time()
+        if created > now + 60 or expires <= now or expires <= created or expires - created > _MAX_COMMAND_AGE_SEC:
+            raise ValueError("command_expired")
+        observed_date = command.get("observed_trade_date")
+        if observed_date:
+            try:
+                datetime.strptime(str(observed_date), "%Y-%m-%d")
+            except ValueError as error:
+                raise ValueError("invalid_observed_trade_date") from error
+        reason = str(command.get("reason", ""))
+        source = str(command.get("source", ""))
+        if len(reason) > 280 or len(source) > 80 or not source.startswith("stock-strategy."):
+            raise ValueError("invalid_context")
+        refs = command.get("context_refs") or []
+        if not isinstance(refs, list) or len(refs) > 10 or any(not isinstance(item, str) or len(item) > 256 for item in refs):
+            raise ValueError("invalid_context_refs")
+        return {
+            "schema_version": 1, "type": "WATCHLIST_ADD", "request_id": request_id,
+            "operation_id": operation_id, "node_id": self.node_id,
+            "workspace_id": self.workspace_id, "target_node_ids": [self.node_id],
+            "symbol": f"{code}.{exchange}", "code": code, "exchange": exchange,
+            "instrument_type": "stock", "source": source, "reason": reason,
+            "context_refs": refs, "observed_trade_date": observed_date or None,
+            "created_at": created_at, "expires_at": expires_at,
+        }
+
+    def accept_command(self, command, body_hash):
+        now_text = datetime.now(timezone.utc).isoformat()
+        payload_text = json.dumps(command, ensure_ascii=False, separators=(",", ":"))
+        with self._db() as connection:
+            existing = connection.execute(
+                "SELECT operation_id,request_id,body_hash,status,result FROM linkage_operations "
+                "WHERE operation_id=? OR request_id=?", (command["operation_id"], command["request_id"])
+            ).fetchone()
+            if existing:
+                if existing["body_hash"] != body_hash or existing["operation_id"] != command["operation_id"]:
+                    raise ValueError("operation_id_conflict")
+                return 202, {"operation_id": existing["operation_id"], "request_id": existing["request_id"],
+                             "status": existing["status"], "result": json.loads(existing["result"])}
+            pending = connection.execute(
+                "SELECT COUNT(*) FROM linkage_operations WHERE status IN ('accepted','processing','retry')"
+            ).fetchone()[0]
+            if pending >= 128:
+                return 429, {"code": "queue_full", "error": "desktop command queue is full"}
+            connection.execute(
+                "INSERT INTO linkage_operations(operation_id,request_id,body_hash,payload,status,result,created_at,expires_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (command["operation_id"], command["request_id"], body_hash, payload_text,
+                 "accepted", "{}", command["created_at"], command["expires_at"], now_text),
+            )
+        self._stop_event.clear()
+        return 202, {"operation_id": command["operation_id"], "request_id": command["request_id"],
+                     "status": "accepted"}
+
+    def _worker_loop(self):
+        while not self._stop_event.wait(0.2):
+            try:
+                with self._db() as connection:
+                    rows = connection.execute(
+                        "SELECT operation_id,payload,expires_at FROM linkage_operations "
+                        "WHERE status IN ('accepted','processing','retry') AND next_attempt<=? "
+                        "ORDER BY created_at LIMIT 8", (time.time(),)
+                    ).fetchall()
+                    completed = connection.execute(
+                        "SELECT operation_id,payload,result FROM linkage_operations "
+                        "WHERE status IN ('applied','already_present') AND result LIKE '%\"status\":\"pending\"%' "
+                        "ORDER BY updated_at ASC LIMIT 128"
+                    ).fetchall()
+                for row in rows:
+                    if self._stop_event.is_set():
+                        break
+                    self._apply_operation(row["operation_id"], row["payload"], row["expires_at"])
+                for row in completed:
+                    if self._stop_event.is_set():
+                        break
+                    try:
+                        result = json.loads(row["result"])
+                        consumer = result.get("consumers", {}).get("TK", {})
+                        if consumer.get("status") == "pending":
+                            command = json.loads(row["payload"])
+                            self._dispatch_pending_notification(row["operation_id"], command, result)
+                    except Exception:
+                        logger.exception("Linkage notification recovery failed")
+            except Exception:
+                logger.exception("Linkage worker could not read its inbox")
+
+    def _apply_operation(self, operation_id, payload_text, expires_at):
+        try:
+            with self._db() as connection:
+                connection.execute(
+                    "UPDATE linkage_operations SET status='processing',attempts=attempts+1,next_attempt=0 "
+                    "WHERE operation_id=?", (operation_id,),
+                )
+            command = json.loads(payload_text)
+            manager = self.manager_factory() if self.manager_factory else None
+            if manager is None:
+                from global_favorites import GlobalFavoriteManager
+                manager = GlobalFavoriteManager()
+            if _utc_timestamp(expires_at) <= time.time():
+                try:
+                    persisted = manager.list_linkage_operations()
+                except Exception:
+                    # The save may have completed before a crash even when its result
+                    # was not recorded. Keep checking instead of reporting a false expiry.
+                    self._schedule_retry(operation_id, expires_at, recovery_check=True)
+                    return
+                if operation_id not in persisted:
+                    self._finish(operation_id, "expired", {"code": "command_expired"})
+                    return
+            result = manager.ensure_linkage_favorite(
+                command["code"], operation_id, metadata={
+                    "source": command["source"], "reason": command["reason"],
+                    "context_refs": command["context_refs"],
+                    "observed_trade_date": command["observed_trade_date"],
+                    "request_id": command["request_id"],
+                },
+            )
+            consumers = {
+                "TK": {"status": "pending", "favorites_revision": result["favorites_revision"],
+                       "quote_status": "pending_fetch"},
+                "ATS": self._consumer_initial_status("ATS", result["favorites_revision"]),
+            }
+            output = {"saved": result, "consumers": consumers}
+            self._finish(operation_id, result["status"], output)
+            self._dispatch_pending_notification(operation_id, command, output)
+        except ValueError as error:
+            code = str(error)
+            self._finish(operation_id, "rejected", {"code": code})
+        except Exception:
+            logger.exception("Linkage favorite operation failed: %s", operation_id)
+            self._schedule_retry(operation_id, expires_at)
+
+    def _schedule_retry(self, operation_id, expires_at, recovery_check=False):
+        now = time.time()
+        try:
+            expires = _utc_timestamp(expires_at)
+            with self._db() as connection:
+                row = connection.execute(
+                    "SELECT attempts FROM linkage_operations WHERE operation_id=?", (operation_id,)
+                ).fetchone()
+                if row is None:
+                    return
+                if expires <= now and not recovery_check:
+                    connection.execute(
+                        "UPDATE linkage_operations SET status='expired',result=?,next_attempt=0,updated_at=? "
+                        "WHERE operation_id=?",
+                        (json.dumps({"code": "command_expired"}, separators=(",", ":")),
+                         datetime.now(timezone.utc).isoformat(), operation_id),
+                    )
+                    return
+                attempts = int(row["attempts"] or 0)
+                delay = min(30, 2 ** min(attempts, 5))
+                next_attempt = now + delay if recovery_check else min(expires, now + delay)
+                result_code = "favorite_state_check_retryable" if recovery_check else "favorite_persistence_failed"
+                result = json.dumps({"code": result_code, "retryable": True},
+                                    separators=(",", ":"))
+                connection.execute(
+                    "UPDATE linkage_operations SET status='retry',result=?,next_attempt=?,updated_at=? "
+                    "WHERE operation_id=?",
+                    (result, next_attempt, datetime.now(timezone.utc).isoformat(), operation_id),
+                )
+        except Exception:
+            # Keep an uncommitted inbox row recoverable; after restart it is retried from processing.
+            logger.exception("Could not persist favorite retry state: %s", operation_id)
+
+    def _consumer_initial_status(self, consumer, revision):
+        with self._db() as connection:
+            row = connection.execute(
+                "SELECT last_seen,favorites_revision,quote_status FROM linkage_consumer_health WHERE consumer=?",
+                (consumer,),
+            ).fetchone()
+        online = bool(row and time.time() - row["last_seen"] <= 15)
+        return {"status": "pending" if online else "not_running",
+                "favorites_revision": int(row["favorites_revision"] or 0) if online else 0,
+                "desired_revision": revision, "quote_status": "pending_fetch"}
+
+    def _dispatch_pending_notification(self, operation_id, command, result):
+        now = time.monotonic()
+        with self._notification_lock:
+            if now < self._notification_retry_after.get(operation_id, 0.0):
+                return
+            self._notification_retry_after[operation_id] = now + 5.0
+        saved = result.get("saved", {})
+        revision = int(saved.get("favorites_revision", 0) or 0)
+        dispatched = False
+        if self.dispatch_to_ui:
+            dispatched = bool(self.dispatch_to_ui({"operation_id": operation_id,
+                                                   "code": command["code"],
+                                                   "favorites_revision": revision}))
+        # Enqueueing on the UI thread is not proof that the monitor consumed it.
+        status = "pending" if dispatched else "not_running"
+        self.report_consumer(operation_id, "TK", status, revision, "pending_fetch")
+
+    def _finish(self, operation_id, status, result):
+        now_text = datetime.now(timezone.utc).isoformat()
+        with self._db() as connection:
+            connection.execute(
+                "UPDATE linkage_operations SET status=?,result=?,updated_at=? WHERE operation_id=?",
+                (status, json.dumps(result, ensure_ascii=False, separators=(",", ":")), now_text, operation_id),
+            )
+
+    def get_operation(self, operation_id):
+        with self._db() as connection:
+            row = connection.execute(
+                "SELECT operation_id,request_id,status,result,updated_at FROM linkage_operations WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"operation_id": row["operation_id"], "request_id": row["request_id"],
+                "status": row["status"], "result": json.loads(row["result"]), "updated_at": row["updated_at"]}
+
+    def report_consumer(self, operation_id, consumer, status, favorites_revision=0, quote_status="unknown"):
+        if consumer not in ("TK", "ATS") or status not in ("synced", "pending", "not_running", "error"):
+            return False
+        if quote_status not in ("ready", "pending_fetch", "unknown", "market_closed", "stale", "quota_limited"):
+            quote_status = "unknown"
+        with self._db() as connection:
+            row = connection.execute("SELECT result FROM linkage_operations WHERE operation_id=?", (operation_id,)).fetchone()
+            if row is None:
+                return False
+            result = json.loads(row["result"])
+            consumers = result.setdefault("consumers", {})
+            consumers[consumer] = {"status": status, "favorites_revision": int(favorites_revision or 0),
+                                   "quote_status": quote_status}
+            connection.execute("UPDATE linkage_operations SET result=?,updated_at=? WHERE operation_id=?",
+                               (json.dumps(result, ensure_ascii=False, separators=(",", ":")),
+                                datetime.now(timezone.utc).isoformat(), operation_id))
+        return True
+
+    def report_consumer_heartbeat(self, consumer, favorites_revision=0, quote_status="unknown"):
+        if consumer not in ("TK", "ATS"):
+            return False
+        if quote_status not in ("ready", "pending_fetch", "unknown", "market_closed", "stale", "quota_limited"):
+            quote_status = "unknown"
+        with self._db() as connection:
+            connection.execute(
+                "INSERT INTO linkage_consumer_health(consumer,last_seen,favorites_revision,quote_status) VALUES(?,?,?,?) "
+                "ON CONFLICT(consumer) DO UPDATE SET last_seen=excluded.last_seen, "
+                "favorites_revision=excluded.favorites_revision, quote_status=excluded.quote_status",
+                (consumer, time.time(), int(favorites_revision or 0), quote_status),
+            )
+            rows = connection.execute(
+                "SELECT operation_id,result FROM linkage_operations WHERE status IN ('applied','already_present')"
+            ).fetchall()
+            for row in rows:
+                result = json.loads(row["result"])
+                consumers = result.setdefault("consumers", {})
+                existing = consumers.get(consumer, {})
+                if existing.get("status") == "not_running":
+                    consumers[consumer] = {"status": "pending", "favorites_revision": 0,
+                                           "quote_status": "pending_fetch"}
+                    connection.execute("UPDATE linkage_operations SET result=? WHERE operation_id=?",
+                                       (json.dumps(result, separators=(",", ":")), row["operation_id"]))
+        return True
+
+    def report_consumer_batch(self, consumer, operations, favorites_revision=0):
+        if consumer not in ("TK", "ATS") or not isinstance(operations, list):
+            return 0
+        reported = 0
+        for item in operations[:128]:
+            if not isinstance(item, dict):
+                continue
+            operation_id = str(item.get("operation_id", ""))
+            quote_status = item.get("quote_status", "pending_fetch")
+            if self.report_consumer(operation_id, consumer, "synced", favorites_revision, quote_status):
+                reported += 1
+        return reported

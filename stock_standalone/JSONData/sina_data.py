@@ -1863,13 +1863,14 @@ class Sina:
         return self.dataframe
 
 
-    def get_stock_list_data(self, ulist: List[str], index: bool = False) -> pd.DataFrame:
+    def get_stock_list_data(self, ulist: List[str], index: bool = False,
+                            force_network: bool = False) -> pd.DataFrame:
         self._task_deadline = time.monotonic() + 30.0
         ulist = [stock_code  for stock_code in ulist if stock_code.startswith(('0','3','4','5', '6','8', '9'))]
         h5: Optional[pd.DataFrame] = None
         if index:
             ulist = self.set_stock_codes_index_init(ulist, index)
-        else:
+        elif not force_network:
             history_lock = getattr(self, 'history_lock', None)
             acquired = history_lock is None or history_lock.acquire(timeout=5.0)
             if not acquired:
@@ -1880,7 +1881,7 @@ class Sina:
                 if history_lock is not None:
                     history_lock.release()
             
-        if h5 is not None and len(h5) >= len(ulist):
+        if not force_network and h5 is not None and len(h5) >= len(ulist):
             log.info("hdf5 data:%s" % (len(h5)))
             h5 = self.combine_lastbuy(h5)
             return h5
@@ -1913,6 +1914,8 @@ class Sina:
             url_local = self.sina_stock_api + ','.join(self.stock_codes)
             log.info("stock_list:%s" % url_local[:30])
             response = requests.get(url_local, headers=self.sinaheader, timeout=(3.0, 10.0))
+            if force_network and getattr(response, 'status_code', None) == 429:
+                response.raise_for_status()
             response.encoding = self.encoding
             self.stock_data.append(response.text)
             self.dataframe = self.format_response_data(index)
