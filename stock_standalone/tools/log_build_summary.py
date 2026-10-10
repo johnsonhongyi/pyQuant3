@@ -5,7 +5,7 @@ Nuitka 批量打包结果历史汇总与性能对比记录器 (追加模式)
 
 职责：
 1. 收集本次打包的执行状态、单项耗时、产物大小及总耗时；
-2. 检测编译器缓存（sccache）命中率、请求数与未命中数；
+2. 读取本批次 Nuitka clcache 命中率、请求数与未命中数；
 3. 统计本地 .nuitka_cache 增量缓存目录体积与健康度；
 4. 读取 nuitka_batch_build_last_summary.txt 历史记录，计算与上一次构建的耗时对比（节约时间与百分比）；
 5. 综合判定缓存命中状态（🔥 热缓存命中加速 / ❄️ 冷启动全量编译 / ⚡ 零变更纯复用）；
@@ -152,6 +152,95 @@ def get_clcache_info() -> Tuple[int, str]:
     return 0, "未创建"
 
 
+def parse_build_timestamp(value: str) -> Optional[datetime.datetime]:
+    """从批处理时间戳中提取本地时间，避免误读上一次构建的统计文件"""
+    match = re.search(
+        r"(\d{4}[/-]\d{1,2}[/-]\d{1,2}\s+\d{1,2}:\d{2}:\d{2}(?:[.,]\d+)?)",
+        value,
+    )
+    if not match:
+        return None
+
+    timestamp = match.group(1).replace(",", ".")
+    date_formats = (
+        "%Y/%m/%d %H:%M:%S.%f",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S",
+    )
+    for date_format in date_formats:
+        try:
+            return datetime.datetime.strptime(timestamp, date_format)
+        except ValueError:
+            continue
+    return None
+
+
+def get_current_clcache_stats(
+    build_dir: Path,
+    module_args: List[str],
+    start_timestamp: str,
+    end_timestamp: str,
+) -> Dict[str, Dict[str, int]]:
+    """读取本批次每个 Nuitka 目标的 Scons clcache 统计文件"""
+    module_build_dirs = {
+        "tk": ("instock_MonitorTK.build", "instock_MonitorTK.onefile-build"),
+        "ats": ("run_ats.build", "run_ats.onefile-build"),
+        "multi": ("multi_period_dialog.build", "multi_period_dialog.onefile-build"),
+    }
+    start_time = parse_build_timestamp(start_timestamp)
+    end_time = parse_build_timestamp(end_timestamp)
+    if start_time is None or end_time is None:
+        return {}
+
+    stats_by_module: Dict[str, Dict[str, int]] = {}
+
+    for item in module_args:
+        delim = "#" if "#" in item else "|"
+        parts = item.split(delim)
+        if len(parts) < 4:
+            continue
+
+        module = parts[1].strip().lower()
+        if parts[3].strip().lower() not in ("成功", "success"):
+            continue
+
+        relative_dirs = module_build_dirs.get(module)
+        if not relative_dirs:
+            continue
+
+        module_hits = 0
+        module_misses = 0
+        stats_files = 0
+        for relative_dir in relative_dirs:
+            stats_dir = build_dir / relative_dir
+            if not stats_dir.is_dir():
+                continue
+
+            for stats_path in stats_dir.glob("clcache-stats.*.txt"):
+                try:
+                    modified = datetime.datetime.fromtimestamp(stats_path.stat().st_mtime)
+                    if modified < start_time - datetime.timedelta(seconds=5):
+                        continue
+                    if modified > end_time + datetime.timedelta(seconds=30):
+                        continue
+
+                    data = json.loads(stats_path.read_text(encoding="utf-8", errors="replace"))
+                    module_hits += max(0, int(data.get("CacheHits", 0)))
+                    module_misses += max(0, int(data.get("CacheMisses", 0)))
+                    stats_files += 1
+                except (OSError, ValueError, TypeError):
+                    continue
+
+        stats_by_module[module] = {
+            "hits": module_hits,
+            "misses": module_misses,
+            "files": stats_files,
+        }
+
+    return stats_by_module
+
+
 def get_sccache_cache_info() -> Tuple[int, str]:
     """获取 sccache 本地磁盘缓存体积"""
     candidates = []
@@ -254,30 +343,58 @@ def main():
         nuitka_bytes, nuitka_size_str = get_dir_size_str(nuitka_cache_path)
 
         clcache_bytes, clcache_size_str = get_clcache_info()
-        sccache_bytes, sccache_size_str = get_sccache_cache_info()
-        sccache_stats = query_sccache_stats()
+        clcache_stats_by_module = get_current_clcache_stats(
+            build_dir,
+            args.module,
+            args.start_timestamp,
+            args.end_timestamp,
+        )
+        cache_module_details = []
+        total_clcache_hits = 0
+        total_clcache_misses = 0
+        missing_cache_stats = []
+        for module, stats in clcache_stats_by_module.items():
+            if not stats["files"]:
+                missing_cache_stats.append(module)
+                cache_module_details.append(f"{module} 无本批次统计")
+                continue
 
-        if sccache_stats.get("requests", 0) > 0 and sccache_stats.get("hits", 0) > 0:
-            rate_val = (sccache_stats["hits"] / sccache_stats["requests"]) * 100
-            compiler_cache_summary = f"sccache (命中率 {rate_val:.1f}% ｜ 请求: {sccache_stats['requests']} ｜ 命中: {sccache_stats['hits']})"
-            if rate_val >= 70:
-                cache_eval = f"[热缓存命中] sccache 命中率 {rate_val:.1f}%, 增量编译极速完成"
-            else:
-                cache_eval = f"[部分缓存命中] sccache 命中率 {rate_val:.1f}%, 包含部分新源文件编译"
-        elif clcache_bytes > 0:
-            compiler_cache_summary = f"clcache [{clcache_size_str}] (Nuitka Windows原生Clang-cl专属缓存就绪)"
-            if args.diff_sec <= 180 and args.success_count > 0:
-                cache_eval = f"[增量编译就绪] clcache ({clcache_size_str}) 与 .nuitka_cache 命中复用"
-            elif args.diff_sec >= 1200:
-                cache_eval = "[全量冷编译] 首次全量打包或刚执行过 clean 缓存重置 (下次构建将复用 clcache 加速)"
-            else:
-                cache_eval = f"[常规增量构建] clcache 本地缓存生效 ({clcache_size_str})"
+            hits = stats["hits"]
+            misses = stats["misses"]
+            requests = hits + misses
+            total_clcache_hits += hits
+            total_clcache_misses += misses
+            rate = (hits / requests * 100) if requests else 0.0
+            cache_module_details.append(
+                f"{module} 命中 {hits}/{requests} ({rate:.1f}%)，未命中 {misses}"
+            )
+
+        total_clcache_requests = total_clcache_hits + total_clcache_misses
+        if clcache_bytes > 0:
+            compiler_cache_summary = f"clcache [{clcache_size_str}] (Nuitka Windows Clang-cl 缓存)"
         else:
-            compiler_cache_summary = f"未检测到编译器缓存 ｜ sccache {sccache_stats['summary']}"
-            if args.diff_sec >= 1200:
-                cache_eval = "[全量冷编译] 耗时较长，请检查是否刚清理缓存"
+            compiler_cache_summary = "clcache 缓存目录未检测到"
+
+        if total_clcache_requests:
+            rate = total_clcache_hits / total_clcache_requests * 100
+            if missing_cache_stats:
+                cache_eval = (
+                    f"[部分统计] 已统计模块的 clcache 命中 "
+                    f"{total_clcache_hits}/{total_clcache_requests} ({rate:.1f}%)；"
+                    f"缺少统计: {', '.join(missing_cache_stats)}"
+                )
             else:
-                cache_eval = "[常规增量构建] 本地缓存复用"
+                cache_eval = (
+                    f"[clcache 实际命中 {total_clcache_hits}/{total_clcache_requests} "
+                    f"({rate:.1f}%)] 本次 C 编译缓存复用率"
+                )
+        elif clcache_stats_by_module:
+            if missing_cache_stats:
+                cache_eval = f"[缓存状态未知] 部分模块无本批次统计: {', '.join(missing_cache_stats)}"
+            else:
+                cache_eval = "[本次无 C 编译请求] clcache 统计文件存在，但未记录命中或未命中"
+        else:
+            cache_eval = "[缓存状态未知] 未找到本批次 clcache 统计，目录体积和构建时长不能代表命中率"
 
     # 4. 解析模块清单并构建表格
     builder_title = "PyInstaller" if args.builder == "pyinstaller" else "Nuitka"
@@ -297,6 +414,13 @@ def main():
         parts = item.split(delim)
         if len(parts) >= 7:
             idx, mod, title, status, m_time, m_size, exe = parts[:7]
+            if not m_size.strip():
+                artifact_path = build_dir / exe
+                try:
+                    artifact_bytes = artifact_path.stat().st_size if artifact_path.is_file() else 0
+                    m_size = f"{artifact_bytes / (1024 * 1024):.1f} MB" if artifact_bytes else "未生成"
+                except OSError:
+                    m_size = "未生成"
             # 对齐格式
             lines.append(f"  {idx}.   {mod:<8} [{status}]    {m_time:<12} {m_size:<12} {exe}")
         elif len(parts) >= 5:
@@ -315,6 +439,10 @@ def main():
     else:
         lines.append(f"增量缓存体积 : .nuitka_cache [{nuitka_size_str}] ｜ 编译器缓存 (clcache) [{clcache_size_str}]")
         lines.append(f"编译器缓存   : {compiler_cache_summary}")
+        lines.append(
+            "本次 clcache  : "
+            + (" ｜ ".join(cache_module_details) if cache_module_details else "未取得本批次命中明细")
+        )
     lines.append(f"产物输出路径 : {build_dir}")
     lines.append(f"历史归档路径 : {build_dir / 'archive'} [保留最近 7 天版本]")
     lines.append("=" * 80)
