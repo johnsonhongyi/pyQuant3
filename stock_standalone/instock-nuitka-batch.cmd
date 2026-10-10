@@ -296,6 +296,8 @@ set "TASK_DIFF_STR=!DIFF_FORMATTED!"
 :: 检查产物状态与文件大小
 call :CALC_FILE_SIZE "!EXE_PATH!"
 set "EXE_SIZE_STR=!RET_FILE_SIZE!"
+if not exist "!EXE_PATH!" set "TASK_EXIT_CODE=1"
+if "!DRY_RUN!"=="1" set "TASK_EXIT_CODE=0"
 
 if "!TASK_EXIT_CODE!"=="0" (
     set "STATUS=成功"

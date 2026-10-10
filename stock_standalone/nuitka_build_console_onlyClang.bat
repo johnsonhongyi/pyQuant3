@@ -2,12 +2,30 @@
 title Nuitka Smart Compiler Assistant - Console Mode
 chcp 65001 >nul
 setlocal enabledelayedexpansion
+cd /d "%~dp0"
+
+rem 固定 TK 专用构建解释器，避免不同启动 shell 选中不同依赖集而导致 clcache 全量未命中。
+rem 如需更换环境，显式设置 TK_PYTHON_EXEC；不要依赖启动 shell 的 PATH。
+if defined TK_PYTHON_EXEC (
+    set "PYTHON_EXEC=%TK_PYTHON_EXEC%"
+) else if exist "%USERPROFILE%\anaconda3\envs\tk_nuitka_env\python.exe" (
+    set "PYTHON_EXEC=%USERPROFILE%\anaconda3\envs\tk_nuitka_env\python.exe"
+) else (
+    echo [ERROR] Dedicated TK Nuitka environment not found: %USERPROFILE%\anaconda3\envs\tk_nuitka_env\python.exe
+    echo [HINT] Set TK_PYTHON_EXEC to the verified TK build environment Python.
+    exit /b 1
+)
+"%PYTHON_EXEC%" -c "import sys, importlib.metadata as m; print('[INFO] Build Python: ' + sys.executable); print('[INFO] Build package fingerprint: Nuitka=' + m.version('Nuitka') + ', numpy=' + m.version('numpy') + ', pandas=' + m.version('pandas') + ', tushare=' + m.version('tushare'))"
+if errorlevel 1 (
+    echo [ERROR] Build Python or Nuitka metadata unavailable: %PYTHON_EXEC%
+    exit /b 1
+)
 
 :: =========================================
 :: START TIME RECORDING
 :: =========================================
-for /f "usebackq delims=" %%i in (`python -c "import time; print(time.time())"`) do set "START_TIME=%%i"
-for /f "usebackq delims=" %%i in (`python -c "import time; print(time.strftime('%%Y-%%m-%%d %%H:%%M:%%S'))"`) do set "START_TIME_STR=%%i"
+for /f "usebackq delims=" %%i in (`call "%PYTHON_EXEC%" -c "import time; print(time.time())"`) do set "START_TIME=%%i"
+for /f "usebackq delims=" %%i in (`call "%PYTHON_EXEC%" -c "import time; print(time.strftime('%%Y-%%m-%%d %%H:%%M:%%S'))"`) do set "START_TIME_STR=%%i"
 echo [INFO] Build started at: %START_TIME_STR%
 echo.
 
@@ -226,20 +244,10 @@ set TK_KERNEL_VERSION=2026.05.23.01
 set PATH=C:\JohnsonProgram\SetDisplayMode\init\upx;%PATH%
 
 echo Checking Python environment...
-:: Check if virtual environment is active
-if defined VIRTUAL_ENV (
-    echo [SUCCESS] Virtual environment detected: %VIRTUAL_ENV%
-    set PYTHON_EXEC=%VIRTUAL_ENV%\Scripts\python.exe
-@REM ) else if defined CONDA_PREFIX (
-@REM     echo [SUCCESS] Conda environment detected: %CONDA_PREFIX%
-@REM     set PYTHON_EXEC=%CONDA_PREFIX%\python.exe
-) else (
-    echo [WARNING] No virtual environment detected, using system Python
-    set PYTHON_EXEC=python
-)
+echo [SUCCESS] Stable TK build interpreter: %PYTHON_EXEC%
 
 :: ===== Get dynamic CSV path =====
-for /f "usebackq delims=" %%i in (`%PYTHON_EXEC% -c "import os, a_trade_calendar; print(os.path.join(os.path.dirname(a_trade_calendar.__file__), 'a_trade_calendar.csv'))"`) do set CSV_PATH=%%i
+for /f "usebackq delims=" %%i in (`call "%PYTHON_EXEC%" -c "import os, a_trade_calendar; print(os.path.join(os.path.dirname(a_trade_calendar.__file__), 'a_trade_calendar.csv'))"`) do set CSV_PATH=%%i
 
 if not exist "%CSV_PATH%" (
     echo [ERROR] CSV file not found: %CSV_PATH%
@@ -297,6 +305,9 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --nofollow-import-to=numba ^
     --nofollow-import-to=llvmlite ^
     --nofollow-import-to=cryptography ^
+    --nofollow-import-to=boto3 ^
+    --nofollow-import-to=botocore ^
+    --nofollow-import-to=pytest ^
     --noinclude-dlls=Qt6WebEngineCore.dll ^
     --noinclude-dlls=Qt6WebEngineWidgets.dll ^
     --noinclude-dlls=Qt6Pdf.dll ^
@@ -387,7 +398,7 @@ echo ==========================================
 echo 🔬 PRE-FLIGHT COMPILER DRY RUN (Takes ~2s)
 echo ==========================================
 echo pass > "%TEMP%\_nuitka_dry_run.py"
-python -m nuitka --show-scons --clang --remove-output "%TEMP%\_nuitka_dry_run.py"
+"%PYTHON_EXEC%" -m nuitka --show-scons --clang --remove-output "%TEMP%\_nuitka_dry_run.py"
 if errorlevel 1 (
     echo.
     echo ❌ [FATAL ERROR] Pre-flight failed! Could not compile properly.
@@ -425,10 +436,10 @@ if "%BUILD_MODE%"=="standalone" (
 )
 
 :: ===== Calculate and Record Elapsed Time =====
-for /f "usebackq delims=" %%i in (`python -c "import time; print(time.time())"`) do set "END_TIME=%%i"
-for /f "usebackq delims=" %%i in (`python -c "import time; print(time.strftime('%%Y-%%m-%%d %%H:%%M:%%S'))"`) do set "END_TIME_STR=%%i"
+for /f "usebackq delims=" %%i in (`call "%PYTHON_EXEC%" -c "import time; print(time.time())"`) do set "END_TIME=%%i"
+for /f "usebackq delims=" %%i in (`call "%PYTHON_EXEC%" -c "import time; print(time.strftime('%%Y-%%m-%%d %%H:%%M:%%S'))"`) do set "END_TIME_STR=%%i"
 
-for /f "usebackq delims=" %%i in (`python -c "import time; elapsed = %END_TIME% - %START_TIME%; m, s = divmod(elapsed, 60); h, m = divmod(m, 60); print('{:02d}:{:02d}:{:02d} ({:.2f}s)'.format(int(h), int(m), int(s), elapsed))"`) do set "ELAPSED_TIME=%%i"
+for /f "usebackq delims=" %%i in (`call "%PYTHON_EXEC%" -c "import time; elapsed = %END_TIME% - %START_TIME%; m, s = divmod(elapsed, 60); h, m = divmod(m, 60); print('{:02d}:{:02d}:{:02d} ({:.2f}s)'.format(int(h), int(m), int(s), elapsed))"`) do set "ELAPSED_TIME=%%i"
 
 echo ==========================================
 echo 🕒 Build Time Summary:
