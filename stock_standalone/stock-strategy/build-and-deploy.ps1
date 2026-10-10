@@ -71,7 +71,7 @@ function Test-ExcludedSourceFile([string]$Path) {
 }
 
 if ($Server -notmatch '^[A-Za-z0-9.-]+$') { throw 'Server must be an IP address or DNS name.' }
-foreach ($path in @($backendRoot,$webRoot,$deployHelper,(Join-Path $backendRoot 'go.mod'),(Join-Path $webRoot 'package-lock.json'))) {
+foreach ($path in @($backendRoot,$webRoot,$deployHelper,(Join-Path $projectRoot 'docker\market-append.sh'),(Join-Path $projectRoot 'docker\stockstrategy-market-append.cron'),(Join-Path $backendRoot 'go.mod'),(Join-Path $webRoot 'package-lock.json'))) {
     if (-not (Test-Path -LiteralPath $path)) { throw "Required build input is missing: $path" }
 }
 $git = (Get-Command git.exe -ErrorAction Stop).Source
@@ -183,7 +183,19 @@ try {
     }
     if (-not (Test-Path -LiteralPath (Join-Path $payload 'source\easy-stock-service\trading-calendar.json'))) { throw 'Source calendar was excluded from the package.' }
     Copy-Item -LiteralPath (Join-Path $projectRoot 'docker\market-append.sh') -Destination (Join-Path $payload 'docker\market-append.sh')
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'docker\stockstrategy-market-append.cron') -Destination (Join-Path $payload 'docker\stockstrategy-market-append.cron')
     Copy-Item -LiteralPath $deployHelper -Destination (Join-Path $payload 'deploy-prebuilt.sh')
+    $unixEncoding = [System.Text.UTF8Encoding]::new($false)
+    foreach ($scriptPath in @(
+        (Join-Path $payload 'deploy-prebuilt.sh'),
+        (Join-Path $payload 'docker\market-append.sh'),
+        (Join-Path $payload 'docker\stockstrategy-market-append.cron')
+    )) {
+        $scriptText = [System.IO.File]::ReadAllText($scriptPath)
+        $scriptText = [regex]::Replace($scriptText, "\r\n?", "`n")
+        [System.IO.File]::WriteAllText($scriptPath, $scriptText, $unixEncoding)
+        if ([System.IO.File]::ReadAllText($scriptPath).Contains("`r")) { throw "Could not normalize Unix line endings: $scriptPath" }
+    }
     Invoke-CheckedNative -File $tar -Arguments @('-czf',$archive,'-C',$payload,'.') -Description 'Release packaging'
 
     Write-Host "Uploading release $releaseId to $target..."

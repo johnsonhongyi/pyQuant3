@@ -1,6 +1,7 @@
 #!/usr/local/bin/python3
 # -*- coding: utf-8 -*-
 
+import argparse
 import logging
 import os
 import sys
@@ -65,13 +66,14 @@ def _final_marker(kind, date):
     return os.path.join(_CACHE_DIR, '%s-%s.done' % (kind, _date_key(date)))
 
 
-def _write_final_marker(kind, date):
+def _write_final_marker(kind, date, source, stats=None, complete=True):
     os.makedirs(_CACHE_DIR, exist_ok=True)
     marker = _final_marker(kind, date)
     fd, temporary = tempfile.mkstemp(prefix=kind + '-', suffix='.tmp', dir=_CACHE_DIR)
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as stream:
-            json.dump({'date': _date_key(date), 'completed_at':
+            json.dump({'date': _date_key(date), 'source': source, 'complete': bool(complete),
+                       'stats': stats or {}, 'completed_at':
                        datetime.datetime.now(_TIMEZONE).isoformat(timespec='seconds')}, stream)
             stream.flush()
             os.fsync(stream.fileno())
@@ -81,12 +83,25 @@ def _write_final_marker(kind, date):
             os.unlink(temporary)
 
 
-def _persist_daily_snapshot(data, table, date, schema):
+def _final_marker_is_current(kind, date, source):
+    marker = _final_marker(kind, date)
+    try:
+        with open(marker, 'r', encoding='utf-8') as stream:
+            payload = json.load(stream)
+        return (payload.get('date') == _date_key(date)
+                and payload.get('source') == source and payload.get('complete') is True)
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _persist_daily_snapshot(data, table, date, schema, replace_date=True):
     date_key = _date_key(date)
     frame = data.copy()
     frame['date'] = date_key
     frame['code'] = frame['code'].astype(str).str.split('.').str[0].str.zfill(6)
     frame = frame.drop_duplicates(['date', 'code'], keep='last')
+    if frame.empty:
+        return 0
     table_name = schema['name']
     with _file_lock(table + '-database'):
         if not mdb.checkTableIsExist(table_name):
@@ -97,8 +112,21 @@ def _persist_daily_snapshot(data, table, date, schema):
 
         from sqlalchemy import text
         with mdb.engine().begin() as connection:
-            connection.execute(text('DELETE FROM `%s` WHERE `date` = :date' % table_name),
-                               {'date': date_key})
+            if replace_date:
+                connection.execute(text('DELETE FROM `%s` WHERE `date` = :date' % table_name),
+                                   {'date': date_key})
+            else:
+                codes = frame['code'].astype(str).drop_duplicates().tolist()
+                params = {'date': date_key}
+                placeholders = []
+                for index, code in enumerate(codes):
+                    key = 'code%s' % index
+                    params[key] = code
+                    placeholders.append(':' + key)
+                connection.execute(
+                    text('DELETE FROM `%s` WHERE `date` = :date AND `code` IN (%s)'
+                         % (table_name, ','.join(placeholders))), params
+                )
             frame.to_sql(table_name, con=connection, if_exists='append', index=False)
     return len(frame)
 
@@ -141,14 +169,14 @@ def _recent_stock_volumes(date):
 
 
 # 股票实时行情数据。
-def save_nph_stock_spot_data(date, before=True):
+def save_nph_stock_spot_data(date, before=True, force_finalize=False):
     if before:
         return
     try:
-        finalize = _is_close_finalize(date)
+        finalize = force_finalize or _is_close_finalize(date)
         with _file_lock('stock-finalize-' + _date_key(date)) if finalize else contextlib.nullcontext():
-            marker = _final_marker('stock', date)
-            if finalize and os.path.exists(marker):
+            if (finalize and not force_finalize
+                    and _final_marker_is_current('stock', date, 'tdx-daily-files-v1')):
                 logging.info('stock close snapshot already finalized: %s', _date_key(date))
                 return
 
@@ -158,16 +186,25 @@ def save_nph_stock_spot_data(date, before=True):
                 return
             data = stf.apply_dynamic_volume_ratio(data, _recent_stock_volumes(date))
 
+            stats = None
             if finalize:
                 stats = stf.backfill_tdx_daily_data(data, date, return_stats=True)
-                if stats.get('eligible', 0) == 0 or stats.get('failed', 0) > 0:
-                    raise RuntimeError('TDX close backfill incomplete: %s' % stats)
 
-            rows = _persist_daily_snapshot(data, 'stock-spot', date, tbs.TABLE_CN_STOCK_SPOT)
-            logging.info('stock spot persisted: date=%s rows=%s finalize=%s',
-                         _date_key(date), rows, finalize)
-            if finalize:
-                _write_final_marker('stock', date)
+            complete = bool(stats and stats.get('complete', False)) if finalize else True
+            rows = _persist_daily_snapshot(
+                data, 'stock-spot', date, tbs.TABLE_CN_STOCK_SPOT,
+                replace_date=(not finalize or complete),
+            )
+            logging.info('stock spot persisted: date=%s rows=%s finalize=%s complete=%s',
+                         _date_key(date), rows, finalize, complete)
+            if finalize and complete:
+                _write_final_marker('stock', date, 'tdx-daily-files-v1', {
+                    key: value for key, value in stats.items()
+                    if isinstance(value, (str, int, float, bool)) or value is None
+                })
+            elif finalize:
+                logging.warning('TDX close snapshot incomplete; valid rows persisted and final marker withheld: %s',
+                                stats)
     except Exception as e:
         logging.error(f"basic_data_daily_job.save_stock_spot_data处理异常：{e}")
 
@@ -180,7 +217,7 @@ def save_nph_etf_spot_data(date, before=True):
         finalize = _is_close_finalize(date)
         with _file_lock('etf-finalize-' + _date_key(date)) if finalize else contextlib.nullcontext():
             marker = _final_marker('etf', date)
-            if finalize and os.path.exists(marker):
+            if finalize and _final_marker_is_current('etf', date, 'etf-snapshot-v1'):
                 logging.info('ETF close snapshot already finalized: %s', _date_key(date))
                 return
 
@@ -192,20 +229,40 @@ def save_nph_etf_spot_data(date, before=True):
             if finalize:
                 stats = stf.backfill_tdx_daily_data(data, date, return_stats=True,
                                                     asset_type='etf')
-                if stats.get('eligible', 0) == 0 or stats.get('failed', 0) > 0:
-                    raise RuntimeError('TDX ETF close backfill incomplete: %s' % stats)
+                if not stats.get('complete', False):
+                    raise RuntimeError('TDX ETF close backfill incomplete; final marker withheld for retry: %s' % stats)
 
             rows = _persist_daily_snapshot(data, 'etf-spot', date, tbs.TABLE_CN_ETF_SPOT)
             logging.info('ETF spot persisted: date=%s rows=%s finalize=%s',
                          _date_key(date), rows, finalize)
             if finalize:
-                _write_final_marker('etf', date)
+                _write_final_marker('etf', date, 'etf-snapshot-v1', {
+                    key: value for key, value in stats.items()
+                    if isinstance(value, (str, int, float, bool)) or value is None
+                })
     except Exception as e:
         logging.error(f"basic_data_daily_job.save_nph_etf_spot_data处理异常：{e}")
 
 
 
 def main():
+    parser = argparse.ArgumentParser(description='Persist daily stock and ETF snapshots')
+    parser.add_argument('--repair-close-date', help='rebuild and verify a historical TDX close date (YYYY-MM-DD)')
+    args = parser.parse_args()
+    if args.repair_close_date:
+        try:
+            target_date = datetime.date.fromisoformat(args.repair_close_date)
+        except ValueError:
+            parser.error('--repair-close-date must use YYYY-MM-DD')
+        if target_date > datetime.datetime.now(_TIMEZONE).date():
+            parser.error('--repair-close-date cannot be in the future')
+        _write_final_marker('stock', target_date, 'tdx-daily-files-v1',
+                            {'repair_in_progress': True}, complete=False)
+        save_nph_stock_spot_data(target_date, before=False, force_finalize=True)
+        if not _final_marker_is_current('stock', target_date, 'tdx-daily-files-v1'):
+            raise SystemExit('TDX close repair did not reach a complete state; see job log')
+        return
+
     now = datetime.datetime.now(_TIMEZONE)
     is_trade_day = trd.is_trade_date(now.date())
     if not (is_trade_day is True or str(is_trade_day).strip().lower() in ('true', '1')):
