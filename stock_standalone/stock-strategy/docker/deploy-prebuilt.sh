@@ -29,12 +29,14 @@ API_CHECK="stockstrategy-api-check-$RELEASE"
 WEB_DIST="$DATA_ROOT/app/web-dist/$RELEASE"
 CALENDAR_BACKUP="$STAGE/trading-calendar.previous.json"
 MARKET_APPEND_BACKUP="$STAGE/market-append.previous.sh"
+CRON_BACKUP="$STAGE/stockstrategy-market-append.previous.cron"
 API_OLD_MOVED=0
 WEB_OLD_MOVED=0
 API_NEW_CREATED=0
 WEB_NEW_CREATED=0
 CALENDAR_UPDATED=0
 MARKET_APPEND_UPDATED=0
+CRON_UPDATED=0
 SUCCESS=0
 
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -64,6 +66,9 @@ rollback() {
         fi
         if [ "$MARKET_APPEND_UPDATED" -eq 1 ] && [ -f "$MARKET_APPEND_BACKUP" ]; then
             install -m 0755 "$MARKET_APPEND_BACKUP" "$PROJECT/docker/market-append.sh"
+        fi
+        if [ "$CRON_UPDATED" -eq 1 ] && [ -f "$CRON_BACKUP" ]; then
+            install -m 0644 "$CRON_BACKUP" /etc/cron.d/stockstrategy-market-append
         fi
         [ -d "$WEB_DIST" ] && rm -rf -- "$WEB_DIST"
         docker image rm "$API_IMAGE" >/dev/null 2>&1
@@ -108,6 +113,7 @@ tar -xzf "$ARCHIVE" -C "$UNPACK"
 [ -s "$UNPACK/web-dist/index.html" ] || fail 'Prebuilt frontend index is missing.'
 [ -s "$UNPACK/source/easy-stock-service/trading-calendar.json" ] || fail 'Source trading calendar is missing.'
 [ -s "$UNPACK/docker/market-append.sh" ] || fail 'Updated market append script is missing.'
+[ -s "$UNPACK/docker/stockstrategy-market-append.cron" ] || fail 'Updated market append cron schedule is missing.'
 
 cp -a "$DATA_ROOT/config/trading-calendar.json" "$CALENDAR_BACKUP"
 calendar_tmp="$DATA_ROOT/config/.trading-calendar.$RELEASE.tmp"
@@ -129,6 +135,10 @@ cp -a "$PROJECT/docker/market-append.sh" "$MARKET_APPEND_BACKUP"
 MARKET_APPEND_UPDATED=1
 install -m 0755 "$UNPACK/docker/market-append.sh" "$PROJECT/docker/.market-append.$RELEASE.tmp"
 mv -f -- "$PROJECT/docker/.market-append.$RELEASE.tmp" "$PROJECT/docker/market-append.sh"
+cp -a /etc/cron.d/stockstrategy-market-append "$CRON_BACKUP"
+CRON_UPDATED=1
+install -m 0644 "$UNPACK/docker/stockstrategy-market-append.cron" "/etc/cron.d/.stockstrategy-market-append.$RELEASE.tmp"
+mv -f -- "/etc/cron.d/.stockstrategy-market-append.$RELEASE.tmp" /etc/cron.d/stockstrategy-market-append
 mkdir -p "$WEB_DIST"
 cp -a "$UNPACK/web-dist/." "$WEB_DIST/"
 chown -R 101:101 "$DATA_ROOT/logs/web"
@@ -183,6 +193,8 @@ docker run -d \
     -e A_STOCK_ADDR=0.0.0.0:20081 -e A_STOCK_APP_VERSION="$RELEASE" \
     -e A_STOCK_DATA_ROOT=/data -e A_STOCK_TRADING_CALENDAR=/data/config/trading-calendar.json \
     -e A_STOCK_DATA_DB=/data/easy-stock/stock-data.db -e A_STOCK_LOG_DIR=/logs/backend \
+    -e A_STOCK_TDX_FORWARDP_DIR=/data/instock/forwardp \
+    -v /mnt/4TB/dockerf/stock/forwardp:/data/instock/forwardp:ro \
     -e A_STOCK_SETTINGS_PATH=/data/easy-stock/settings.json -e A_STOCK_MASTERY_CACHE=/data/trading-mastery \
     -e A_STOCK_HERMES_HOME=/data/hermes-home -e A_STOCK_HERMES_WORKDIR=/app \
     -e HOME=/data -e XDG_CONFIG_HOME=/data/config -e TZ=Asia/Hong_Kong \

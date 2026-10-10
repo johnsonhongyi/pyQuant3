@@ -23,6 +23,16 @@ except ImportError:
     from JSONData.sina_data import Sina
     from JSONData.tdx_data_Day import get_tdx_Exp_day_to_df, get_tdx_file_path
 import instock.core.tablestructure as tbs
+try:
+    from instock.core.tdx_hq import (
+        TDXUnavailable, daily_bar_to_line, daily_bar_to_snapshot, parse_daily_line,
+        get_tdx_client, quote_to_snapshot, read_tdx_local_calendar, read_tdx_tail_bars,
+    )
+except ImportError:
+    from core.tdx_hq import (
+        TDXUnavailable, daily_bar_to_line, daily_bar_to_snapshot,
+        get_tdx_client, quote_to_snapshot, read_tdx_local_calendar, read_tdx_tail_bars,
+    )
 import instock.lib.trade_time as trd
 import instock.core.crawling.trade_date_hist as tdh
 import instock.core.crawling.fund_etf_em as fee
@@ -233,6 +243,40 @@ def _tdx_line_date(line):
     return value if re.fullmatch(r'\d{4}-\d{2}-\d{2}', value) else None
 
 
+def _clean_tdx_file_lines(lines):
+    valid_lines = []
+    invalid_count = 0
+    for line in lines:
+        try:
+            raw = line.encode('gb18030', errors='replace')
+        except (AttributeError, UnicodeError):
+            invalid_count += 1
+            continue
+        if parse_daily_line(raw) is None:
+            invalid_count += 1
+            continue
+        valid_lines.append(line if line.endswith(('\n', '\r')) else line + '\n')
+    return valid_lines, invalid_count
+
+
+def _atomic_write_tdx_lines(path, lines):
+    directory = os.path.dirname(path)
+    fd, temporary = tempfile.mkstemp(prefix=os.path.basename(path) + '.', suffix='.tmp', dir=directory)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8', newline='') as destination:
+            destination.writelines(lines)
+            destination.flush()
+            os.fsync(destination.fileno())
+        if os.path.exists(path):
+            os.chmod(temporary, os.stat(path).st_mode & 0o777)
+        else:
+            os.chmod(temporary, 0o644)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 def _tdx_history_gap_range(existing_dates, target_date, trade_dates):
     previous_dates = [date for date in existing_dates if date < target_date]
     if not previous_dates:
@@ -270,105 +314,15 @@ def _tdx_history_gap_range(existing_dates, target_date, trade_dates):
     return None, None
 
 
-def _fetch_tencent_tdx_history_gap(code, start_date, end_date):
-    if code.startswith(('4', '8', '43', '83', '87', '92')):
-        exchange = 'bj'
-    elif code.startswith(('5', '6', '9')):
-        exchange = 'sh'
-    else:
-        exchange = 'sz'
-    symbol = exchange + code
-    url = 'https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get'
-    lines = []
-    seen_dates = set()
-    for year in range(int(start_date[:4]), int(end_date[:4]) + 1):
-        params = {
-            '_var': 'kline_day%s' % year,
-            'param': '%s,day,%s-01-01,%s-12-31,640,' % (symbol, year, year + 1),
-            'r': '0.8205512681390605',
-        }
-        response = requests.get(url, params=params, timeout=15)
-        response.raise_for_status()
-        json_start = response.text.find('={')
-        if json_start < 0:
-            raise ValueError('Tencent daily history response is not valid JSONP')
-        payload = json.loads(response.text[json_start + 1:].strip().rstrip(';'))
-        stock_data = payload.get('data', {}).get(symbol, {})
-        daily_rows = stock_data.get('day', [])
-        if not daily_rows:
-            raise ValueError('Tencent daily history is unavailable for %s in %s' % (symbol, year))
-
-        for row in daily_rows:
-            if len(row) < 9:
-                continue
-            bar_date = str(row[0])[:10]
-            if bar_date < start_date or bar_date > end_date or bar_date in seen_dates:
-                continue
-            try:
-                # Tencent returns main-board/ChiNext volume in lots and amount in 10k yuan;
-                # STAR Market volume is already shares. TDX files store shares and yuan.
-                volume_multiplier = 1 if symbol.startswith('sh688') else 100
-                numbers = [float(row[1]), float(row[3]), float(row[4]), float(row[2]),
-                           float(row[5]) * volume_multiplier, float(row[8]) * 10000]
-            except (TypeError, ValueError):
-                continue
-            if (not np.isfinite(numbers).all() or min(numbers[:4]) <= 0
-                    or numbers[4] < 0 or numbers[5] < 0):
-                continue
-            seen_dates.add(bar_date)
-            lines.append(bar_date + ',' + ','.join(format(value, '.10g') for value in numbers) + '\n')
-
-    if not lines:
-        raise ValueError('Tencent returned no usable daily bars for %s (%s..%s)' %
-                         (symbol, start_date, end_date))
-    return lines
-
-
 def _fetch_tdx_history_gap(code, start_date, end_date):
-    fetch_history = getattr(she, 'stock_zh_a_hist', None)
-    if not callable(fetch_history):
-        logging.info('Eastmoney history API unavailable; using Tencent for %s', code)
-        return _fetch_tencent_tdx_history_gap(code, start_date, end_date)
-    try:
-        history = fetch_history(
-            symbol=code, period='daily', start_date=start_date.replace('-', ''),
-            end_date=end_date.replace('-', ''), adjust='',
-        )
-        if history is None or history.empty:
-            logging.info('Eastmoney returned no history for %s; using Tencent', code)
-            return _fetch_tencent_tdx_history_gap(code, start_date, end_date)
-    except Exception as e:
-        logging.warning('Eastmoney history failed for %s; using Tencent: %s', code, e)
-        return _fetch_tencent_tdx_history_gap(code, start_date, end_date)
+    """Fetch missing daily bars only from the TDX HQ source."""
+    bars = get_tdx_client().fetch_daily_bars(code, start_date, end_date)
+    return [daily_bar_to_line(bar) for bar in bars]
 
-    history = history.rename(columns={
-        '日期': 'date', '开盘': 'open', '最高': 'high', '最低': 'low',
-        '收盘': 'close', '成交量': 'volume', '成交额': 'amount',
-    })
-    required = ('date', 'open', 'high', 'low', 'close', 'volume', 'amount')
-    if any(column not in history.columns for column in required):
-        raise ValueError('historical quote response is missing daily bar columns')
-    history = history.loc[:, required].copy()
-    history['date'] = pd.to_datetime(history['date'], errors='coerce').dt.strftime('%Y-%m-%d')
-    for column in required[1:]:
-        history[column] = pd.to_numeric(history[column], errors='coerce')
-    history = history.dropna(subset=required)
-    # Eastmoney/AkShare reports stock volume in lots; TDX daily files store shares.
-    history['volume'] *= 100
 
-    lines = []
-    seen_dates = set()
-    for row in history.sort_values('date').itertuples(index=False):
-        bar_date = row.date
-        values = [row.open, row.high, row.low, row.close, row.volume, row.amount]
-        numbers = [float(value) for value in values]
-        if (not isinstance(bar_date, str) or bar_date < start_date or bar_date > end_date
-                or bar_date in seen_dates or not np.isfinite(numbers).all()
-                or min(numbers[:4]) <= 0 or numbers[4] < 0 or numbers[5] < 0):
-            continue
-        seen_dates.add(bar_date)
-        lines.append(bar_date + ',' + ','.join(format(value, '.10g') for value in numbers) + '\n')
-    return lines
+def _fetch_tencent_tdx_history_gap(code, start_date, end_date):
+    """Compatibility alias retained for older deployment smoke checks; uses TDX."""
+    return _fetch_tdx_history_gap(code, start_date, end_date)
 
 
 def _normalize_talib_columns(data):
@@ -383,15 +337,30 @@ def _normalize_talib_columns(data):
 
 
 # 读取股票交易日历数据
-def fetch_stocks_trade_date():
+def _tdx_local_trade_dates(target_date=None):
+    forward_dir = os.environ.get('TDX_FORWARDP_DIR', '/data/InStock/instock/forwardp')
+    calendar_codes = (
+        ('SH', '999999'), ('SZ', '399001'),
+        ('SH', '600000'), ('SH', '600036'), ('SH', '601398'),
+        ('SH', '601288'), ('SH', '601166'), ('SH', '601988'),
+        ('SZ', '000001'), ('SZ', '000002'), ('SZ', '000858'),
+    )
+    candidates = []
+    for exchange, code in calendar_codes:
+        candidates.extend(os.path.join(forward_dir, exchange + code + suffix)
+                          for suffix in ('.TXT', '.txt'))
+    return read_tdx_local_calendar(candidates, target_date=target_date,
+                                   max_bytes=131072, max_bars=500)
+
+
+def fetch_stocks_trade_date(target_date=None):
     try:
-        data = tdh.tool_trade_date_hist_sina()
-        if data is None or len(data.index) == 0:
-            return None
-        data_date = set(data['trade_date'].values.tolist())
-        return data_date
+        local_dates = _tdx_local_trade_dates(target_date)
+        if local_dates:
+            return set(local_dates)
     except Exception as e:
-        logging.error(f"stockfetch.fetch_stocks_trade_date处理异常：{e}")
+        logging.warning('TDX local trade calendar unavailable: %s', e)
+    logging.error('TDX local trade calendar unavailable; refusing external calendar fallback')
     return None
 
 
@@ -403,7 +372,7 @@ def repair_tdx_history_gaps(target_date=None, return_stats=True):
              'failed': 0, 'calendar_failed': 0}
     try:
         target_date = _format_trade_date(target_date)
-        trade_dates = fetch_stocks_trade_date()
+        trade_dates = fetch_stocks_trade_date(target_date)
         if not trade_dates:
             stats['calendar_failed'] = 1
             logging.error('TDX history repair skipped because the trade-date calendar is unavailable')
@@ -709,55 +678,259 @@ def fetch_etfs(date):
 
 
 # 读取当天股票数据
+def _stock_names_before(date):
+    try:
+        import instock.lib.database as mdb
+        table_name = tbs.TABLE_CN_STOCK_SPOT['name']
+        if not mdb.checkTableIsExist(table_name):
+            return {}
+        from sqlalchemy import text
+        query = text(
+            'SELECT code,name FROM %s WHERE date=('
+            'SELECT MAX(date) FROM %s WHERE date < :date)'
+            % (table_name, table_name)
+        )
+        with mdb.engine().connect() as connection:
+            frame = pd.read_sql_query(query, connection, params={'date': _format_trade_date(date)})
+        if frame.empty:
+            return {}
+        return {
+            str(row.code).split('.')[0].zfill(6): str(row.name or '')
+            for row in frame.itertuples(index=False)
+        }
+    except Exception as e:
+        logging.debug('TDX snapshot name cache unavailable: %s', e)
+        return {}
+
+
+def _stock_snapshot_frame(rows, target_date, diagnostics):
+    columns = list(tbs.TABLE_CN_STOCK_SPOT['columns'])
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        frame = pd.DataFrame(columns=columns)
+    for column in columns:
+        if column not in frame.columns:
+            if column == 'industry':
+                frame[column] = ''
+            elif column in ('report_date', 'listing_date'):
+                frame[column] = None
+            else:
+                frame[column] = 0
+    if 'code' in frame.columns and not frame.empty:
+        frame['code'] = frame['code'].astype(str).str.split('.').str[0].str.zfill(6)
+        frame = frame.drop_duplicates('code', keep='last')
+    if 'date' in frame.columns and not frame.empty:
+        frame['date'] = target_date
+    frame = frame[columns]
+    frame.attrs['tdx_snapshot'] = diagnostics
+    return frame
+
+
+def _fetch_tdx_daily_stock_snapshot(date, codes):
+    target_date = _format_trade_date(date)
+    names = _stock_names_before(date)
+    diagnostics = {
+        'source': 'tdx_daily_files',
+        'expected_codes': sorted(codes),
+        'valid_codes': [],
+        'no_trade_codes': [],
+        'no_bar_codes': [],
+        'missing_codes': [],
+        'invalid_codes': [],
+        'corrupt_tail_codes': [],
+        'repair_codes': [],
+        'api_error_codes': [],
+    }
+    rows = []
+    stale = []
+    previous_by_code = {}
+    client = get_tdx_client()
+
+    for code in sorted(codes):
+        _, path, _ = _tdx_history_source(code)
+        if not path:
+            stale.append((code, []))
+            continue
+        try:
+            bars, invalid_count = read_tdx_tail_bars(
+                path, target_date, max_bytes=8192, max_bars=4
+            )
+        except Exception:
+            bars, invalid_count = [], 1
+        if invalid_count:
+            diagnostics['corrupt_tail_codes'].append(code)
+            diagnostics['repair_codes'].append(code)
+        target_bar = next((bar for bar in bars if bar['date'] == target_date), None)
+        previous = next((bar for bar in reversed(bars) if bar['date'] < target_date), None)
+        if previous:
+            previous_by_code[code] = previous['close']
+        if target_bar:
+            row = daily_bar_to_snapshot(
+                code, target_bar, previous['close'] if previous else None, names.get(code, '')
+            )
+            if row is not None:
+                rows.append(row)
+                diagnostics['valid_codes'].append(code)
+                if invalid_count:
+                    diagnostics['repair_codes'].append(code)
+                continue
+            diagnostics['invalid_codes'].append(code)
+        stale.append((code, bars))
+
+    no_bar_candidates = []
+    history_failed = False
+    for index, (code, local_bars) in enumerate(stale):
+        try:
+            history = client.fetch_daily_bars(code, target_date, target_date)
+        except Exception as exc:
+            logging.warning('TDX daily snapshot request failed for %s: %s', code, exc)
+            diagnostics['api_error_codes'].append(code)
+            diagnostics['missing_codes'].extend(item[0] for item in stale[index:])
+            history_failed = True
+            break
+        if not history:
+            diagnostics['no_trade_codes'].append(code)
+            continue
+        target_bar = next((bar for bar in history if bar['date'] == target_date), None)
+        if target_bar:
+            previous = next(
+                (bar for bar in reversed(local_bars) if bar['date'] < target_date), None
+            )
+            row = daily_bar_to_snapshot(
+                code, target_bar,
+                previous['close'] if previous else previous_by_code.get(code),
+                names.get(code, ''),
+            )
+            if row is not None:
+                rows.append(row)
+                diagnostics['valid_codes'].append(code)
+                diagnostics['repair_codes'].append(code)
+                continue
+            diagnostics['invalid_codes'].append(code)
+        no_bar_candidates.append(code)
+
+    now = datetime.datetime.now(ZoneInfo('Asia/Shanghai'))
+    if no_bar_candidates and target_date == now.date().isoformat() and now.time() >= datetime.time(16, 0) and not history_failed:
+        try:
+            quotes, failed = client.fetch_quotes(no_bar_candidates)
+        except Exception as exc:
+            logging.warning('TDX quote status check failed for stale files: %s', exc)
+            quotes, failed = {}, set(no_bar_candidates)
+        for code in no_bar_candidates:
+            quote = quotes.get(code)
+            if quote is None:
+                diagnostics['missing_codes'].append(code)
+                if code in failed:
+                    diagnostics['api_error_codes'].append(code)
+                continue
+            status, row = quote_to_snapshot(code, quote, target_date)
+            if status == 'valid':
+                if not row.get('name'):
+                    row['name'] = names.get(code, '')
+                rows.append(row)
+                diagnostics['valid_codes'].append(code)
+                diagnostics['repair_codes'].append(code)
+            elif status == 'no_trade':
+                diagnostics['no_trade_codes'].append(code)
+            else:
+                diagnostics['invalid_codes'].append(code)
+    elif no_bar_candidates:
+        diagnostics['no_bar_codes'].extend(no_bar_candidates)
+
+    for key in (
+        'valid_codes', 'no_trade_codes', 'no_bar_codes', 'missing_codes',
+        'invalid_codes', 'corrupt_tail_codes', 'repair_codes', 'api_error_codes',
+    ):
+        diagnostics[key] = sorted(set(diagnostics[key]))
+    resolved = set(diagnostics['valid_codes']) | set(diagnostics['no_trade_codes'])
+    diagnostics['missing_codes'] = sorted(
+        set(diagnostics['missing_codes'])
+        | (set(codes) - resolved - set(diagnostics['no_bar_codes'])
+           - set(diagnostics['invalid_codes']))
+    )
+    diagnostics['invalid_codes'] = sorted(set(diagnostics['invalid_codes']))
+    diagnostics['resolved_codes'] = sorted(resolved)
+    diagnostics['unresolved_codes'] = sorted(set(codes) - resolved)
+    diagnostics['expected_count'] = len(codes)
+    diagnostics['snapshot_rows'] = len(rows)
+    logging.info(
+        'TDX daily snapshot: date=%s expected=%s rows=%s repaired=%s no_trade=%s no_bar=%s '
+        'missing=%s invalid=%s corrupt_tail=%s',
+        target_date, len(codes), len(rows), len(diagnostics['repair_codes']),
+        len(diagnostics['no_trade_codes']), len(diagnostics['no_bar_codes']),
+        len(diagnostics['missing_codes']), len(diagnostics['invalid_codes']),
+        len(diagnostics['corrupt_tail_codes']),
+    )
+    return _stock_snapshot_frame(rows, target_date, diagnostics)
+
+
+def _fetch_tdx_live_stock_snapshot(date, codes):
+    target_date = _format_trade_date(date)
+    diagnostics = {
+        'source': 'tdx_hq_quote',
+        'expected_codes': sorted(codes),
+        'valid_codes': [],
+        'no_trade_codes': [],
+        'no_bar_codes': [],
+        'missing_codes': [],
+        'invalid_codes': [],
+        'corrupt_tail_codes': [],
+        'repair_codes': [],
+        'api_error_codes': [],
+    }
+    client = get_tdx_client()
+    try:
+        quotes, failed = client.fetch_quotes(sorted(codes))
+    except Exception as exc:
+        logging.error('TDX live snapshot unavailable: %s', exc)
+        return None
+    rows = []
+    for code in sorted(codes):
+        quote = quotes.get(code)
+        if quote is None:
+            diagnostics['missing_codes'].append(code)
+            if code in failed:
+                diagnostics['api_error_codes'].append(code)
+            continue
+        status, row = quote_to_snapshot(code, quote, target_date)
+        if status == 'valid':
+            rows.append(row)
+            diagnostics['valid_codes'].append(code)
+        elif status == 'no_trade':
+            diagnostics['no_trade_codes'].append(code)
+        else:
+            diagnostics['invalid_codes'].append(code)
+    diagnostics['resolved_codes'] = sorted(
+        set(diagnostics['valid_codes']) | set(diagnostics['no_trade_codes'])
+    )
+    diagnostics['unresolved_codes'] = sorted(
+        set(codes) - set(diagnostics['resolved_codes'])
+    )
+    diagnostics['expected_count'] = len(codes)
+    diagnostics['snapshot_rows'] = len(rows)
+    logging.info(
+        'TDX live snapshot: date=%s expected=%s rows=%s no_trade=%s missing=%s invalid=%s',
+        target_date, len(codes), len(rows), len(diagnostics['no_trade_codes']),
+        len(diagnostics['missing_codes']), len(diagnostics['invalid_codes']),
+    )
+    return _stock_snapshot_frame(rows, target_date, diagnostics)
+
+
 def fetch_stocks(date):
     try:
-        quotes = Sina().market('all')
-        if quotes is None or quotes.empty:
+        codes = _get_tdx_stock_codes()
+        if len(codes) < 500:
+            logging.error('stockfetch.fetch_stocks TDX code inventory unavailable: files=%s',
+                          len(codes))
             return None
-        quotes = quotes.copy()
-        quotes['code'] = quotes['code'].astype(str).str.zfill(6)
-        quotes = quotes.loc[quotes['code'].apply(is_a_stock)]
         target_date = _format_trade_date(date)
-        quote_dates = quotes['dt'].astype(str).str[:10]
-        quotes = quotes.loc[quote_dates == target_date].drop_duplicates('code', keep='last')
-        minimum = max(500, int(len(_get_tdx_stock_codes()) * 0.7))
-        if len(quotes) < minimum:
-            logging.error('stockfetch.fetch_stocks Sina行情覆盖不足: %s/%s', len(quotes), minimum)
-            return None
-
-        previous = pd.to_numeric(quotes['close'], errors='coerce').fillna(0)
-        current = pd.to_numeric(quotes['now'], errors='coerce').fillna(0)
-        high = pd.to_numeric(quotes['high'], errors='coerce').fillna(0)
-        low = pd.to_numeric(quotes['low'], errors='coerce').fillna(0)
-        values = {
-            'date': target_date,
-            'code': quotes['code'].values,
-            'name': quotes['name'].fillna('').values,
-            'new_price': current.values,
-            'change_rate': np.where(previous != 0, (current - previous) / previous * 100, 0),
-            'ups_downs': (current - previous).values,
-            'volume': pd.to_numeric(quotes['volume'], errors='coerce').fillna(0).values,
-            'deal_amount': pd.to_numeric(quotes['turnover'], errors='coerce').fillna(0).values,
-            'amplitude': np.where(previous != 0, (high - low) / previous * 100, 0),
-            'open_price': pd.to_numeric(quotes['open'], errors='coerce').fillna(0).values,
-            'high_price': high.values,
-            'low_price': low.values,
-            'pre_close_price': previous.values,
-        }
-        columns = list(tbs.TABLE_CN_STOCK_SPOT['columns'])
-        data = pd.DataFrame(index=range(len(quotes)))
-        for column in columns:
-            if column in values:
-                data[column] = values[column]
-            elif column == 'industry':
-                data[column] = ''
-            elif column in ('report_date', 'listing_date'):
-                data[column] = None
-            else:
-                data[column] = 0
-        return data[columns]
+        now = datetime.datetime.now(ZoneInfo('Asia/Shanghai'))
+        if target_date < now.date().isoformat() or (
+                target_date == now.date().isoformat() and now.time() >= datetime.time(16, 0)):
+            return _fetch_tdx_daily_stock_snapshot(date, codes)
+        return _fetch_tdx_live_stock_snapshot(date, codes)
     except Exception as e:
-        logging.error(f"stockfetch.fetch_stocks处理异常：{e}")
+        logging.error('stockfetch.fetch_stocks TDX snapshot failed: %s', e)
     return None
 
 
@@ -1087,39 +1260,90 @@ def _stock_hist_cache_uncached(code, date_start, date_end=None, is_cache=True, a
 
 @_tdx_backfill_serialized
 def backfill_tdx_daily_data(data, date, return_stats=False, asset_type='stock'):
-    """Repair recent TDX stock-history gaps and atomically upsert today's Sina close."""
-    stats = {'eligible': 0, 'written': 0, 'unchanged': 0, 'failed': 0, 'deferred': 0,
-             'gaps_detected': 0, 'gap_rows_filled': 0, 'gap_failed': 0}
+    """Repair TDX history gaps and atomically upsert a verified daily snapshot."""
+    stats = {'input': 0, 'eligible': 0, 'processed': 0, 'invalid': 0,
+             'written': 0, 'unchanged': 0, 'failed': 0, 'deferred': 0,
+             'gaps_detected': 0, 'gap_rows_filled': 0, 'gap_dates_missing': 0,
+             'gap_failed': 0, 'calendar_failed': 0, 'tdx_inventory': 0,
+             'snapshot_expected': 0, 'snapshot_valid': 0, 'snapshot_no_trade': 0,
+             'snapshot_no_bar': 0, 'snapshot_missing': 0, 'snapshot_invalid': 0,
+             'snapshot_unresolved': 0, 'corrupt_tail_codes': 0,
+             'corrupt_lines_removed': 0, 'corrupt_files_repaired': 0,
+             'corrupt_files_failed': 0, 'target_in_calendar': None, 'complete': False}
+    snapshot_diagnostics = getattr(data, 'attrs', {}).get('tdx_snapshot', {}) if data is not None else {}
     try:
         target_date = _format_trade_date(date)
         now = datetime.datetime.now(ZoneInfo('Asia/Shanghai'))
-        if target_date != now.strftime('%Y-%m-%d') or now.time() < datetime.time(16, 0):
-            logging.info('skip TDX close backfill before market close or for a non-current date: %s', target_date)
+        today = now.date().isoformat()
+        if target_date > today or (target_date == today and now.time() < datetime.time(16, 0)):
+            logging.info('skip TDX close backfill before market close or for a future date: %s', target_date)
             stats['deferred'] = 1
             return stats if return_stats else 0
         if data is None or data.empty:
             return stats if return_stats else 0
+        expected_codes = set(snapshot_diagnostics.get('expected_codes', []))
+        if snapshot_diagnostics and asset_type != 'etf':
+            stats['snapshot_expected'] = len(expected_codes)
+            stats['snapshot_valid'] = len(set(snapshot_diagnostics.get('valid_codes', [])))
+            stats['snapshot_no_trade'] = len(set(snapshot_diagnostics.get('no_trade_codes', [])))
+            stats['snapshot_no_bar'] = len(set(snapshot_diagnostics.get('no_bar_codes', [])))
+            stats['snapshot_missing'] = len(set(snapshot_diagnostics.get('missing_codes', [])))
+            stats['snapshot_invalid'] = len(set(snapshot_diagnostics.get('invalid_codes', [])))
+            stats['snapshot_unresolved'] = len(expected_codes - (
+                set(snapshot_diagnostics.get('valid_codes', []))
+                | set(snapshot_diagnostics.get('no_trade_codes', []))
+            ))
+            stats['corrupt_tail_codes'] = len(set(snapshot_diagnostics.get('corrupt_tail_codes', [])))
+        forward_dir = os.environ.get('TDX_FORWARDP_DIR', '/data/InStock/instock/forwardp')
+        if not os.path.isdir(forward_dir):
+            stats['failed'] += 1
+            logging.error('TDX close backfill directory does not exist: %s', forward_dir)
+            return stats if return_stats else 0
+        if asset_type != 'etf':
+            stats['tdx_inventory'] = len(_get_tdx_stock_codes())
+            if stats['tdx_inventory'] < 500:
+                stats['failed'] += 1
+                logging.error('TDX close backfill code inventory unavailable: files=%s',
+                              stats['tdx_inventory'])
+                return stats if return_stats else 0
         trade_dates = set()
         if asset_type != 'etf':
             try:
-                trade_dates = sorted({
-                    _format_trade_date(value) for value in (fetch_stocks_trade_date() or set())
-                })
-                trade_dates = [value for value in trade_dates if value < target_date]
+                calendar = fetch_stocks_trade_date(target_date)
+                if not calendar:
+                    stats['calendar_failed'] = 1
+                    logging.warning('TDX history gap calendar unavailable; completion cannot be verified')
+                else:
+                    all_trade_dates = {_format_trade_date(value) for value in calendar}
+                    stats['target_in_calendar'] = target_date in all_trade_dates
+                    if stats['target_in_calendar'] is False:
+                        stats['calendar_failed'] = 1
+                        logging.warning('target date is absent from the TDX trade calendar: %s', target_date)
+                    trade_dates = sorted(value for value in all_trade_dates if value < target_date)
             except Exception as e:
+                stats['calendar_failed'] = 1
                 logging.warning('TDX history gap calendar unavailable: %s', e)
-        forward_dir = os.environ.get('TDX_FORWARDP_DIR', '/data/InStock/instock/forwardp')
-        os.makedirs(forward_dir, exist_ok=True)
         for row in data.itertuples(index=False):
             code = str(row.code).zfill(6)
             is_etf = asset_type == 'etf'
             if not code.isdigit() or (is_etf and not code.startswith(('1', '5'))) \
                     or (not is_etf and not is_a_stock(code)):
                 continue
-            values = [row.open_price, row.high_price, row.low_price, row.new_price,
-                      row.volume, row.deal_amount]
-            numbers = [float(value) for value in values]
-            if not np.isfinite(numbers).all() or numbers[0] <= 0 or numbers[1] <= 0 or numbers[2] <= 0 or numbers[3] <= 0:
+            stats['input'] += 1
+            try:
+                values = [row.open_price, row.high_price, row.low_price, row.new_price,
+                          row.volume, row.deal_amount]
+                numbers = [float(value) for value in values]
+            except (TypeError, ValueError, OverflowError):
+                stats['invalid'] += 1
+                logging.warning('TDX close backfill skipped invalid quote for %s', code)
+                continue
+            if (not np.isfinite(numbers).all() or min(numbers[:4]) <= 0
+                    or numbers[1] < max(numbers[0], numbers[2], numbers[3])
+                    or numbers[2] > min(numbers[0], numbers[3])
+                    or numbers[4] < 0 or numbers[5] < 0):
+                stats['invalid'] += 1
+                logging.warning('TDX close backfill skipped invalid OHLCV for %s', code)
                 continue
             stats['eligible'] += 1
             line = target_date + ',' + ','.join(format(value, '.10g') for value in numbers) + '\n'
@@ -1135,23 +1359,30 @@ def backfill_tdx_daily_data(data, date, return_stats=False, asset_type='stock'):
                         old_lines = source.readlines()
                 else:
                     old_lines = []
+                old_lines, corrupt_count = _clean_tdx_file_lines(old_lines)
                 existing_dates = {value for value in (_tdx_line_date(old_line) for old_line in old_lines)
                                   if value}
                 gap_lines = []
-                if asset_type != 'etf':
+                if asset_type != 'etf' and not snapshot_diagnostics:
                     gap_start, gap_end = _tdx_history_gap_range(
                         existing_dates, target_date, trade_dates
                     )
                     if gap_start and gap_end and gap_start <= gap_end:
                         stats['gaps_detected'] += 1
+                        expected_gap_dates = {
+                            value for value in trade_dates
+                            if gap_start <= value <= gap_end and value not in existing_dates
+                        }
                         try:
                             fetched_lines = _fetch_tdx_history_gap(code, gap_start, gap_end)
+                            fetched_dates = {_tdx_line_date(value) for value in fetched_lines}
                             gap_lines = [
                                 history_line for history_line in fetched_lines
-                                if _tdx_line_date(history_line) not in existing_dates
+                                if _tdx_line_date(history_line) in expected_gap_dates
                                 and _tdx_line_date(history_line) != target_date
                             ]
                             stats['gap_rows_filled'] += len(gap_lines)
+                            stats['gap_dates_missing'] += len(expected_gap_dates - fetched_dates)
                         except Exception as e:
                             stats['gap_failed'] += 1
                             logging.error('TDX history gap repair failed for %s (%s..%s): %s',
@@ -1178,32 +1409,67 @@ def backfill_tdx_daily_data(data, date, return_stats=False, asset_type='stock'):
                     merged.extend(gap_lines)
                 if not replaced:
                     merged.append(line)
-                if date_matches == 1 and same_record and not gap_lines:
+                if date_matches == 1 and same_record and not gap_lines and not corrupt_count:
                     stats['unchanged'] += 1
+                    stats['processed'] += 1
                     continue
-                fd, temporary = tempfile.mkstemp(prefix=code + '.', suffix='.tmp', dir=forward_dir)
-                try:
-                    with os.fdopen(fd, 'w', encoding='utf-8', newline='') as destination:
-                        destination.writelines(merged)
-                        destination.flush()
-                        os.fsync(destination.fileno())
-                    if os.path.exists(path):
-                        os.chmod(temporary, os.stat(path).st_mode & 0o777)
-                    else:
-                        os.chmod(temporary, 0o644)
-                    os.replace(temporary, path)
-                finally:
-                    if os.path.exists(temporary):
-                        os.unlink(temporary)
+                _atomic_write_tdx_lines(path, merged)
+                if corrupt_count:
+                    stats['corrupt_lines_removed'] += corrupt_count
+                    stats['corrupt_files_repaired'] += 1
                 stats['written'] += 1
+                stats['processed'] += 1
             except Exception as e:
                 stats['failed'] += 1
+                if code in set(snapshot_diagnostics.get('corrupt_tail_codes', [])):
+                    stats['corrupt_files_failed'] += 1
                 logging.error('TDX close backfill failed for %s: %s', code, e)
-        logging.info('TDX %s close backfill completed: date=%s eligible=%s written=%s unchanged=%s '
-                     'gaps=%s gap_rows=%s gap_failed=%s failed=%s',
-                     asset_type, target_date, stats['eligible'], stats['written'],
-                     stats['unchanged'], stats['gaps_detected'], stats['gap_rows_filled'],
-                     stats['gap_failed'], stats['failed'])
+        for code in set(snapshot_diagnostics.get('corrupt_tail_codes', [])):
+            _, corrupt_path, _ = _tdx_history_source(code)
+            if not corrupt_path or not os.path.isfile(corrupt_path):
+                stats['corrupt_files_failed'] += 1
+                continue
+            try:
+                with open(corrupt_path, 'r', encoding='gb18030', errors='replace', newline='') as source:
+                    old_lines = source.readlines()
+                clean_lines, corrupt_count = _clean_tdx_file_lines(old_lines)
+                if corrupt_count:
+                    _atomic_write_tdx_lines(corrupt_path, clean_lines)
+                    stats['corrupt_lines_removed'] += corrupt_count
+                    stats['corrupt_files_repaired'] += 1
+            except Exception as e:
+                stats['corrupt_files_failed'] += 1
+                logging.error('TDX corrupt-tail cleanup failed for %s: %s', code, e)
+        corrupt_repair_complete = stats['corrupt_files_failed'] == 0
+        if snapshot_diagnostics and asset_type != 'etf':
+            coverage_complete = (
+                stats['snapshot_expected'] > 0
+                and stats['snapshot_unresolved'] == 0
+                and stats['snapshot_missing'] == 0
+                and stats['snapshot_invalid'] == 0
+            )
+        else:
+            coverage_complete = True
+        stats['complete'] = bool(
+            stats['input'] > 0 and stats['eligible'] == stats['input']
+            and stats['processed'] == stats['eligible'] and stats['failed'] == 0
+            and stats['invalid'] == 0 and stats['gap_failed'] == 0
+            and stats['gap_dates_missing'] == 0 and corrupt_repair_complete
+            and coverage_complete
+            and (asset_type == 'etf' or (stats['calendar_failed'] == 0 and stats['tdx_inventory'] >= 500))
+        )
+        logging.info('TDX %s close backfill completed: date=%s input=%s eligible=%s processed=%s '
+                     'snapshot_expected=%s unresolved=%s no_bar=%s missing=%s snapshot_invalid=%s '
+                     'corrupt_removed=%s corrupt_repaired=%s corrupt_failed=%s written=%s unchanged=%s '
+                     'invalid=%s gaps=%s gap_rows=%s gap_dates_missing=%s gap_failed=%s '
+                     'calendar_failed=%s tdx_inventory=%s failed=%s complete=%s',
+                     asset_type, target_date, stats['input'], stats['eligible'], stats['processed'],
+                     stats['snapshot_expected'], stats['snapshot_unresolved'], stats['snapshot_no_bar'],
+                     stats['snapshot_missing'], stats['snapshot_invalid'], stats['corrupt_lines_removed'],
+                     stats['corrupt_files_repaired'], stats['corrupt_files_failed'], stats['written'],
+                     stats['unchanged'], stats['invalid'], stats['gaps_detected'], stats['gap_rows_filled'],
+                     stats['gap_dates_missing'], stats['gap_failed'], stats['calendar_failed'],
+                     stats['tdx_inventory'], stats['failed'], stats['complete'])
         return stats if return_stats else stats['written']
     except Exception as e:
         logging.error('stockfetch.backfill_tdx_daily_data处理异常：%s', e)

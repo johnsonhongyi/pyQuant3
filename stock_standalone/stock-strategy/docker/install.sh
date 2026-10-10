@@ -191,6 +191,8 @@ docker run -d \
     -e A_STOCK_DATA_ROOT=/data \
     -e A_STOCK_TRADING_CALENDAR=/data/config/trading-calendar.json \
     -e A_STOCK_DATA_DB=/data/easy-stock/stock-data.db \
+    -e A_STOCK_TDX_FORWARDP_DIR=/data/instock/forwardp \
+    -v /mnt/4TB/dockerf/stock/forwardp:/data/instock/forwardp:ro \
     -e A_STOCK_LOG_DIR=/logs/backend \
     -e A_STOCK_SETTINGS_PATH=/data/easy-stock/settings.json \
     -e A_STOCK_MASTERY_CACHE=/data/trading-mastery \

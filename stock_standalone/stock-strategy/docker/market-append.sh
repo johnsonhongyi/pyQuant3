@@ -3,12 +3,13 @@ set -eu
 
 PROJECT=/root/johnson/stock-strategy
 DATA_ROOT=/mnt/4TB/dockerf/stockstrategy
+TDX_FORWARDP_DIR=/mnt/4TB/dockerf/stock/forwardp
 SERVICE="$PROJECT/source/easy-stock-service"
 LOG_ROOT="$DATA_ROOT/logs/service"
 LOCK_ROOT="$DATA_ROOT/data/service/locks"
 
 case "${1:-}" in
-    cn)
+    cn|cn-retry)
         script=bars.py
         log_file="$LOG_ROOT/market-append-cn.log"
         lock_file="$LOCK_ROOT/market-append-cn.lock"
@@ -62,6 +63,17 @@ mkdir -p "$LOG_ROOT" "$LOCK_ROOT"
     exec >> "$log_file" 2>&1
 
     export EASY_STOCK_DATA_DB="$DATA_ROOT/data/easy-stock/stock-data.db"
+    case "$1" in
+        cn|cn-retry)
+            export EASY_STOCK_TDX_FORWARDP_DIR="$TDX_FORWARDP_DIR"
+            if [ ! -d "$EASY_STOCK_TDX_FORWARDP_DIR" ]; then
+                printf '[%s] Instock TDX daily directory missing: %s; refusing external daily fallback\n' \
+                    "$(date -Is)" "$EASY_STOCK_TDX_FORWARDP_DIR" >&2
+                exit 1
+            fi
+            export EASY_STOCK_TDX_DAILY_ENABLED=1
+            ;;
+    esac
     export TRADING_CALENDAR_PATH="$DATA_ROOT/config/trading-calendar.json"
     export PYTHONUNBUFFERED=1
     # The API has no host port; resolve its address on the managed bridge.
