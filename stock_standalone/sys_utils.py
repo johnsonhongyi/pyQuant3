@@ -641,37 +641,116 @@ def repair_system_configurations_and_delisted_stocks():
     try:
         fav_path = get_conf_path("favorite_stocks.json") or os.path.join(app_root, "favorite_stocks.json")
         if os.path.exists(fav_path) and os.path.getsize(fav_path) > 0:
-            with open(fav_path, "r", encoding="utf-8") as f:
-                fav_data = json.load(f)
+            from global_favorites import _favorites_file_lock
+            import threading
+            import time
+            with _favorites_file_lock(fav_path):
+                with open(fav_path, "r", encoding="utf-8") as f:
+                    fav_data = json.load(f)
 
-            need_save = False
-            ui_state = fav_data.get("sector_bidding_panel_persistence_ui_state", fav_data)
+                need_save = False
+                removed_codes = set()
+                ui_state = fav_data.get("sector_bidding_panel_persistence_ui_state", fav_data)
 
-            # 清洗 顶层 与 ui_state 内的 favorite_stocks 列表
-            for target_dict in [fav_data, ui_state]:
-                stocks_list = target_dict.get("favorite_stocks", [])
-                if stocks_list:
-                    clean_stocks = [c for c in stocks_list if c and not is_delisted_stock(str(c))]
-                    if len(clean_stocks) != len(stocks_list):
-                        removed_codes = set(stocks_list) - set(clean_stocks)
-                        logger.warning(f"🧹 [Self-Healing] 从 {os.path.basename(fav_path)} 中剔除已退市死码: {removed_codes}")
-                        target_dict["favorite_stocks"] = clean_stocks
-                        need_save = True
+                # 清洗 顶层 与 ui_state 内的 favorite_stocks 列表
+                for target_dict in [fav_data, ui_state]:
+                    stocks_list = target_dict.get("favorite_stocks", [])
+                    if stocks_list:
+                        clean_stocks = []
+                        for code in stocks_list:
+                            if not code:
+                                continue
+                            if is_delisted_stock(str(code)):
+                                raw_code = str(code).strip()
+                                if raw_code.isdigit() and 1 <= len(raw_code) <= 6:
+                                    removed_codes.add(raw_code.zfill(6))
+                                continue
+                            clean_stocks.append(code)
+                        if len(clean_stocks) != len(stocks_list):
+                            removed_labels = set(stocks_list) - set(clean_stocks)
+                            logger.warning(f"🧹 [Self-Healing] 从 {os.path.basename(fav_path)} 中剔除已退市死码: {removed_labels}")
+                            target_dict["favorite_stocks"] = clean_stocks
+                            need_save = True
 
-                dates_dict = target_dict.get("favorite_stocks_dates", {})
-                if dates_dict:
-                    clean_dates = {k: v for k, v in dates_dict.items() if k and not is_delisted_stock(str(k))}
-                    if len(clean_dates) != len(dates_dict):
-                        target_dict["favorite_stocks_dates"] = clean_dates
-                        need_save = True
+                    dates_dict = target_dict.get("favorite_stocks_dates", {})
+                    if dates_dict:
+                        for code in dates_dict:
+                            raw_code = str(code).strip()
+                            if raw_code.isdigit() and 1 <= len(raw_code) <= 6 and is_delisted_stock(raw_code):
+                                removed_codes.add(raw_code.zfill(6))
+                        clean_dates = {k: v for k, v in dates_dict.items() if k and not is_delisted_stock(str(k))}
+                        if len(clean_dates) != len(dates_dict):
+                            target_dict["favorite_stocks_dates"] = clean_dates
+                            need_save = True
 
-            if need_save:
-                tmp_fav = f"{fav_path}.tmp.{os.getpid()}"
-                with open(tmp_fav, "w", encoding="utf-8") as f_out:
-                    json.dump(fav_data, f_out, ensure_ascii=False, indent=2)
-                os.replace(tmp_fav, fav_path)
-                logger.info(f"✅ [Self-Healing] 成功自愈修复并重写物理文件: {fav_path}")
-                repaired_count += 1
+                if need_save:
+                    if removed_codes:
+                        linkage = fav_data.get("system_linkage")
+                        if not isinstance(linkage, dict):
+                            linkage = {}
+                        sources = linkage.get("favorite_sources")
+                        if not isinstance(sources, dict):
+                            sources = {}
+                        tombstones = linkage.get("favorite_tombstones")
+                        if not isinstance(tombstones, dict):
+                            tombstones = {}
+                        source_tombstones = linkage.get("favorite_source_tombstones")
+                        if not isinstance(source_tombstones, dict):
+                            source_tombstones = {}
+                        operations = linkage.get("applied_operations")
+                        if not isinstance(operations, dict):
+                            operations = {}
+                        try:
+                            revision = max(0, int(linkage.get("favorites_revision", 0) or 0)) + 1
+                        except (TypeError, ValueError):
+                            revision = 1
+                        recorded_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                        for code in removed_codes:
+                            sources.pop(code, None)
+                            source_tombstones.pop(code, None)
+                            operation_id = f"self-heal-delisted-{code}-{time.time_ns()}"
+                            tombstones[code] = {
+                                "operation_id": operation_id,
+                                "local_revision": revision,
+                                "recorded_at": recorded_at,
+                            }
+                            operations[operation_id] = {
+                                "code": code,
+                                "source": "manual",
+                                "action": "remove_all",
+                                "status": "removed",
+                                "recorded_at": recorded_at,
+                            }
+                        linkage.update({
+                            "favorites_revision": revision,
+                            "favorite_sources": sources,
+                            "favorite_tombstones": tombstones,
+                            "favorite_source_tombstones": source_tombstones,
+                            "applied_operations": operations,
+                        })
+                        fav_data["system_linkage"] = linkage
+                    elif need_save:
+                        linkage = fav_data.get("system_linkage")
+                        if not isinstance(linkage, dict):
+                            linkage = {}
+                        try:
+                            linkage["favorites_revision"] = max(
+                                0, int(linkage.get("favorites_revision", 0) or 0)) + 1
+                        except (TypeError, ValueError):
+                            linkage["favorites_revision"] = 1
+                        fav_data["system_linkage"] = linkage
+                    tmp_fav = f"{fav_path}.tmp.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}"
+                    try:
+                        with open(tmp_fav, "x", encoding="utf-8") as f_out:
+                            json.dump(fav_data, f_out, ensure_ascii=False, indent=2)
+                            f_out.flush()
+                            os.fsync(f_out.fileno())
+                        os.replace(tmp_fav, fav_path)
+                    finally:
+                        if os.path.exists(tmp_fav):
+                            os.remove(tmp_fav)
+                    logger.info(f"✅ [Self-Healing] 成功自愈修复并重写物理文件: {fav_path}")
+                    repaired_count += 1
     except Exception as e:
         logger.error(f"❌ [Self-Healing] 修复 favorite_stocks.json 发生异常: {e}")
 

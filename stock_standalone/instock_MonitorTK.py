@@ -849,6 +849,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             left_frame, textvariable=self.status_var, anchor="w", padx=10, pady=1
         )
         status_label_left.pack(fill="x", expand=True)
+        self.linkage_context_var = tk.StringVar(value="共享题材/热度上下文：等待配置")
+        tk.Label(left_frame, textvariable=self.linkage_context_var, anchor="w", padx=10,
+                 fg="#52616b", font=("Microsoft YaHei", 8)).pack(fill="x", expand=True)
 
 
 
@@ -3516,6 +3519,28 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                         self._force_ui_refresh_pending = True
                                 except Exception as e:
                                     logger.error(f"Failed to update extra_monitor_codes: {e}")
+
+                        elif obj and obj.get("cmd") == "WATCHLIST_CONSUMED":
+                            gateway = getattr(self, '_system_linkage_gateway', None)
+                            if gateway:
+                                try:
+                                    gateway.report_consumer_batch(
+                                        obj.get('consumer', ''), obj.get('operations', []),
+                                        obj.get('favorites_revision', 0),
+                                    )
+                                except Exception:
+                                    logger.exception("Could not record watchlist consumer receipt")
+
+                        elif obj and obj.get("cmd") == "WATCHLIST_HEARTBEAT":
+                            gateway = getattr(self, '_system_linkage_gateway', None)
+                            if gateway:
+                                try:
+                                    gateway.report_consumer_heartbeat(
+                                        obj.get('consumer', ''), obj.get('favorites_revision', 0),
+                                        obj.get('quote_status', 'unknown'),
+                                    )
+                                except Exception:
+                                    logger.exception("Could not record watchlist consumer heartbeat")
                         
                         elif obj and obj.get("cmd") == "SET_VOICE_STATE":
                             enabled = obj.get("enabled", True)
@@ -3686,6 +3711,66 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 "candidate_count": len(candidates),
                 "published_at": published["available_at"],
             }
+            try:
+                context_client = getattr(self, "_linkage_context_client", None)
+                if context_client is not None:
+                    import math
+                    from datetime import timezone
+                    from zoneinfo import ZoneInfo
+
+                    as_of = datetime.strptime(
+                        f"{bidding.date} {bidding.generated_at}", "%Y-%m-%d %H:%M:%S",
+                    ).replace(tzinfo=ZoneInfo("Asia/Shanghai")).astimezone(timezone.utc).isoformat()
+
+                    def finite_value(value):
+                        try:
+                            number = float(value)
+                            return round(number, 3) if math.isfinite(number) else None
+                        except (TypeError, ValueError):
+                            return None
+
+                    candidate_codes = list(dict.fromkeys(
+                        str(getattr(signal, "code", "") or "").strip().zfill(6)
+                        for signal in candidates
+                        if str(getattr(signal, "code", "") or "").strip().isdigit()
+                    ))[:100]
+                    candidate_codes_complete = len(candidate_codes) == len(candidates)
+                    sectors = []
+                    for sector in bidding.active_sectors[:100]:
+                        entry = {"name": str(sector.name or "")}
+                        for key, value in (("change_percent", sector.avg_pct), ("leader_change_percent", sector.leader_pct),
+                                           ("score", sector.board_score)):
+                            number = finite_value(value)
+                            if number is not None:
+                                entry[key] = number
+                        leader = str(sector.leader_code or "").strip().zfill(6)
+                        if leader.isdigit():
+                            entry["leader_symbol"] = leader + (".SH" if leader.startswith(("600", "601", "603", "605", "688", "689")) else ".SZ")
+                        if sector.leader_name:
+                            entry["leader_name"] = str(sector.leader_name)[:64]
+                        sectors.append(entry)
+                    stocks = []
+                    for code, item in list(bidding.stock_snap.items())[:100]:
+                        digits = str(code or "").strip().zfill(6)
+                        if not digits.isdigit() or len(digits) != 6:
+                            continue
+                        entry = {"symbol": digits + (".SH" if digits.startswith(("600", "601", "603", "605", "688", "689")) else ".SZ")}
+                        for key, value in (("change_percent", item.get("pct")), ("score", item.get("score"))):
+                            number = finite_value(value)
+                            if number is not None:
+                                entry[key] = number
+                        if item.get("name"):
+                            entry["name"] = str(item["name"])[:64]
+                        stocks.append(entry)
+                    evidence = {
+                        "schema_version": 1, "source_id": "tk.auction", "session_phase": "auction",
+                        "state": str(published.get("state", "unknown")), "candidate_count": len(candidates),
+                        "candidate_codes": candidate_codes, "candidate_codes_complete": candidate_codes_complete,
+                        "sectors": sectors, "stocks": stocks,
+                    }
+                    context_client.publish_source_snapshot("tk.auction", bidding.date, as_of, evidence)
+            except Exception:
+                logger.warning("[AuctionSentimentShadow] shared auction evidence could not be queued", exc_info=True)
             self._auction_shadow_done_date = today
             logger.info(
                 "[AuctionSentimentShadow] %s state=%s candidates=%s; trading path untouched",
@@ -3997,7 +4082,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 def _auto_stock_select_task():
                     logger.warning("[15:30 Task] STEP 3 ▶ get_candidates_df started in thread.")
                     try:
-                        self.selector.get_candidates_df(force=True, logical_date=today)
+                        candidates = self.selector.get_candidates_df(force=True, logical_date=today)
+                        context_client = getattr(self, "_linkage_context_client", None)
+                        if context_client is not None:
+                            try:
+                                from system_linkage_context import publish_instock_candidate_evidence
+                                if publish_instock_candidate_evidence(candidates, context_client, today):
+                                    logger.info("[15:30 Task] STEP 3 ✅ Instock 候选证据已排队上传。")
+                            except Exception as evidence_error:
+                                logger.warning("[15:30 Task] Instock linkage evidence queue failed: %s", evidence_error)
                         logger.warning("[15:30 Task] STEP 3 ✅ 每日收盘选股自动持久化完成！")
                         self._generate_eod_pulse_report(today)
                     except Exception as e_select:
@@ -4237,6 +4330,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._is_closing = True
         if hasattr(self, '_app_exiting'):
             self._app_exiting.set()
+        gateway = getattr(self, '_system_linkage_gateway', None)
+        if gateway:
+            threading.Thread(target=gateway.stop, name="SystemLinkageShutdown", daemon=True).start()
+        for bus, event_type, handler in getattr(self, "_linkage_signal_handlers", []):
+            try:
+                bus.unsubscribe(event_type, handler)
+            except Exception:
+                logger.debug("TK anomaly evidence listener cleanup failed", exc_info=True)
+        self._linkage_signal_handlers = []
+        context_client = getattr(self, '_linkage_context_client', None)
+        if context_client:
+            threading.Thread(target=context_client.stop, name="LinkageContextShutdown", daemon=True).start()
         qt_event_job = getattr(self, '_qt_event_after_id', None)
         if qt_event_job is not None:
             try:
@@ -6457,6 +6562,28 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         df_filtered = latest_p.get('filtered_ui_data')
                         full_df_res = latest_p.get('full_snapshot_res')
                         df_filtered_res = latest_p.get('filtered_ui_data_res')
+                        if 'linkage_quotes' in latest_p:
+                            linkage_quotes = latest_p.get('linkage_quotes')
+                            linkage_statuses = latest_p.get('linkage_quote_statuses') or {}
+                            linkage_revision = int(
+                                latest_p.get('linkage_favorites_revision', 0) or 0
+                            )
+                            with self._df_lock:
+                                previous_revision = getattr(self, '_linkage_favorites_revision', None)
+                                self._linkage_quote_frame = linkage_quotes
+                                self._linkage_quote_statuses = dict(linkage_statuses)
+                                self._linkage_favorites_revision = linkage_revision
+                                self._linkage_quote_frame_at = time.monotonic()
+                            if previous_revision is not None and previous_revision != linkage_revision:
+                                self._linkage_quote_send_cursor = 0
+                            if linkage_statuses or (linkage_quotes is not None and not linkage_quotes.empty):
+                                last_ui_refresh = getattr(self, '_linkage_last_ui_refresh_at', 0.0)
+                                if time.monotonic() - last_ui_refresh >= 10.0:
+                                    self._linkage_last_ui_refresh_at = time.monotonic()
+                                    self._schedule_after(
+                                        0, self._refresh_ui_favorites,
+                                        key='linkage_quote_ui_refresh', debounce=True,
+                                    )
                     else:
                         full_df = latest_p
                     
@@ -7152,6 +7279,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """主线程交付行情缓存；预览帧不触发交易或信号计算。"""
         with self._df_lock:
             self.df_all = full_df
+            self._linkage_market_frame_at = time.monotonic()
             if cur_res == (self.global_values.getkey('resample') or 'd'):
                 self.df_all_res = full_df_res if full_df_res is not None else full_df
         self._data_update_version = getattr(self, '_data_update_version', 0) + 1
@@ -7386,6 +7514,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """[OPTIMIZE] 集中处理后台常驻任务的初始化，减少主线程计时器碎片"""
         if getattr(self, '_is_closing', False):
             return
+        self._schedule_after(1000, self._start_system_linkage_gateway)
         self._schedule_after(3000, self._start_feedback_listener)
         self._schedule_after(4000, self._bg_premarket_diagnose_heartbeat)
         self._schedule_after(5000, self._bg_kernel_heartbeat)
@@ -7395,6 +7524,345 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._schedule_after(58000, self.schedule_15_30_job)
         self._schedule_after(58000, self.schedule_market_sentiment_snapshot_job)
         self._schedule_after(58000, self.schedule_auction_sentiment_shadow_job)
+
+    def _start_system_linkage_gateway(self):
+        if getattr(self, '_is_closing', False) or getattr(self, '_system_linkage_gateway', None):
+            return
+        try:
+            from JohnsonUtil import commonTips as cct
+            if not bool(getattr(cct, 'linkage_enabled', False)):
+                return
+            try:
+                from system_linkage_context import SystemLinkageContextClient
+                self._linkage_context_client = SystemLinkageContextClient(
+                    cct, callback=self._queue_linkage_context_update
+                )
+                if self._linkage_context_client.start():
+                    self._start_linkage_signal_bridge()
+                cached_snapshot, cached_status = self._linkage_context_client.latest()
+                self._queue_linkage_context_update(cached_snapshot, cached_status)
+            except Exception:
+                self._linkage_context_client = None
+                logger.exception("TK shared context consumer could not start")
+            from system_linkage_gateway import SystemLinkageGateway
+
+            def dispatch_to_ui(command):
+                if (getattr(self, '_is_closing', False) or not hasattr(self, 'tk_dispatch_queue')
+                        or self.tk_dispatch_queue.qsize() > 500):
+                    return False
+                try:
+                    self.tk_dispatch_queue.put_nowait(
+                        lambda payload=dict(command): self._apply_system_linkage_monitor(payload)
+                    )
+                    return True
+                except Exception:
+                    logger.exception("Could not queue system-linkage monitor update")
+                    return False
+
+            gateway = SystemLinkageGateway(cct, dispatch_to_ui=dispatch_to_ui)
+            self._system_linkage_gateway = gateway
+
+            def start_gateway():
+                try:
+                    registration = gateway.start()
+                    if registration:
+                        logger.info("System-linkage JSON gateway started: %s", registration)
+                except Exception:
+                    logger.exception("System-linkage gateway startup failed; local IPC remains available")
+                    self._system_linkage_gateway = None
+
+            threading.Thread(target=start_gateway, name="SystemLinkageStartup", daemon=True).start()
+            self._schedule_after(5000, self._system_linkage_heartbeat)
+        except Exception:
+            logger.exception("System-linkage gateway initialization failed")
+
+    def _start_linkage_signal_bridge(self):
+        if getattr(self, "_linkage_signal_handlers", None):
+            return
+        try:
+            from signal_bus import SignalBus, get_signal_bus
+
+            bus = get_signal_bus()
+            handlers = []
+            for event_type in (SignalBus.EVENT_PATTERN, SignalBus.EVENT_RISK, SignalBus.EVENT_SECTOR_ALERT):
+                bus.subscribe(event_type, self._queue_tk_anomaly_evidence)
+                handlers.append((bus, event_type, self._queue_tk_anomaly_evidence))
+            self._linkage_signal_handlers = handlers
+        except Exception:
+            logger.debug("TK anomaly evidence bridge is unavailable", exc_info=True)
+
+    def _queue_tk_anomaly_evidence(self, event):
+        if getattr(self, "_is_closing", False):
+            return
+        client = getattr(self, "_linkage_context_client", None)
+        if client is None:
+            return
+        try:
+            from datetime import datetime, timezone
+            from zoneinfo import ZoneInfo
+            import hashlib
+            import json
+            import math
+
+            event_type = str(getattr(event, "event_type", "") or "")
+            payload = getattr(event, "payload", {})
+            if not isinstance(payload, dict):
+                payload = {}
+            raw_code = payload.get("symbol") or payload.get("code")
+            signal = getattr(event, "signal", None)
+            if not raw_code and signal is not None:
+                raw_code = getattr(signal, "code", "")
+            digits = "".join(character for character in str(raw_code or "") if character.isdigit())
+            if len(digits) != 6:
+                return
+            suffix = ".SH" if digits.startswith(("600", "601", "603", "605", "688", "689")) else ".SZ"
+            observed_at = getattr(event, "timestamp", None)
+            if not isinstance(observed_at, datetime):
+                observed_at = datetime.fromisoformat(str(observed_at).replace("Z", "+00:00"))
+            if observed_at.tzinfo is None:
+                observed_at = observed_at.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+            local_time = observed_at.astimezone(ZoneInfo("Asia/Shanghai"))
+            as_of = observed_at.astimezone(timezone.utc).isoformat()
+            details = {}
+            for key in ("name", "pattern", "reason", "description", "severity", "scope", "theme_id", "score", "change_pct"):
+                value = payload.get(key)
+                if isinstance(value, (str, int, bool)):
+                    details[key] = str(value)[:160] if isinstance(value, str) else value
+                elif isinstance(value, float) and math.isfinite(value):
+                    details[key] = value
+            evidence = {"event_type": event_type, "event_source": str(getattr(event, "source", "") or "")[:64],
+                        "symbol": digits + suffix, "trade_date": local_time.date().isoformat(),
+                        "observed_at": as_of, "details": details}
+            material = json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            evidence["event_id"] = hashlib.sha256(material).hexdigest()
+            client.queue_source_event("tk.anomaly", local_time.date().isoformat(), as_of, evidence)
+        except Exception:
+            logger.debug("TK anomaly evidence could not be queued", exc_info=True)
+
+    def _queue_linkage_context_update(self, snapshot, status):
+        if getattr(self, '_is_closing', False):
+            return
+        try:
+            queue_obj = getattr(self, 'tk_dispatch_queue', None)
+            if queue_obj is None or queue_obj.qsize() > 500:
+                return
+            queue_obj.put_nowait(lambda snap=snapshot, state=dict(status or {}): self._apply_linkage_context_update(snap, state))
+        except Exception:
+            logger.debug("TK shared context update could not be queued", exc_info=True)
+
+    def _apply_linkage_context_update(self, snapshot, status):
+        if getattr(self, '_is_closing', False) or not hasattr(self, 'linkage_context_var'):
+            return
+        self._linkage_context_snapshot = snapshot
+        selected = getattr(self, 'selected_stock_info', None) or {}
+        code = selected.get('code') if isinstance(selected, dict) else ''
+        self._update_linkage_context_status(code, status)
+
+    def _update_linkage_context_status(self, code, status=None):
+        if not hasattr(self, 'linkage_context_var'):
+            return
+        client = getattr(self, '_linkage_context_client', None)
+        if not client:
+            self.linkage_context_var.set("共享题材/热度上下文：未连接")
+            return
+        _, client_status = client.latest()
+        current_status = status if isinstance(status, dict) else client_status
+        summary = client.summary_for_symbol(code) if code else {}
+        if not summary:
+            summary = {"state": current_status.get('state', 'unavailable')}
+        theme_heat = summary.get('theme_heat', [])[:3]
+        theme_labels = []
+        for theme in theme_heat:
+            label = str(theme.get('name', '') or '')
+            if isinstance(theme.get('change_percent'), (int, float)):
+                label += f" {theme['change_percent']:+.2f}%"
+            if isinstance(theme.get('daily_strength_score'), (int, float)):
+                label += f" 日强{theme['daily_strength_score']}"
+            if isinstance(theme.get('five_day_strength_score'), (int, float)):
+                label += f" 五日{theme['five_day_strength_score']}"
+            if label:
+                theme_labels.append(label)
+        themes = '、'.join(theme_labels or summary.get('themes', [])[:3]) or '无已确认题材'
+        ranks = summary.get('ranks', {})
+        rank_text = '、'.join(f"{source}#{rank}" for source, rank in sorted(ranks.items(), key=lambda item: item[1])[:3]) or '未在当前榜单观测范围'
+        ladder = summary.get('ladder') or {}
+        ladder_text = f"{ladder.get('label', '')} {ladder.get('streak', '')}连板" if ladder else '天梯未列入'
+        leader = summary.get('leader') or {}
+        leader_label = '历史 ATS 角色候选' if leader.get('freshness') == 'stale' else 'ATS 角色候选'
+        leader_text = (f"{leader_label} {leader.get('role', '')}" if leader.get('candidate')
+                       else str(leader.get('classification', 'ATS 角色证据待同步')))
+        date = summary.get('trade_date') or '日期未知'
+        attention = current_status.get('attention', 'pending')
+        auction = summary.get('auction') or {}
+        auction_label = '历史竞价参考' if auction.get('freshness') == 'stale' else '竞价'
+        auction_text = (f"{auction_label} {auction.get('state', 'unknown')}" + ('候选' if auction.get('candidate') else '')
+                        + f" {auction.get('trade_date', '')}") if auction else '竞价证据待同步'
+        instock_candidate = summary.get('instock_candidate') or {}
+        instock_text = str(instock_candidate.get('classification', '当前候选证据待同步'))
+        if instock_candidate.get('candidate') and instock_candidate.get('grade'):
+            instock_text += f" {instock_candidate['grade']}级"
+        if isinstance(instock_candidate.get('score'), (int, float)):
+            instock_text += f" {instock_candidate['score']}分"
+        if instock_candidate.get('trade_date'):
+            instock_text += f" {instock_candidate['trade_date']}"
+        event_text = summary.get('event_summary', '')
+        event_detail = f" / 最新事件 {event_text}" if event_text else ''
+        publish = current_status.get('publish', 'pending')
+        self.linkage_context_var.set(f"共享证据 {str(code or '').strip() or '未选择'} · {date} · {summary.get('state', 'unknown')} · 关注同步 {attention} · 上传 {publish} · {themes} / {rank_text} / {ladder_text} / {leader_text} / {auction_text} / Instock {instock_text}{event_detail}")
+
+    def _apply_system_linkage_monitor(self, command):
+        """Apply a persisted favorite to the existing monitor from Tk's UI thread."""
+        gateway = getattr(self, '_system_linkage_gateway', None)
+        operation_id = str(command.get('operation_id', ''))
+        code = str(command.get('code', '')).strip()
+        revision = int(command.get('favorites_revision', 0) or 0)
+        status = 'error'
+        quote_status = 'pending_fetch'
+        if getattr(self, '_is_closing', False):
+            status = 'not_running'
+        elif len(code) == 6 and code.isdigit() and code != '000000':
+            try:
+                from global_favorites import GlobalFavoriteManager
+
+                manager = GlobalFavoriteManager()
+                operation = manager.list_linkage_operations().get(operation_id)
+                if (not operation or operation.get('code') != code
+                        or operation.get('action', 'add') != 'add'):
+                    status = 'error'
+                else:
+                    if manager.is_linkage_operation_active(code, operation_id):
+                        favorite_codes = sorted(
+                            str(item).strip().zfill(6)
+                            for item in manager.get_favorite_stocks()
+                        )
+                        self.global_dict['linkage_monitor_codes'] = favorite_codes
+                        self.global_dict['linkage_favorites_revision'] = int(manager.version)
+                    else:
+                        logger.info("Skipping superseded linkage monitor command %s for %s", operation_id, code)
+                        quote_status = 'unknown'
+                    self._force_full_sync_pending = True
+                    self._force_ui_refresh_pending = True
+                    status = 'synced'
+            except Exception:
+                logger.exception("Could not add linkage favorite %s to monitor", code)
+        if gateway and operation_id:
+            threading.Thread(
+                target=gateway.report_consumer,
+                args=(operation_id, 'TK', status, revision, quote_status),
+                name="LinkageTKReceipt", daemon=True,
+            ).start()
+
+    def _system_linkage_quote_status(self, code, frame=None, frame_at=None):
+        """只用当前内存行情判断关注股状态；不回退到昨日价格冒充实时行情。"""
+        try:
+            with self._df_lock:
+                frame = frame if frame is not None else getattr(self, 'df_all', None)
+                frame_at = frame_at if frame_at is not None else getattr(self, '_linkage_market_frame_at', 0.0)
+                linkage_frame = getattr(self, '_linkage_quote_frame', None)
+                linkage_frame_at = getattr(self, '_linkage_quote_frame_at', 0.0)
+                cached_status = dict(getattr(self, '_linkage_quote_statuses', {}))
+            normalized_code = str(code or '').strip().zfill(6)
+            from JohnsonUtil import commonTips as cct
+            from system_linkage_quotes import (
+                frame_quote_row, normalize_supported_stock_code, quote_row_status,
+            )
+            if not normalize_supported_stock_code(normalized_code):
+                return 'unknown'
+            minute = int(cct.get_now_time_int())
+            market_active = bool(cct.get_trade_date_status()) and (
+                930 <= minute <= 1130 or 1300 <= minute <= 1500
+            )
+            latest_trade_date = cct.get_last_trade_date()
+            base_row = frame_quote_row(frame, normalized_code)
+            base_status = quote_row_status(
+                base_row, latest_trade_date, market_active,
+                time.monotonic() - float(frame_at or 0.0),
+            )
+            linkage_row = frame_quote_row(linkage_frame, normalized_code)
+            linkage_status = quote_row_status(
+                linkage_row, latest_trade_date, market_active,
+                time.monotonic() - float(linkage_frame_at or 0.0),
+            )
+            if base_status == 'ready':
+                return 'ready'
+            cached = cached_status.get(normalized_code)
+            if cached in ('quota_limited', 'stale', 'pending_fetch', 'unknown'):
+                return cached
+            if cached == 'ready' and linkage_row is not None:
+                return linkage_status
+            if 'market_closed' in (base_status, linkage_status):
+                return 'market_closed'
+            if linkage_status == 'stale' or base_status == 'stale':
+                return 'stale'
+            return base_status if base_status != 'pending_fetch' else linkage_status
+        except Exception:
+            logger.debug('Could not determine TK linkage quote readiness for %s', code, exc_info=True)
+            return 'unknown'
+
+    def _report_system_linkage_state(self, gateway):
+        """后台刷新关联操作回执与总体行情状态，避免 SQLite 写入阻塞 Tk。"""
+        try:
+            from global_favorites import GlobalFavoriteManager
+
+            manager = GlobalFavoriteManager()
+            revision = manager.get_persistent_revision()
+            favorites = {str(code).strip().zfill(6) for code in manager.get_favorite_stocks()}
+            operations = manager.list_linkage_operations()
+            with self._df_lock:
+                frame = getattr(self, 'df_all', None)
+                frame_at = getattr(self, '_linkage_market_frame_at', 0.0)
+
+            states = {}
+            for operation_id, record in operations.items():
+                if not isinstance(record, dict):
+                    continue
+                code = str(record.get('code', '')).strip().zfill(6)
+                if code in favorites:
+                    states[str(operation_id)] = (code, self._system_linkage_quote_status(code, frame, frame_at))
+
+            last_reported = getattr(self, '_system_linkage_reported_states', {})
+            pending = [
+                {'operation_id': operation_id, 'quote_status': quote_status}
+                for operation_id, (_code, quote_status) in states.items()
+                if last_reported.get(operation_id) != (revision, quote_status)
+            ][:128]
+            if pending:
+                reported = gateway.report_consumer_batch('TK', pending, revision)
+                if reported == len(pending):
+                    for item in pending:
+                        last_reported[item['operation_id']] = (revision, item['quote_status'])
+                    self._system_linkage_reported_states = last_reported
+
+            favorite_statuses = [
+                self._system_linkage_quote_status(code, frame, frame_at)
+                for code in list(favorites)[:512]
+            ]
+            overall_status = next(
+                (candidate for candidate in ('ready', 'market_closed', 'quota_limited', 'stale', 'pending_fetch')
+                 if candidate in favorite_statuses),
+                'unknown',
+            )
+            gateway.report_consumer_heartbeat('TK', revision, overall_status)
+        except Exception:
+            logger.exception('System-linkage TK heartbeat failed')
+        finally:
+            self._system_linkage_heartbeat_running = False
+
+    def _system_linkage_heartbeat(self):
+        if getattr(self, '_is_closing', False):
+            return
+        gateway = getattr(self, '_system_linkage_gateway', None)
+        if gateway and gateway._server and not getattr(self, '_system_linkage_heartbeat_running', False):
+            self._system_linkage_heartbeat_running = True
+            try:
+                threading.Thread(
+                    target=self._report_system_linkage_state, args=(gateway,),
+                    name="LinkageTKHeartbeat", daemon=True,
+                ).start()
+            except Exception:
+                self._system_linkage_heartbeat_running = False
+                logger.exception('Could not start System-linkage TK heartbeat worker')
+        self._schedule_after(5000, self._system_linkage_heartbeat)
 
     def controlled_gc_loop(self):
         """
@@ -8250,6 +8718,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 "extra": values  # 保留整行
             }
             self.selected_stock_info = stock_info
+            self._update_linkage_context_status(stock_info.get('code'))
 
             if selected_item:
                 stock_info = self.tree.item(selected_item[0], 'values')
@@ -9332,6 +9801,48 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # ⚡ [FIX] 无论成功失败，必须重置启动锁，否则下一次启动将永久失效
             self._qt_starting = False
 
+    def _send_linkage_quotes_to_ats(self):
+        """Send bounded favorite-only quotes to ATS without touching strategy consumers."""
+        try:
+            subscriber = getattr(self, '_stream_subscribers', {}).get(26670, {})
+            if not subscriber.get('subscribed', False):
+                return False
+            with self._df_lock:
+                frame = getattr(self, '_linkage_quote_frame', None)
+                frame = frame.copy() if frame is not None else pd.DataFrame()
+                statuses = dict(getattr(self, '_linkage_quote_statuses', {}))
+                revision = int(getattr(self, '_linkage_favorites_revision', 0) or 0)
+            if not frame.empty:
+                frame = frame.sort_index()
+            if len(frame) > 128:
+                total_rows = len(frame)
+                cursor = int(getattr(self, '_linkage_quote_send_cursor', 0) or 0) % total_rows
+                positions = [(cursor + offset) % len(frame) for offset in range(128)]
+                frame = frame.iloc[positions].copy()
+                self._linkage_quote_send_cursor = (cursor + len(positions)) % total_rows
+            else:
+                self._linkage_quote_send_cursor = 0
+            statuses = dict(sorted(statuses.items())[:512])
+            body = {
+                'type': 'UPDATE_LINKAGE_QUOTES',
+                'data': frame,
+                'statuses': statuses,
+                'favorites_revision': revision,
+            }
+            payload = pickle.dumps(('UPDATE_DF_DATA', body), protocol=pickle.HIGHEST_PROTOCOL)
+            header = struct.pack('!I', len(payload))
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as connection:
+                connection.settimeout(1.0)
+                connection.connect(('127.0.0.1', 26670))
+                connection.sendall(b'DATA' + header + payload)
+            return True
+        except (OSError, pickle.PickleError, struct.error) as exc:
+            logger.debug('[LinkageIPC] favorite quote sidecar send failed: %s', exc)
+            return False
+        except Exception:
+            logger.exception('[LinkageIPC] unexpected favorite quote sidecar send error')
+            return False
+
     def send_df(self, initial=True):
         """同步数据推送核心逻辑 (作为类方法，支持跨线程唤醒)"""
         # [THREAD-SAFETY] 确保同一时间只有一个同步实例在跑
@@ -9356,8 +9867,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._sync_session = uuid.uuid4().hex
             self._last_attempt_content_fingerprint = None
             empty_wait_count = 0  # ⭐ [NEW] 初始/空数据重试缓冲计数器
+            next_linkage_quote_send = 0.0
 
             while self._df_sync_running:
+                now_linkage = time.monotonic()
+                if now_linkage >= next_linkage_quote_send:
+                    self._send_linkage_quotes_to_ats()
+                    next_linkage_quote_send = now_linkage + 10.0
                 vis_enabled = getattr(self, '_vis_enabled_cache', True)
                 is_work_time_now = cct.get_work_time()
                 deferred_port_sync = getattr(self, '_deferred_port_sync', None)
@@ -11208,7 +11724,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             fav_mgr = GlobalFavoriteManager()
             cur_stocks = fav_mgr.get_favorite_stocks()
             cur_sectors = fav_mgr.get_favorite_sectors()
-            
+            linkage_codes = sorted(str(code).strip().zfill(6) for code in cur_stocks)
+            linkage_revision = int(fav_mgr.version)
+            if (list(self.global_dict.get('linkage_monitor_codes', [])) != linkage_codes
+                    or int(self.global_dict.get('linkage_favorites_revision', 0) or 0) != linkage_revision):
+                self.global_dict['linkage_monitor_codes'] = linkage_codes
+                self.global_dict['linkage_favorites_revision'] = linkage_revision
+                if hasattr(self, '_send_df_wake_event'):
+                    self._send_df_wake_event.set()
+
             last_ver = getattr(self, '_last_favorites_version', 0)
             last_stocks = getattr(self, '_last_fav_stocks_set', None)
             last_sectors = getattr(self, '_last_fav_sectors_set', None)
@@ -11238,15 +11762,60 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def _refresh_ui_favorites(self):
         """[0ms 内存重绘] 收到重点关注通知后，仅在内存层面对当前数据做二次置顶并重绘 UI"""
         try:
-            if not hasattr(self, 'current_df') or self.current_df.empty:
-                return
-            df = self.current_df.copy()
+            import pandas as pd
+            df = (self.current_df.copy()
+                  if isinstance(getattr(self, 'current_df', None), pd.DataFrame)
+                  else pd.DataFrame())
             if 'code' not in df.columns:
                 df['code'] = df.index.astype(str)
+            prior_linkage_only = set(getattr(self, '_linkage_ui_only_codes', set()))
+            if prior_linkage_only and not df.empty:
+                with self._df_lock:
+                    source_frame = getattr(self, 'df_all', None)
+                    source_codes = set(
+                        source_frame.index.astype(str).str.strip().str.zfill(6)
+                    ) if source_frame is not None and not source_frame.empty else set()
+                remove_codes = prior_linkage_only - source_codes
+                if remove_codes:
+                    row_codes = df['code'].astype(str).str.strip().str.zfill(6)
+                    df = df.loc[~row_codes.isin(remove_codes)].copy()
+            with self._df_lock:
+                linkage_frame = getattr(self, '_linkage_quote_frame', None)
+                linkage_frame = linkage_frame.copy() if linkage_frame is not None else None
+            linkage_ui_only = set()
             try:
                 from global_favorites import GlobalFavoriteManager
+                from system_linkage_quotes import frame_quote_row, normalize_supported_stock_code
                 fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
-                df['is_fav'] = df['code'].apply(lambda x: 1 if str(x).strip().zfill(6) in fav_stocks else 0)
+                normalized_favorites = {
+                    str(code).strip().zfill(6) for code in fav_stocks if str(code).strip()
+                }
+                for code in normalized_favorites:
+                    if not normalize_supported_stock_code(code):
+                        continue
+                    quote_row = frame_quote_row(linkage_frame, code)
+                    if quote_row is None:
+                        continue
+                    row_codes = df['code'].astype(str).str.strip().str.zfill(6)
+                    matches = df.index[row_codes == code].tolist()
+                    quote_values = quote_row.to_dict()
+                    quote_values['code'] = code
+                    if 'now' in quote_values:
+                        quote_values['trade'] = quote_values['now']
+                    if matches:
+                        row_index = matches[0]
+                        for column, value in quote_values.items():
+                            if column not in df.columns:
+                                df[column] = pd.NA
+                            df.at[row_index, column] = value
+                    else:
+                        quote_values['linkage_quote_status'] = getattr(
+                            self, '_linkage_quote_statuses', {}
+                        ).get(code, 'unknown')
+                        df = pd.concat([df, pd.DataFrame([quote_values], index=[code])], sort=False)
+                        linkage_ui_only.add(code)
+                row_codes = df['code'].astype(str).str.strip().str.zfill(6)
+                df['is_fav'] = row_codes.isin(normalized_favorites).astype(int)
                 sort_col = getattr(self, 'sortby_col', None)
                 sort_col_asc = getattr(self, 'sortby_col_ascend', False)
                 if sort_col and sort_col in df.columns:
@@ -11257,6 +11826,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     df.drop(columns=['is_fav'], inplace=True)
             except Exception as e:
                 logger.warning(f"Failed to sort favorites on refresh: {e}")
+            self._linkage_ui_only_codes = linkage_ui_only
             if hasattr(self, 'tree_updater'):
                 self.tree_updater._values_cache.clear()
             self.refresh_tree(df, force=True)

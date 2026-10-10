@@ -44,7 +44,8 @@ class IPCBridge:
             
         self.db_manager = SQLiteConnectionManager.get_instance(self.db_path)
 
-    def start_realtime_listener(self, port=26670, data_callback=None, signal_callback=None):
+    def start_realtime_listener(self, port=26670, data_callback=None,
+                                signal_callback=None, linkage_callback=None):
         """
         Starts a daemon TCP server thread on the specified port.
         Listens for real-time market data updates or signals from the main process.
@@ -79,7 +80,9 @@ class IPCBridge:
                             if process:
                                 self._active_client = client
                         if process:
-                            self._handle_client(client, data_callback, signal_callback)
+                            self._handle_client(
+                                client, data_callback, signal_callback, linkage_callback
+                            )
                         else:
                             client.close()
                     finally:
@@ -176,7 +179,8 @@ class IPCBridge:
         except Exception:
             pass
 
-    def _handle_client(self, conn, data_callback, signal_callback):
+    def _handle_client(self, conn, data_callback, signal_callback,
+                       linkage_callback=None):
         from ats.performance import measure
         perf_started = time.perf_counter()
         try:
@@ -203,6 +207,54 @@ class IPCBridge:
                         payload = pickle.loads(data)
                     if isinstance(payload, tuple) and len(payload) >= 2:
                         cmd, body = payload[0], payload[1]
+                        if cmd == 'UPDATE_DF_DATA' and isinstance(body, dict) and body.get('type') == 'UPDATE_LINKAGE_QUOTES':
+                            if linkage_callback:
+                                try:
+                                    from system_linkage_quotes import normalize_supported_stock_code
+                                    quote_frame = body.get('data')
+                                    if not isinstance(quote_frame, pd.DataFrame):
+                                        return
+                                    if len(quote_frame) > 128:
+                                        return
+                                    quote_frame = quote_frame.copy()
+                                    if 'code' in quote_frame.columns:
+                                        codes = quote_frame['code'].astype(str).str.strip().map(
+                                            normalize_supported_stock_code
+                                        )
+                                        quote_frame = quote_frame.loc[codes != ''].copy()
+                                        quote_frame['code'] = codes.loc[codes != '']
+                                        quote_frame.set_index('code', inplace=True, drop=False)
+                                    else:
+                                        codes = [normalize_supported_stock_code(code)
+                                                 for code in quote_frame.index]
+                                        quote_frame = quote_frame.loc[
+                                            [index for index, code in zip(quote_frame.index, codes) if code]
+                                        ].copy()
+                                        quote_frame.index = [code for code in codes if code]
+                                        quote_frame.index.name = 'code'
+                                    raw_statuses = body.get('statuses', {})
+                                    allowed_statuses = {
+                                        'ready', 'stale', 'pending_fetch', 'quota_limited',
+                                        'market_closed', 'unknown', 'unsupported',
+                                    }
+                                    statuses = {}
+                                    if isinstance(raw_statuses, dict):
+                                        for raw_code, raw_status in list(raw_statuses.items())[:512]:
+                                            raw_code = str(raw_code or '').strip()
+                                            code = normalize_supported_stock_code(raw_code)
+                                            if not code and raw_code.isdigit() and 0 < len(raw_code) <= 6:
+                                                code = raw_code.zfill(6)
+                                            status = str(raw_status)
+                                            if code and status in allowed_statuses:
+                                                statuses[code] = status
+                                    linkage_callback({
+                                        'data': quote_frame,
+                                        'statuses': statuses,
+                                        'favorites_revision': int(body.get('favorites_revision', 0) or 0),
+                                    })
+                                except (TypeError, ValueError, OverflowError) as linkage_error:
+                                    print(f"[IPCBridge] Rejected malformed linkage quotes: {linkage_error}")
+                            return
                         if cmd == 'UPDATE_DF_DATA' and data_callback:
                             # 🚀【全量与增量双模解析】支持 dict 包装协议与裸 DataFrame
                             df_to_deliver = None

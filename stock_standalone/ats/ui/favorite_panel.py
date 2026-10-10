@@ -105,6 +105,11 @@ class FavoritePanel(QWidget):
         self.count_label = QLabel("共 0 只标的")
         self.count_label.setStyleSheet("color: #888888; font-size: 9pt;")
         header.addWidget(self.count_label)
+
+        self.linkage_context_label = QLabel("共享证据：等待快照")
+        self.linkage_context_label.setStyleSheet("color: #9aa7b5; font-size: 8pt;")
+        self.linkage_context_label.setToolTip("只读题材、人气与天梯上下文；不参与交易准入或执行。")
+        header.addWidget(self.linkage_context_label)
         header.addStretch()
 
         # 🎯 策略过滤持久化开关按钮
@@ -145,6 +150,10 @@ class FavoritePanel(QWidget):
         # 启动时若无推送，立即加载基础重点关注股票清单
         self.load_initial_favorites()
 
+    def set_linkage_context(self, text):
+        if hasattr(self, "linkage_context_label"):
+            self.linkage_context_label.setText(str(text or "共享证据：等待快照"))
+
     def load_initial_favorites(self):
         """冷启动/无 IPC 推送时：从 GlobalFavoriteManager 加载重点关注基础列表"""
         try:
@@ -163,13 +172,13 @@ class FavoritePanel(QWidget):
             for code in sorted(fav_stocks):
                 code_clean = str(code).strip().zfill(6)
                 name = resolve_stock_name(code_clean) or "重点标的"
-                fav_date = fav_mgr.get_favorite_stock_date(code_clean) or time.strftime("%Y-%m-%d")
+                fav_date = fav_mgr.get_favorite_stock_date(code_clean) or "--"
                 
                 row = (
-                    code_clean, name, "0.00", "重点关注", "+0.0%", "0", "观察",
-                    fav_date, "200.0", "0.0", "0", "0.0", "0.0", "0.0", "普通",
+                    code_clean, name, "--", "重点关注", "--", "--", "观察",
+                    fav_date, "--", "--", "--", "--", "--", "--", "普通",
                     *extra_fallback,
-                    "基础重点关注标的"
+                    "行情待获取"
                 )
                 rows.append(row)
                 

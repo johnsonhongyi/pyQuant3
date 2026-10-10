@@ -75,7 +75,7 @@ class LedgerUpdateWorker(QThread):
     def __init__(self, df_all, signal_ledger, volume_profiler,
                  session_snapshot, swing_tracker, stock_history_cache,
                  price_pct_cache, name_cache, fav_stocks, universe_manager,
-                 today_str, ledger_update_service=None):
+                 today_str, ledger_update_service=None, linkage_context_client=None):
         super().__init__()
         # 浅拷贝 DataFrame：仅复制 index/columns 结构元数据，数据块共享内存
         # 在 Worker 只读访问 df 的场景下足够安全，避免 ~80ms 的深拷贝开销
@@ -92,6 +92,7 @@ class LedgerUpdateWorker(QThread):
         self._fav_stocks = fav_stocks
         self._universe_manager = universe_manager
         self._today_str = today_str
+        self._linkage_context_client = linkage_context_client
 
     def _get_name(self, code):
         """从 name_cache 或 df 解析股票名称 (无 IO 纯内存)"""
@@ -122,6 +123,12 @@ class LedgerUpdateWorker(QThread):
                 cde = CapitalDragonEngine.get_instance()
                 dragon_report = cde.get_cached_report(max_age=5.0, df_check=df_all, fallback_stale=True) or {}
                 dragon_codes = cde.get_dragon_codes()
+                if dragon_report and self._linkage_context_client is not None:
+                    try:
+                        from system_linkage_context import publish_ats_leader_evidence
+                        publish_ats_leader_evidence(dragon_report, self._linkage_context_client)
+                    except Exception as evidence_error:
+                        logger.warning("ATS leader evidence queue failed: %s", evidence_error)
             except Exception as e_cde:
                 pass
 
@@ -1896,6 +1903,8 @@ class ATSMainWindow(QMainWindow):
     realtime_signal_signal = pyqtSignal(object)
     next_day_snapshot_signal = pyqtSignal(object)
     db_data_loaded_signal = pyqtSignal(object)
+    linkage_store_changed_signal = pyqtSignal(object)
+    linkage_context_signal = pyqtSignal(object)
     _price_load_ready = pyqtSignal()
     _channel_scan_ready = pyqtSignal(object)
     _market_summary_ready = pyqtSignal()
@@ -1904,6 +1913,8 @@ class ATSMainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        self.linkage_store_changed_signal.connect(self._handle_linkage_store_changed)
+        self.linkage_context_signal.connect(self._handle_linkage_context_changed)
         self._channel_scan_ready.connect(self._on_channel_scan_ready)
         self._filter_eval_ready.connect(self._on_filter_eval_finished)
         self._history_hits_ready.connect(self._on_history_hits_ready)
@@ -2041,6 +2052,35 @@ class ATSMainWindow(QMainWindow):
         self._favorites_poll_timer.setInterval(500 if market_active else 60000)
         self._favorites_poll_timer.timeout.connect(self._poll_favorites_loop)
         self._favorites_poll_timer.start()
+        try:
+            import queue
+            from global_favorites import GlobalFavoriteManager
+            self._linkage_receipt_queue = queue.Queue(maxsize=256)
+            self._linkage_receipt_stop = threading.Event()
+            self._linkage_pending_operations = {}
+            self._linkage_last_reported = {}
+            self._linkage_state_lock = threading.Lock()
+            self._linkage_favorites_listener = self._on_linkage_store_changed_from_worker
+            favorite_manager = GlobalFavoriteManager()
+            favorite_manager.add_change_listener(self._linkage_favorites_listener)
+            threading.Thread(target=self._linkage_receipt_worker, name="ATSLinkageReceipt", daemon=True).start()
+            QTimer.singleShot(1000, self._reconcile_linkage_favorites)
+            self._linkage_heartbeat_timer = QTimer(self)
+            self._linkage_heartbeat_timer.setInterval(5000)
+            self._linkage_heartbeat_timer.timeout.connect(self._send_linkage_heartbeat)
+            self._linkage_heartbeat_timer.start()
+        except Exception:
+            logger.exception("ATS watchlist linkage initialization failed; favorite polling remains active")
+
+        try:
+            from system_linkage_context import SystemLinkageContextClient
+            self._linkage_context_client = SystemLinkageContextClient(
+                cct, callback=lambda snapshot, status: self.linkage_context_signal.emit({"snapshot": snapshot, "status": status})
+            )
+            self._linkage_context_client.start()
+        except Exception:
+            self._linkage_context_client = None
+            logger.exception("ATS shared context initialization failed; local market data remains active")
         
         # 初始化过滤公式表达式和搜索历史数据缓存 (History Filter Integration)
         self.query_expr = ""
@@ -3516,6 +3556,7 @@ class ATSMainWindow(QMainWindow):
         c_digits = "".join(x for x in code_clean if x.isdigit()).zfill(6) if any(x.isdigit() for x in code_clean) else code_clean
         self.current_selected_code = c_digits
         self.current_selected_name = str(name) if name and name != "未知" else self.get_stock_name(c_digits)
+        self._refresh_selected_linkage_context(c_digits)
             
         import time
         now = time.time()
@@ -4123,13 +4164,15 @@ class ATSMainWindow(QMainWindow):
             try:
                 self._ipc_frame_lock = threading.Lock()
                 self._pending_ipc_frame = None
+                self._pending_linkage_quotes = None
                 self._ipc_frame_timer = QTimer(self)
                 self._ipc_frame_timer.timeout.connect(self._consume_latest_ipc_frame)
                 self._ipc_frame_timer.start(250)
                 self.bridge.start_realtime_listener(
                     port=26670,
                     data_callback=self._queue_latest_ipc_frame,
-                    signal_callback=lambda sig: self.realtime_signal_signal.emit(sig)
+                    signal_callback=lambda sig: self.realtime_signal_signal.emit(sig),
+                    linkage_callback=self._queue_linkage_quotes,
                 )
                 self._listener_started = True
             except Exception as e:
@@ -4497,6 +4540,13 @@ class ATSMainWindow(QMainWindow):
                 frame.attrs["sector_data"] = previous.attrs.get("sector_data")
             self._pending_ipc_frame = frame
 
+    def _queue_linkage_quotes(self, package):
+        """Queue favorite-only quotes for the ATS UI thread, outside current_df."""
+        if getattr(self, '_is_closing', False) or getattr(self, '_close_requested', False):
+            return
+        with self._ipc_frame_lock:
+            self._pending_linkage_quotes = package
+
     def _consume_latest_ipc_frame(self):
         if getattr(self, "_is_closing", False):
             with self._ipc_frame_lock:
@@ -4505,12 +4555,85 @@ class ATSMainWindow(QMainWindow):
         with self._ipc_frame_lock:
             frame = self._pending_ipc_frame
             self._pending_ipc_frame = None
+            linkage_quotes = self._pending_linkage_quotes
+            self._pending_linkage_quotes = None
         if frame is not None:
             from ats.performance import record, measure
             queued_ns = frame.attrs.get('_ats_queued_ns', time.monotonic_ns())
             record('gui.queue_age', (time.monotonic_ns() - queued_ns) / 1e6, frame)
             with measure('gui.accept', frame):
                 self._handle_realtime_data(frame)
+        if linkage_quotes is not None:
+            self._apply_linkage_quotes(linkage_quotes)
+
+    def _apply_linkage_quotes(self, package):
+        """Store and display favorite-only quotes without adding them to market decisions."""
+        try:
+            import pandas as pd
+            from JohnsonUtil import commonTips as cct
+            from system_linkage_quotes import (
+                frame_quote_row, normalize_supported_stock_code, quote_row_status,
+            )
+
+            if not isinstance(package, dict):
+                return
+            frame = package.get('data')
+            if not isinstance(frame, pd.DataFrame) or len(frame) > 128:
+                return
+            frame = frame.copy()
+            revision = int(package.get('favorites_revision', 0) or 0)
+            previous_revision = getattr(self, '_linkage_favorites_revision', None)
+            existing_frame = getattr(self, '_linkage_quote_frame', None)
+            statuses = dict(package.get('statuses') or {})
+            if previous_revision == revision and isinstance(existing_frame, pd.DataFrame):
+                if not frame.empty:
+                    incoming_codes = (
+                        frame['code'].astype(str).str.strip().str.zfill(6)
+                        if 'code' in frame.columns
+                        else frame.index.astype(str).str.strip().str.zfill(6)
+                    )
+                    existing_codes = (
+                        existing_frame['code'].astype(str).str.strip().str.zfill(6)
+                        if 'code' in existing_frame.columns
+                        else existing_frame.index.astype(str).str.strip().str.zfill(6)
+                    )
+                    existing_frame = existing_frame.loc[
+                        ~existing_codes.isin(set(incoming_codes))
+                    ]
+                    frame = pd.concat([existing_frame, frame], sort=False)
+                else:
+                    frame = existing_frame.copy()
+                if not statuses:
+                    statuses = dict(getattr(self, '_linkage_quote_statuses', {}))
+            if len(frame) > 512:
+                frame = frame.iloc[-512:].copy()
+            minute = int(cct.get_now_time_int())
+            market_active = bool(cct.get_trade_date_status()) and (
+                930 <= minute <= 1130 or 1300 <= minute <= 1500
+            )
+            latest_trade_date = cct.get_last_trade_date()
+            frame_codes = (
+                frame['code'].astype(str).tolist() if 'code' in frame.columns
+                else [str(code) for code in frame.index]
+            )
+            for raw_code in frame_codes:
+                code = normalize_supported_stock_code(raw_code)
+                if not code:
+                    continue
+                row = frame_quote_row(frame, code)
+                if row is not None:
+                    if statuses.get(code) not in (
+                            'quota_limited', 'stale', 'pending_fetch', 'unknown'):
+                        statuses[code] = quote_row_status(
+                            row, latest_trade_date, market_active, frame_age_seconds=0
+                        )
+            self._linkage_quote_frame = frame
+            self._linkage_quote_statuses = statuses
+            self._linkage_favorites_revision = revision
+            self._linkage_quote_received_at = time.monotonic()
+            self._safe_favorites_changed()
+        except Exception as exc:
+            logger.warning('[ATS] favorite quote sidecar rejected: %s', exc)
 
     def _request_full_sync_async(self):
         if getattr(self, "_pipe_sync_busy", False):
@@ -4673,6 +4796,7 @@ class ATSMainWindow(QMainWindow):
             "ver": packet_meta.get("ver"),
             "source_version": packet_meta.get("source_version"),
         }
+        self._last_linkage_market_frame_at = time.monotonic()
 
         # 🛡️【自动缝合与补全静态分类列】：确保 current_df 永远保持完整的 category 板块分类数据
         if self.current_df is not None and not self.current_df.empty and ('category' not in self.current_df.columns or self.current_df['category'].dropna().empty):
@@ -4688,6 +4812,7 @@ class ATSMainWindow(QMainWindow):
 
         # ⚡ 名称缓存更新策略：跨日重置、扩容首刷、60s增量节流同步
         self._sync_name_cache()
+        self._refresh_linkage_quote_receipts()
 
         # 🛡️ 实时推送到独立新股阶梯盯盘窗口 (非阻塞, 防重入 50ms 防抖)
         if hasattr(self, 'ladder_monitor_win') and self.ladder_monitor_win is not None:
@@ -5285,6 +5410,7 @@ class ATSMainWindow(QMainWindow):
             universe_manager=self.universe_manager,
             today_str=today_str,
             ledger_update_service=self.ledger_update_service,
+            linkage_context_client=getattr(self, "_linkage_context_client", None),
         )
         worker.results_ready.connect(self._on_ledger_results)
         worker.finished.connect(self._on_ledger_finished)
@@ -7280,6 +7406,23 @@ class ATSMainWindow(QMainWindow):
         from ats.ui.sbc_launcher import SBCProcessManager
         from sys_utils import get_app_root, is_packaged_env
 
+        try:
+            from global_favorites import GlobalFavoriteManager
+            listener = getattr(self, '_linkage_favorites_listener', None)
+            if listener:
+                GlobalFavoriteManager().remove_change_listener(listener)
+            stop_event = getattr(self, '_linkage_receipt_stop', None)
+            if stop_event:
+                stop_event.set()
+            context_client = getattr(self, '_linkage_context_client', None)
+            if context_client:
+                context_client.stop()
+            heartbeat_timer = getattr(self, '_linkage_heartbeat_timer', None)
+            if heartbeat_timer:
+                heartbeat_timer.stop()
+        except Exception:
+            logger.debug("ATS watchlist linkage cleanup failed", exc_info=True)
+
         drain = getattr(self, '_exit_cleanup_drain', None)
         if drain is None:
             deadline = time.monotonic() + 30.0
@@ -7688,6 +7831,234 @@ class ATSMainWindow(QMainWindow):
         self._complete_shutdown(event)
 
 
+    def _on_linkage_store_changed_from_worker(self, event):
+        try:
+            self.linkage_store_changed_signal.emit(dict(event or {}))
+        except RuntimeError:
+            # The Qt window may already have been destroyed during shutdown.
+            pass
+
+    def _handle_linkage_context_changed(self, event):
+        self._refresh_selected_linkage_context(getattr(self, "current_selected_code", ""))
+
+    def _refresh_selected_linkage_context(self, code):
+        panel = getattr(self, "favorite_panel", None)
+        client = getattr(self, "_linkage_context_client", None)
+        if panel is None or client is None or not hasattr(panel, "set_linkage_context"):
+            return
+        summary = client.summary_for_symbol(code) if code else client.latest()[1]
+        if not isinstance(summary, dict):
+            summary = {}
+        _, client_status = client.latest()
+        theme_labels = []
+        for theme in summary.get("theme_heat", [])[:3]:
+            label = str(theme.get("name", "") or "")
+            if isinstance(theme.get("change_percent"), (int, float)):
+                label += f" {theme['change_percent']:+.2f}%"
+            if isinstance(theme.get("daily_strength_score"), (int, float)):
+                label += f" 日强{theme['daily_strength_score']}"
+            if isinstance(theme.get("five_day_strength_score"), (int, float)):
+                label += f" 五日{theme['five_day_strength_score']}"
+            if label:
+                theme_labels.append(label)
+        themes = theme_labels or summary.get("themes", [])
+        ranks = summary.get("ranks", {})
+        rank_text = "、".join(f"{source}#{rank}" for source, rank in sorted(ranks.items(), key=lambda item: item[1])[:3])
+        ladder = summary.get("ladder") or {}
+        leader = summary.get("leader") or {}
+        auction = summary.get("auction") or {}
+        instock_candidate = summary.get("instock_candidate") or {}
+        event_text = summary.get("event_summary", "")
+        auction_label = "历史竞价参考" if auction.get("freshness") == "stale" else "竞价"
+        leader_label = "历史 ATS 角色候选" if leader.get("freshness") == "stale" else "ATS 角色候选"
+        detail = " / ".join(part for part in (
+            "、".join(themes[:3]) if themes else "无已确认题材",
+            rank_text or "未在当前榜单观测范围",
+            f"{ladder.get('label', '')} {ladder.get('streak', '')}连板" if ladder else "天梯未列入",
+            (f"{leader_label} {leader.get('role', '')}" if leader.get("candidate")
+             else str(leader.get("classification", "ATS 角色证据待同步"))),
+            (f"{auction_label} {auction.get('state', 'unknown')}" + ("候选" if auction.get("candidate") else "")
+             + f" {auction.get('trade_date', '')}") if auction else "竞价证据待同步",
+            "Instock " + str(instock_candidate.get("classification", "候选证据待同步"))
+            + (f" {instock_candidate.get('grade')}级" if instock_candidate.get("candidate") and instock_candidate.get("grade") else "")
+            + (f" {instock_candidate.get('score')}分" if isinstance(instock_candidate.get("score"), (int, float)) else "")
+            + (f" {instock_candidate.get('trade_date')}" if instock_candidate.get("trade_date") else ""),
+            "最新事件 " + str(event_text) if event_text else "",
+            "关注同步 " + str(client_status.get("attention", "pending")),
+            "证据上传 " + str(client_status.get("publish", "pending")),
+        ) if part)
+        panel.set_linkage_context(
+            f"共享证据 {code or '未选择'} · {summary.get('trade_date', '日期未知')} · {summary.get('state', 'unknown')} · {detail}"
+        )
+
+    def _handle_linkage_store_changed(self, event):
+        if getattr(self, '_is_closing', False):
+            return
+        self._safe_favorites_changed()
+        self._queue_linkage_consumption(
+            event.get('new_operations') or {}, event.get('favorites_revision', 0)
+        )
+
+    def _reconcile_linkage_favorites(self):
+        if getattr(self, '_is_closing', False):
+            return
+        try:
+            from global_favorites import GlobalFavoriteManager
+            manager = GlobalFavoriteManager()
+            favorites = manager.get_favorite_stocks()
+            operations = {
+                operation_id: record
+                for operation_id, record in manager.list_linkage_operations().items()
+                if record.get('code') in favorites
+            }
+            self._safe_favorites_changed()
+            self._queue_linkage_consumption(operations, manager.persistent_revision)
+        except Exception:
+            logger.exception("ATS could not reconcile persisted watchlist linkage operations")
+
+    def _linkage_quote_status(self, code):
+        try:
+            from system_linkage_quotes import (
+                frame_quote_row, normalize_supported_stock_code, quote_row_status,
+            )
+            market_active = bool(self._is_market_session_active())
+            from JohnsonUtil import commonTips as cct
+            latest_trade_date = cct.get_last_trade_date()
+            code = str(code).strip().zfill(6)
+            if not normalize_supported_stock_code(code):
+                return 'unknown'
+            market_frame = getattr(self, 'current_df', None)
+            linkage_frame = getattr(self, '_linkage_quote_frame', None)
+            market_row = frame_quote_row(market_frame, code)
+            linkage_row = frame_quote_row(linkage_frame, code)
+            market_status = quote_row_status(
+                market_row, latest_trade_date, market_active,
+                time.monotonic() - getattr(self, '_last_linkage_market_frame_at', 0.0),
+            )
+            linkage_status = quote_row_status(
+                linkage_row, latest_trade_date, market_active,
+                time.monotonic() - getattr(self, '_linkage_quote_received_at', 0.0),
+            )
+        except Exception:
+            return 'unknown'
+        if market_status == 'ready':
+            return 'ready'
+        cached = getattr(self, '_linkage_quote_statuses', {}).get(code)
+        if cached in ('quota_limited', 'stale', 'pending_fetch', 'unknown'):
+            return cached
+        if cached == 'ready' and linkage_row is not None:
+            return linkage_status
+        if 'market_closed' in (market_status, linkage_status):
+            return 'market_closed'
+        if 'stale' in (market_status, linkage_status):
+            return 'stale'
+        return market_status if market_status != 'pending_fetch' else linkage_status
+
+    def _queue_linkage_consumption(self, operations, favorites_revision=0):
+        import queue
+
+        if not isinstance(operations, dict) or not hasattr(self, '_linkage_receipt_queue'):
+            return
+        items = []
+        reported_states = {}
+        for operation_id, record in operations.items():
+            if not isinstance(record, dict):
+                continue
+            code = str(record.get('code', '')).strip().zfill(6)
+            if len(code) != 6 or not code.isdigit():
+                continue
+            self._linkage_pending_operations[str(operation_id)] = code
+            quote_status = self._linkage_quote_status(code)
+            state = ('synced', quote_status)
+            with self._linkage_state_lock:
+                already_reported = self._linkage_last_reported.get(str(operation_id)) == state
+            if already_reported:
+                continue
+            reported_states[str(operation_id)] = state
+            items.append({'operation_id': str(operation_id), 'code': code,
+                          'quote_status': quote_status})
+        if not items:
+            return
+        payload = {
+            'cmd': 'WATCHLIST_CONSUMED', 'consumer': 'ATS',
+            'favorites_revision': int(favorites_revision or 0), 'operations': items,
+        }
+        try:
+            self._linkage_receipt_queue.put_nowait(payload)
+            with self._linkage_state_lock:
+                self._linkage_last_reported.update(reported_states)
+        except queue.Full:
+            logger.warning("ATS watchlist receipt queue is full; startup reconciliation will retry")
+
+    def _refresh_linkage_quote_receipts(self):
+        if not getattr(self, '_linkage_pending_operations', None):
+            return
+        try:
+            from global_favorites import GlobalFavoriteManager
+            manager = GlobalFavoriteManager()
+            revision = manager.persistent_revision
+            operations = manager.list_linkage_operations()
+            favorites = manager.get_favorite_stocks()
+            pending = {
+                operation_id: operations[operation_id]
+                for operation_id in self._linkage_pending_operations
+                if operation_id in operations
+                and operations[operation_id].get('code') in favorites
+            }
+            self._queue_linkage_consumption(pending, revision)
+        except Exception:
+            logger.debug("ATS could not refresh watchlist quote receipts", exc_info=True)
+
+    def _linkage_heartbeat_quote_status(self):
+        try:
+            from global_favorites import GlobalFavoriteManager
+            manager = GlobalFavoriteManager()
+            statuses = [self._linkage_quote_status(code)
+                        for code in list(manager.get_favorite_stocks())[:512]]
+        except Exception:
+            return 'unknown'
+        for candidate in ('ready', 'market_closed', 'quota_limited', 'stale', 'pending_fetch'):
+            if candidate in statuses:
+                return candidate
+        return 'unknown'
+
+    def _send_linkage_heartbeat(self):
+        if getattr(self, '_is_closing', False) or not hasattr(self, '_linkage_receipt_queue'):
+            return
+        try:
+            from global_favorites import GlobalFavoriteManager
+            self._refresh_linkage_quote_receipts()
+            payload = {
+                'cmd': 'WATCHLIST_HEARTBEAT', 'consumer': 'ATS',
+                'favorites_revision': GlobalFavoriteManager().persistent_revision,
+                'quote_status': self._linkage_heartbeat_quote_status(),
+            }
+            self._linkage_receipt_queue.put_nowait(payload)
+        except Exception:
+            logger.debug("ATS watchlist heartbeat was not queued", exc_info=True)
+
+    def _linkage_receipt_worker(self):
+        import queue
+        from data_utils import send_code_via_pipe, PIPE_NAME_TK
+
+        stop_event = getattr(self, '_linkage_receipt_stop', None)
+        while stop_event is not None and not stop_event.is_set():
+            try:
+                payload = self._linkage_receipt_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            try:
+                delivered = send_code_via_pipe(payload, logger, pipe_name=PIPE_NAME_TK)
+                if not delivered:
+                    logger.warning("ATS watchlist status could not reach TK pipe")
+            except Exception:
+                delivered = False
+                logger.exception("ATS watchlist status delivery failed")
+            if not delivered and payload.get('cmd') == 'WATCHLIST_CONSUMED':
+                with self._linkage_state_lock:
+                    for item in payload.get('operations', []):
+                        self._linkage_last_reported.pop(str(item.get('operation_id', '')), None)
+
     def _on_favorites_changed(self):
         # Thread-safe trigger UI refresh on favorite changes using QTimer
         QTimer.singleShot(0, self._safe_favorites_changed)
@@ -7716,6 +8087,29 @@ class ATSMainWindow(QMainWindow):
             fav_mgr = GlobalFavoriteManager()
             fav_stocks = fav_mgr.get_favorite_stocks()
             fav_stocks_clean = {str(c).strip().zfill(6) for c in fav_stocks}
+            from system_linkage_quotes import (
+                frame_quote_row, normalize_supported_stock_code, quote_row_status,
+            )
+            from JohnsonUtil import commonTips as cct
+            linkage_frame = getattr(self, '_linkage_quote_frame', None)
+            latest_trade_date = cct.get_last_trade_date()
+            market_active = bool(self._is_market_session_active())
+            now_monotonic = time.monotonic()
+            market_frame_age = now_monotonic - getattr(
+                self, '_last_linkage_market_frame_at', 0.0
+            )
+            linkage_frame_age = now_monotonic - getattr(
+                self, '_linkage_quote_received_at', 0.0
+            )
+            status_labels = {
+                'ready': '实时行情就绪',
+                'stale': '行情已过期',
+                'pending_fetch': '行情待获取',
+                'quota_limited': '行情源限流',
+                'market_closed': '非交易时段',
+                'unknown': '行情状态未知',
+                'unsupported': '该市场暂未接入',
+            }
 
             # 🚀 [PERF OPTIMIZE] 沿用既有内存数据，原位刷新所有当前可见视图上的 ⭐ 重点标识
             # 1. 刷新重点关注 Tab 视图 (favorite_panel)
@@ -7731,54 +8125,84 @@ class ATSMainWindow(QMainWindow):
                 has_df = hasattr(self, 'current_df') and isinstance(self.current_df, pd.DataFrame) and not self.current_df.empty
 
                 for code_clean in fav_stocks_clean:
-                    if code_clean in existing_fav_rows:
-                        fav_rows.append(existing_fav_rows[code_clean])
+                    linkage_row = frame_quote_row(linkage_frame, code_clean)
+                    base_row = frame_quote_row(self.current_df, code_clean) if has_df else None
+                    base_status = quote_row_status(
+                        base_row, latest_trade_date, market_active, market_frame_age
+                    )
+                    linkage_status = quote_row_status(
+                        linkage_row, latest_trade_date, market_active, linkage_frame_age
+                    )
+                    if base_status == 'ready':
+                        quote_row = base_row
+                    elif linkage_status == 'ready':
+                        quote_row = linkage_row
                     else:
-                        name = "未知"
-                        price_str = "0.00"
-                        if has_df and code_clean in self.current_df.index:
-                            row_df = self.current_df.loc[code_clean]
-                            if isinstance(row_df, pd.DataFrame):
-                                row_df = row_df.iloc[0]
-                            name = str(row_df.get('name', '未知'))
-                            price_val = row_df.get('trade', row_df.get('price', 0.0))
+                        quote_row = linkage_row if linkage_row is not None else base_row
+                    status = (
+                        self._linkage_quote_status(code_clean)
+                        if normalize_supported_stock_code(code_clean)
+                        else 'unsupported'
+                    )
+                    if status not in status_labels:
+                        status = 'pending_fetch' if normalize_supported_stock_code(code_clean) else 'unsupported'
+                    reason = status_labels[status]
+                    if code_clean in existing_fav_rows:
+                        existing_row = list(existing_fav_rows[code_clean])
+                        if quote_row is not None:
+                            price_value = next((quote_row.get(key) for key in
+                                                ('trade', 'price', 'now', 'close')
+                                                if quote_row.get(key) is not None), None)
                             try:
-                                price_str = f"{float(price_val):.2f}"
-                            except Exception:
-                                price_str = str(price_val)
+                                parsed_price = float(price_value)
+                                if parsed_price > 0:
+                                    existing_row[2] = f"{parsed_price:.2f}"
+                            except (TypeError, ValueError):
+                                pass
                         else:
-                            from sys_utils import resolve_stock_name
-                            name = resolve_stock_name(code_clean) or "未知"
-                        from ats.ui.favorite_panel import get_ats_extra_cols
-                        extra_cols = get_ats_extra_cols()
-                        extra_fallback = []
-                        for ec in extra_cols:
-                            ec_val = '--'
-                            if has_df and code_clean in self.current_df.index:
-                                try:
-                                    row_df = self.current_df.loc[code_clean]
-                                    if isinstance(row_df, pd.DataFrame):
-                                        row_df = row_df.iloc[0]
-                                    for k in (ec, ec.lower(), ec.upper()):
-                                        if k in row_df:
-                                            try:
-                                                from JohnsonUtil import commonTips as cct
-                                                ec_val = cct.format_col_value(ec, row_df[k])
-                                            except Exception:
-                                                ec_val = str(row_df[k])
-                                            break
-                                except Exception:
-                                    pass
-                            extra_fallback.append(ec_val)
+                            existing_row[2] = '--'
+                        if existing_row:
+                            existing_row[-1] = reason
+                        fav_rows.append(tuple(existing_row))
+                        continue
 
-                        fav_date = fav_mgr.get_favorite_stock_date(code_clean) or time.strftime("%Y-%m-%d")
-                        fallback_row = (
-                            code_clean, name, price_str, "重点关注", "+0.0%", "0", "观察",
-                            fav_date, "200.0", "0.0", "0", "0.0", "0.0", "0.0", "普通",
-                            *extra_fallback,
-                            "基础重点关注标的"
-                        )
-                        fav_rows.append(fallback_row)
+                    name = str(quote_row.get('name', '未知')) if quote_row is not None else '未知'
+                    if name in ('', '未知'):
+                        from sys_utils import resolve_stock_name
+                        name = resolve_stock_name(code_clean) or '未知'
+                    price_str = '--'
+                    if quote_row is not None:
+                        for key in ('trade', 'price', 'now', 'close'):
+                            try:
+                                parsed_price = float(quote_row.get(key))
+                                if parsed_price > 0:
+                                    price_str = f"{parsed_price:.2f}"
+                                    break
+                            except (TypeError, ValueError):
+                                continue
+
+                    from ats.ui.favorite_panel import get_ats_extra_cols
+                    extra_cols = get_ats_extra_cols()
+                    extra_fallback = []
+                    for ec in extra_cols:
+                        ec_val = '--'
+                        if quote_row is not None:
+                            for key in (ec, ec.lower(), ec.upper()):
+                                if key in quote_row:
+                                    try:
+                                        from JohnsonUtil import commonTips as cct
+                                        ec_val = cct.format_col_value(ec, quote_row[key])
+                                    except Exception:
+                                        ec_val = str(quote_row[key])
+                                    break
+                        extra_fallback.append(ec_val)
+
+                    fav_date = fav_mgr.get_favorite_stock_date(code_clean) or "--"
+                    fav_rows.append((
+                        code_clean, name, price_str, "重点关注", "--", "--", "观察",
+                        fav_date, "--", "--", "--", "--", "--", "--", "普通",
+                        *extra_fallback, reason,
+                    ))
 
                 self._pending_fav_rows = fav_rows
                 self.favorite_panel.update_favorite_rows(fav_rows)
