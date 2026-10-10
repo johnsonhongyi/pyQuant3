@@ -1070,6 +1070,20 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self._event_consume_timer.timeout.connect(self._consume_incoming_events)
         self._event_consume_timer.start()
 
+        self._dashboard_refresh_running = False
+        self._dashboard_refresh_pending = False
+        self._dashboard_refresh_state = None
+        self._dashboard_refresh_timer = QTimer(self)
+        self._dashboard_refresh_timer.setSingleShot(True)
+        self._dashboard_refresh_timer.timeout.connect(self._process_all_tables_refresh_chunk)
+        self._ui_state_restore_jobs = []
+        self._ui_state_restore_index = 0
+        self._ui_state_restore_count = 0
+        self._ui_state_restore_payload = None
+        self._ui_state_restore_timer = QTimer(self)
+        self._ui_state_restore_timer.setSingleShot(True)
+        self._ui_state_restore_timer.timeout.connect(self._restore_ui_state_chunk)
+
         self._row_cache = {} # {table_obj: {code: table_item_at_col2}} 用于 O(1) 查找现有行
         
         # [NEW] 极速渲染所需常量与预分配对象
@@ -1252,6 +1266,23 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         """停止所有计时器 and 订阅，释放资源"""
         with self._state_lock:
             self._accept_events = False
+        if hasattr(self, '_dashboard_refresh_timer') and self._dashboard_refresh_timer:
+            self._dashboard_refresh_timer.stop()
+        if hasattr(self, '_ui_state_restore_timer') and self._ui_state_restore_timer:
+            self._ui_state_restore_timer.stop()
+        self._dashboard_refresh_pending = False
+        if self._dashboard_refresh_running:
+            state = self._dashboard_refresh_state or {}
+            for name, table in self.tables.items():
+                try:
+                    table.blockSignals(False)
+                    table.setUpdatesEnabled(True)
+                    if state.get('active_sortings', {}).get(name, False):
+                        table.setSortingEnabled(True)
+                except RuntimeError:
+                    pass
+            self._dashboard_refresh_state = None
+            self._dashboard_refresh_running = False
         self._visible_sort_timer.stop()
         self._type_filter_timer.stop()
         self._pending_visible_sort = None
@@ -1737,82 +1768,114 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             from ats.ui.styles import load_config_node
             ui_state = load_config_node(SETTINGS_SECTION, {})
             pos = load_config_node("signal_dashboard_panel", {})
-            
+
             if not ui_state:
                 self._is_initializing = False
                 return
-            
+
             # [NEW] 恢复折叠重复个股状态
             if 'fold_duplicates' in ui_state and hasattr(self, 'fold_check'):
                 self.fold_check.blockSignals(True)
                 self.fold_check.setChecked(bool(ui_state['fold_duplicates']))
                 self.fold_check.blockSignals(False)
-            
-            restored_count = 0
-            for name, table in self.tables.items():
-                clean_name = self._clean_tab_name(name)
-                state_key = f'table_state_{clean_name}'
-                widths_key = f'col_widths_{clean_name}'
-                
-                # 优先恢复 restoreState
-                if state_key in ui_state and ui_state[state_key]:
-                    state_hex = ui_state[state_key]
-                    ok = table.horizontalHeader().restoreState(QByteArray.fromHex(state_hex.encode()))
-                    if ok:
-                        restored_count += 1
-                
-                # 显式使用物理像素列宽数组进行二重坚固覆盖 (防止 restoreState 失灵或拉伸覆盖)
-                if widths_key in ui_state and isinstance(ui_state[widths_key], list):
-                    widths = ui_state[widths_key]
-                    for col_idx, w in enumerate(widths):
-                        if col_idx < table.columnCount() and int(w) > 0:
-                            table.setColumnWidth(col_idx, int(w))
-                            
-                self._reapply_table_stretch_mode(name, table)
-            
-            # 恢复上次选中的 Tab 页签
-            if hasattr(self, 'tabs') and self.tabs and self.tabs.count() > 0:
-                target_idx = ui_state.get('active_tab_index', 0)
-                target_name = ui_state.get('active_tab_name', '')
-                if target_name:
-                    for i in range(self.tabs.count()):
-                        if self._clean_tab_name(self.tabs.tabText(i)) == target_name:
-                            target_idx = i
-                            break
-                if 0 <= target_idx < self.tabs.count():
-                    self.tabs.blockSignals(True)
-                    self.tabs.setCurrentIndex(target_idx)
-                    self.tabs.blockSignals(False)
 
-            logger.debug(f"✅ [Dashboard] UI state restored for {restored_count} tables.")
-            
-            # 恢复配置后触发一次全表刷新
-            self._refresh_all_tables()
-            
-            # 恢复磁吸与位置状态
-            try:
-                if pos:
-                    self.anchor_edge = pos.get("anchor_edge")
-                    should_hide = pos.get("is_hidden_state", False)
-                    self.is_hidden_state = False
-                    scale = self._get_dpi_scale_factor()
-                    if "x" in pos and "y" in pos and "width" in pos and "height" in pos:
-                        self.normal_geometry = QRect(
-                            int(pos["x"] * scale),
-                            int(pos["y"] * scale),
-                            int(pos["width"] * scale),
-                            int(pos["height"] * scale)
-                        )
-                    if should_hide and self.anchor_edge and self.normal_geometry:
-                        QTimer.singleShot(200, self.hide_to_edge)
-            except Exception as snap_err:
-                logger.error(f"[SignalDashboardPanel] Failed to restore snap state: {snap_err}")
-            
-            # 恢复完成后，采集当前快照作为 dirty-check 基准
-            QTimer.singleShot(200, self._finalize_restore)
+            # 列宽恢复会触发布局计算；每轮仅处理一张表，让 Tk/Qt 事件循环继续响应。
+            self._ui_state_restore_payload = (ui_state, pos)
+            self._ui_state_restore_jobs = list(self.tables.items())
+            self._ui_state_restore_index = 0
+            self._ui_state_restore_count = 0
+            self._ui_state_restore_timer.start(0)
         except Exception as e:
             logger.error(f"Failed to restore UI state: {e}")
             self._is_initializing = False
+
+    def _restore_ui_state_chunk(self):
+        payload = self._ui_state_restore_payload
+        if not payload:
+            return
+        if self._ui_state_restore_index >= len(self._ui_state_restore_jobs):
+            self._finish_ui_state_restore()
+            return
+
+        ui_state, _pos = payload
+        name, table = self._ui_state_restore_jobs[self._ui_state_restore_index]
+        clean_name = self._clean_tab_name(name)
+        state_key = f'table_state_{clean_name}'
+        widths_key = f'col_widths_{clean_name}'
+        try:
+            # 优先恢复 restoreState
+            if state_key in ui_state and ui_state[state_key]:
+                state_hex = ui_state[state_key]
+                ok = table.horizontalHeader().restoreState(QByteArray.fromHex(state_hex.encode()))
+                if ok:
+                    self._ui_state_restore_count += 1
+
+            # 显式列宽用于覆盖 restoreState 的拉伸结果。
+            widths = ui_state.get(widths_key)
+            if isinstance(widths, list):
+                for col_idx, width in enumerate(widths):
+                    if col_idx < table.columnCount() and int(width) > 0:
+                        table.setColumnWidth(col_idx, int(width))
+
+            self._reapply_table_stretch_mode(name, table)
+        except Exception:
+            logger.exception("[Dashboard] Failed to restore table layout: %s", name)
+
+        self._ui_state_restore_index += 1
+        if self._ui_state_restore_index < len(self._ui_state_restore_jobs):
+            self._ui_state_restore_timer.start(0)
+        else:
+            self._finish_ui_state_restore()
+
+    def _finish_ui_state_restore(self):
+        payload = self._ui_state_restore_payload
+        if not payload:
+            return
+        ui_state, pos = payload
+        restored_count = self._ui_state_restore_count
+        self._ui_state_restore_payload = None
+        self._ui_state_restore_jobs = []
+
+        # 恢复上次选中的 Tab 页签
+        if hasattr(self, 'tabs') and self.tabs and self.tabs.count() > 0:
+            target_idx = ui_state.get('active_tab_index', 0)
+            target_name = ui_state.get('active_tab_name', '')
+            if target_name:
+                for i in range(self.tabs.count()):
+                    if self._clean_tab_name(self.tabs.tabText(i)) == target_name:
+                        target_idx = i
+                        break
+            if 0 <= target_idx < self.tabs.count():
+                self.tabs.blockSignals(True)
+                self.tabs.setCurrentIndex(target_idx)
+            self.tabs.blockSignals(False)
+
+        logger.debug(f"✅ [Dashboard] UI state restored for {restored_count} tables.")
+
+        # 恢复配置后触发一次全表刷新
+        self._refresh_all_tables()
+
+        # 恢复磁吸与位置状态
+        try:
+            if pos:
+                self.anchor_edge = pos.get("anchor_edge")
+                should_hide = pos.get("is_hidden_state", False)
+                self.is_hidden_state = False
+                scale = self._get_dpi_scale_factor()
+                if "x" in pos and "y" in pos and "width" in pos and "height" in pos:
+                    self.normal_geometry = QRect(
+                        int(pos["x"] * scale),
+                        int(pos["y"] * scale),
+                        int(pos["width"] * scale),
+                        int(pos["height"] * scale)
+                    )
+                if should_hide and self.anchor_edge and self.normal_geometry:
+                    QTimer.singleShot(200, self.hide_to_edge)
+        except Exception as snap_err:
+            logger.error(f"[SignalDashboardPanel] Failed to restore snap state: {snap_err}")
+
+        # 恢复完成后，采集当前快照作为 dirty-check 基准
+        QTimer.singleShot(200, self._finalize_restore)
 
     def _reapply_table_stretch_mode(self, tab_name: str, table: QTableWidget):
         """
@@ -3965,6 +4028,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def _process_batch_signals(self):
         """批量处理 UI 更新，确保滚动条稳定"""
+        if self._dashboard_refresh_running:
+            # 保留缓冲区，重建结束后再按原有微批次追加。
+            return
         if not self._table_update_buffer:
             return
         
@@ -4095,6 +4161,11 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         if update_ui: self._append_to_tables(event)
 
     def _append_to_tables(self, event: BusEvent):
+        if self._dashboard_refresh_running:
+            # 全量重建期间不与尚未完成的表格写入交错；本事件已进入 _all_events。
+            self._dashboard_refresh_pending = True
+            return
+
         payload = event.payload
         code = payload.get('code', '')
         name = payload.get('name', '')
@@ -4325,109 +4396,157 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 pass
 
     def _refresh_all_tables(self):
-        """[PERF v4.0] 极致 O(N) 全量刷新，彻底根治 L2917 循环内的 O(N^2) 性能陷阱"""
-        
-        # 1. 预案锁定
+        """准备全量刷新；Qt 单元格填充分片执行，避免长时间占用 UI 事件循环。"""
+        if self._dashboard_refresh_running:
+            self._dashboard_refresh_pending = True
+            return
+
+        self._dashboard_refresh_running = True
+        self._dashboard_refresh_pending = False
         active_sortings = {}
-        for name, table in self.tables.items():
-            active_sortings[name] = table.isSortingEnabled()
-            table.setUpdatesEnabled(False)
-            table.blockSignals(True)
-            table.setSortingEnabled(False)
-            table.setRowCount(0) # 物理清空
-            self._row_cache[table] = {} # 物理清理旧缓存
-            
+        self._dashboard_refresh_state = {
+            'active_sortings': active_sortings,
+            'jobs': [],
+            'job_index': 0,
+        }
+
         try:
-            # 2. 批量归类（内存操作，亚毫秒级）
             table_events = {name: [] for name in self.tables.keys()}
-            
             fold_duplicates = self.fold_check.isChecked() if hasattr(self, 'fold_check') else False
-            
+            source_events = tuple(self._all_events)
+
             if fold_duplicates:
                 table_events_map = {name: OrderedDict() for name in self.tables.keys()}
-                for event in self._all_events:
+                for event in source_events:
                     payload = event.payload
                     code = payload.get('code', '')
-                    if not code: continue
-                    
-                    if event.event_type in [SignalBus.EVENT_PATTERN, SignalBus.EVENT_ALERT, SignalBus.EVENT_RISK]:
-                        if code in table_events_map["全部信号"]:
-                            table_events_map["全部信号"].pop(code)
-                        table_events_map["全部信号"][code] = event
-                        
-                        pattern = str(payload.get('pattern', payload.get('subtype', 'ALERT')) or '').lower()
-                        detail = str(payload.get('detail', payload.get('message', '')) or '').lower()
-                        
-                        matched_cats = 0
-                        for cat, keywords in CATEGORY_MAP.items():
-                            if not keywords: continue
-                            if any(kw.lower() in pattern or kw.lower() in detail for kw in keywords):
-                                if cat in table_events_map:
-                                    if code in table_events_map[cat]:
-                                        table_events_map[cat].pop(code)
-                                    table_events_map[cat][code] = event
-                                    matched_cats += 1
-                        
-                        if matched_cats == 0 and "其它信号" in table_events_map:
-                            if code in table_events_map["其它信号"]:
-                                table_events_map["其它信号"].pop(code)
-                            table_events_map["其它信号"][code] = event
-                
-                for name in table_events.keys():
+                    if not code or event.event_type not in [SignalBus.EVENT_PATTERN, SignalBus.EVENT_ALERT, SignalBus.EVENT_RISK]:
+                        continue
+
+                    table_events_map["全部信号"].pop(code, None)
+                    table_events_map["全部信号"][code] = event
+
+                    pattern = str(payload.get('pattern', payload.get('subtype', 'ALERT')) or '').lower()
+                    detail = str(payload.get('detail', payload.get('message', '')) or '').lower()
+                    matched_cats = 0
+                    for cat, keywords in CATEGORY_MAP.items():
+                        if not keywords or cat not in table_events_map:
+                            continue
+                        if any(kw.lower() in pattern or kw.lower() in detail for kw in keywords):
+                            table_events_map[cat].pop(code, None)
+                            table_events_map[cat][code] = event
+                            matched_cats += 1
+
+                    if matched_cats == 0 and "其它信号" in table_events_map:
+                        table_events_map["其它信号"].pop(code, None)
+                        table_events_map["其它信号"][code] = event
+
+                for name in table_events:
                     if name in table_events_map:
                         table_events[name] = list(table_events_map[name].values())
             else:
-                for event in self._all_events:
+                for event in source_events:
                     payload = event.payload
-                    # 简单复刻 _append_to_tables 的逻辑（仅分组）
-                    if event.event_type in [SignalBus.EVENT_PATTERN, SignalBus.EVENT_ALERT, SignalBus.EVENT_RISK]:
-                        table_events["全部信号"].append(event)
-                        
-                        pattern = str(payload.get('pattern', payload.get('subtype', 'ALERT')) or '').lower()
-                        detail = str(payload.get('detail', payload.get('message', '')) or '').lower()
-                        
-                        matched_cats = 0
-                        for cat, keywords in CATEGORY_MAP.items():
-                            if not keywords: continue
-                            if any(kw.lower() in pattern or kw.lower() in detail for kw in keywords):
-                                if cat in table_events:
-                                    table_events[cat].append(event)
-                                    matched_cats += 1
-                        
-                        if matched_cats == 0 and "其它信号" in table_events:
-                            table_events["其它信号"].append(event)
-                
-            # 3. 物理灌入（O(N) 填充）
-            for name, table in self.tables.items():
-                # 引擎表通过 _update_engine_views 刷新，此处跳过
-                if name in ["🌟 决策队列", "🐉 龙头追踪", "🔥 板块热力", "🌐 战略趋势", "📡 市场预警"]:
-                    continue
-                    
-                events = table_events.get(name, [])
-                # 限制最大展示量
-                max_show = 500
-                events = events[-max_show:]
-                
-                table.setRowCount(len(events))
-                for i, ev in enumerate(events):
-                    self._fill_row_data(table, i, ev.payload, timestamp=ev.timestamp)
+                    if event.event_type not in [SignalBus.EVENT_PATTERN, SignalBus.EVENT_ALERT, SignalBus.EVENT_RISK]:
+                        continue
+                    table_events["全部信号"].append(event)
 
-        finally:
+                    pattern = str(payload.get('pattern', payload.get('subtype', 'ALERT')) or '').lower()
+                    detail = str(payload.get('detail', payload.get('message', '')) or '').lower()
+                    matched_cats = 0
+                    for cat, keywords in CATEGORY_MAP.items():
+                        if not keywords:
+                            continue
+                        if any(kw.lower() in pattern or kw.lower() in detail for kw in keywords):
+                            if cat in table_events:
+                                table_events[cat].append(event)
+                                matched_cats += 1
+                    if matched_cats == 0 and "其它信号" in table_events:
+                        table_events["其它信号"].append(event)
+
+            # 先准备行数与任务队列；实际创建 QTableWidgetItem 的工作留给短时分片。
+            engine_tables = ["🌟 决策队列", "🐉 龙头追踪", "🔥 板块热力", "🌐 战略趋势", "📡 市场预警"]
             for name, table in self.tables.items():
+                active_sortings[name] = table.isSortingEnabled()
+                table.setUpdatesEnabled(False)
+                table.blockSignals(True)
+                table.setSortingEnabled(False)
+                if name in engine_tables:
+                    continue
+
+                self._row_cache[table] = {}
+                events = table_events.get(name, [])[-500:]
+                table.setRowCount(len(events))
+                self._dashboard_refresh_state['jobs'].append([name, table, events, 0])
+
+            self._dashboard_refresh_timer.start(0)
+        except Exception:
+            logger.exception("[Dashboard] Failed to prepare full table refresh")
+            self._finish_all_tables_refresh()
+
+    def _process_all_tables_refresh_chunk(self):
+        """每轮最多填充 16 行或约 12ms，再让 Tk/Qt 处理其他事件。"""
+        state = self._dashboard_refresh_state
+        if not self._dashboard_refresh_running or state is None:
+            return
+
+        jobs = state['jobs']
+        job_index = state['job_index']
+        deadline = time.perf_counter() + 0.012
+        processed = 0
+        try:
+            while job_index < len(jobs) and processed < 16:
+                job = jobs[job_index]
+                name, table, events, row_idx = job
+                if row_idx >= len(events):
+                    job_index += 1
+                    continue
+
+                event = events[row_idx]
+                self._fill_row_data(table, row_idx, event.payload, timestamp=event.timestamp)
+                job[3] += 1
+                processed += 1
+                if processed and time.perf_counter() >= deadline:
+                    break
+
+            state['job_index'] = job_index
+            if job_index < len(jobs):
+                self._dashboard_refresh_timer.start(0)
+            else:
+                self._finish_all_tables_refresh()
+        except Exception:
+            logger.exception("[Dashboard] Failed while filling a table refresh chunk")
+            self._finish_all_tables_refresh()
+
+    def _finish_all_tables_refresh(self):
+        """恢复表格交互状态并合并刷新期间到达的重绘请求。"""
+        state = self._dashboard_refresh_state or {}
+        active_sortings = state.get('active_sortings', {})
+        engine_tables = ["🌟 决策队列", "🐉 龙头追踪", "🔥 板块热力", "🌐 战略趋势"]
+
+        for name, table in self.tables.items():
+            try:
                 table.blockSignals(False)
                 table.setUpdatesEnabled(True)
-                was_sorting = active_sortings.get(name, False)
-                if was_sorting and name not in ["🌟 决策队列", "🐉 龙头追踪", "🔥 板块热力", "🌐 战略趋势"]:
+                if active_sortings.get(name, False) and name not in engine_tables:
                     table.setSortingEnabled(True)
-                    # 仅对可见表进行一次性排序
                     if table.isVisible():
                         sort_col = getattr(table, '_sort_col', 0)
                         sort_order = getattr(table, '_sort_order', Qt.SortOrder.DescendingOrder)
                         self._sort_table_python(table, sort_col, sort_order)
-                
                 self._limit_table_column_widths(table)
                 table.viewport().update()
-                
+            except Exception:
+                logger.exception("[Dashboard] Failed to restore table state: %s", name)
+
+        self._dashboard_refresh_state = None
+        self._dashboard_refresh_running = False
+        refresh_again = self._dashboard_refresh_pending
+        self._dashboard_refresh_pending = False
+        if refresh_again:
+            self._dashboard_refresh_timer.start(0)
+        elif self._table_update_buffer and getattr(self, '_batch_timer', None):
+            self._batch_timer.start(16)
 
     def _fill_row_data(self, table, row_idx, p, timestamp=None):
         """纯粹的数据填充逻辑，不触发任何布局改变信号"""
@@ -5398,9 +5517,12 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         for k in self._signal_type_counts: self._signal_type_counts[k] = 0
         self._market_stats = {"up": 0, "down": 0, "flat": 0, "vol_up": 0, "vol_down": 0, "vol_details": []}
         
-        # 3. 清空 UI 表格
-        for table in self.tables.values():
-            table.setRowCount(0)
+        # 3. 清空 UI 表格。异步重建期间由后续空数据刷新负责清空，避免与分片回调交错。
+        if self._dashboard_refresh_running:
+            self._dashboard_refresh_pending = True
+        else:
+            for table in self.tables.values():
+                table.setRowCount(0)
             
         # 4. 重置 UI 标签与卡片 (进入“等待同步”状态)
         for key, lbl in self.cards.items():
