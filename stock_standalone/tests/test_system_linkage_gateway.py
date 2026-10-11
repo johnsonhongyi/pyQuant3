@@ -587,3 +587,85 @@ def test_security_directory_releases_missing_resource_through_shared_resolver(tm
     assert catalog.read_bytes() == resource.read_bytes()
     if mode != "development":
         assert not (app / "JSONData").exists()
+
+
+def _seed_consumer_operation(gateway):
+    with gateway._db() as connection:
+        connection.execute(
+            "INSERT INTO linkage_operations(operation_id,request_id,body_hash,payload,status,result,created_at,expires_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            ("ack-op", "ack-req", "hash", "{}", "applied", json.dumps({
+                "saved": {"persisted": True, "favorites_revision": 1},
+                "consumers": {"TK": {"status": "pending"}, "ATS": {"status": "pending"}},
+            }), "now", "later", "now"),
+        )
+
+
+def test_concurrent_consumer_acks_preserve_both_results(tmp_path, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    gateway = SystemLinkageGateway(SimpleNamespace(), database_path=str(tmp_path / "ack.sqlite3"))
+    _seed_consumer_operation(gateway)
+    first_read, release, second_done = threading.Event(), threading.Event(), threading.Event()
+    original = gateway._connect
+    class PausedConnection:
+        def __init__(self, connection):
+            self.connection = connection
+        def execute(self, sql, *args):
+            cursor = self.connection.execute(sql, *args)
+            if sql.startswith("SELECT result FROM") and threading.current_thread().name.endswith("_0"):
+                first_read.set()
+                assert release.wait(3)
+            return cursor
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+    monkeypatch.setattr(gateway, "_connect", lambda: PausedConnection(original()))
+    def second_ack():
+        try:
+            return gateway.report_consumer("ack-op", "ATS", "synced", 1, "market_closed")
+        finally:
+            second_done.set()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(gateway.report_consumer, "ack-op", "TK", "synced", 1, "market_closed")
+        assert first_read.wait(3)
+        second = pool.submit(second_ack)
+        try:
+            second_done.wait(0.2)
+        finally:
+            release.set()
+        assert first.result(timeout=3) and second.result(timeout=3)
+    monkeypatch.setattr(gateway, "_connect", original)
+    consumers = gateway.get_operation("ack-op")["result"]["consumers"]
+    assert consumers["TK"]["status"] == consumers["ATS"]["status"] == "synced"
+
+
+def test_consumer_retries_and_old_revisions_cannot_regress_ack(tmp_path):
+    gateway = SystemLinkageGateway(SimpleNamespace(), database_path=str(tmp_path / "ack.sqlite3"))
+    _seed_consumer_operation(gateway)
+    assert not gateway.report_consumer("ack-op", "TK", "synced", 0)
+    assert gateway.report_consumer("ack-op", "TK", "synced", 2, "market_closed")
+    assert gateway.report_consumer("ack-op", "TK", "pending", 2)
+    assert gateway.report_consumer("ack-op", "TK", "synced", 1, "pending_fetch")
+    assert not gateway.report_consumer("ack-op", "TK", "synced", "invalid")
+    consumer = gateway.get_operation("ack-op")["result"]["consumers"]["TK"]
+    assert consumer == {"status": "synced", "favorites_revision": 2, "quote_status": "market_closed"}
+
+
+def test_finish_and_notification_preserve_early_consumer_ack(tmp_path):
+    gateway = SystemLinkageGateway(SimpleNamespace(), dispatch_to_ui=lambda _command: True,
+                                   database_path=str(tmp_path / "ack.sqlite3"))
+    _seed_consumer_operation(gateway)
+    assert gateway.report_consumer("ack-op", "TK", "synced", 1, "market_closed")
+    assert gateway.report_consumer("ack-op", "ATS", "synced", 1, "market_closed")
+    result = {"saved": {"persisted": True, "favorites_revision": 1},
+              "consumers": {"TK": {"status": "pending"}, "ATS": {"status": "not_running"}}}
+    gateway._finish("ack-op", "applied", result)
+    gateway._dispatch_pending_notification("ack-op", {"code": "600000"}, result)
+    gateway.report_consumer_heartbeat("ATS", 2, "market_closed")
+    gateway.report_consumer_heartbeat("ATS", 1, "pending_fetch")
+    consumers = gateway.get_operation("ack-op")["result"]["consumers"]
+    assert all(consumers[name]["status"] == "synced" for name in ("TK", "ATS"))
+    with gateway._db() as connection:
+        row = connection.execute("SELECT favorites_revision,quote_status FROM linkage_consumer_health WHERE consumer='ATS'").fetchone()
+    assert tuple(row) == (2, "market_closed")

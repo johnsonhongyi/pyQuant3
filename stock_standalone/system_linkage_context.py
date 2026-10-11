@@ -710,11 +710,6 @@ class SystemLinkageContextClient:
                 except Exception as error:
                     self._publisher_status = "stale: " + str(error)
                     logger.debug("System-linkage evidence publish failed: %s", error)
-                snapshot = self._fetch_json("/api/v1/linkage/context")
-                if not isinstance(snapshot, dict) or snapshot.get("schema_version") != 1 or not snapshot.get("snapshot_id"):
-                    raise ValueError("invalid_context_snapshot")
-                self._store_snapshot(snapshot)
-                self._sync_events()
                 if self._attention_enabled and self._favorite_manager is not None:
                     try:
                         self._sync_attention()
@@ -723,6 +718,11 @@ class SystemLinkageContextClient:
                         if str(error) in ("attention_revision_conflict", "favorites_revision_conflict"):
                             self._attention_wakeup.set()
                         logger.debug("System-linkage attention sync failed: %s", error)
+                snapshot = self._fetch_json("/api/v1/linkage/context")
+                if not isinstance(snapshot, dict) or snapshot.get("schema_version") != 1 or not snapshot.get("snapshot_id"):
+                    raise ValueError("invalid_context_snapshot")
+                self._store_snapshot(snapshot)
+                self._sync_events()
                 with self._lock:
                     self._snapshot = snapshot
                     self._status = {"state": "online", "error": "", "snapshot_id": snapshot["snapshot_id"],
@@ -1135,10 +1135,8 @@ class SystemLinkageContextClient:
             }
             status, result = self._request_json("POST", "/api/v1/linkage/attention/intents/batch", payload)
             if status == 409 and isinstance(result, dict) and result.get("code") == "attention_revision_conflict":
-                latest = self._get_attention_snapshot()
-                self._favorite_manager.set_attention_sync_revision(
-                    int(latest.get("revision", 0) or 0), baseline_favorites_revision,
-                )
+                # The new remote revision has not been projected locally yet.
+                # Keep the consumed cursor so the next pass reconciles tombstones.
                 raise ValueError("attention_revision_conflict")
             if status != 200 or not isinstance(result, dict) or not isinstance(result.get("revision"), int):
                 code = result.get("code", "error") if isinstance(result, dict) else "invalid_response"

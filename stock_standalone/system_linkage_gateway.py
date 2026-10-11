@@ -880,6 +880,16 @@ class SystemLinkageGateway:
     def _finish(self, operation_id, status, result):
         now_text = datetime.now(timezone.utc).isoformat()
         with self._db() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if status in ("applied", "already_present"):
+                row = connection.execute("SELECT result FROM linkage_operations WHERE operation_id=?", (operation_id,)).fetchone()
+                previous = json.loads(row["result"]) if row else {}
+                consumers = result.setdefault("consumers", {})
+                for consumer, ack in previous.get("consumers", {}).items():
+                    if ack.get("status") == "synced" and int(ack.get("favorites_revision", 0) or 0) >= int(
+                        result.get("saved", {}).get("favorites_revision", 0) or 0
+                    ):
+                        consumers[consumer] = ack
             connection.execute(
                 "UPDATE linkage_operations SET status=?,result=?,updated_at=? WHERE operation_id=?",
                 (status, json.dumps(result, ensure_ascii=False, separators=(",", ":")), now_text, operation_id),
@@ -901,13 +911,29 @@ class SystemLinkageGateway:
             return False
         if quote_status not in ("ready", "pending_fetch", "unknown", "market_closed", "stale", "quota_limited"):
             quote_status = "unknown"
+        try:
+            revision = int(favorites_revision or 0)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if revision < 0:
+            return False
         with self._db() as connection:
+            # Acquire the writer before reading the shared JSON (also across processes).
+            connection.execute("BEGIN IMMEDIATE")
             row = connection.execute("SELECT result FROM linkage_operations WHERE operation_id=?", (operation_id,)).fetchone()
             if row is None:
                 return False
             result = json.loads(row["result"])
             consumers = result.setdefault("consumers", {})
-            consumers[consumer] = {"status": status, "favorites_revision": int(favorites_revision or 0),
+            existing = consumers.get(consumer, {})
+            previous_revision = int(existing.get("favorites_revision", 0) or 0)
+            if revision < previous_revision or (
+                revision == previous_revision and existing.get("status") == "synced" and status != "synced"
+            ):
+                return True
+            if status == "synced" and revision < int(result.get("saved", {}).get("favorites_revision", 0) or 0):
+                return False
+            consumers[consumer] = {"status": status, "favorites_revision": revision,
                                    "quote_status": quote_status}
             connection.execute("UPDATE linkage_operations SET result=?,updated_at=? WHERE operation_id=?",
                                (json.dumps(result, ensure_ascii=False, separators=(",", ":")),
@@ -923,7 +949,9 @@ class SystemLinkageGateway:
             connection.execute(
                 "INSERT INTO linkage_consumer_health(consumer,last_seen,favorites_revision,quote_status) VALUES(?,?,?,?) "
                 "ON CONFLICT(consumer) DO UPDATE SET last_seen=excluded.last_seen, "
-                "favorites_revision=excluded.favorites_revision, quote_status=excluded.quote_status",
+                "favorites_revision=MAX(linkage_consumer_health.favorites_revision,excluded.favorites_revision), "
+                "quote_status=CASE WHEN excluded.favorites_revision>=linkage_consumer_health.favorites_revision "
+                "THEN excluded.quote_status ELSE linkage_consumer_health.quote_status END",
                 (consumer, time.time(), int(favorites_revision or 0), quote_status),
             )
             rows = connection.execute(
