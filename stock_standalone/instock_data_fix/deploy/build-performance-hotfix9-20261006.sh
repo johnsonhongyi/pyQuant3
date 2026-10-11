@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "$0")/legacy-deployment-disabled.sh" "$0"
 set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 IMAGE=instock:johnson250103-sina-runtime-perf-hotfix9-20261006

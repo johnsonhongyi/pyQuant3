@@ -76,5 +76,9 @@ data/ipo_learning/shadow_observations.sqlite
 !design/tk_column_viewport_benchmark_20261009.json
 .build_validation/
 !tests/test_system_linkage_quotes.py
+!tests/test_system_linkage_gateway.py
+!tests/test_system_linkage_context.py
+/system_linkage.key
+/system_linkage.sqlite3
 # The nested stock-strategy checkout owns its own Git history.
 /stock-strategy/source/

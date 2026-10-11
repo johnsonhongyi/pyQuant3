@@ -2,6 +2,15 @@
 
 生产部署背景与上次线上核验见 [source/docs/项目交接说明.md](source/docs/项目交接说明.md)。其中生产快照有日期，部署前必须重新核验容器、镜像、挂载与部署脚本预期基础镜像。
 
+## 2026-10-11 总控统一发布规则（当前有效）
+
+- 全系统职责与共用规范见[总控文档](../docs/engineering/全系统职责与Docker发布持久化回滚规范.md)：`pyQuant3/stock_standalone` 协调 TK/ATS 桌面和跨项目验收；stock-strategy 负责 Go API、SBC/Web 和共享题材/热度/连板事实；InStock 负责 Python 选股及基本面/历史候选证据；TK/ATS 分别负责本机关注实时消费和分析证据消费。数据事实、消费回执和交易执行不可互相替代。
+- 默认发布以审核 Git SHA 对齐，不构建新镜像、不追加普通功能层。stock-strategy 的宿主机 Python 任务可在既有源码 Git 路径更新；Go/Web 目前封装在只读根文件系统镜像中，尚无已验证的无镜像更新入口，因此当前 `build-and-deploy.ps1` 仅为显式分层例外，不能视作默认发布方式。
+- 已有 `full-system-linkage-trial-20261011114424` 是一次明确记录的候选版本；它不授权后续每个修复都构建新镜像。分层例外须记录原因、base digest、源码 SHA、唯一候选 tag、验收及回滚点。
+- Docker 镜像说明标签表示镜像构建时的运行环境/源码；容器代码更新后的 Git SHA须另行记录，不能用静态 image label 冒充当前应用 SHA。更新或回滚都保持现有 bind mount 路径和结构，代码回滚不回滚或覆盖外置数据库/日志/行情数据。
+- 体积报告分列 image size、容器 `SizeRw` 与虚拟总大小；删除镜像必须逐项确认运行与回滚引用，禁止全局 prune 和带 `-v` 删除容器。
+- 本文件后续按日期记录的部署与镜像操作是当时的历史事实，不是当前发布指令；如与现行规则冲突，以本节及 `source/docs/02-部署文档.md` 第 9 节为准。
+
 ## 2026-10-08 本地修复状态
 
 - 本次仅修复 stockstrategy 的 Easy Stock 行情管理、网络代理、回补与相关回归问题；没有部署、重启生产容器或修改生产数据库。
@@ -83,3 +92,39 @@
 - InStock 2026-10-09 回补 marker 已完整：库存 5,572 个唯一股票代码，5,538 个有效行、34 个空日线/no-trade；数据库为 5,538 行且 OHLCV 无效行 0。TDX 本地日历合并覆盖 501 个交易日，`target_in_calendar=true`。容器日线 cron 已设为工作日 16:05 首跑、16:35 重试，共享锁有效。
 - InStock 容器仍基于 `instock:johnson250103-sina-runtime-flatbase-20261007`；当前 crontab 已做单行更新并备份，但该文件未由宿主机 bind mount。后续如重建/替换 InStock 容器，应以更新后的 InStock `cron/root` 为准；现存 hotfix 构建脚本基线与 live image 不匹配，不能原样重放。
 - 详细复核、测试与备份位置见 `docs/tasks/2026-10-10_1326_数据底座限流与TDX闭环.md` 及上级 `../ENVIRONMENT_HANDOFF.md` 本节。
+
+## 2026-10-11 Docker 数据外置与重建保护
+
+- 备份扩展至 InStock 容器源码、环境、项目配置、`/etc/environment`、运行 root crontab、`/tmp` 修复文件和 MariaDB 在线全库快照；主目录为 `/mnt/4TB/dockerf/maintenance-backups/stockstrategy-instock-predeploy-20261010-235029`。MariaDB 31 张 InnoDB 应用表的压缩快照约 1.24 GiB，校验通过。
+- InStock 下一版通过只读外置源码、外置配置和现有四类数据挂载运行；容器根文件系统只读，回撤保留旧容器且不覆盖数据库。旧日期部署/同步脚本已拒绝执行。
+- stock-strategy 部署与回撤入口现在核对完整挂载契约及回撤 SHA256。新任务文档：`docs/tasks/2026-10-11_0055_Docker持久化挂载与无损重建.md`；InStock 挂载约定：`../instock_data_fix/deploy/DOCKER_DATA_CONTRACT.md`。
+- 未停止生产容器、未部署新版本。备份在同一 4TB 盘，仍需异地副本覆盖磁盘故障风险。
+## 2026-10-11 stock-strategy API 单层镜像与外置持久化核验
+
+- API 已切换到 `stockstrategy/backend:20261010171545`，镜像 ID `sha256:ed8cbe9544efbcd5f4a50039b79884d43d1d2b662dc9ee6715325c1525d52d6d`，1 层、101,772,610 字节；后端程序 SHA256 为 `d8d152e0497c9dae335266bf6a935e85b6eaee36efca272d7aa2f60bcf719832`。旧 25 层镜像以 `preflat-20261010171545-20261010-180805` 和 `preflat-20261010171545-20261010-184456` 保留，旧容器 `stockstrategy-api-rollback-20261010-184456` 停止保留用于回撤。API/Web 均健康。
+- API 的 `/data`、后端日志、服务日志、InStock `forwardp`、cron 配置均为原有外置 bind mount；数据/日志在 `/mnt/4TB/dockerf/stockstrategy/`，`forwardp` 与 cron 挂载只读。Web 静态发布目录和日志也在外置盘，容器镜像未更换。
+- 完整备份位于 `/mnt/4TB/dockerf/maintenance-backups/stockstrategy-api-flat-success-20261010-184456`，`COMPLETE` 已创建；数据与配置复制校验文件为空，表示无差异。配置前后 SHA256 相同，标准化数据树前后清单相同；`stock-data`、`tdx-cache` SQLite 完整性均为 `ok`，schema 与业务行无变化。
+- `docker diff` 未发现 API 应用目录或数据库/配置写入；仅有 Docker init 与外置挂载点登记。Web 写层仅见 nginx PID 和临时 cache 目录，日志仍走外置挂载。当前 API/Web 的 `ReadonlyRootfs=false` 与切换前一致；后续如需强化只读策略，应先单独验证运行期写路径。
+- 发布入口 `docker/deploy-prebuilt.sh` 已增加日历、market-append、cron 与外置配置不一致时的前置拒绝，并停止随程序发布覆盖这些运行配置；日志目录仅调整顶层属主，不递归改写历史日志。每版后端仍从固定单层 flat base 构建，预期镜像为 2 层，不再继承上一版累积层。新入口由本地 `build-and-deploy.ps1` 打包执行。
+- 验证：生产 API/Web 健康；最终备份的配置、标准化数据树及两份数据库前后摘要逐项 `cmp` 一致；`bash -n docker/deploy-prebuilt.sh` 与 `git diff --check` 通过。
+
+## 2026-10-11 stock-strategy 全只读发布与 nginx 缓存外置
+
+- 按部署手册由 Windows 本地编译并发布 `20261011114424`；API/Web 均通过健康检查，入口 `http://192.168.50.60:20073`。回滚命令：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261011114424`。
+- API 基于固定 1 层 `flatbase-20261010171545` 构建，发布镜像校验为 2 层；API/Web 根文件系统均只读，API 8 个、Web 5 个外置 bind mount 契约校验通过。
+- Web 整个 `/var/cache` 绑定到 `/mnt/4TB/dockerf/stockstrategy/runtime/20261011114424/web/cache`，nginx 缓存位于外置目录 `nginx/` 子目录；API/Web 的 `/tmp`、`/run` 也使用同版本隔离 runtime 外置目录。
+- 新容器严格 `docker diff` 核验通过，`/var`、`/var/cache` 及其他应用运行时路径没有留在容器可写层；生产复核显示 API 镜像为 2 层，UID 101 对外置缓存中的 `/var/cache/nginx` 有写权限。旧 Web 仅保留在停止的回滚容器中；该容器原有的 `/var`、`/var/cache` 父目录记录按旧版兼容规则保留。runtime 目录须随该版回滚快照留存。
+## 2026-10-11 stock-strategy 镜像清理状态
+
+- 未创建新镜像。生产 API `20261011114424`（2 层）及固定 base `flatbase-20261010171545`（1 层）保持原 ID；API/Web 健康，最新 `20261011114424` 回滚快照 `SHA256SUMS` 校验通过。
+- 删除了无标签、无容器引用、无父子镜像依赖的悬空单层镜像 `sha256:86cdcd64f75a`；移除了 Web 的 `20261010115951`、`20261010164527`、`full-system-linkage-trial-20261011114424` 三个旧别名，Web 实际镜像未改变。保留当前与回滚清单要求的标签。
+- 旧 API 回滚容器 `stockstrategy-api-rollback-20261010-184456` 仍停止保留，引用 25 层镜像 `sha256:9528e661c84a` 及其历史父镜像链。其 5 个挂载均为外置 bind mount；`docker diff` 仅有外置挂载点登记和 Docker init，无应用或业务数据写层。
+- 自动审核拒绝删除该生产停止容器，理由是镜像清理请求未明确授权删除容器。须取得明确授权后才能删除该旧回滚容器并清理其不再引用的 API 历史镜像链；当前 API、Web、最新回滚容器和外置数据不在清理范围内。
+- 发布脚本现在要求本地 `-AllowLayeredImageBuild` 与远端 `--allow-layered-image` 双重显式开关；首次安装镜像操作要求 `--allow-image-build`。手册已记录门禁和禁止全局 prune。无开关启动本地发布脚本已验证在编译前退出。
+
+## 2026-10-11 stock-strategy backend 镜像清理完成
+
+- 按用户明确授权删除停止的旧回滚容器 stockstrategy-api-rollback-20261010-184456 及其历史 API 镜像父链；旧回滚路径已退役，代码版本回溯由 Git 管理。
+- backend 现在只有两个镜像 ID：605917063f7b（20261011114424 与 full-system-linkage-trial-20261011114424，2 层，119 MB）和 ed8cbe9544ef（20261010171545 与 flatbase-20261010171545，1 层，102 MB）。无其他 backend 历史标签或镜像链。
+- API/Web 生产服务仍健康且 ReadonlyRootfs=true；最新 API/Web 回滚容器保留，最新回滚快照 20261011114424 的 SHA256 校验通过。Web 镜像未改变。
+- 删除旧容器时未使用 -v；其挂载均为外置 bind mount，外置数据、日志和配置未删除。未构建镜像、未重启服务。

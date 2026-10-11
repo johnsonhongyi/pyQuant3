@@ -745,7 +745,7 @@ class GlobalConfig:
         )
         # [NEW] 鼠标左键选择右键粘贴功能开关：是否存储在系统剪贴板中 (True=保留供粘贴, False=默认不保存在剪贴板)
         self.copy_paste_save = self.get_with_writeback("general", "copy_paste_save", fallback=False, value_type="bool")
-        self.linkage_enabled = self.get_with_writeback("general", "linkage_enabled", fallback=False, value_type="bool")
+        self.linkage_enabled = self.get_with_writeback("general", "linkage_enabled", fallback=True, value_type="bool")
         self.ipc_bind_host = self.get_with_writeback("general", "ipc_bind_host", fallback="auto_lan", value_type="str")
         self.ipc_advertise_host = self.get_with_writeback("general", "ipc_advertise_host", fallback="auto", value_type="str")
         self.ipc_linkage_port = self.get_with_writeback("general", "ipc_linkage_port", fallback=26676, value_type="int")

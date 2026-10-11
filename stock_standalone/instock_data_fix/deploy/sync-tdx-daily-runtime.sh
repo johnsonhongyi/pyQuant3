@@ -1,4 +1,5 @@
 #!/bin/sh
+. "$(dirname "$0")/legacy-deployment-disabled.sh" "$0"
 set -eu
 
 if [ "$#" -lt 1 ]; then

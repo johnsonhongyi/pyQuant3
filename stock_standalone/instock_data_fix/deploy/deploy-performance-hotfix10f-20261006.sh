@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "$0")/legacy-deployment-disabled.sh" "$0"
 set -euo pipefail
 
 STOCK_ROOT=/mnt/4TB/dockerf/stock

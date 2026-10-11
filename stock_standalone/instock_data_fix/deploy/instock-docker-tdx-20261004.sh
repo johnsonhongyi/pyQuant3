@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "$0")/legacy-deployment-disabled.sh" "$0"
 set -euo pipefail
 
 IMAGE=${IMAGE:-instock:johnson250103-sina-runtime-perf-hotfix6-20261006}

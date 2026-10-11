@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "$0")/legacy-deployment-disabled.sh" "$0"
 set -euo pipefail
 ROOT=/mnt/4TB/dockerf/stock
 test "$(docker inspect inStock --format '{{.Config.Image}}')" = instock:johnson250103-sina-runtime-perf-hotfix9-20261006
