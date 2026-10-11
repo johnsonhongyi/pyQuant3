@@ -606,8 +606,18 @@ class SystemLinkageContextTests(unittest.TestCase):
                                            "source": "manual", "action": "add"}], 5,
             )
 
-        self.assertEqual(manager.state["attention_revision"], 7)
-        self.assertEqual(manager.state["attention_favorites_revision"], 5)
+        self.assertEqual(manager.state["attention_revision"], 2)
+        self.assertEqual(manager.state["attention_favorites_revision"], 2)
+        manager.state["stocks"] = ["600000"]
+        manager.state["sources"] = {"600000": {"manual": {"local_revision": 9}}}
+        client.snapshot["tombstones"] = [{"symbol": "600000.SH", "revision": 7, "intent_id": "remote-delete"}]
+        client._sync_attention()
+        self.assertFalse(manager.state["stocks"])
+        self.assertEqual(client.sent, [])
+        restarted = _MemoryAttentionClient(manager, client.snapshot)
+        restarted._sync_attention()
+        self.assertFalse(manager.state["stocks"])
+        self.assertEqual(restarted.sent, [])
 
     def test_attention_sync_applies_central_source_to_desktop(self):
         manager = _MemoryFavorites({"favorites_revision": 0, "attention_revision": 0,
@@ -622,6 +632,23 @@ class SystemLinkageContextTests(unittest.TestCase):
         self.assertEqual(manager.state["sources"]["600000"]["stock-strategy:sbc"]["operation_id"], "attn-add")
         self.assertEqual(manager.state["stocks"], ["600000"])
         self.assertEqual(manager.applied[0][4], "remote_sync")
+
+
+    def test_attention_runs_even_when_context_is_unavailable(self):
+        client = _MemoryAttentionClient(_MemoryFavorites({}), {})
+        calls = []
+        client._drain_source_events = lambda: None
+        client._flush_source_outbox = lambda: None
+        client._sync_attention = lambda: calls.append("attention")
+        client._notify = lambda: None
+        client.poll_interval = 0.001
+        def fail_context(_path):
+            client._stop.set()
+            raise OSError("context unavailable")
+        client._fetch_json = fail_context
+        client._run()
+        self.assertEqual(calls, ["attention"])
+        self.assertEqual(client.latest()[1]["state"], "unavailable")
 
 
 if __name__ == "__main__":
