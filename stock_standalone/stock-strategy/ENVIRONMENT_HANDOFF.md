@@ -128,3 +128,12 @@
 - backend 现在只有两个镜像 ID：605917063f7b（20261011114424 与 full-system-linkage-trial-20261011114424，2 层，119 MB）和 ed8cbe9544ef（20261010171545 与 flatbase-20261010171545，1 层，102 MB）。无其他 backend 历史标签或镜像链。
 - API/Web 生产服务仍健康且 ReadonlyRootfs=true；最新 API/Web 回滚容器保留，最新回滚快照 20261011114424 的 SHA256 校验通过。Web 镜像未改变。
 - 删除旧容器时未使用 -v；其挂载均为外置 bind mount，外置数据、日志和配置未删除。未构建镜像、未重启服务。
+
+## 2026-10-11 stock-strategy TK 桌面节点联动发布
+
+- 按部署手册第 9 节发布 `20261011150918`，源码为 `source` 仓库提交 `5c0c917eaad171b529c7939c470473bce66eddb3`（`feat: 支持TK桌面节点自助接入联动`）。Windows 工作区 npm 生命周期进程受限导致首次构建失败；改用该提交的干净隔离工作副本并在授权环境重跑同一脚本后成功，失败尝试未写入生产。
+- 后端新增 TK 桌面节点配置包导入、身份/HMAC/私网地址校验、SQLite 注册持久化、回连测试和重启恢复；peer 请求增加时间戳/nonce 防重放、路由白名单与请求体限制，并为联动目标读写增加同步保护。系统状态页新增粘贴/剪贴板导入、校验、连接状态和重试面板。Go 构建、`npm ci`（232 个包）、`tsc -b`、Vite 生产构建（1999 个模块）通过；发布隔离 API smoke 通过。本次未执行独立 Go/Web 全量测试套件。
+- API 镜像 `stockstrategy/backend:20261011150918`，ID `sha256:7762f6b27e119995c5dcf73ba030d7720d02d5b7865f1ed55b692d5da759efc8`，从固定 base `flatbase-20261010171545`（ID `sha256:ed8cbe9544efbcd5f4a50039b79884d43d1d2b662dc9ee6715325c1525d52d6d`）产生，2 层、119,336,420 字节；API/Web app-version 均为 `20261011150918`。Web 镜像未更换，仍为 `stockstrategy/web:20261011114424`；静态文件挂载至 `/mnt/4TB/dockerf/stockstrategy/app/web-dist/20261011150918`。
+- API、Web 均 healthy，API `/api/health` 和 Web 代理的 `/api/health` 返回正常。API/Web 根文件系统只读、`SizeRw=0`；API 8 个、Web 5 个挂载。SQLite 数据库和既有日志挂载保留；本次未修改数据库、行情数据或实盘交易状态。API/Web 的 `/tmp`、`/run` 及 Web `/var/cache` 使用本 release 的 runtime 外置目录。
+- 回滚快照 `/mnt/4TB/dockerf/stockstrategy/rollback/20261011150918` 的 `COMPLETE` 与 `SHA256SUMS` 校验通过，记录的上一版 API/Web 标签均为 `20261011114424`。回滚命令：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261011150918`。
+- 本次仅证明从现有 pinned base 快速构建应用差异层的发布链有效；镜像未记录 source commit label，指定源码版本压平/晋升新 base 的命令尚未实现。设计见 `source/docs/tasks/2026-10-11_1520_分层镜像基线重建与业务代码保真设计.md`；实施和专项验收前不得从线上容器或人工同步目录生成新业务 base。
