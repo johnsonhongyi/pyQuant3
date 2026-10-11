@@ -137,3 +137,14 @@
 - API、Web 均 healthy，API `/api/health` 和 Web 代理的 `/api/health` 返回正常。API/Web 根文件系统只读、`SizeRw=0`；API 8 个、Web 5 个挂载。SQLite 数据库和既有日志挂载保留；本次未修改数据库、行情数据或实盘交易状态。API/Web 的 `/tmp`、`/run` 及 Web `/var/cache` 使用本 release 的 runtime 外置目录。
 - 回滚快照 `/mnt/4TB/dockerf/stockstrategy/rollback/20261011150918` 的 `COMPLETE` 与 `SHA256SUMS` 校验通过，记录的上一版 API/Web 标签均为 `20261011114424`。回滚命令：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261011150918`。
 - 本次仅证明从现有 pinned base 快速构建应用差异层的发布链有效；镜像未记录 source commit label，指定源码版本压平/晋升新 base 的命令尚未实现。设计见 `source/docs/tasks/2026-10-11_1520_分层镜像基线重建与业务代码保真设计.md`；实施和专项验收前不得从线上容器或人工同步目录生成新业务 base。
+
+## 2026-10-11 17:10 TK/Go 鉴权一致性修复与现场验收
+
+- 发布 `20261011170509`，应用源码 SHA `3d8359ea429cf7f178ba39fb6a6f9727fcf66117`；发布脚本提交 `95db0cd3`。从干净隔离副本按手册构建，固定 base、部署锁、隔离 smoke、健康门禁、回滚快照全部执行。
+- 无令牌网页导入及后续联动共用内网/同源鉴权；声明桌面身份的请求始终验 HMAC。已配置 token 时仍校验 Bearer/X-A-Stock-Token。nginx 保留 Host 端口，配置和入口脚本随现有 web-dist/.runtime 版本化，复用现有 Web 镜像及 5 个挂载；旧容器保持自身入口和资源，可直接回滚。
+- API 镜像 `stockstrategy/backend:20261011170509`，ID `sha256:5f1c1d8618c7d65693c2bf0542177343f7b3b5e0f397fa2c2ab52a75a1e1c2f4`，2 层、119336420 字节；Web 镜像仍 `stockstrategy/web:20261011114424`，ID `sha256:ce15ecc17364a415c3a4e609a2858b046af4f3bc9f1058c33bdfaf13b1bb07e9`、62396647 字节。两者 RepoDigests 为空，记录 image ID，不虚构 registry digest。
+- API/Web 均 healthy、always、只读根文件系统、SizeRw=0；SizeRootFs 分别 119336420/62396647；挂载数 8/5。数据、日志、行情、日历路径不变，runtime 和 Web 静态目录使用本 release。nginx -t 和回滚 SHA256SUMS 均通过。回滚：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261011170509`。
+- 本机 Go `internal/httpapi`、`internal/linkage` 包测试通过，前端定向 12 项通过，发布 Go 编译、tsc/Vite 构建通过。真实 TK 导入 connected；targets/context/events/attention 均 200；跨源导入、错误 HMAC、nonce 重放、桌面越权读取 targets 均 401。
+- 实际关注验收选用已有关注股 600418.SH；操作 `acceptance-0eb4fa96b52b4995a3c118e9acc6394a` 被 TK 以 `security_directory_unavailable` 拒绝，未保存关注变更。重复提交确认幂等；不能宣称 TK/ATS 消费闭环通过。
+- 实际网关进程为 `D:\JohnsonProgram\instockMonitorTK\instock_MonitorTK.exe`。安装目录存在有效的根目录 stock_codes.conf，缺少网关读取的 JSONData/stock_codes.conf。拟从同一安装目录原样复制至兼容路径、不改程序；自动审批因先前“不改 TK”约束拒绝，已请求用户明确授权，尚未执行复制。
+- 详细审核与后续范围见 `docs/tasks/2026-10-11_1710_TK与Go鉴权部署验收.md`；未触发真实交易，未记录密钥。
