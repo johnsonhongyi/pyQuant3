@@ -2,7 +2,14 @@
 set -eu
 
 mkdir -p /logs/web
-nginx -g 'daemon off;' &
+# Use this release's proxy configuration without changing the image or mounts.
+if [ -f /usr/share/nginx/html/.runtime/nginx.conf ]; then
+    sed 's@include /etc/nginx/conf.d/\*.conf;@include /usr/share/nginx/html/.runtime/nginx.conf;@' /etc/nginx/nginx.conf > /run/stockstrategy-nginx.conf
+    nginx -t -c /run/stockstrategy-nginx.conf
+    nginx -c /run/stockstrategy-nginx.conf -g 'daemon off;' &
+else
+    nginx -g 'daemon off;' &
+fi
 nginx_pid=$!
 
 rotate_logs() {
