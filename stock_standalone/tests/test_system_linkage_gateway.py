@@ -206,6 +206,9 @@ def test_gateway_confirms_symbols_from_local_security_directory(tmp_path, monkey
 
 
 def test_gateway_fails_closed_when_security_directory_is_unavailable(tmp_path, monkeypatch):
+    import sys_utils
+
+    monkeypatch.setattr(sys_utils, "get_base_path", lambda: str(tmp_path / "missing_bundle"))
     monkeypatch.setattr(system_linkage_gateway, "get_app_root", lambda: str(tmp_path))
     gateway = SystemLinkageGateway(
         SimpleNamespace(ipc_node_id="tk-1", ipc_workspace_id="desk"),
@@ -515,3 +518,72 @@ def test_expired_command_recovers_a_favorite_saved_before_process_exit(tmp_path)
     assert result["status"] == "already_present"
     assert result["result"]["saved"]["persisted"] is True
     assert calls == ["op-expired"]
+
+@pytest.mark.parametrize("mode", ["development", "nuitka", "pyinstaller"])
+def test_security_directory_uses_shared_resolver_and_reloads_updates(tmp_path, monkeypatch, mode):
+    import os
+    import sys_utils
+
+    app = tmp_path / "app"
+    bundle = tmp_path / "bundle"
+    app.mkdir()
+    bundle.mkdir()
+    monkeypatch.setattr(sys_utils, "get_base_path", lambda: str(bundle))
+    monkeypatch.setattr(sys_utils, "is_packaged_env", lambda: mode != "development")
+    monkeypatch.setattr(system_linkage_gateway, "get_app_root", lambda: str(app))
+    monkeypatch.setattr(system_linkage_gateway, "_SECURITY_DIRECTORY_CACHE", {})
+    monkeypatch.delenv("NUITKA_ONEFILE_DIRECTORY", raising=False)
+    monkeypatch.delattr(sys_utils.sys, "_MEIPASS", raising=False)
+    monkeypatch.setattr(sys_utils.sys, "frozen", mode == "pyinstaller", raising=False)
+    if mode == "nuitka":
+        monkeypatch.setenv("NUITKA_ONEFILE_DIRECTORY", str(bundle))
+    elif mode == "pyinstaller":
+        monkeypatch.setattr(sys_utils.sys, "_MEIPASS", str(bundle), raising=False)
+
+    catalog = app / ("JSONData/stock_codes.conf" if mode == "development" else "stock_codes.conf")
+    catalog.parent.mkdir(parents=True, exist_ok=True)
+    catalog.write_text(json.dumps({"stock": ["600000"]}), encoding="utf-8")
+    if mode != "development":
+        # A bundled/development copy must not shadow the updated runtime catalog.
+        stale = app / "JSONData" / "stock_codes.conf"
+        stale.parent.mkdir()
+        stale.write_text(json.dumps({"stock": ["600099"]}), encoding="utf-8")
+    assert system_linkage_gateway._load_security_directory() == frozenset({"600000"})
+    assert os.path.normpath(sys_utils.get_conf_path("stock_codes.conf", base_dir=str(app))) == str(catalog)
+
+    old_mtime = catalog.stat().st_mtime_ns
+    replacement = catalog.with_suffix(".tmp")
+    replacement.write_text(json.dumps({"stock": ["600001"]}), encoding="utf-8")
+    replacement.replace(catalog)
+    os.utime(catalog, ns=(old_mtime + 1_000_000_000, old_mtime + 1_000_000_000))
+    assert system_linkage_gateway._load_security_directory() == frozenset({"600001"})
+    catalog.write_text('{"stock": []}', encoding="utf-8")
+    assert system_linkage_gateway._load_security_directory() is None
+
+
+@pytest.mark.parametrize("mode", ["development", "nuitka", "pyinstaller"])
+def test_security_directory_releases_missing_resource_through_shared_resolver(tmp_path, monkeypatch, mode):
+    import sys_utils
+
+    app = tmp_path / "app"
+    bundle = tmp_path / "bundle"
+    app.mkdir()
+    resource = bundle / "JSONData" / "stock_codes.conf"
+    resource.parent.mkdir(parents=True)
+    resource.write_text(json.dumps({"stock": ["600000"]}), encoding="utf-8")
+    monkeypatch.setattr(sys_utils, "get_base_path", lambda: str(bundle))
+    monkeypatch.setattr(sys_utils, "is_packaged_env", lambda: mode != "development")
+    monkeypatch.setattr(system_linkage_gateway, "get_app_root", lambda: str(app))
+    monkeypatch.setattr(system_linkage_gateway, "_SECURITY_DIRECTORY_CACHE", {})
+    monkeypatch.delenv("NUITKA_ONEFILE_DIRECTORY", raising=False)
+    monkeypatch.delattr(sys_utils.sys, "_MEIPASS", raising=False)
+    monkeypatch.setattr(sys_utils.sys, "frozen", mode == "pyinstaller", raising=False)
+    if mode == "nuitka":
+        monkeypatch.setenv("NUITKA_ONEFILE_DIRECTORY", str(bundle))
+    elif mode == "pyinstaller":
+        monkeypatch.setattr(sys_utils.sys, "_MEIPASS", str(bundle), raising=False)
+    assert system_linkage_gateway._load_security_directory() == frozenset({"600000"})
+    catalog = app / ("JSONData/stock_codes.conf" if mode == "development" else "stock_codes.conf")
+    assert catalog.read_bytes() == resource.read_bytes()
+    if mode != "development":
+        assert not (app / "JSONData").exists()
