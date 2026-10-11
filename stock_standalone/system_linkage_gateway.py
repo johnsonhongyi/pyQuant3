@@ -301,8 +301,11 @@ def _normalize_backend_url(value):
 
 def _load_security_directory():
     """Read the local stock directory without importing its network-refresh path."""
-    path = os.path.join(get_app_root(), "JSONData", "stock_codes.conf")
     try:
+        # Share the release/update path used by StockCode in dev and packaged apps.
+        path = get_conf_path("stock_codes.conf", base_dir=get_app_root())
+        if not path:
+            return None
         info = os.stat(path)
         if info.st_size <= 0 or info.st_size > 2 * 1024 * 1024:
             return None

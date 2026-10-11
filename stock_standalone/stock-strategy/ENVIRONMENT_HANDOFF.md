@@ -148,3 +148,12 @@
 - 实际关注验收选用已有关注股 600418.SH；操作 `acceptance-0eb4fa96b52b4995a3c118e9acc6394a` 被 TK 以 `security_directory_unavailable` 拒绝，未保存关注变更。重复提交确认幂等；不能宣称 TK/ATS 消费闭环通过。
 - 实际网关进程为 `D:\JohnsonProgram\instockMonitorTK\instock_MonitorTK.exe`。安装目录存在有效的根目录 stock_codes.conf，缺少网关读取的 JSONData/stock_codes.conf。拟从同一安装目录原样复制至兼容路径、不改程序；自动审批因先前“不改 TK”约束拒绝，已请求用户明确授权，尚未执行复制。
 - 详细审核与后续范围见 `docs/tasks/2026-10-11_1710_TK与Go鉴权部署验收.md`；未触发真实交易，未记录密钥。
+- 2026-10-11 补充纠正：取消兼容目录复制方案，未执行安装目录写入。根因为 TK 网关绕过 get_conf_path；源码已共用资源释放/更新路径，隔离网关测试 22 项通过（含开发和两种打包路径、自动释放、更新缓存）。现场 EXE 尚未重建，关注保存现场验收仍待完成。
+
+## 2026-10-11 17:49 TK PyInstaller 生产闭环（取代上述待验收状态）
+
+- 按用户授权使用 instock-pyinstall-to-exe.cmd、py_stock_build 环境打包（201 秒），生产构建环境网关 22 项测试通过；实际 EXE 归档核验包含 get_conf_path 修复和证券资源，外置密钥匹配，无密钥记录。
+- 生产 TK release 20261011-174350：仅更新 D:\JohnsonProgram\instockMonitorTK\instock_MonitorTK.exe，先关闭旧进程再启动新进程。新 SHA256 22F3801EFAA1407ECFF07A9FAE96D935CD7F33C705D2B5BA50702C6908F20A20；旧 EXE 及 release.json 保存在同安装目录 release-backups/tk-linkage-20261011-174350。配置、数据和交易开关保持既有值。
+- 真实原始配置导入 connected；网页查询200；错误HMAC、nonce重放、越权、跨源请求401。操作 acceptance-684dd758ae4d40a3a9af38136f4ebf53（已有自选000002.SZ）applied、persisted=true、revision=1、TK/ATS=synced；幂等重放通过。
+- 生产浏览器前端600733北汽蓝谷关注操作39414d13822e4a315306dfe30c12eac5：persisted=true、revision=2、TK/ATS=synced，页面显示已在关注及双端synced；非交易时段最终回执行情market_closed。不以缺行情伪装实时正常，未触发交易。
+- TK读取根目录stock_codes.conf，未创建JSONData副本。API/Web镜像与本节上方Go发布相同且healthy。真实证券联网自动更新未强制执行；隔离测试已覆盖自动释放和更新缓存失效。
