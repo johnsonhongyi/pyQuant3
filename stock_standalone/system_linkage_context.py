@@ -3,10 +3,12 @@
 
 import ipaddress
 import hashlib
+import hmac
 import json
 import logging
 import math
 import os
+import secrets
 import sqlite3
 import threading
 import time
@@ -18,6 +20,7 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from sys_utils import get_app_root
+from system_linkage_gateway import _resolve_key_file
 
 logger = logging.getLogger("system_linkage_context")
 _MAX_CONTEXT_BYTES = 8 * 1024 * 1024
@@ -355,6 +358,7 @@ class SystemLinkageContextClient:
         self._events = []
         self._base_url = ""
         self._token = ""
+        self._key = b""
         self._workspace_id = ""
         self._node_id = ""
         self._attention_enabled = False
@@ -435,15 +439,28 @@ class SystemLinkageContextClient:
             raise ValueError("invalid_stock_strategy_base_url")
         _require_private_host(parsed.hostname)
         base = urlunsplit((parsed.scheme, parsed.netloc, "", "", "")).rstrip("/")
+        key_path = str(getattr(self.config, "ipc_key_file", "") or "").strip()
+        key = b""
+        if key_path:
+            with open(_resolve_key_file(self.config, key_path), "rb") as file_obj:
+                raw_key = file_obj.read(4096).strip()
+            try:
+                key_text = raw_key.decode("ascii")
+                key = bytes.fromhex(key_text) if len(key_text) == 64 else raw_key
+            except (UnicodeDecodeError, ValueError):
+                key = raw_key
+            if len(key) < 32:
+                raise ValueError("ipc_key_file_must_contain_at_least_32_bytes")
         token = str(os.environ.get("A_STOCK_TOKEN", "") or "").strip()
         token_path = str(getattr(self.config, "stock_strategy_token_file", "") or "").strip()
-        if not token and token_path:
+        if not token and not key and token_path:
             with open(os.path.expandvars(os.path.expanduser(token_path)), "r", encoding="utf-8") as file_obj:
                 token = file_obj.read(4096).strip()
-        if not token:
-            raise ValueError("stock_strategy_token_not_configured")
+        if not token and not key:
+            raise ValueError("linkage_peer_auth_not_configured")
         self._base_url = base
         self._token = token
+        self._key = key
         self._workspace_id = str(getattr(self.config, "ipc_workspace_id", "") or "").strip()
         self._node_id = str(getattr(self.config, "ipc_node_id", "") or "").strip()
         self._attention_enabled = bool(
@@ -732,8 +749,22 @@ class SystemLinkageContextClient:
 
     def _request_json(self, method, path, payload=None):
         body = None if payload is None else json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        headers = {"Accept": "application/json", "Authorization": "Bearer " + self._token,
-                   "Cache-Control": "no-cache"}
+        headers = {"Accept": "application/json", "Cache-Control": "no-cache"}
+        if self._key:
+            timestamp = str(int(time.time()))
+            nonce = secrets.token_hex(24)
+            canonical = "\n".join((method, path, hashlib.sha256(body or b"").hexdigest(),
+                                   timestamp, nonce, self._node_id, self._workspace_id)).encode("utf-8")
+            signature = hmac.new(self._key, canonical, hashlib.sha256).hexdigest()
+            headers.update({
+                "X-Linkage-Node-ID": self._node_id,
+                "X-Linkage-Workspace-ID": self._workspace_id,
+                "X-Linkage-Timestamp": timestamp,
+                "X-Linkage-Nonce": nonce,
+                "X-Linkage-Signature": signature,
+            })
+        elif self._token:
+            headers["Authorization"] = "Bearer " + self._token
         if body is not None:
             headers["Content-Type"] = "application/json"
         request = Request(self._base_url + path, data=body, headers=headers, method=method)

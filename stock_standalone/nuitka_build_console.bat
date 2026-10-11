@@ -234,7 +234,7 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --include-data-file=MonitorTK.ico=MonitorTK.ico ^
     --include-data-file=window_config.json=window_config.json ^
     --include-data-file=webTools\window_manager\window_layout_config.json=webTools\window_manager\window_layout_config.json ^
-    --include-data-file=global.ini=global.ini ^
+    --include-data-file=JohnsonUtil\global.ini=global.ini ^
     --include-data-file=scale2_window_config.json=scale2_window_config.json ^
     --include-data-file=monitor_category_list.json=monitor_category_list.json ^
     --include-data-file=visualizer_layout.json=visualizer_layout.json ^

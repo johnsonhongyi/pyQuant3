@@ -7532,6 +7532,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             from JohnsonUtil import commonTips as cct
             if not bool(getattr(cct, 'linkage_enabled', False)):
                 return
+            from system_linkage_gateway import ensure_linkage_config
+            ensure_linkage_config(cct)
             try:
                 from system_linkage_context import SystemLinkageContextClient
                 self._linkage_context_client = SystemLinkageContextClient(
@@ -7544,7 +7546,25 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except Exception:
                 self._linkage_context_client = None
                 logger.exception("TK shared context consumer could not start")
-            from system_linkage_gateway import SystemLinkageGateway
+            from system_linkage_gateway import SystemLinkageGateway, build_setup_package
+
+            def on_peer_configured():
+                def resume_context():
+                    if getattr(self, '_is_closing', False):
+                        return
+                    try:
+                        client = getattr(self, '_linkage_context_client', None)
+                        if client is None:
+                            from system_linkage_context import SystemLinkageContextClient
+                            client = SystemLinkageContextClient(cct, callback=self._queue_linkage_context_update)
+                            self._linkage_context_client = client
+                        if client.start():
+                            self._start_linkage_signal_bridge()
+                        cached_snapshot, cached_status = client.latest()
+                        self._queue_linkage_context_update(cached_snapshot, cached_status)
+                    except Exception:
+                        logger.exception("TK shared context consumer could not resume after setup")
+                self._schedule_after(0, resume_context)
 
             def dispatch_to_ui(command):
                 if (getattr(self, '_is_closing', False) or not hasattr(self, 'tk_dispatch_queue')
@@ -7559,7 +7579,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     logger.exception("Could not queue system-linkage monitor update")
                     return False
 
-            gateway = SystemLinkageGateway(cct, dispatch_to_ui=dispatch_to_ui)
+            gateway = SystemLinkageGateway(
+                cct, dispatch_to_ui=dispatch_to_ui, on_configured=on_peer_configured
+            )
             self._system_linkage_gateway = gateway
 
             def start_gateway():
@@ -7567,6 +7589,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     registration = gateway.start()
                     if registration:
                         logger.info("System-linkage JSON gateway started: %s", registration)
+                        package = build_setup_package(registration, gateway._key)
+                        print(
+                            "SYSTEM_LINKAGE_SETUP_V1=" + json.dumps(
+                                package, ensure_ascii=False, separators=(",", ":")
+                            ),
+                            flush=True,
+                        )
+                except ValueError as error:
+                    config_path = getattr(cct, "conf_ini", "global.ini") or "global.ini"
+                    logger.warning(
+                        "System-linkage gateway is not configured (%s); check %s. "
+                        "Local IPC remains available",
+                        error, config_path,
+                    )
+                    self._system_linkage_gateway = None
                 except Exception:
                     logger.exception("System-linkage gateway startup failed; local IPC remains available")
                     self._system_linkage_gateway = None

@@ -7,11 +7,14 @@ import json
 import logging
 import os
 import re
+import secrets
 import socket
 import sqlite3
+import tempfile
 import threading
 import time
 import contextlib
+import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
@@ -33,6 +36,7 @@ _ASHARE_PREFIXES = {
 }
 _SECURITY_DIRECTORY_CACHE = {}
 _SECURITY_DIRECTORY_LOCK = threading.Lock()
+_CONFIG_WRITE_LOCK = threading.Lock()
 
 
 def _utc_timestamp(value):
@@ -66,7 +70,7 @@ def _resolve_bind_host(config):
             raise ValueError("linkage gateway bind address must be private or loopback")
         return configured
     if not remote:
-        raise ValueError("stock_strategy_base_url is required for auto_lan binding")
+        return _discover_private_bind_host()
     parsed = urlsplit(remote)
     if not parsed.hostname:
         raise ValueError("stock_strategy_base_url is invalid")
@@ -90,6 +94,200 @@ def _resolve_bind_host(config):
     if not _is_private_ip(local_address):
         raise ValueError("no private LAN route to stock-strategy was found")
     return local_address
+
+
+def _discover_private_bind_host():
+    addresses = []
+    try:
+        records = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET, socket.SOCK_DGRAM)
+        addresses.extend(record[4][0] for record in records)
+    except OSError:
+        pass
+    for address in addresses:
+        if _is_private_ip(address):
+            return address
+    for destination in ("192.0.2.1", "198.51.100.1", "203.0.113.1"):
+        route = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            route.connect((destination, 9))
+            local_address = route.getsockname()[0]
+        except OSError:
+            continue
+        finally:
+            route.close()
+        if _is_private_ip(local_address):
+            return local_address
+    raise ValueError("no private LAN interface is available for the linkage gateway")
+
+
+def _config_target(config):
+    target = getattr(config, "CFG", None) or config
+    parser = getattr(target, "cfg", None)
+    path = getattr(target, "cfg_file", None) or getattr(config, "conf_ini", None)
+    return target, parser, path
+
+
+def _linkage_config_dir(config):
+    _, _, config_path = _config_target(config)
+    if config_path:
+        return os.path.dirname(os.path.abspath(os.path.expandvars(
+            os.path.expanduser(str(config_path)))))
+    return get_app_root()
+
+
+def _resolve_key_file(config, key_path):
+    key_path = os.path.expandvars(os.path.expanduser(str(key_path or "").strip()))
+    if not key_path:
+        return ""
+    if not os.path.isabs(key_path):
+        key_path = os.path.join(_linkage_config_dir(config), key_path)
+    return os.path.abspath(key_path)
+
+
+def _copy_key_file(source_path, target_path):
+    with open(source_path, "rb") as source:
+        key_data = source.read(4096)
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    descriptor, temporary_path = tempfile.mkstemp(prefix=".linkage-key-", dir=os.path.dirname(target_path))
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(key_data)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary_path, target_path)
+    except Exception:
+        try:
+            os.unlink(temporary_path)
+        except OSError:
+            pass
+        raise
+
+
+def _persist_config_values(config, values):
+    target, parser, config_path = _config_target(config)
+    if parser is not None and config_path:
+        config_path = os.path.abspath(os.path.expandvars(os.path.expanduser(str(config_path))))
+        parent = os.path.dirname(config_path)
+        os.makedirs(parent, exist_ok=True)
+        with _CONFIG_WRITE_LOCK:
+            if not parser.has_section("general"):
+                parser.add_section("general")
+            for key, value in values.items():
+                parser.set("general", key, str(value))
+            descriptor, temporary_path = tempfile.mkstemp(prefix=".linkage-", suffix=".ini", dir=parent)
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as output:
+                    parser.write(output)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.replace(temporary_path, config_path)
+            except Exception:
+                try:
+                    os.unlink(temporary_path)
+                except OSError:
+                    pass
+                raise
+    for key, value in values.items():
+        setattr(target, key, value)
+        if target is not config:
+            setattr(config, key, value)
+
+
+def ensure_linkage_config(config):
+    """Persist missing desktop identity and HMAC settings before gateway startup."""
+    updates = {}
+    node_id = str(getattr(config, "ipc_node_id", "") or "").strip()
+    workspace_id = str(getattr(config, "ipc_workspace_id", "") or "").strip()
+    if not node_id:
+        updates["ipc_node_id"] = "tk-" + uuid.uuid4().hex[:24]
+    elif not _NODE_RE.fullmatch(node_id):
+        raise ValueError("configured linkage node identity is invalid; preserve it and resolve manually")
+    if not workspace_id:
+        updates["ipc_workspace_id"] = "ws-" + uuid.uuid4().hex[:24]
+    elif not _NODE_RE.fullmatch(workspace_id):
+        raise ValueError("configured linkage identity is invalid; preserve it and resolve manually")
+
+    configured_key_path = str(getattr(config, "ipc_key_file", "") or "").strip()
+    configured_key_file = _resolve_key_file(config, configured_key_path)
+    key_path = _resolve_key_file(config, "system_linkage.key")
+    if (configured_key_file and os.path.isfile(configured_key_file)
+            and os.path.normcase(configured_key_file) != os.path.normcase(key_path)):
+        _copy_key_file(configured_key_file, key_path)
+    if configured_key_path != "system_linkage.key":
+        updates["ipc_key_file"] = "system_linkage.key"
+    os.makedirs(os.path.dirname(key_path), exist_ok=True)
+    if not os.path.exists(key_path):
+        encoded_key = secrets.token_hex(32) + "\n"
+        try:
+            descriptor = os.open(key_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            pass
+        else:
+            with os.fdopen(descriptor, "w", encoding="ascii", newline="") as key_file:
+                key_file.write(encoded_key)
+                key_file.flush()
+                os.fsync(key_file.fileno())
+    with open(key_path, "rb") as key_file:
+        raw_key = key_file.read(4096).strip()
+    try:
+        key_text = raw_key.decode("ascii")
+        key = bytes.fromhex(key_text) if len(key_text) == 64 and re.fullmatch(r"[0-9a-fA-F]{64}", key_text) else raw_key
+    except (UnicodeDecodeError, ValueError):
+        key = raw_key
+    if len(key) < 32:
+        raise ValueError("configured ipc_key_file must contain at least 32 bytes")
+
+    allowlist = getattr(config, "ipc_peer_allowlist", None)
+    if not isinstance(allowlist, (list, tuple)):
+        allowlist = []
+    normalized_allowlist = [str(item).strip() for item in allowlist if str(item).strip()]
+    if not normalized_allowlist:
+        updates["ipc_peer_allowlist"] = ["auto_private"]
+    elif len(normalized_allowlist) != len(allowlist):
+        updates["ipc_peer_allowlist"] = normalized_allowlist
+    if not getattr(config, "ipc_bind_host", None):
+        updates["ipc_bind_host"] = "auto_lan"
+    if not getattr(config, "ipc_advertise_host", None):
+        updates["ipc_advertise_host"] = "auto"
+    if not getattr(config, "ipc_linkage_port", None):
+        updates["ipc_linkage_port"] = 26676
+    if updates:
+        _persist_config_values(config, updates)
+    return {"node_id": updates.get("ipc_node_id", node_id),
+            "workspace_id": updates.get("ipc_workspace_id", workspace_id),
+            "key": key, "key_file": key_path}
+
+
+def build_setup_package(registration, key):
+    return {
+        "schema_version": 1,
+        "kind": "stock-standalone.system-linkage",
+        "node_id": registration["node_id"],
+        "workspace_id": registration["workspace_id"],
+        "label": socket.gethostname()[:96],
+        "address": registration["address"],
+        "port": registration["port"],
+        "hmac_key": key.hex(),
+    }
+
+
+def _normalize_backend_url(value):
+    parsed = urlsplit(str(value or "").strip())
+    if (parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username
+            or parsed.password or parsed.query or parsed.fragment or parsed.path not in ("", "/")):
+        raise ValueError("invalid_stock_strategy_base_url")
+    try:
+        addresses = {ipaddress.ip_address(parsed.hostname)}
+    except ValueError:
+        try:
+            addresses = {ipaddress.ip_address(item[4][0]) for item in
+                         socket.getaddrinfo(parsed.hostname, parsed.port or 80, socket.AF_INET, socket.SOCK_STREAM)}
+        except OSError as error:
+            raise ValueError("stock_strategy_base_url_did_not_resolve") from error
+    if not addresses or any(address.version != 4 or not (address.is_private or address.is_loopback)
+                            for address in addresses):
+        raise ValueError("stock_strategy_base_url_must_resolve_to_private_ipv4")
+    return parsed.geturl().rstrip("/")
 
 
 def _load_security_directory():
@@ -154,10 +352,11 @@ class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
 class SystemLinkageGateway:
     """Owns the desktop inbox, HMAC verification and serial favorite writer."""
 
-    def __init__(self, config, dispatch_to_ui=None, manager_factory=None, database_path=None):
+    def __init__(self, config, dispatch_to_ui=None, manager_factory=None, database_path=None, on_configured=None):
         self.config = config
         self.dispatch_to_ui = dispatch_to_ui
         self.manager_factory = manager_factory
+        self.on_configured = on_configured
         self.database_path = database_path or os.path.join(get_app_root(), "system_linkage.sqlite3")
         self.node_id = str(getattr(config, "ipc_node_id", "") or "").strip()
         self.workspace_id = str(getattr(config, "ipc_workspace_id", "") or "").strip()
@@ -233,7 +432,7 @@ class SystemLinkageGateway:
         key_file = str(getattr(self.config, "ipc_key_file", "") or "").strip()
         if not key_file:
             raise ValueError("ipc_key_file is required")
-        key_file = os.path.expandvars(os.path.expanduser(key_file))
+        key_file = _resolve_key_file(self.config, key_file)
         with open(key_file, "rb") as file_obj:
             raw_key = file_obj.read(4096)
         try:
@@ -256,11 +455,43 @@ class SystemLinkageGateway:
         if not 1 <= self._port <= 65535:
             raise ValueError("ipc_linkage_port is outside the valid range")
         for entry in self._allowlist:
+            if str(entry).strip().lower() == "auto_private":
+                continue
             network = ipaddress.ip_network(str(entry).strip(), strict=False)
             if not (network.is_private or network.is_loopback):
                 raise ValueError("ipc_peer_allowlist must only contain private peer ranges")
+        advertise_host = str(getattr(self.config, "ipc_advertise_host", "auto") or "auto").strip()
+        if advertise_host.lower() != "auto":
+            try:
+                advertise_ip = ipaddress.ip_address(advertise_host)
+            except ValueError as error:
+                raise ValueError("ipc_advertise_host must be a private IPv4 address or auto") from error
+            if advertise_ip.version != 4 or not (advertise_ip.is_loopback or _is_private_ip(advertise_host)):
+                raise ValueError("ipc_advertise_host must be a private IPv4 address or auto")
         self._key = self._load_key()
         self._bound_host = _resolve_bind_host(self.config)
+
+    def _configure_from_peer(self, payload, peer_address):
+        if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+            raise ValueError("invalid_setup_configuration")
+        backend_url = _normalize_backend_url(payload.get("stock_strategy_base_url"))
+        try:
+            peer = ipaddress.ip_address(peer_address)
+        except ValueError as error:
+            raise ValueError("invalid_peer_address") from error
+        if peer.version != 4 or not (_is_private_ip(str(peer)) or peer.is_loopback):
+            raise ValueError("peer_address_must_be_private_ipv4")
+        _persist_config_values(self.config, {
+            "stock_strategy_base_url": backend_url,
+        })
+        self.config.stock_strategy_base_url = backend_url
+        if self.on_configured is not None:
+            try:
+                self.on_configured()
+            except Exception:
+                logger.exception("System-linkage context restart callback failed")
+        return {"status": "configured", "node_id": self.node_id,
+                "workspace_id": self.workspace_id, "connection_test": "hmac_verified"}
 
     def start(self):
         if not bool(getattr(self.config, "linkage_enabled", False)):
@@ -300,8 +531,14 @@ class SystemLinkageGateway:
             def _auth(self, body):
                 try:
                     peer = ipaddress.ip_address(self.client_address[0])
-                    if not any(peer in ipaddress.ip_network(str(item).strip(), strict=False)
-                               for item in gateway._allowlist):
+                    peer_allowed = any(
+                        (str(item).strip().lower() == "auto_private" and
+                         (peer.is_private or peer.is_loopback)) or
+                        (str(item).strip().lower() != "auto_private" and
+                         peer in ipaddress.ip_network(str(item).strip(), strict=False))
+                        for item in gateway._allowlist
+                    )
+                    if not peer_allowed:
                         return False
                     node = self.headers.get("X-Linkage-Node-ID", "")
                     workspace = self.headers.get("X-Linkage-Workspace-ID", "")
@@ -351,7 +588,8 @@ class SystemLinkageGateway:
                 return self._reply(404, {"code": "not_found", "error": "route not found"})
 
             def do_POST(self):
-                if urlsplit(self.path).path != "/bridge/v1/commands":
+                path = urlsplit(self.path).path
+                if path not in ("/bridge/v1/commands", "/bridge/v1/configure"):
                     return self._reply(404, {"code": "not_found", "error": "route not found"})
                 try:
                     body = self._body()
@@ -360,7 +598,10 @@ class SystemLinkageGateway:
                 if not self._auth(body):
                     return self._reply(401, {"code": "unauthorized", "error": "authentication failed"})
                 try:
-                    command = gateway.validate_command(json.loads(body.decode("utf-8")))
+                    payload = json.loads(body.decode("utf-8"))
+                    if path == "/bridge/v1/configure":
+                        return self._reply(200, gateway._configure_from_peer(payload, self.client_address[0]))
+                    command = gateway.validate_command(payload)
                     status, result = gateway.accept_command(command, hashlib.sha256(body).hexdigest())
                     return self._reply(status, result)
                 except ValueError as error:
@@ -369,6 +610,9 @@ class SystemLinkageGateway:
                     return self._reply(status, {"code": code, "error": "invalid linkage command"})
                 except sqlite3.OperationalError:
                     return self._reply(503, {"code": "storage_unavailable", "error": "command could not be persisted"})
+                except OSError:
+                    logger.exception("System-linkage configuration could not be persisted")
+                    return self._reply(503, {"code": "configuration_unavailable", "error": "configuration could not be persisted"})
 
         self._server = _BoundedThreadingHTTPServer((self._bound_host, self._port), Handler, max_clients=8)
         self._server_thread = threading.Thread(target=self._server.serve_forever,

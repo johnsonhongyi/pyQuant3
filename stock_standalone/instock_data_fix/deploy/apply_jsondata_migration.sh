@@ -1,4 +1,5 @@
 #!/bin/bash
+. "$(dirname "$0")/legacy-deployment-disabled.sh" "$0"
 set -e
 
 echo "=== [1/5] Inside lock boundary ==="
