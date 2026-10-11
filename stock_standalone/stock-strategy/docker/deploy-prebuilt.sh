@@ -403,7 +403,8 @@ docker run -d \
     --health-cmd='wget -q -T 5 -O /dev/null http://127.0.0.1/' \
     --health-interval=10s --health-timeout=5s --health-retries=6 --health-start-period=10s \
     -p 192.168.50.60:20073:80 \
-    -v "$WEB_DIST:/usr/share/nginx/html:ro" -v "$DATA_ROOT/logs/web:/logs/web" "$old_web_image" >/dev/null
+    -v "$WEB_DIST:/usr/share/nginx/html:ro" -v "$DATA_ROOT/logs/web:/logs/web" \
+    --entrypoint /bin/sh "$old_web_image" /usr/share/nginx/html/.runtime/web-entrypoint.sh >/dev/null
 WEB_NEW_CREATED=1
 require_web_mount_contract stockstrategy-web 5
 require_readonly_root stockstrategy-web

@@ -171,6 +171,13 @@ try {
     if (-not (Test-Path -LiteralPath (Join-Path $webDist 'index.html'))) { throw 'Frontend build did not produce dist/index.html.' }
     [Environment]::SetEnvironmentVariable('VITE_A_STOCK_TOKEN', $null, 'Process')
 
+    # Keep nginx configuration versioned with the existing web-dist bind mount.
+    $webRuntime = Join-Path $webDist '.runtime'
+    $null = New-Item -ItemType Directory -Path $webRuntime -Force
+    foreach ($runtimeFile in @('nginx.conf','web-entrypoint.sh')) {
+        $runtimeText = [IO.File]::ReadAllText((Join-Path $projectRoot "docker\$runtimeFile")).Replace("`r`n", "`n")
+        [IO.File]::WriteAllText((Join-Path $webRuntime $runtimeFile), $runtimeText, [Text.UTF8Encoding]::new($false))
+    }
     Write-Host 'Preparing source sync package (local data, logs, reviews, screenshots, and secrets excluded)...'
     $null = New-Item -ItemType Directory -Path (Join-Path $payload 'backend'),(Join-Path $payload 'web-dist'),(Join-Path $payload 'source'),(Join-Path $payload 'docker') -Force
     Copy-Item -LiteralPath $backendOutput -Destination (Join-Path $payload 'backend\easy-stock-backend')
