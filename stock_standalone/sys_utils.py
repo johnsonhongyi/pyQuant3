@@ -235,6 +235,10 @@ def get_base_path() -> str:
 # },
     
 RESOURCE_MAP = {
+    "system_linkage.key": {
+        "src": "system_linkage.key",
+        "dst": "system_linkage.key"
+    },
     "MonitorTK.ico": {
         "src": "MonitorTK.ico",
         "dst": "MonitorTK.ico"

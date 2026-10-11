@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
-from sys_utils import get_app_root
+from sys_utils import get_app_root, get_base_path, get_conf_path
 
 logger = logging.getLogger("system_linkage_gateway")
 _MAX_BODY_BYTES = 64 * 1024
@@ -210,12 +210,21 @@ def ensure_linkage_config(config):
     configured_key_path = str(getattr(config, "ipc_key_file", "") or "").strip()
     configured_key_file = _resolve_key_file(config, configured_key_path)
     key_path = _resolve_key_file(config, "system_linkage.key")
-    if (configured_key_file and os.path.isfile(configured_key_file)
+    if (not os.path.exists(key_path)
+            and configured_key_file and os.path.isfile(configured_key_file)
             and os.path.normcase(configured_key_file) != os.path.normcase(key_path)):
         _copy_key_file(configured_key_file, key_path)
     if configured_key_path != "system_linkage.key":
         updates["ipc_key_file"] = "system_linkage.key"
     os.makedirs(os.path.dirname(key_path), exist_ok=True)
+    if not os.path.exists(key_path):
+        # Restore the packaged key first so TK uses the same key included by
+        # the build, then generate one only when no packaged key is available.
+        bundled_key = os.path.join(get_base_path(), "system_linkage.key")
+        has_bundled_key = os.path.isfile(bundled_key) and os.path.getsize(bundled_key) > 0
+        get_conf_path("system_linkage.key", base_dir=_linkage_config_dir(config))
+        if has_bundled_key and not os.path.isfile(key_path):
+            raise OSError("packaged system_linkage.key could not be released to the configuration directory")
     if not os.path.exists(key_path):
         encoded_key = secrets.token_hex(32) + "\n"
         try:

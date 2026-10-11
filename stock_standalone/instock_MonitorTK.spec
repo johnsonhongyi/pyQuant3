@@ -1,8 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
+import runpy
 import a_trade_calendar
 from PyInstaller.utils.hooks import collect_submodules
 
+spec_location = os.path.abspath(SPECPATH)
+spec_dir = spec_location if os.path.isdir(spec_location) else os.path.dirname(spec_location)
+linkage_key_path = runpy.run_path(
+    os.path.join(spec_dir, "prepare_system_linkage_key.py")
+)["ensure_linkage_key_file"](spec_dir)
 csv_path = os.path.join(os.path.dirname(a_trade_calendar.__file__), "a_trade_calendar.csv")
 
 block_cipher = None
@@ -42,6 +48,7 @@ a = Analysis(
         ("JSONData/stock_codes.conf", "JSONData"),
         ("JSONData/count.ini", "JSONData"),
         ("JohnsonUtil/global.ini", "JohnsonUtil"),
+        (linkage_key_path, "."),
         ("JohnsonUtil/wencai/同花顺板块行业.xlsx", "JohnsonUtil/wencai"),
         ("strategy_config.json", "."),
         ("webTools/window_manager/window_layout_config.json", "webTools/window_manager"),

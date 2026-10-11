@@ -246,6 +246,12 @@ set PATH=C:\JohnsonProgram\SetDisplayMode\init\upx;%PATH%
 echo Checking Python environment...
 echo [SUCCESS] Stable TK build interpreter: %PYTHON_EXEC%
 
+call "%PYTHON_EXEC%" "%~dp0prepare_system_linkage_key.py"
+if errorlevel 1 (
+    echo [ERROR] Could not prepare the linkage key packaging resource.
+    exit /b 1
+)
+
 :: ===== Get dynamic CSV path =====
 for /f "usebackq delims=" %%i in (`call "%PYTHON_EXEC%" -c "import os, a_trade_calendar; print(os.path.join(os.path.dirname(a_trade_calendar.__file__), 'a_trade_calendar.csv'))"`) do set CSV_PATH=%%i
 
@@ -329,6 +335,7 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --include-data-file=window_config.json=window_config.json ^
     --include-data-file=webTools\window_manager\window_layout_config.json=webTools\window_manager\window_layout_config.json ^
     --include-data-file=JohnsonUtil\global.ini=global.ini ^
+    --include-data-file="%~dp0system_linkage.key=system_linkage.key" ^
     --include-data-file=scale2_window_config.json=scale2_window_config.json ^
     --include-data-file=monitor_category_list.json=monitor_category_list.json ^
     --include-data-file=visualizer_layout.json=visualizer_layout.json ^
@@ -340,7 +347,6 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --include-data-file=datacsv\minute_kline_viewer_history.json=datacsv\minute_kline_viewer_history.json ^
     --include-data-file=JSONData\stock_codes.conf=JSONData\stock_codes.conf ^
     --include-data-file=JSONData\count.ini=JSONData\count.ini ^
-    --include-data-file=JohnsonUtil\global.ini=JohnsonUtil\global.ini ^
     --include-data-file=JohnsonUtil\wencai\同花顺板块行业.xlsx=JohnsonUtil\wencai\同花顺板块行业.xlsx ^
     --include-package=a_trade_calendar ^
     --include-package=pyttsx3 ^

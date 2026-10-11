@@ -63,7 +63,9 @@ def test_auto_lan_binding_uses_a_private_interface_before_backend_setup(monkeypa
     )) == "192.168.31.42"
 
 
-def test_ensure_linkage_config_persists_identity_key_and_private_peer_policy(tmp_path):
+def test_ensure_linkage_config_persists_identity_key_and_private_peer_policy(tmp_path, monkeypatch):
+    monkeypatch.setattr(system_linkage_gateway, "get_base_path", lambda: str(tmp_path / "empty_bundle"))
+    monkeypatch.setattr(system_linkage_gateway, "get_conf_path", lambda *args, **kwargs: None)
     config_path = tmp_path / "global.ini"
     config_path.write_text("[general]\nlinkage_enabled = True\n", encoding="utf-8")
     parser = configparser.ConfigParser()
@@ -90,6 +92,41 @@ def test_ensure_linkage_config_persists_identity_key_and_private_peer_policy(tmp
     assert saved.get("general", "ipc_peer_allowlist") == "['auto_private']"
     assert saved.get("general", "ipc_key_file") == "system_linkage.key"
     assert first["key_file"] == str(tmp_path / "system_linkage.key")
+
+
+def test_ensure_linkage_config_releases_packaged_key_before_generating(tmp_path, monkeypatch):
+    config_path = tmp_path / "global.ini"
+    config_path.write_text("[general]\n", encoding="utf-8")
+    packaged_key = b"b" * 32
+    package_dir = tmp_path / "bundle"
+    package_dir.mkdir()
+    (package_dir / "system_linkage.key").write_bytes(packaged_key)
+    released_targets = []
+
+    def release_key(name, base_dir):
+        assert name == "system_linkage.key"
+        target = tmp_path / "system_linkage.key"
+        target.write_bytes(packaged_key)
+        released_targets.append(target)
+        return str(target)
+
+    monkeypatch.setattr(system_linkage_gateway, "get_conf_path", release_key)
+    monkeypatch.setattr(system_linkage_gateway, "get_base_path", lambda: str(package_dir))
+    parser = configparser.ConfigParser()
+    parser.read(config_path, encoding="utf-8")
+    config_store = SimpleNamespace(cfg=parser, cfg_file=str(config_path))
+    config = SimpleNamespace(
+        CFG=config_store, conf_ini=str(config_path), linkage_enabled=True,
+        ipc_node_id="tk-existing", ipc_workspace_id="ws-existing", ipc_key_file="",
+        ipc_peer_allowlist=["auto_private"], ipc_bind_host="auto_lan",
+        ipc_advertise_host="auto", ipc_linkage_port=26676,
+    )
+
+    registration = system_linkage_gateway.ensure_linkage_config(config)
+
+    assert released_targets == [tmp_path / "system_linkage.key"]
+    assert registration["key"] == packaged_key
+    assert (tmp_path / "system_linkage.key").read_bytes() == packaged_key
 
 
 def test_ensure_linkage_config_migrates_an_absolute_key_path(tmp_path):
