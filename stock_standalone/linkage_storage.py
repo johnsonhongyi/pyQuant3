@@ -8,7 +8,7 @@ from pathlib import Path
 import sqlite3
 import threading
 import time
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 
 from ats.persistence_lock import directory_write_lock
@@ -23,6 +23,37 @@ MAX_EVENT_BYTES = 4 * 1024 * 1024
 _workers = set()
 _workers_lock = threading.Lock()
 logger = logging.getLogger(__name__)
+_database_gates = {}
+_database_gates_lock = threading.Lock()
+_database_owners = {}
+
+
+@contextmanager
+def database_access(path, operation, timeout=4.0):
+    """Serialize cooperating linkage connections before SQLite acquires file locks."""
+    identity = os.path.normcase(os.path.abspath(path))
+    with _database_gates_lock:
+        gate = _database_gates.setdefault(identity, threading.Lock())
+    started = time.monotonic()
+    if not gate.acquire(timeout=timeout):
+        logger.error('[LINKAGE-DB-BUSY] database=%s waiter=%s owner=%s',
+                     identity, operation, _database_owners.get(identity))
+        raise TimeoutError('linkage database access busy: ' + operation)
+    acquired = time.monotonic()
+    owner = (os.getpid(), threading.current_thread().name, operation)
+    _database_owners[identity] = owner
+    try:
+        # Same lock order as runtime initialization, reclamation and closing archive.
+        with directory_write_lock(os.path.dirname(identity),
+                                  timeout=max(0.0, timeout - (acquired - started))):
+            yield
+    finally:
+        _database_owners.pop(identity, None)
+        gate.release()
+        elapsed = time.monotonic() - started
+        if elapsed >= 0.25:
+            logger.warning('[LINKAGE-DB-SLOW] database=%s owner=%s wait_ms=%.1f elapsed_ms=%.1f',
+                           identity, owner, (acquired - started) * 1000, elapsed * 1000)
 
 
 def configure(connection):

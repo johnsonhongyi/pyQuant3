@@ -26,9 +26,44 @@ def load_method(path, owner_class, name, **namespace):
                and node.name == owner_class)
     node = next(node for node in cls.body if isinstance(node, ast.FunctionDef)
                 and node.name == name)
-    env = dict(time=time, logger=Mock(), **namespace)
+    env = dict(time=time, logger=Mock())
+    env.update(namespace)
     exec(compile(ast.Module(body=[node], type_ignores=[]), path, 'exec'), env)
     return env[name]
+
+
+def test_panel_open_coalesces_until_gui_delivery_and_releases_gate_after_failure(monkeypatch):
+    import queue
+    import sys
+
+    for fail in (False, True):
+        clock = [100.0]
+        created = []
+
+        def panel_factory(**_kwargs):
+            created.append(threading.get_ident())
+            if fail:
+                raise RuntimeError('injected construction failure')
+            return SimpleNamespace(show=Mock())
+
+        monkeypatch.setitem(sys.modules, 'sector_bidding_panel',
+                            SimpleNamespace(SectorBiddingPanel=panel_factory))
+        owner = GuiOwner(tk_dispatch_queue=queue.Queue(), after=Mock(),
+                         _auto_bidding_panel_requested=True)
+        open_panel = load_method('instock_MonitorTK.py', 'StockMonitorApp',
+                                 'open_sector_bidding_panel', threading=threading,
+                                 time=SimpleNamespace(time=lambda: clock[0]), toast_message=Mock())
+        open_panel(owner)
+        callback = owner.tk_dispatch_queue.get(timeout=2)
+        clock[0] += 3
+        open_panel(owner)
+        assert owner._bidding_panel_build_pending and owner.tk_dispatch_queue.empty()
+        assert created == []
+        callback()
+        assert created == [threading.get_ident()]
+        assert not owner._bidding_panel_build_pending
+        if fail:
+            assert not owner._auto_bidding_panel_requested
 
 
 def panel_owner():

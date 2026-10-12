@@ -31,11 +31,25 @@ def method(path, cls_name, name, **extra):
 def detector_owner():
     owner = SimpleNamespace(_load_lock=threading.Lock(), _loading_callbacks=[],
                             _loading_thread=None, _is_ready=False, simulation_mode=False,
-                            _apply_detector_state=Mock(return_value=True))
-    for name in ('ensure_data_ready_async', '_apply_and_finalize'):
+                            realtime_service=None, _apply_detector_state=Mock(return_value=True))
+    for name in ('ensure_data_ready_async', '_apply_and_finalize', '_load_consolidation_state'):
         setattr(owner, name, MethodType(method('bidding_momentum_detector.py',
                                                'BiddingMomentumDetector', name), owner))
     return owner
+
+
+def test_lazy_consolidation_restore_runs_on_loader_thread_before_ready(monkeypatch):
+    future = concurrent.futures.Future()
+    install_pool(monkeypatch, [future])
+    owner = detector_owner()
+    calls = []
+    owner.realtime_service = SimpleNamespace(kline_cache=SimpleNamespace(
+        load_consolidation_state=lambda: calls.append((threading.get_ident(), owner._is_ready))))
+    owner.ensure_data_ready_async()
+    owner._loading_thread.join(timeout=2)
+    assert len(calls) == 1 and calls[0][0] != threading.get_ident() and not calls[0][1]
+    finish_on_background_thread(future, {})
+    assert owner._is_ready
 
 
 def install_pool(monkeypatch, futures):

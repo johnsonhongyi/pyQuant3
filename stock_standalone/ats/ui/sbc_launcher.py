@@ -564,16 +564,16 @@ class SBCProcessManager:
             #    超时过短会导致 bootloader atexit 未执行，遗留临时目录并触发父进程报
             #    "Failed to remove temporary directory" 警告 (PYI-10032)。
             try:
-                proc.wait(timeout=3.0)
+                proc.wait(timeout=10.0)
             except subprocess.TimeoutExpired:
                 logger.warning(f"[SBCLauncher] 持仓盯盘进程 (PID={proc.pid}) 等待超时，执行 terminate")
                 self._signal_sbc_process(proc, children)
                 try:
-                    proc.wait(timeout=2.0)
+                    proc.wait(timeout=5.0)
                 except subprocess.TimeoutExpired:
                     self._signal_sbc_process(proc, children, force=True)
                     try:
-                        proc.wait(timeout=0.5)
+                        proc.wait(timeout=1.0)
                     except Exception:
                         pass
             # 💡 彻底关闭子进程管道句柄，释放操作系统内核对 DLL 的文件锁
@@ -583,7 +583,15 @@ class SBCProcessManager:
                         pipe.close()
             except Exception:
                 pass
-            logger.info("[SBCLauncher] 持仓盯盘进程已安全退出并完成持久化。")
+            alive = proc.poll() is None or any(child.is_running() for child in children)
+            if alive:
+                logger.error("[SBCLauncher] 持仓盯盘进程退出未完成 PID=%s", proc.pid)
+                return False
+            if proc.returncode:
+                logger.warning("[SBCLauncher] 持仓盯盘进程已回收 PID=%s returncode=%s；需核对退出保存日志",
+                               proc.pid, proc.returncode)
+            else:
+                logger.info("[SBCLauncher] 持仓盯盘进程已正常退出且句柄已释放。")
             return True
         except Exception as e:
             logger.error(f"[SBCLauncher] 关闭持仓盯盘进程异常: {e}")
@@ -780,11 +788,12 @@ class SBCProcessManager:
         self._close_all_subprocesses(procs)
 
     def _close_all_subprocesses(self, procs):
+        success = True
         proc = procs.pop("__holdings_launcher__", None)
         if proc and proc.poll() is None:
-            self._close_launcher_subprocess(proc)
+            success = self._close_launcher_subprocess(proc)
         if not procs:
-            return
+            return success
         children_by_pid = {p.pid: self._sbc_bootloader_children(p) for p in procs.values()
                            if p and p.poll() is None}
         logger.info(f"[SBCLauncher] 🛑 正在统一优雅关闭 {len(procs)} 个 SBC 独立子进程...")
@@ -817,19 +826,20 @@ class SBCProcessManager:
         # 2. 给予子进程在收到 WM_CLOSE 后优雅保存退出的缓冲时间
         #    onefile 子进程需要 2~3s 完成自身 bootloader _MEI* 临时目录清理，
         #    时间过短会导致子进程被强杀，遗留临时目录报 PYI-10032 警告。
-        remaining = self._wait_for_processes(procs_to_wait, 2.0)
+        remaining = self._wait_for_processes(procs_to_wait, 10.0)
+        forced = bool(remaining)
         for code, proc in remaining:
             try:
                 self._signal_sbc_process(proc, children_by_pid.get(proc.pid, []))
             except Exception:
                 pass
-        remaining = self._wait_for_processes(remaining, 0.6)
+        remaining = self._wait_for_processes(remaining, 3.0)
         for code, proc in remaining:
             try:
                 self._signal_sbc_process(proc, children_by_pid.get(proc.pid, []), force=True)
             except Exception:
                 pass
-        self._wait_for_processes(remaining, 0.4)
+        remaining = self._wait_for_processes(remaining, 1.0)
 
         # 4. 彻底关闭所有子进程的操作系统管道文件描述符，断开 DLL 文件锁
         for code, proc in procs_to_wait:
@@ -840,8 +850,15 @@ class SBCProcessManager:
             except Exception:
                 pass
 
+        if remaining:
+            logger.error("[SBCLauncher] SBC 退出未完成 PIDs=%s", [p.pid for _, p in remaining])
+            return False
         procs.clear()
-        logger.info("[SBCLauncher] 🏁 所有 SBC 独立子进程已全部安全退出且句柄彻底释放。")
+        if forced:
+            logger.warning("[SBCLauncher] SBC 子进程超时后已强制回收；需核对退出保存日志。")
+        elif success:
+            logger.info("[SBCLauncher] SBC 独立子进程已正常退出且句柄已释放。")
+        return success
 
     def get_running_codes(self) -> List[str]:
         """获取当前正在运行的所有 SBC 子进程标的代码"""

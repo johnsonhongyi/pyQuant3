@@ -10,6 +10,7 @@ import re
 import secrets
 import socket
 import sqlite3
+import sys
 import tempfile
 import threading
 import time
@@ -19,7 +20,8 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
-from linkage_storage import runtime_database, configure as configure_linkage_database, trim as trim_linkage_database
+from linkage_storage import (runtime_database, database_access,
+                             configure as configure_linkage_database, trim as trim_linkage_database)
 from sys_utils import get_app_root, get_base_path, get_conf_path
 
 logger = logging.getLogger("system_linkage_gateway")
@@ -397,15 +399,17 @@ class SystemLinkageGateway:
 
     @contextlib.contextmanager
     def _db(self):
-        connection = self._connect()
-        try:
-            yield connection
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
+        operation = 'gateway.' + sys._getframe(2).f_code.co_name
+        with database_access(self.database_path, operation):
+            connection = self._connect()
+            try:
+                yield connection
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
 
     def _init_database(self):
         os.makedirs(os.path.dirname(os.path.abspath(self.database_path)), exist_ok=True)
@@ -973,25 +977,36 @@ class SystemLinkageGateway:
             should_reconcile = reconnected or consumer in self._consumer_recovery_pending
             if should_reconcile and time.monotonic() >= retry_after:
                 try:
+                    # Decode outside the writer transaction; compare-and-swap
+                    # prevents a concurrent receipt from being overwritten.
                     with self._db() as connection:
-                        connection.execute("BEGIN IMMEDIATE")
                         rows = connection.execute(
                             "SELECT operation_id,result FROM linkage_operations "
-                            "WHERE status IN ('applied','already_present')"
+                            "WHERE status IN ('applied','already_present') AND result LIKE '%not_running%'"
                         ).fetchall()
-                        for row in rows:
-                            result = json.loads(row["result"])
-                            consumers = result.setdefault("consumers", {})
-                            existing = consumers.get(consumer, {})
-                            if existing.get("status") == "not_running":
-                                consumers[consumer] = {"status": "pending", "favorites_revision": 0,
-                                                       "quote_status": "pending_fetch"}
-                                connection.execute(
-                                    "UPDATE linkage_operations SET result=? WHERE operation_id=?",
-                                    (json.dumps(result, separators=(",", ":")), row["operation_id"]),
-                                )
-                    self._consumer_recovery_pending.discard(consumer)
-                    self._consumer_recovery_retry_after.pop(consumer, None)
+                    updates = []
+                    for row in rows:
+                        result = json.loads(row["result"])
+                        consumers = result.setdefault("consumers", {})
+                        if consumers.get(consumer, {}).get("status") == "not_running":
+                            consumers[consumer] = {"status": "pending", "favorites_revision": 0,
+                                                   "quote_status": "pending_fetch"}
+                            updates.append((json.dumps(result, separators=(",", ":")),
+                                            row["operation_id"], row["result"]))
+                    conflicted = False
+                    for offset in range(0, len(updates), 64):
+                        with self._db() as connection:
+                            connection.execute("BEGIN IMMEDIATE")
+                            for values in updates[offset:offset + 64]:
+                                changed = connection.execute(
+                                    "UPDATE linkage_operations SET result=? WHERE operation_id=? AND result=?", values)
+                                conflicted = conflicted or changed.rowcount != 1
+                    if conflicted:
+                        self._consumer_recovery_pending.add(consumer)
+                        self._consumer_recovery_retry_after[consumer] = time.monotonic() + 30.0
+                    else:
+                        self._consumer_recovery_pending.discard(consumer)
+                        self._consumer_recovery_retry_after.pop(consumer, None)
                 except Exception:
                     self._consumer_recovery_pending.add(consumer)
                     self._consumer_recovery_retry_after[consumer] = time.monotonic() + 30.0

@@ -35,6 +35,18 @@ def normalize_speech_text(text: str) -> str:
     text = re.sub(r'(\d+)\.(\d+)', r'\1点\2', text)
     return text
 
+def _speak_sapi(speaker, text, stop_event):
+    """Keep COM calls on the voice thread and permit shutdown to cancel speech."""
+    if stop_event.is_set():
+        return
+    speaker.Speak(text, 1)  # SVSFlagsAsync
+    while not speaker.WaitUntilDone(50):
+        if stop_event.is_set():
+            speaker.Speak('', 3)  # SVSFlagsAsync | SVSFPurgeBeforeSpeak
+            speaker.WaitUntilDone(200)
+            return
+
+
 def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: threading.Event, cancel_q: Queue, current_state: dict, feedback_queue: Queue = None):
     """
     语音播报后台线程 (Resolved mp.Queue GIL Crash)
@@ -232,8 +244,7 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
                             except: pass
                             
                         if not stop_event.is_set():
-                            # 使用同步播放 (Flags=0)，使其完整播放不会被打断
-                            speaker.Speak(safe_msg, 0)
+                            _speak_sapi(speaker, safe_msg, stop_event)
                             
                         last_speech_end_ts = time.time()
                         
@@ -248,7 +259,7 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
                         worker_log(f"Direct SpVoice speak failed: {ex}, falling back to pyttsx3")
                         sp_voice_success = False
 
-                if not sp_voice_success and pyttsx3 and is_voice_on:
+                if not sp_voice_success and pyttsx3 and is_voice_on and not stop_event.is_set():
                     # [FIX] 强行清除 pyttsx3 的缓存引擎，确保每次独立实例化
                     if hasattr(pyttsx3, '_activeEngines'):
                         # [SAFETY] 仅在真的有活跃引擎时才清理，减少对 GIL 的冲击
@@ -368,6 +379,7 @@ class AlertManager:
     def _start_feedback_listener(self):
         """启动反馈监听线程"""
         t = threading.Thread(target=self._feedback_loop, daemon=True, name="FeedbackListener")
+        self._feedback_thread = t
         t.start()
 
     def _feedback_loop(self):
@@ -492,14 +504,35 @@ class AlertManager:
 
     def stop(self):
         """系统完全退出"""
+        self.enabled = False
+        self.on_speak_start = None
+        self.on_speak_end = None
         self.stop_event.set()
-        if self.process and self.process.is_alive():
-            self.process.join(timeout=0.5)
-        logger.debug("Alert system stopped.")
+        self.interrupt_event.set()
+        with self._batch_lock:
+            timer, self._batch_timer = self._batch_timer, None
+            self._batch_data.clear()
+        if timer is not None:
+            timer.cancel()
+        self.voice_queue.put_nowait({'message': 'STOP_COMMAND'})
+        deadline = time.monotonic() + 2.0
+        workers = (self.process, getattr(self, '_feedback_thread', None), timer)
+        pending = []
+        for worker in workers:
+            if worker is not None and worker is not threading.current_thread():
+                worker.join(timeout=max(0.0, deadline - time.monotonic()))
+                if worker.is_alive():
+                    pending.append(worker.name)
+        if pending:
+            logger.warning('Alert shutdown incomplete; active workers: %s', pending)
+        else:
+            logger.debug('Alert system stopped.')
 
     def _flush_batch_alerts(self):
         """[CORE] 聚合报警刷新逻辑：将同一周期的多条报警合并为一条"""
         with self._batch_lock:
+            if self.stop_event.is_set():
+                return
             data_to_flush = self._batch_data
             self._batch_data = {}
             self._batch_timer = None
@@ -561,6 +594,8 @@ class AlertManager:
 
     def send_alert(self, message: str, priority: int = 2, key: Optional[str] = None, cooldown: int = 0):
         """发送报警 (支持合并)"""
+        if self.stop_event.is_set():
+            return
         # ⚡ [NEW] 即使在全局报警禁用的情况下，也进行会话追踪 (用于同步赛马面板等可视化组件)
         self._track_session_code(message, key)
 
@@ -586,6 +621,8 @@ class AlertManager:
         # 3. 如果提供了 Key (股票代码)，进入聚合缓冲
         if key and len(str(key)) == 6:
             with self._batch_lock:
+                if self.stop_event.is_set():
+                    return
                 if key not in self._batch_data:
                     self._batch_data[key] = []
                 self._batch_data[key].append((priority, message, now))
@@ -637,6 +674,8 @@ class AlertManager:
 
     def _do_send_alert(self, message: str, priority: int = 2, key: Optional[str] = None, cooldown: int = 0):
         """实际的消息分发与记录逻辑"""
+        if self.stop_event.is_set():
+            return
         now = time.time()
         
         # 2. 日志记录
