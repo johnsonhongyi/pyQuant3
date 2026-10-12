@@ -518,7 +518,7 @@ class DetailedChartDialog(QDialog, WindowMixin):
         self.pw.plot(times, prices, pen=pg.mkPen(p_color, width=3), name="价格")
         
         # 均价线 (金黄色虚线)
-        avg_price = [sum(prices[:i+1])/(i+1) for i in range(len(prices))]
+        avg_price = np.cumsum(prices, dtype=float) / np.arange(1, len(prices) + 1)
         self.pw.plot(times, avg_price, pen=pg.mkPen('#FFFF00', width=1.5, style=Qt.PenStyle.DashLine), name="均价")
         
         # 4. 成交量 (在主图下方叠加，自动缩放)

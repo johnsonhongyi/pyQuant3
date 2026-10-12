@@ -25,6 +25,7 @@ except ImportError:
 
 from JohnsonUtil import LoggerFactory
 logger = LoggerFactory.getLogger(name="AlertManager")
+_VOICE_WORKER_DEBUG_ENABLED = False
 
 def normalize_speech_text(text: str) -> str:
     """语音文本标准化"""
@@ -47,7 +48,7 @@ def _speak_sapi(speaker, text, stop_event):
             return
 
 
-def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: threading.Event, cancel_q: Queue, current_state: dict, feedback_queue: Queue = None):
+def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: threading.Event, cancel_q: Queue, current_state: dict, feedback_queue: Queue = None, debug_enabled: bool = False):
     """
     语音播报后台线程 (Resolved mp.Queue GIL Crash)
     支持通过 cancel_q 跳过队列，并通过 current_state 标记当前状态
@@ -56,29 +57,37 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
     import pythoncom
     import time
     
-    # --- [FIX] 使用普通 FileHandler 避免多进程下的轮转冲突 (Windows WinError 32) ---
+    # 默认不创建独立语音日志；仅 TK 显式开启 debug 时写盘。
     import logging
-    import logging.handlers
-    log_file = "voice_worker_debug.log"
-    handler = logging.FileHandler(
-        log_file, 
-        mode='a',
-        encoding='utf-8',
-        delay=True
-    )
-    handler.setFormatter(logging.Formatter('[%(asctime)s] [ProcessWorker-%(process)d] %(message)s', '%Y-%m-%d %H:%M:%S'))
-    
-    # --- [FIX] 使用独立的本地 logger，不污染全局 LoggerFactory 单例的 level ---
     w_logger = logging.getLogger("VoiceWorkerThread")
-    w_logger.setLevel(logging.DEBUG)
     w_logger.propagate = False
-    if not w_logger.handlers:
-        w_logger.addHandler(handler)
+    if debug_enabled:
+        w_logger.setLevel(logging.DEBUG)
+        handler = next((h for h in w_logger.handlers
+                        if getattr(h, "_voice_worker_debug_handler", False)), None)
+        if handler is None:
+            handler = logging.FileHandler(
+                "voice_worker_debug.log",
+                mode='a',
+                encoding='utf-8',
+                delay=True,
+            )
+            handler._voice_worker_debug_handler = True
+            handler.setFormatter(logging.Formatter(
+                '[%(asctime)s] [ProcessWorker-%(process)d] %(message)s',
+                '%Y-%m-%d %H:%M:%S',
+            ))
+            w_logger.addHandler(handler)
+    else:
+        w_logger = None
 
     def worker_log(msg):
+        if w_logger is None:
+            return
         try:
             w_logger.debug(msg)
-        except: pass
+        except Exception:
+            pass
 
     worker_log("Voice worker process started.")
     
@@ -307,11 +316,27 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
         except: pass
 
     worker_log("Voice worker process exited.")
+    if debug_enabled and w_logger is not None:
+        for handler in list(w_logger.handlers):
+            if getattr(handler, "_voice_worker_debug_handler", False):
+                w_logger.removeHandler(handler)
+                try:
+                    handler.close()
+                except Exception:
+                    pass
 
 class AlertManager:
     _instance = None
     _lock = threading.Lock()
     _initialized = False
+
+    @classmethod
+    def set_worker_debug_enabled(cls, enabled):
+        """Set voice worker file logging from the owning TK application's debug mode."""
+        global _VOICE_WORKER_DEBUG_ENABLED
+        _VOICE_WORKER_DEBUG_ENABLED = bool(enabled)
+        if cls._instance is not None:
+            cls._instance._worker_debug_enabled = _VOICE_WORKER_DEBUG_ENABLED
 
     def __new__(cls, *args, **kwargs):
         with cls._lock:
@@ -322,6 +347,7 @@ class AlertManager:
     def __init__(self, voice_enabled=True):
         if self._initialized: return
         self._initialized = True
+        self._worker_debug_enabled = _VOICE_WORKER_DEBUG_ENABLED
         
         self.enabled: bool = True
         self.voice_enabled: bool = voice_enabled
@@ -369,7 +395,8 @@ class AlertManager:
             
             self.process = threading.Thread(
                 target=_voice_worker, 
-                args=(self.voice_queue, self.stop_event, self.interrupt_event, self.cancel_queue, self.current_state, self.feedback_queue),
+                args=(self.voice_queue, self.stop_event, self.interrupt_event, self.cancel_queue,
+                      self.current_state, self.feedback_queue, self._worker_debug_enabled),
                 daemon=True,
                 name="AlertVoiceWorkerThread"
             )

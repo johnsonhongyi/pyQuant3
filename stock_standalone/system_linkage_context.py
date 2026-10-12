@@ -827,7 +827,9 @@ class SystemLinkageContextClient:
             connection.execute("DELETE FROM linkage_context_snapshots")
             connection.execute("INSERT INTO linkage_context_snapshots(snapshot_id,trade_date,received_at,stored_at,payload) VALUES(?,?,?,?,?)",
                                (snapshot["snapshot_id"], snapshot.get("trade_date", ""), snapshot.get("received_at", ""), now, payload))
-            trim_linkage_database(connection)
+            # Snapshot history was already reduced to one row above. Full trim
+            # also scans/parses the event table; keep that work out of this
+            # frequently shared snapshot transaction.
 
     def _sync_events(self):
         with self._connection() as connection:
