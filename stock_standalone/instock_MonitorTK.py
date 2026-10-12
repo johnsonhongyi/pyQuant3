@@ -3846,19 +3846,27 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 raise RuntimeError("close market frame or sector detector is unavailable")
 
             if panel is not None and callable(getattr(panel, "on_realtime_data_arrived", None)):
-                panel.on_realtime_data_arrived(frame.copy(), force_update=False)
+                close_frame = frame.copy()
                 worker = getattr(panel, "_worker", None)
+                request_count = getattr(worker, "_score_request_count", 0)
+                panel.on_realtime_data_arrived(
+                    close_frame, force_update=False, score_if_needed=True, force_score=True)
                 if worker is not None:
                     deadline = time.monotonic() + 60.0
                     target_count = len(frame)
+                    score_count = len(getattr(detector, "_tick_series", ()))
                     while time.monotonic() < deadline:
                         queued = worker.df_queue.qsize() if hasattr(worker, "df_queue") else 0
                         score_count = len(getattr(detector, "_tick_series", ()))
-                        if queued == 0 and score_count >= target_count * 0.9:
+                        if (queued == 0 and getattr(worker, "_score_request_count", 0) > request_count
+                                and score_count >= target_count * 0.9
+                                and not getattr(detector, "_score_active", False)):
                             break
                         time.sleep(0.5)
                     queued = worker.df_queue.qsize() if hasattr(worker, "df_queue") else 0
-                    if queued != 0 or score_count < target_count * 0.9:
+                    if (queued != 0 or getattr(worker, "_score_request_count", 0) <= request_count
+                            or score_count < target_count * 0.9
+                            or getattr(detector, "_score_active", False)):
                         raise RuntimeError(
                             f"sector detector incomplete: scores={score_count}/{target_count}, queued={queued}"
                         )
@@ -4030,27 +4038,38 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if panel is not None:
                     # [THREAD-SAFE] on_realtime_data_arrived 是线程安全入队接口，直接在后台线程调用
                     logger.warning("[15:30 Task] STEP 1b ▶ Feeding df to panel (thread-safe queue)...")
-                    panel.on_realtime_data_arrived(df_feed, force_update=False)
-
-                    # 等待面板内部 _worker 处理完毕（score 填充 >= 90%）
-                    detector = getattr(panel, 'detector', None)
                     worker_obj = getattr(panel, '_worker', None)
+                    request_count = getattr(worker_obj, '_score_request_count', 0)
+                    panel.on_realtime_data_arrived(
+                        df_feed, force_update=False, score_if_needed=True, force_score=True)
+
+                    # 注册覆盖率不是已评分数；同时等待该帧被处理和评分 scheduler 退出。
+                    detector = getattr(panel, 'detector', None)
                     if detector and worker_obj:
                         logger.warning("[15:30 Task] STEP 1c ▶ Waiting for score calculation (max 60s)...")
-                        sync_start = time.time()
+                        sync_start = time.monotonic()
                         target_count = len(df_feed)
-                        while (time.time() - sync_start < 60.0):
+                        score_count = len(detector._tick_series)
+                        q_count = 0
+                        feed_ready = False
+                        while (time.monotonic() - sync_start < 60.0):
                             q_count = worker_obj.df_queue.qsize() if hasattr(worker_obj.df_queue, 'qsize') else 0
                             score_count = len(detector._tick_series)
-                            logger.debug(f"[15:30 Task] q={q_count}, scored={score_count}/{target_count}, elapsed={time.time()-sync_start:.1f}s")
-                            if q_count == 0 and score_count >= (target_count * 0.9):
+                            logger.debug(f"[15:30 Task] q={q_count}, registered={score_count}/{target_count}, elapsed={time.monotonic()-sync_start:.1f}s")
+                            if (q_count == 0 and getattr(worker_obj, '_score_request_count', 0) > request_count
+                                    and score_count >= (target_count * 0.9)
+                                    and not getattr(detector, '_score_active', False)):
+                                feed_ready = True
                                 break
                             time.sleep(1.5)
-                        time.sleep(3.0)  # 额外缓冲，确保板块聚合完成
-                        logger.warning(f"[15:30 Task] STEP 1c ✅ Score sync done. scored={len(detector._tick_series)} in {time.time()-sync_start:.1f}s")
+                        if not feed_ready:
+                            raise RuntimeError(
+                                f"SectorBiddingPanel feed remains pending: registered={score_count}/{target_count}, queued={q_count}"
+                            )
+                        time.sleep(3.0)  # 给异步板块聚合预留调度时间。
+                        logger.warning(f"[15:30 Task] STEP 1c Feed processed. registered={len(detector._tick_series)} in {time.monotonic()-sync_start:.1f}s")
                     else:
-                        logger.warning("[15:30 Task] STEP 1c ▶ No detector/worker, sleep 5s as fallback.")
-                        time.sleep(5.0)
+                        raise RuntimeError("SectorBiddingPanel detector/worker is unavailable; archive deferred")
 
                     # 执行高采样率归档
                     logger.warning("[15:30 Task] STEP 1d ▶ Saving SectorBiddingPanel persistent data...")
@@ -4058,7 +4077,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         if cct.get_trade_date_status() and detector:
                             detector.update_scores(skip_evaluate=True)
                             detector.save_persistent_data(force=True)
-                            logger.warning("[15:30 Task] STEP 1d ✅ SectorBiddingPanel 归档完成。")
+                            logger.warning("[15:30 Task] STEP 1d SectorBiddingPanel 持久化保存已请求。")
                     except Exception as e:
                         logger.error(f"[15:30 Task] SectorBiddingPanel 自动保存失败: {e}")
                 else:
@@ -9358,7 +9377,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 df_all = getattr(self, 'df_all', None)
                 worker = getattr(self.sector_bidding_panel, '_worker', None)
                 if df_all is not None and not df_all.empty:
-                    if worker is not None and getattr(worker, 'latest_df', None) is df_all:
+                    detector = getattr(self.sector_bidding_panel, 'detector', None)
+                    if (worker is not None and getattr(worker, 'latest_df', None) is df_all
+                            and bool(getattr(detector, '_tick_series', None))):
                         logger.warning("⏱️ [SectorBidding][REOPEN] 当前行情帧已送达，跳过重复评分")
                     else:
                         t0 = time.time()

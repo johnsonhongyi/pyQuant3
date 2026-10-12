@@ -1220,6 +1220,7 @@ class DataProcessWorker(QThread):
         # =========================================================================
         self._last_emit_ts = 0.0
         self._last_error_log_ts = 0.0
+        self._score_request_count = 0
 
         # =========================================================================
         # Emit 最小间隔（秒）
@@ -1256,19 +1257,24 @@ class DataProcessWorker(QThread):
     def stop(self):
         self._is_running = False
 
-    def add_data(self, df):
+    def add_data(self, df, score_requested=False, force_score=False):
 
         # 防止 Queue 无限堆积
         while self.df_queue.qsize() >= 2:
             try:
-                self.df_queue.get_nowait()
+                stale = self.df_queue.get_nowait()
+                if isinstance(stale, tuple) and len(stale) == 3:
+                    _, stale_score, stale_force = stale
+                    score_requested = score_requested or stale_score
+                    force_score = force_score or stale_force
             except Exception:
                 break
 
         try:
-            self.df_queue.put_nowait(df)
+            self.df_queue.put_nowait((df, score_requested, force_score))
+            return True
         except Exception:
-            pass
+            return False
 
     def trigger_recalc(self):
 
@@ -1366,9 +1372,15 @@ class DataProcessWorker(QThread):
                 # ================================================================
 
                 df = None
+                score_requested = False
+                force_score = False
 
                 try:
-                    df = self.df_queue.get(timeout=0.05)
+                    request = self.df_queue.get(timeout=0.05)
+                    if isinstance(request, tuple) and len(request) == 3:
+                        df, score_requested, force_score = request
+                    else:
+                        df = request
                 except Empty:
                     pass
 
@@ -1384,8 +1396,14 @@ class DataProcessWorker(QThread):
                     while True:
 
                         try:
-                            newer_df = self.df_queue.get_nowait()
+                            newer = self.df_queue.get_nowait()
+                            if isinstance(newer, tuple) and len(newer) == 3:
+                                newer_df, newer_score, newer_force = newer
+                            else:
+                                newer_df, newer_score, newer_force = newer, False, False
                             df = newer_df
+                            score_requested = score_requested or newer_score
+                            force_score = force_score or newer_force
                             dropped += 1
 
                         except Empty:
@@ -1396,7 +1414,9 @@ class DataProcessWorker(QThread):
                             f"⏩ [Worker] Dropped stale frames: {dropped}"
                         )
 
-                    self._process_df_chunked(df)
+                    self._process_df_chunked(
+                        df, score_requested=score_requested, force_score=force_score
+                    )
 
                     has_work = True
 
@@ -1452,16 +1472,18 @@ class DataProcessWorker(QThread):
     # Chunked Processing
     # =========================================================================
 
-    def _process_df_chunked(self, df):
+    def _process_df_chunked(self, df, score_requested=False, force_score=False):
 
         try:
 
             if df is None:
                 return
 
-            if not self.score_in_worker:
+            should_score = self.score_in_worker or score_requested
+            if not should_score:
                 # The TK global DataPublisher owns this shared detector's feed
-                # and scoring. The panel only keeps its latest display source.
+                # and scoring during the live session. The panel only keeps its
+                # latest display source unless the caller requests a fallback feed.
                 self.latest_df = df
                 return
 
@@ -1479,19 +1501,43 @@ class DataProcessWorker(QThread):
             # 注册代码
             # ================================================================
 
-            if hasattr(self.detector, "register_codes"):
-                self.detector.register_codes(df)
-
-
-            # ================================================================
-            # 分片处理
-            # ================================================================
-
-            self.latest_df = df  # Publish the source before scoring can emit its completion.
             total = len(active_codes)
-            if total > 0:
+
+            def register_and_score():
+                if hasattr(self.detector, "register_codes"):
+                    self.detector.register_codes(df)
+                self.latest_df = df
+                if total > 0 or force_score:
+                    self.detector.update_scores(
+                        active_codes=active_codes if total > 0 else None,
+                        force=bool(force_score),
+                    )
+                    self._score_request_count += 1
+
+            # Manual force must not be dropped when the shared scheduler is busy.
+            # Reserve its score lock across register+start so this frame is present
+            # before the forced sweep is accepted.
+            score_lock = getattr(self.detector, '_score_lock', None)
+            if force_score and score_lock is not None:
+                while self._is_running:
+                    submitted = False
+                    with score_lock:
+                        if not getattr(self.detector, '_score_active', False):
+                            try:
+                                register_and_score()
+                                submitted = True
+                            except Exception:
+                                self._safe_log_error(
+                                    "[Worker] update_scores failed:\n"
+                                    + traceback.format_exc()
+                                )
+                            break
+                    if submitted:
+                        break
+                    time.sleep(0.05)
+            else:
                 try:
-                    self.detector.update_scores(active_codes=active_codes)
+                    register_and_score()
                 except Exception:
                     self._safe_log_error(
                         "[Worker] update_scores failed:\n"
@@ -1678,6 +1724,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         self._last_selected_code = None
         self._last_refresh_ts = 0
         self._force_update_requested = False
+        self._fallback_df = None
         self._sbc_test_windows = []     # 持有 SBC 测试窗口引用，防止 GC
         self._is_history_mode = False   # [NEW] 历史复盘模式标志
         self._history_date = ""         # [NEW] 历史数据日期
@@ -1848,6 +1895,20 @@ class SectorBiddingPanel(QWidget, WindowMixin):
              if hasattr(self, 'status_lbl'):
                  self.status_lbl.setText("⏳ 等待主窗口数据或手动刷新...")
 
+    def _global_detector_is_empty(self):
+        detector_lock = getattr(self.detector, '_lock', None)
+        if detector_lock is not None and not detector_lock.acquire(blocking=False):
+            return False
+        try:
+            return not any((
+                getattr(self.detector, '_tick_series', {}),
+                getattr(self.detector, 'active_sectors', {}),
+                getattr(self.detector, 'daily_watchlist', {}),
+            ))
+        finally:
+            if detector_lock is not None:
+                detector_lock.release()
+
     def showEvent(self, event):
         """窗口显示时，尝试触发初次刷新以填补白板"""
         super().showEvent(event)
@@ -1855,6 +1916,16 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         if self.sector_table.rowCount() == 0:
             if hasattr(self, 'status_lbl'):
                 self.status_lbl.setText("🔄 准备首次数据评分映射...")
+            df_all = getattr(self.main_window, 'df_all', None)
+            should_seed_detector = False
+            if (self._is_global_detector and df_all is not None
+                    and not getattr(df_all, 'empty', True)):
+                should_seed_detector = self._global_detector_is_empty()
+            if should_seed_detector:
+                self.on_realtime_data_arrived(
+                    df_all, force_update=True, score_if_needed=True
+                )
+                return
             # Reuse warm detector data; showing a window must not rescore all stocks.
             with self._update_lock:
                 self._force_update_requested = True
@@ -2718,7 +2789,12 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 
                 if hasattr(self.main_window, 'df_all') and self.main_window.df_all is not None:
                     # 如果有实盘数据，推入队列，触发计算
-                    self.on_realtime_data_arrived(self.main_window.df_all, force_update=True)
+                    self.on_realtime_data_arrived(
+                        self.main_window.df_all,
+                        force_update=True,
+                        score_if_needed=True,
+                        force_score=True,
+                    )
                 else:
                     # 否则触发全量异步 sweep
                     self._worker.trigger_recalc()
@@ -2954,25 +3030,54 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             
         return None
 
-    def on_realtime_data_arrived(self, df_all, force_update=False):
+    def on_realtime_data_arrived(
+        self, df_all, force_update=False, score_if_needed=False, force_score=False
+    ):
         """主线程调用，将数据推入后台线程避免卡顿 UI"""
         
         if self._is_history_mode:
             return
 
         try:
-            # ✔ 丢弃旧数据（正确方式）
-            while True:
-                try:
-                    self._worker.df_queue.get_nowait()
-                except Empty:
-                    break
+            explicit_score_request = bool(score_if_needed)
+            auto_fallback_request = False
+            if self._is_global_detector and not force_score:
+                service = getattr(self.main_window, 'realtime_service', None)
+                fallback_needed = (
+                    df_all is not None
+                    and not getattr(df_all, 'empty', True)
+                    and (
+                        service is None
+                        or not getattr(service, 'is_ready', False)
+                        or bool(getattr(service, 'paused', False))
+                        or self._global_detector_is_empty()
+                    )
+                )
+                if df_all is not None and not getattr(df_all, 'empty', True):
+                    try:
+                        fallback_needed = fallback_needed or not cct.get_work_time_duration()
+                    except Exception:
+                        fallback_needed = True
+                auto_fallback_request = fallback_needed
 
-            # 推入最新数据
-            self._worker.add_data(df_all)  # [THREAD-SAFETY] 外部调用点 (instock_MonitorTK.py) 已确保是不可变快照，物理移除深拷贝以减少 50ms 主线程阻塞
+            score_requested = bool(
+                force_score or explicit_score_request or auto_fallback_request
+            )
+            if score_requested and not force_score and df_all is self._fallback_df:
+                score_requested = False
 
             with self._update_lock:
                 self._force_update_requested = self._force_update_requested or force_update
+
+            previous_fallback_df = self._fallback_df
+            if score_requested:
+                self._fallback_df = df_all
+            # 推入最新数据
+            queued = self._worker.add_data(
+                df_all, score_requested=score_requested, force_score=force_score
+            )  # [THREAD-SAFETY] 外部调用点已提供不可变快照
+            if score_requested and not queued:
+                self._fallback_df = previous_fallback_df
 
         except Exception as e:
             import traceback
