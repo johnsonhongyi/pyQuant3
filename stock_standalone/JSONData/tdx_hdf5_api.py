@@ -1652,15 +1652,23 @@ def safe_load_table(
     if store is None:
         return pd.DataFrame()
 
+    lock_started = time.perf_counter()
     with _HDF_GLOBAL_LOCK:
         # ---------- 1. 快速路径（主路径） ----------
         try:
-            df = store[table_name]
+            lock_ms = (time.perf_counter() - lock_started) * 1000
+            with timed_ctx('hdf_read_table_%s' % table_name, warn_ms=1000):
+                df = store[table_name]
             if df is None or df.empty:
                 return pd.DataFrame()
 
             # 去重 + 防御
-            df = df[~df.index.duplicated(keep='first')]
+            with timed_ctx('hdf_index_dedup_%s' % table_name, warn_ms=500):
+                if not df.index.is_unique:
+                    df = df[~df.index.duplicated(keep='first')]
+            if lock_ms >= 500:
+                log.warning('[HDF-LOCK-WAIT] table=%s global_lock_ms=%.2f thread=%s',
+                            table_name, lock_ms, threading.current_thread().name)
             return df
 
         # ---------- 2. 结构错误 ----------
@@ -3126,7 +3134,9 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
         if table is not None:
             dd = pd.DataFrame()
             try:
-                with SafeHDFStore(fname, mode='r') as store:
+                with timed_ctx('hdf_open_lock_%s' % table, warn_ms=500):
+                    store_context = SafeHDFStore(fname, mode='r')
+                with store_context as store:
                     if store is None:
                         raise AttributeError("SafeHDFStore open failed")
 
@@ -3263,7 +3273,8 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
     # 保持原来去重与 MultiIndex 处理
     if df is not None:
         try:
-            df = df[~df.index.duplicated(keep='last')]
+            if not df.index.is_unique:
+                df = df[~df.index.duplicated(keep='last')]
         except Exception:
             # 若 index 操作失败则忽略
             pass
@@ -3297,9 +3308,11 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
                 current_size = os.path.getsize(fname_path)
             except Exception:
                 pass
+        with timed_ctx('hdf_cache_copy_%s' % table, warn_ms=500):
+            cache_df = df.copy()
         with _SINA_MI_LOCK:
             _SINA_MI_CACHE[table] = {
-                'df': df.copy(),
+                'df': cache_df,
                 'mtime': current_mtime,
                 'size': current_size
             }
