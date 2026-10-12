@@ -3,6 +3,9 @@
 
 from datetime import datetime
 import math
+import logging
+import threading
+import time
 
 
 LINKAGE_QUOTE_BATCH_SIZE = 128
@@ -10,6 +13,58 @@ LINKAGE_QUOTE_CACHE_SIZE = 512
 LINKAGE_QUOTE_MAX_AGE_SECONDS = 120
 _SUPPORTED_PREFIXES = ("600", "601", "603", "605", "688", "689",
                        "000", "001", "002", "003", "300", "301")
+
+
+class AsyncLinkageQuoteFetcher:
+    """One bounded display-only request; never retain a full market frame or wait on IO."""
+
+    def __init__(self, fetcher):
+        self._fetcher = fetcher
+        self._lock = threading.Lock()
+        self._busy = False
+        self._result = None
+
+    def submit(self, revision, trade_date, codes, market_active):
+        codes = tuple(codes[:LINKAGE_QUOTE_BATCH_SIZE])
+        if not codes or not market_active:
+            return False
+        with self._lock:
+            if self._busy or self._result is not None:
+                return False
+            self._busy = True
+
+        def fetch():
+            started = time.monotonic()
+            try:
+                frame, statuses, _ = collect_linkage_quote_batch(
+                    codes, None, trade_date, market_active, self._fetcher,
+                    limit=LINKAGE_QUOTE_BATCH_SIZE,
+                )
+                result = (revision, trade_date, codes, frame, statuses, started)
+            except Exception:
+                # Preserve explicit pending status if validation itself failed.
+                logging.getLogger(__name__).exception('Favorite quote worker validation failed')
+                result = (revision, trade_date, codes, None,
+                          dict.fromkeys(codes, 'pending_fetch'), started)
+            with self._lock:
+                self._result = result
+                self._busy = False
+
+        try:
+            threading.Thread(target=fetch, name='LinkageQuoteFetch', daemon=True).start()
+        except Exception:
+            with self._lock:
+                self._busy = False
+            raise
+        return True
+
+    def take_result(self, revision, trade_date):
+        with self._lock:
+            result, self._result = self._result, None
+        if result is None or result[:2] != (revision, trade_date):
+            return None
+        # Age from request start is conservative when the network is slow.
+        return result[2:]
 
 
 def normalize_supported_stock_code(value):
