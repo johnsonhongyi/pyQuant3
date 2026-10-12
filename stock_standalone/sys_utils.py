@@ -643,9 +643,9 @@ def repair_system_configurations_and_delisted_stocks():
 
     # 1. 自愈清洗 `favorite_stocks.json` 重点关注列表
     try:
-        from global_favorites import FAVORITE_STOCKS_FILE
-        fav_path = FAVORITE_STOCKS_FILE
-        if os.path.exists(fav_path) and os.path.getsize(fav_path) > 0:
+        from global_favorites import FAVORITE_STOCKS_FILE, _favorite_storage_error
+        fav_path = FAVORITE_STOCKS_FILE if not _favorite_storage_error else None
+        if fav_path and os.path.exists(fav_path) and os.path.getsize(fav_path) > 0:
             from global_favorites import _favorites_file_lock
             import threading
             import time
