@@ -174,6 +174,101 @@ def test_voice_overflow_is_summarized_without_an_unbounded_per_stock_cache():
     assert log.warning.call_args.args[-1] == 99
 
 
+def test_dead_voice_worker_restarts_before_enqueue_without_overriding_mute():
+    import queue
+    from typing import Optional
+
+    send = method('alert_manager.py', 'AlertManager', '_do_send_alert', Empty=queue.Empty, Optional=Optional)
+    owner = SimpleNamespace(stop_event=threading.Event(), voice_enabled=True,
+        process=SimpleNamespace(is_alive=lambda: False), voice_queue=queue.Queue(),
+        global_last_alert=0, _log_voice_overflow=Mock())
+
+    def restart():
+        owner.process = SimpleNamespace(is_alive=lambda: True)
+
+    owner.start = Mock(side_effect=restart)
+    send(owner, 'test message', key='600000')
+    owner.start.assert_called_once()
+    assert owner.voice_queue.get_nowait()['key'] == '600000'
+    owner.voice_enabled = False
+    owner.process = None
+    send(owner, 'muted message', key='600001')
+    assert owner.start.call_count == 1
+    assert owner.voice_queue.empty()
+    owner.stop_event.set()
+    owner.voice_enabled = True
+    send(owner, 'shutdown message', key='600002')
+    assert owner.start.call_count == 1
+
+
+def test_sapi_wait_observes_round_cancel_without_stopping_worker():
+    node = next(n for n in source_tree('alert_manager.py').body
+                if isinstance(n, ast.FunctionDef) and n.name == '_speak_sapi')
+    namespace = {}
+    exec(compile(ast.Module(body=[node], type_ignores=[]), 'alert_manager.py', 'exec'), namespace)
+    stop, interrupt = threading.Event(), threading.Event()
+    speaker = Mock()
+
+    def wait(timeout):
+        interrupt.set()
+        return timeout == 200
+
+    speaker.WaitUntilDone.side_effect = wait
+    namespace['_speak_sapi'](speaker, 'cancel me', stop, interrupt)
+    assert speaker.Speak.call_args_list[-1].args == ('', 3)
+    assert not stop.is_set()
+    assert speaker.WaitUntilDone.call_count == 2
+
+
+def test_close_round_clears_unplayed_batch_and_content_debounce():
+    import queue
+    owner = SimpleNamespace(process=SimpleNamespace(is_alive=lambda: True),
+        _batch_lock=threading.Lock(), _batch_data={'600000': ['old']},
+        _batch_timer=Mock(), message_cooldowns={'old message': time.time()},
+        cancel_queue=queue.Queue(), interrupt_event=threading.Event())
+    timer = owner._batch_timer
+    cancel = method('alert_manager.py', 'AlertManager', 'stop_current_speech')
+    cancel(owner)
+    assert not owner._batch_data
+    assert not owner.message_cooldowns
+    assert owner._batch_timer is None
+    timer.cancel.assert_called_once()
+    assert owner.cancel_queue.get_nowait()[0] == '__ALL__'
+    assert owner.interrupt_event.is_set()
+
+
+def test_voice_worker_concurrent_start_uses_one_worker():
+    owner = SimpleNamespace(_worker_start_lock=threading.Lock(), process=None,
+        stop_event=threading.Event(), interrupt_event=threading.Event(),
+        voice_queue=None, cancel_queue=None, current_state={}, feedback_queue=None,
+        _worker_debug_enabled=False)
+    created = []
+
+    class FakeThread:
+        def __init__(self, **kwargs):
+            self.alive = False
+            created.append(self)
+
+        def is_alive(self):
+            return self.alive
+
+        def start(self):
+            time.sleep(0.005)
+            self.alive = True
+
+    locked_start = method('alert_manager.py', 'AlertManager', '_start_worker_locked',
+        threading=SimpleNamespace(Thread=FakeThread), _voice_worker=Mock())
+    owner._start_worker_locked = MethodType(locked_start, owner)
+    start = method('alert_manager.py', 'AlertManager', 'start')
+    workers = [threading.Thread(target=start, args=(owner,)) for _ in range(8)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=1)
+    assert len(created) == 1
+    assert created[0].is_alive()
+
+
 def test_history_fetch_is_single_flight_and_submit_failure_allows_retry():
     owner = SimpleNamespace(daily_pattern_detector=object(), _daily_hist_cache_status=True,
         daily_history_cache={}, _pending_hist_fetches=set(), _lock=threading.Lock(),

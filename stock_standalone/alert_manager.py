@@ -36,13 +36,13 @@ def normalize_speech_text(text: str) -> str:
     text = re.sub(r'(\d+)\.(\d+)', r'\1点\2', text)
     return text
 
-def _speak_sapi(speaker, text, stop_event):
+def _speak_sapi(speaker, text, stop_event, interrupt_event=None):
     """Keep COM calls on the voice thread and permit shutdown to cancel speech."""
     if stop_event.is_set():
         return
     speaker.Speak(text, 1)  # SVSFlagsAsync
     while not speaker.WaitUntilDone(50):
-        if stop_event.is_set():
+        if stop_event.is_set() or (interrupt_event is not None and interrupt_event.is_set()):
             speaker.Speak('', 3)  # SVSFlagsAsync | SVSFPurgeBeforeSpeak
             speaker.WaitUntilDone(200)
             return
@@ -53,8 +53,16 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
     语音播报后台线程 (Resolved mp.Queue GIL Crash)
     支持通过 cancel_q 跳过队列，并通过 current_state 标记当前状态
     """
-    import pyttsx3
-    import pythoncom
+    try:
+        import pyttsx3
+    except ImportError:
+        pyttsx3 = None
+        logger.warning("pyttsx3 unavailable; voice worker will use SAPI only")
+    try:
+        import pythoncom
+    except ImportError:
+        logger.exception("Voice worker cannot start: pythoncom unavailable")
+        return
     import time
     
     # 默认不创建独立语音日志；仅 TK 显式开启 debug 时写盘。
@@ -253,7 +261,7 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
                             except: pass
                             
                         if not stop_event.is_set():
-                            _speak_sapi(speaker, safe_msg, stop_event)
+                            _speak_sapi(speaker, safe_msg, stop_event, interrupt_event)
                             
                         last_speech_end_ts = time.time()
                         
@@ -302,6 +310,7 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
                     worker_log("Utterance finished.")
             except Exception as e:
                 worker_log(f"Engine Cycle Error: {e}")
+                logger.exception("Voice playback failed for %s", key)
             finally:
                 if current_state:
                     try: current_state['key'] = ""
@@ -309,6 +318,7 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
 
         except Exception as e:
             worker_log(f"Fatal Worker Loop Error: {e}")
+            logger.exception("Voice worker loop failed")
             time.sleep(1)
 
     if com_initialized and pythoncom:
@@ -373,6 +383,7 @@ class AlertManager:
         self.current_state = {'key': '', 'active_codes': '', 'last_sync_time': 0.0}
         
         self.process: Optional[threading.Thread] = None 
+        self._worker_start_lock = threading.Lock()
         self.cooldowns: Dict[str, float] = {}
         self.message_cooldowns: Dict[str, float] = {}
         self.global_last_alert: float = 0
@@ -389,6 +400,10 @@ class AlertManager:
 
     def start(self):
         """启动或重启语音线程 (Resolved mp.Queue GIL Crash)"""
+        with self._worker_start_lock:
+            self._start_worker_locked()
+
+    def _start_worker_locked(self):
         if self.process is None or not self.process.is_alive():
             self.stop_event.clear()
             self.interrupt_event.clear()
@@ -497,6 +512,15 @@ class AlertManager:
         if key:
             self.cancel_queue.put(str(key))
         else:
+            # Closing a round must discard its not-yet-flushed announcements.
+            # Their fingerprints were recorded before playback; retaining them
+            # would mute the next round even though the cancelled speech never ran.
+            with self._batch_lock:
+                self._batch_data.clear()
+                timer, self._batch_timer = self._batch_timer, None
+                self.message_cooldowns.clear()
+            if timer is not None:
+                timer.cancel()
             self.cancel_queue.put(("__ALL__", time.time()))
             self.interrupt_event.set() # 立即触发引擎中断
 
@@ -725,6 +749,13 @@ class AlertManager:
             #     logger.warning(f"{prefix} [Alert] {message}")
             # logger.warning(f"{prefix} [Alert] {message}")
         # 3. 语音队列分放
+        if self.voice_enabled and (self.process is None or not self.process.is_alive()):
+            logger.warning("Voice worker stopped unexpectedly; restarting before enqueue: %s", key)
+            try:
+                self.start()
+            except Exception:
+                logger.exception("Voice worker restart failed for %s", key)
+                return
         if self.voice_enabled and self.process and self.process.is_alive():
             try:
                 q_size = self.voice_queue.qsize()

@@ -591,6 +591,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.pump_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pump")
         self.compute_executor = ThreadPoolExecutor(max_workers=_compute_workers, thread_name_prefix="compute")
         self.view_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix='view')
+        self.market_stats_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='market_stats')
         self.executor = self.compute_executor  # 🛡️ 向后兼容别名
         logger.info(f"✅ Layered ThreadPool: pump=1 compute={_compute_workers} (Config: {cct.livestrategy_max_workers})")
         # 🔷 [VERSION] 快照版本号 + inflight 计数器
@@ -4488,7 +4489,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             #    executor(调度层) -> pump_executor(中转层) -> compute_executor(计算层)
             # 防止主调度线程向已关闭计算池提交任务导致 RuntimeError
             # ---------------------------------------------------------
-            for pool_name in ['view_executor', 'executor', 'pump_executor', 'compute_executor']:
+            for pool_name in ['market_stats_executor', 'view_executor', 'executor', 'pump_executor', 'compute_executor']:
                 pool = getattr(self, pool_name, None)
                 if pool:
                     try:
@@ -8362,8 +8363,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     except Exception as e:
                         logger.error(f"Async stats aggregation failed: {e}")
                 
-                if hasattr(self, 'executor'):
-                    self._market_stats_future = self.executor.submit(_async_stats_aggregation)
+                if getattr(self, 'market_stats_executor', None) is not None:
+                    self._market_stats_future = self.market_stats_executor.submit(_async_stats_aggregation)
                 else:
                     threading.Thread(target=_async_stats_aggregation, daemon=True).start()
         except:
