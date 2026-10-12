@@ -383,6 +383,9 @@ class SystemLinkageGateway:
         self._port = int(getattr(config, "ipc_linkage_port", 26676) or 26676)
         self._notification_lock = threading.Lock()
         self._notification_retry_after = {}
+        self._consumer_heartbeat_lock = threading.Lock()
+        self._consumer_recovery_pending = set()
+        self._consumer_recovery_retry_after = {}
         self._init_database()
 
     def _connect(self):
@@ -946,27 +949,53 @@ class SystemLinkageGateway:
             return False
         if quote_status not in ("ready", "pending_fetch", "unknown", "market_closed", "stale", "quota_limited"):
             quote_status = "unknown"
-        with self._db() as connection:
-            connection.execute(
-                "INSERT INTO linkage_consumer_health(consumer,last_seen,favorites_revision,quote_status) VALUES(?,?,?,?) "
-                "ON CONFLICT(consumer) DO UPDATE SET last_seen=excluded.last_seen, "
-                "favorites_revision=MAX(linkage_consumer_health.favorites_revision,excluded.favorites_revision), "
-                "quote_status=CASE WHEN excluded.favorites_revision>=linkage_consumer_health.favorites_revision "
-                "THEN excluded.quote_status ELSE linkage_consumer_health.quote_status END",
-                (consumer, time.time(), int(favorites_revision or 0), quote_status),
-            )
-            rows = connection.execute(
-                "SELECT operation_id,result FROM linkage_operations WHERE status IN ('applied','already_present')"
-            ).fetchall()
-            for row in rows:
-                result = json.loads(row["result"])
-                consumers = result.setdefault("consumers", {})
-                existing = consumers.get(consumer, {})
-                if existing.get("status") == "not_running":
-                    consumers[consumer] = {"status": "pending", "favorites_revision": 0,
-                                           "quote_status": "pending_fetch"}
-                    connection.execute("UPDATE linkage_operations SET result=? WHERE operation_id=?",
-                                       (json.dumps(result, separators=(",", ":")), row["operation_id"]))
+        with self._consumer_heartbeat_lock:
+            now = time.time()
+            with self._db() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                previous = connection.execute(
+                    "SELECT last_seen FROM linkage_consumer_health WHERE consumer=?", (consumer,)
+                ).fetchone()
+                reconnected = not previous or now - float(previous["last_seen"] or 0) > 15
+                connection.execute(
+                    "INSERT INTO linkage_consumer_health(consumer,last_seen,favorites_revision,quote_status) VALUES(?,?,?,?) "
+                    "ON CONFLICT(consumer) DO UPDATE SET last_seen=excluded.last_seen, "
+                    "favorites_revision=MAX(linkage_consumer_health.favorites_revision,excluded.favorites_revision), "
+                    "quote_status=CASE WHEN excluded.favorites_revision>=linkage_consumer_health.favorites_revision "
+                    "THEN excluded.quote_status ELSE linkage_consumer_health.quote_status END",
+                    (consumer, now, int(favorites_revision or 0), quote_status),
+                )
+
+            # A normal heartbeat must not scan and rewrite every completed operation.
+            # Requeue stale consumer notifications only once at startup/reconnect, in
+            # a separate transaction so a recovery scan cannot roll back the heartbeat.
+            retry_after = self._consumer_recovery_retry_after.get(consumer, 0.0)
+            should_reconcile = reconnected or consumer in self._consumer_recovery_pending
+            if should_reconcile and time.monotonic() >= retry_after:
+                try:
+                    with self._db() as connection:
+                        connection.execute("BEGIN IMMEDIATE")
+                        rows = connection.execute(
+                            "SELECT operation_id,result FROM linkage_operations "
+                            "WHERE status IN ('applied','already_present')"
+                        ).fetchall()
+                        for row in rows:
+                            result = json.loads(row["result"])
+                            consumers = result.setdefault("consumers", {})
+                            existing = consumers.get(consumer, {})
+                            if existing.get("status") == "not_running":
+                                consumers[consumer] = {"status": "pending", "favorites_revision": 0,
+                                                       "quote_status": "pending_fetch"}
+                                connection.execute(
+                                    "UPDATE linkage_operations SET result=? WHERE operation_id=?",
+                                    (json.dumps(result, separators=(",", ":")), row["operation_id"]),
+                                )
+                    self._consumer_recovery_pending.discard(consumer)
+                    self._consumer_recovery_retry_after.pop(consumer, None)
+                except Exception:
+                    self._consumer_recovery_pending.add(consumer)
+                    self._consumer_recovery_retry_after[consumer] = time.monotonic() + 30.0
+                    logger.exception("Could not reconcile %s notifications after reconnect", consumer)
         return True
 
     def report_consumer_batch(self, consumer, operations, favorites_revision=0):

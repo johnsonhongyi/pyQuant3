@@ -126,6 +126,8 @@ def test_real_renderer_formats_off_thread_and_skips_unchanged_writes(root, count
     tree, updater, frame = renderer(root, count)
     preparation_threads = []
     original = type(updater)._prepare_render_rows
+    plan_threads = []
+    original_plan = type(updater)._build_render_plan
 
     def prepare(self, df):
         assert self.tree is None and self.root is None
@@ -133,11 +135,17 @@ def test_real_renderer_formats_off_thread_and_skips_unchanged_writes(root, count
         preparation_threads.append(threading.get_ident())
         return original(self, df)
 
+    def build_plan(codes, children, item_map_snapshot):
+        plan_threads.append(threading.get_ident())
+        return original_plan(codes, children, item_map_snapshot)
+
     monkeypatch.setattr(type(updater), '_prepare_render_rows', prepare)
+    monkeypatch.setattr(type(updater), '_build_render_plan', build_plan)
     updater.update(frame)
     settle(root, updater)
     assert len(tree.get_children()) == count
     assert preparation_threads and all(t != threading.get_ident() for t in preparation_threads)
+    assert plan_threads and all(t != threading.get_ident() for t in plan_threads)
     writes, moves = Mock(wraps=tree.item), Mock(wraps=tree.move)
     monkeypatch.setattr(tree, 'item', writes)
     monkeypatch.setattr(tree, 'move', moves)

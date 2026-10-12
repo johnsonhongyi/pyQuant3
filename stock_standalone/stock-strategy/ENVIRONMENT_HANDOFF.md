@@ -157,3 +157,12 @@
 - 真实原始配置导入 connected；网页查询200；错误HMAC、nonce重放、越权、跨源请求401。操作 acceptance-684dd758ae4d40a3a9af38136f4ebf53（已有自选000002.SZ）applied、persisted=true、revision=1、TK/ATS=synced；幂等重放通过。
 - 生产浏览器前端600733北汽蓝谷关注操作39414d13822e4a315306dfe30c12eac5：persisted=true、revision=2、TK/ATS=synced，页面显示已在关注及双端synced；非交易时段最终回执行情market_closed。不以缺行情伪装实时正常，未触发交易。
 - TK读取根目录stock_codes.conf，未创建JSONData副本。API/Web镜像与本节上方Go发布相同且healthy。真实证券联网自动更新未强制执行；隔离测试已覆盖自动释放和更新缓存失效。
+
+## 2026-10-12 00:32 TK/Go 自助接入同源鉴权修复部署
+
+- 发布 `20261012003209`，目标源码 SHA `71a77b76230c9bdd0c8baf0e301fe8f2cc60e272`（包含 Go/Web 鉴权一致性修复 `63a5630c49835139cc2d8274aa7a51cf4198d222`）。根因为浏览器导入直接请求保存的 Go `:20081`，页面来自 Web `:20073`，无令牌策略将两者判定为跨源；TK `hmac_key` 是后续 HMAC 凭据，不是 Go 管理令牌。导入现改走同主机 Web `/api` 网关，同时保留 Go `backend_base_url`；Vite 开发代理保留 Host/Origin 一致。
+- API 镜像 `stockstrategy/backend:20261012003209`，ID `sha256:83dd32c9995bf04aacec60eb5146f534a92d2dbf9621d2d8255d7cf26ce0b2f6`，2 层、119,365,092 字节。Web 仍为 `stockstrategy/web:20261011114424`，ID `sha256:ce15ecc17364a415c3a4e609a2858b046af4f3bc9f1058c33bdfaf13b1bb07e9`，11 层、62,396,647 字节。
+- API/Web 均 `healthy`、重启策略 `always`、只读根文件系统；`SizeRw=0`，根文件系统分别 119,365,092/62,396,647 字节。外置挂载数仍为 API 8、Web 5：保留 `/data`、`/logs`、交易日历、行情任务、InStock 只读行情；Web 静态文件位于 `/mnt/4TB/dockerf/stockstrategy/app/web-dist/20261012003209`，`/tmp`、`/run`、Web `/var/cache` 使用该 release 的外置 runtime。
+- 生产只读验收：Web 代理及 LAN 入口 `/api/health` 正常；无令牌同源 targets/context/events/attention 均返回 200；跨源 targets/import/commands 返回 401；同源 malformed import/commands 分别返回 400，malformed attention identity 返回 403，均未写数据。targets 读回已有节点 `tk-eac80a9aa66a462795557e68`/workspace `ws-b33bb748186a4bbc8e69ab72`，API 标记 `configured` 仅证明持久注册，不代表本次在线握手。测试包括配置令牌时错误 Bearer/X-A-Stock-Token 拒绝、无令牌来源边界、Web 同主机跨端口经同源代理；Go `go test ./...`、Web 34 文件/183 测试及 `tsc -b && vite build` 通过。
+- 回滚快照 `/mnt/4TB/dockerf/stockstrategy/rollback/20261012003209` 的 `COMPLETE` 存在且全部 `SHA256SUMS` 校验通过。回滚命令：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261012003209`。
+- 这次部署证明鉴权路径已修复。Windows 剪贴板未包含 TK 配置行，所以本次未重新导入/更新已有目标，也未修改 TK 或执行交易；本次发布不能据此宣称新的 HMAC configure/connected 现场验收。取得安全配置输入后，可按现有页面重新握手，并验证关注命令回执与幂等。

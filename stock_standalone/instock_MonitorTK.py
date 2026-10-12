@@ -1195,7 +1195,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._qt_event_after_id = self.after(50, self._process_qt_events)
 
 
-        self.sender = StockSender(self.tdx_var, self.ths_var, self.dfcf_var, callback=self.update_send_status)
+        self.sender = StockSender(
+            self.tdx_var, self.ths_var, self.dfcf_var,
+            callback=self.update_send_status, defer_initial_scan=True,
+        )
         self.clipboard_monitor = start_clipboard_listener(
             self.sender, 
             ignore_func=lambda code: code.strip() == str(getattr(self, 'select_code', '')).strip(),
@@ -7481,17 +7484,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     is_auto_window = cct.get_trade_date_status() and (915 <= now_hm <= 1505)
                     is_ready_auto = (time.time() - self._init_start_time > 20)
                     
-                    if is_auto_window and is_ready_auto and (not hasattr(self, "sector_bidding_panel") or self.sector_bidding_panel is None):
-                        from sector_bidding_panel import SectorBiddingPanel
-                        if not hasattr(self, "sector_bidding_panel") or self.sector_bidding_panel is None:
-                            self.sector_bidding_panel = SectorBiddingPanel(main_window=self)
-                            
-
-                            
-                            self.sector_bidding_panel.show()
-                            if hasattr(self, 'df_all') and not self.df_all.empty:
-                                self.sector_bidding_panel.on_realtime_data_arrived(self.df_all, force_update=True)
-                            logger.info("📡 [Sync] 已自动弹出 竞价/尾盘联动监控面板(Tick订阅版)")
+                    if (is_auto_window and is_ready_auto
+                            and (not hasattr(self, "sector_bidding_panel") or self.sector_bidding_panel is None)
+                            and not getattr(self, '_auto_bidding_panel_requested', False)):
+                        # 不在 main_ui_sync 中同步构造 Qt 面板；走现有异步打开入口，
+                        # 让行情交付回调先返回，避免初始化占住 TK 主事件循环。
+                        self._auto_bidding_panel_requested = True
+                        self._put_deduped_task(
+                            "lf_auto_bidding_panel", self.open_sector_bidding_panel,
+                        )
 
             except Exception as e:
                 logger.error(f"Error applying tree data: {e}", exc_info=True)
@@ -10889,11 +10890,68 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except:
                 pass
 
+    def _request_stock_sender_reload(self, flags):
+        """在后台扫描外部交易软件窗口，并合并快速切换。"""
+        self._sender_reload_requested_state = tuple(bool(flag) for flag in flags)
+        if getattr(self, '_sender_reload_pending', False):
+            return
+        self._sender_reload_pending = True
+
+        def reload_worker():
+            try:
+                while True:
+                    requested = self._sender_reload_requested_state
+                    scan_started = time.perf_counter()
+                    try:
+                        self.sender.reload(flags=requested)
+                    except Exception:
+                        logger.exception("[StockSender] 后台窗口扫描失败")
+                    elapsed_ms = (time.perf_counter() - scan_started) * 1000
+                    if elapsed_ms >= 500:
+                        logger.warning(
+                            "[StockSender] 后台窗口扫描耗时 %.1fms flags=%s",
+                            elapsed_ms, requested,
+                        )
+                    self._sender_reload_completed_state = requested
+                    if requested == self._sender_reload_requested_state:
+                        break
+            finally:
+                if getattr(self, '_is_closing', False):
+                    self._sender_reload_pending = False
+                else:
+                    try:
+                        self.tk_dispatch_queue.put(self._finish_stock_sender_reload)
+                    except Exception:
+                        self._sender_reload_pending = False
+                        logger.exception("[StockSender] 回投扫描完成事件失败")
+
+        try:
+            threading.Thread(
+                target=reload_worker, name="StockSenderWindowScan", daemon=True,
+            ).start()
+        except Exception:
+            self._sender_reload_pending = False
+            logger.exception("[StockSender] 无法启动后台窗口扫描线程")
+
+    def _finish_stock_sender_reload(self):
+        self._sender_reload_pending = False
+        requested = getattr(self, '_sender_reload_requested_state', None)
+        completed = getattr(self, '_sender_reload_completed_state', None)
+        if (requested is not None and requested != completed and any(requested)
+                and not getattr(self, '_is_closing', False)):
+            self._request_stock_sender_reload(requested)
+
     def update_linkage_status(self):
         global tip_var_status_flag
-        # 此处处理 checkbuttons 状态
-        if not self.tdx_var.get() or not self.ths_var.get():
-            self.sender.reload()
+        # 只在 TDX/同花顺/东方财富开关变化时重扫，且绝不在 Tk 回调中同步 EnumWindows。
+        sender_flags = (
+            bool(self.tdx_var.get()), bool(self.ths_var.get()), bool(self.dfcf_var.get()),
+        )
+        if sender_flags != getattr(self, '_sender_reload_requested_state', None):
+            if any(sender_flags):
+                self._request_stock_sender_reload(sender_flags)
+            else:
+                self._sender_reload_requested_state = sender_flags
         if  self.dfcf_var.get() != self.auto_adjust_column:
             logger.info(f"DC:{self.dfcf_var.get()} self.auto_adjust_column :{self.auto_adjust_column}")
             self.auto_adjust_column = self.dfcf_var.get()

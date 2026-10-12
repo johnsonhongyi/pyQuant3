@@ -21,9 +21,6 @@ kernel32 = ctypes.windll.kernel32
 user32 = ctypes.windll.user32
 
 WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, ctypes.c_void_p)
-GetWindowTextW = user32.GetWindowTextW
-GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-GetWindowTextW.restype = ctypes.c_int
 GetClassNameW = user32.GetClassNameW
 GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 GetClassNameW.restype = ctypes.c_int
@@ -35,7 +32,8 @@ GetClassNameW.restype = ctypes.c_int
 # RegisterWindowMessageW.restype = ctypes.c_uint
 
 class StockSender:
-    def __init__(self, tdx_var=True, ths_var=True, dfcf_var=False, base_dir=None, callback=None):
+    def __init__(self, tdx_var=True, ths_var=True, dfcf_var=False, base_dir=None, callback=None,
+                 defer_initial_scan=False):
         self.tdx_var = tdx_var
         self.ths_var = ths_var
         self.dfcf_var = dfcf_var
@@ -61,13 +59,12 @@ class StockSender:
         self.ths_code = []
         self.load_ths_code()
 
-        # 查找窗口
-        # if self.tdx_var.get()
-        self.find_tdx_window()
-        # if self.ths_var.get()
-        self.find_ths_window()
-        # if self.dfcf_var.get():
-        self.find_dfcf_handle()
+        # 查找窗口；TK 主界面可延迟到后台扫描，避免冷启动卡在 EnumWindows。
+        self._reload_lock = threading.Lock()
+        if not defer_initial_scan:
+            self.find_tdx_window()
+            self.find_ths_window()
+            self.find_dfcf_handle()
 
         # --- 极限性能优化组件 ---
         self._task_queue = queue.Queue(maxsize=1)  # 状态覆盖队列
@@ -113,35 +110,42 @@ class StockSender:
                 return False
         return bool(var)
 
-    def reload(self):
+    def reload(self, flags=None):
         """
         重新查找各交易软件窗口句柄
         兼容 Tk BooleanVar / bool
         """
 
-        if self._get_flag(self.tdx_var):
-            self.tdx_window_handle = 0
-            self.find_tdx_window()
-            print(f'reload tdx_window_handle: {self.tdx_window_handle}')
+        if flags is None:
+            flags = (self._get_flag(self.tdx_var), self._get_flag(self.ths_var),
+                     self._get_flag(self.dfcf_var))
+        tdx_enabled, ths_enabled, dfcf_enabled = tuple(bool(flag) for flag in flags)
 
-        if self._get_flag(self.ths_var):
-            self.ths_process_hwnd = 0
-            self.ths_window_handle = 0
-            self.find_ths_window()
-            print(
-                f'reload ths_process_hwnd: {self.ths_process_hwnd} '
-                f'ths_window_handle: {self.ths_window_handle}'
-            )
+        # Serialize discoveries; callers may safely invoke this from a background thread.
+        with self._reload_lock:
+            if tdx_enabled:
+                self.tdx_window_handle = 0
+                self.find_tdx_window()
+                print(f'reload tdx_window_handle: {self.tdx_window_handle}')
 
-        if self._get_flag(self.dfcf_var):
-            self.dfcf_process_hwnd = 0
-            self.ahk_process_hwnd = 0
-            # self.thsweb_process_hwnd = 0
-            self.find_dfcf_handle()
-            print(
-                f'reload dfcf_process_hwnd: {self.dfcf_process_hwnd} '
-                f'ahk_process_hwnd: {self.ahk_process_hwnd}'
-            )
+            if ths_enabled:
+                self.ths_process_hwnd = 0
+                self.ths_window_handle = 0
+                self.find_ths_window()
+                print(
+                    f'reload ths_process_hwnd: {self.ths_process_hwnd} '
+                    f'ths_window_handle: {self.ths_window_handle}'
+                )
+
+            if dfcf_enabled:
+                self.dfcf_process_hwnd = 0
+                self.ahk_process_hwnd = 0
+                # self.thsweb_process_hwnd = 0
+                self.find_dfcf_handle()
+                print(
+                    f'reload dfcf_process_hwnd: {self.dfcf_process_hwnd} '
+                    f'ahk_process_hwnd: {self.ahk_process_hwnd}'
+                )
 
         # 查找窗口
     # ----------------- 统一发送 ----------------- #
@@ -402,8 +406,6 @@ class StockSender:
     # ----------------- 查找窗口 ----------------- #
     def find_tdx_window(self):
         def enum_callback(hwnd, lparam):
-            title_buf = ctypes.create_unicode_buffer(256)
-            GetWindowTextW(hwnd, title_buf, 255)
             cls_buf = ctypes.create_unicode_buffer(256)
             GetClassNameW(hwnd, cls_buf, 255)
             if "TdxW_MainFrame_Class" in cls_buf.value:
