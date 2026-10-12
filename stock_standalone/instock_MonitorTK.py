@@ -697,6 +697,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             os.getenv("APP_DEBUG", "0") == "1" or 
                             getattr(cct.CFG, "DEBUG", False) 
                             )
+        AlertManager.set_worker_debug_enabled(self._debug_mode)
         # [ROOT-FIX] 初始化联动代理与防重标志
         self.link_manager = get_link_manager()
         self._last_visualizer_time = 0
@@ -19569,24 +19570,25 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             all_cats = []  # 用于统计出现次数
             topN = df_filtered.head(50)
 
-            for code, row in topN.iterrows():
-                if isinstance(row.get("category"), str):
-                    cats = [c.strip() for c in row["category"].replace("；", ";").replace("+", ";").split(";") if c.strip()]
+            # 行情帧有数百列；摘要只用这五列，避免在 Tk 主线程逐行构造宽 Series。
+            category_rows = topN.reindex(columns=["category", "name", "percent", "per1d", "volume"])
+            for code, category, name, percent, per1d, volume in category_rows.itertuples(index=True, name=None):
+                if isinstance(category, str):
+                    cats = [c.strip() for c in category.replace("；", ";").replace("+", ";").split(";") if c.strip()]
                     for ca in cats:
                         # 过滤泛概念
                         if is_generic_concept(ca):
                             continue
                         all_cats.append(ca)
                         # 添加其他信息到元组里，比如 (code, name, percent, volume)
-                        percent = row.get("percent")
                         if pd.isna(percent) or percent == 0:
-                            percent = row.get("per1d", 0)
+                            percent = 0 if pd.isna(per1d) else per1d
                         cat_dict.setdefault(ca, []).append((
                             code,
-                            row.get("name", ""),
+                            name,
                             # row.get("percent", 0) or row.get("per1d", 0),
                             percent,
-                            row.get("volume", 0)
+                            0 if pd.isna(volume) else volume
                             # 如果还有其他列，可以继续加: row.get("其他列")
                         ))
 
@@ -19650,23 +19652,28 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             added = [c for c in current_categories if c not in old_categories]
             removed = [c for c in old_categories if c not in current_categories]
 
-            # 清空并重新构建 dynamic_concepts_frame 里的内容
-            for widget in self.dynamic_concepts_frame.winfo_children():
-                widget.destroy()
+            labels = self.dynamic_concepts_frame.winfo_children()
+            if current_categories == list(old_categories) and len(labels) == len(top5):
+                # 概念顺序没变时只更新计数，不销毁并重建 Tk 控件。
+                for lbl_c, (k, v) in zip(labels, top5.items()):
+                    lbl_c.config(text=f"{k}:{v}")
+            else:
+                for widget in labels:
+                    widget.destroy()
 
-            for k, v in top5.items():
-                lbl_c = tk.Label(
-                    self.dynamic_concepts_frame,
-                    text=f"{k}:{v}",
-                    font=self.default_font_bold,
-                    fg="green",
-                    bg="#f7f7f7",
-                    cursor="hand2"
-                )
-                lbl_c.pack(side="left", padx=6)
-                lbl_c.bind("<Button-1>", lambda e, name=k: self._show_preferred_concept_window(name))
-                lbl_c.bind("<Enter>", lambda e, w=lbl_c: w.config(fg="#004D00"))
-                lbl_c.bind("<Leave>", lambda e, w=lbl_c: w.config(fg="green"))
+                for k, v in top5.items():
+                    lbl_c = tk.Label(
+                        self.dynamic_concepts_frame,
+                        text=f"{k}:{v}",
+                        font=self.default_font_bold,
+                        fg="green",
+                        bg="#f7f7f7",
+                        cursor="hand2"
+                    )
+                    lbl_c.pack(side="left", padx=6)
+                    lbl_c.bind("<Button-1>", lambda e, name=k: self._show_preferred_concept_window(name))
+                    lbl_c.bind("<Enter>", lambda e, w=lbl_c: w.config(fg="#004D00"))
+                    lbl_c.bind("<Leave>", lambda e, w=lbl_c: w.config(fg="green"))
 
             if added or removed:
                 self.lbl_category_title.config(text="概念异动:", fg="red")
