@@ -2198,17 +2198,26 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin, TreeviewMixin):
         try:
             from global_favorites import GlobalFavoriteManager
             fav_mgr = GlobalFavoriteManager()
+            from tk_gui_modules.favorite_actions import submit_tk_favorite_action
             
             menu.add_separator()
             if code in fav_mgr.get_favorite_stocks():
                 menu.add_command(
                     label="❌ 取消重点个股",
-                    command=lambda: [fav_mgr.remove_favorite_stock(code), self.after(0, self.load_data)]
+                    command=lambda c=code: submit_tk_favorite_action(
+                        self, "remove_favorite_stock_result", c,
+                        on_complete=lambda owner, result, error: owner._refresh_ui_favorites()
+                        if error is None else None,
+                    )
                 )
             else:
                 menu.add_command(
                     label="⭐ 设为重点个股",
-                    command=lambda: [fav_mgr.add_favorite_stock(code), self.after(0, self.load_data)]
+                    command=lambda c=code: submit_tk_favorite_action(
+                        self, "add_favorite_stock_result", c,
+                        on_complete=lambda owner, result, error: owner._refresh_ui_favorites()
+                        if error is None else None,
+                    )
                 )
         except Exception as e:
             logger.warning(f"Failed to add favorites to context menu: {e}")

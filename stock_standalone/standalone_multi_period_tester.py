@@ -1951,19 +1951,27 @@ class StandaloneMultiPeriodTester(_parent_class, TreeviewMixin):
 
     def add_to_favorites(self, code):
         try:
-            from global_favorites import GlobalFavoriteManager
-            GlobalFavoriteManager().add_favorite_stock(code)
-            self.status_var.set(f"已添加重点关注: {code}")
+            from tk_gui_modules.favorite_actions import submit_tk_favorite_action
+            submit_tk_favorite_action(
+                self, "add_favorite_stock_result", code,
+                success_message=f"已添加重点关注: {code}",
+                on_complete=lambda owner, result, error: owner._refresh_ui_favorites()
+                if error is None else None,
+            )
         except Exception as e:
-            messagebox.showerror("错误", f"添加重点关注失败: {e}")
+            self.status_var.set(f"添加重点关注失败: {e}")
 
     def remove_from_favorites(self, code):
         try:
-            from global_favorites import GlobalFavoriteManager
-            GlobalFavoriteManager().remove_favorite_stock(code)
-            self.status_var.set(f"已取消重点关注: {code}")
+            from tk_gui_modules.favorite_actions import submit_tk_favorite_action
+            submit_tk_favorite_action(
+                self, "remove_favorite_stock_result", code,
+                success_message=f"已取消重点关注: {code}",
+                on_complete=lambda owner, result, error: owner._refresh_ui_favorites()
+                if error is None else None,
+            )
         except Exception as e:
-            messagebox.showerror("错误", f"取消重点关注失败: {e}")
+            self.status_var.set(f"取消重点关注失败: {e}")
 
     def copy_code(self, code):
         try:

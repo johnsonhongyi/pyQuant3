@@ -539,7 +539,8 @@ def _ensure_listener_started(log_f, show_detail=True):
         import shutil
         os.makedirs(os.path.dirname(os.path.abspath(log_f)), exist_ok=True)
 
-        fh = RotatingFileHandler(
+        from JohnsonUtil.buffered_log import BufferedRamLogHandler
+        fh = BufferedRamLogHandler(
             log_f,
             maxBytes=5 * 1024 * 1024,
             backupCount=3,

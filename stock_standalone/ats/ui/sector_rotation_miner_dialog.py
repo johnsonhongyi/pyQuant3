@@ -1673,9 +1673,17 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
             self._apply_candidate_filter()
             self._run_dna_audit_selected()
         elif chosen == act_fav_sec:
-            fav_mgr.toggle_favorite_sector(sec)
-            self.status_bar.setText(f"⭐ 已更新重点关注板块: {sec}")
-            self._render_sectors_table(self._last_sectors)
+            from ats.ui.favorite_actions import submit_favorite_action
+            def _sector_favorite_finished(owner, result, error):
+                if error is not None:
+                    owner.status_bar.setText(f"⭐ 板块关注保存失败: {sec}")
+                    return
+                owner.status_bar.setText(f"⭐ 已更新重点关注板块: {sec}")
+                owner._render_sectors_table(owner._last_sectors)
+            submit_favorite_action(
+                self, "toggle_favorite_sector_result", sec,
+                on_complete=_sector_favorite_finished,
+            )
         elif chosen == act_copy_sec:
             QApplication.clipboard().setText(sec)
             self.status_bar.setText(f"📋 已复制板块名称: {sec}")
@@ -1814,11 +1822,18 @@ class SectorRotationMinerDialog(QDialog, WindowMixin):
     def _toggle_favorite_stock(self, code: str, name: str = ""):
         """切换股票重点关注状态"""
         try:
-            fav_mgr = GlobalFavoriteManager()
-            is_now_fav = fav_mgr.toggle_favorite_stock(str(code).strip())
-            act_text = "已加入重点关注" if is_now_fav else "已从重点关注移除"
-            self.status_bar.setText(f"⭐ {act_text}: {name or code} ({code})")
-            self._apply_candidate_filter()
+            from ats.ui.favorite_actions import submit_favorite_action
+            def _finished(owner, result, error):
+                if error is not None:
+                    owner.status_bar.setText(f"⭐ 保存失败: {name or code} ({code})")
+                    return
+                action = "已加入重点关注" if result.get("status") == "added" else "已从重点关注移除"
+                owner.status_bar.setText(f"⭐ {action}: {name or code} ({code})")
+                owner._apply_candidate_filter()
+            submit_favorite_action(
+                self, "toggle_favorite_stock_result", str(code).strip(),
+                on_complete=_finished,
+            )
         except Exception as e:
             logger.debug(f"Toggle favorite stock error: {e}")
 

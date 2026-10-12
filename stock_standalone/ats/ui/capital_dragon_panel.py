@@ -1769,24 +1769,11 @@ class CapitalDragonPanel(QWidget):
     def _toggle_global_favorite(self, code: str, name: str = ""):
         """切换全系统重点关注状态，通知全系统各观察池和表格安全刷新"""
         try:
-            from global_favorites import GlobalFavoriteManager
-            fav_mgr = GlobalFavoriteManager()
-            is_fav = fav_mgr.is_favorite_stock(code)
-            fav_mgr.toggle_favorite_stock(code)
-            win = self.window()
-            if win and hasattr(win, '_safe_favorites_changed'):
-                win._safe_favorites_changed()
-            action_str = "已取消全系统重点关注" if is_fav else "已加入全系统重点关注"
-            toast_text = f"⭐ 【{name or code}】{action_str}"
-            try:
-                from stock_logic_utils import toast_messageQT
-                toast_messageQT(self, toast_text)
-            except Exception:
-                pass
-            if self.main_window and hasattr(self.main_window, 'statusBar'):
-                sb = self.main_window.statusBar()
-                if sb:
-                    sb.showMessage(toast_text, 3000)
+            from ats.ui.favorite_actions import submit_favorite_action
+            submit_favorite_action(
+                self, "toggle_favorite_stock_result", str(code).strip(),
+                success_message=f"⭐ 【{name or code}】关注状态已保存",
+            )
         except Exception as e:
             logger.error(f"[CapitalDragonPanel] 切换全系统重点关注异常: {e}")
 

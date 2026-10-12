@@ -2170,9 +2170,16 @@ class SectorDetailDialog(QDialog, WindowMixin):
 
     def _toggle_favorite_stock(self, code: str):
         """切换个股重点关注状态"""
-        from global_favorites import GlobalFavoriteManager
-        action = GlobalFavoriteManager().toggle_favorite_stock(code)
-        logger.info(f"{'⭐ 设为' if action == 'added' else '❌ 取消'}重点个股: {code}")
+        from ats.ui.favorite_actions import submit_favorite_action
+        def _report(_owner, result, error):
+            if error is not None:
+                logger.warning("Favorite toggle failed for %s: %s", code, error)
+                return
+            action = result.get("status")
+            logger.info(f"{'⭐ 设为' if action == 'added' else '❌ 取消'}重点个股: {code}")
+            if hasattr(_owner, "_on_favorites_changed"):
+                _owner._on_favorites_changed()
+        submit_favorite_action(self, "toggle_favorite_stock_result", code, on_complete=_report)
 
     def _on_favorites_changed(self):
         """GlobalFavoriteManager 回调，刷新列表"""
@@ -3189,9 +3196,16 @@ class CategoryDetailDialog(QDialog, WindowMixin):
 
     def _toggle_favorite_stock(self, code: str):
         """切换个股重点关注状态"""
-        from global_favorites import GlobalFavoriteManager
-        action = GlobalFavoriteManager().toggle_favorite_stock(code)
-        logger.info(f"{'⭐ 设为' if action == 'added' else '❌ 取消'}重点个股: {code}")
+        from ats.ui.favorite_actions import submit_favorite_action
+        def _report(_owner, result, error):
+            if error is not None:
+                logger.warning("Favorite toggle failed for %s: %s", code, error)
+                return
+            action = result.get("status")
+            logger.info(f"{'⭐ 设为' if action == 'added' else '❌ 取消'}重点个股: {code}")
+            if hasattr(_owner, "_on_favorites_changed"):
+                _owner._on_favorites_changed()
+        submit_favorite_action(self, "toggle_favorite_stock_result", code, on_complete=_report)
 
     def _on_favorites_changed(self):
         """GlobalFavoriteManager 回调，刷新列表"""
@@ -4699,16 +4713,30 @@ class BiddingRacingRhythmPanel(QWidget, WindowMixin):
     def _toggle_favorite_stock(self, code: str):
         """切换个股重点关注状态，通过 GlobalFavoriteManager 原子更新并广播。"""
         clean_code = code.replace("⭐ ", "").replace("⚡", "").replace("🔔", "").strip()
-        from global_favorites import GlobalFavoriteManager
-        action = GlobalFavoriteManager().toggle_favorite_stock(clean_code)
-        logger.info(f"{'⭐ 设为' if action == 'added' else '❌ 取消'}重点个股: {clean_code}")
+        from ats.ui.favorite_actions import submit_favorite_action
+        def _report(_owner, result, error):
+            if error is not None:
+                logger.warning("Favorite toggle failed for %s: %s", clean_code, error)
+                return
+            action = result.get("status")
+            logger.info(f"{'⭐ 设为' if action == 'added' else '❌ 取消'}重点个股: {clean_code}")
+            if hasattr(_owner, "_on_favorites_changed"):
+                _owner._on_favorites_changed()
+        submit_favorite_action(self, "toggle_favorite_stock_result", clean_code, on_complete=_report)
 
     def _toggle_favorite_sector(self, sector_name: str):
         """切换板块重点关注状态，通过 GlobalFavoriteManager 原子更新并广播。"""
         clean_sector = sector_name.replace("⭐ ", "").strip()
-        from global_favorites import GlobalFavoriteManager
-        action = GlobalFavoriteManager().toggle_favorite_sector(clean_sector)
-        logger.info(f"{'⭐ 设为' if action == 'added' else '❌ 取消'}重点板块: {clean_sector}")
+        from ats.ui.favorite_actions import submit_favorite_action
+        def _report(_owner, result, error):
+            if error is not None:
+                logger.warning("Favorite sector toggle failed for %s: %s", clean_sector, error)
+                return
+            action = result.get("status")
+            logger.info(f"{'⭐ 设为' if action == 'added' else '❌ 取消'}重点板块: {clean_sector}")
+            if hasattr(_owner, "_on_favorites_changed"):
+                _owner._on_favorites_changed()
+        submit_favorite_action(self, "toggle_favorite_sector_result", clean_sector, on_complete=_report)
 
     def _on_stock_context_menu(self, pos):
         """个股表右键菜单"""

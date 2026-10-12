@@ -5,24 +5,103 @@ import logging
 import threading
 import time
 import contextlib
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Set, Callable, Any
 import sys_utils
 
 _base_dir = sys_utils.get_app_root()
+_favorite_storage_error = None
 def _get_fav_config_path(filename="window_config.json"):
+    global _favorite_storage_error
     path = sys_utils.get_conf_path(filename, _base_dir)
     if not path:
         path = os.path.join(_base_dir, filename)
+    if filename == "favorite_stocks.json":
+        from linkage_storage import runtime_file
+        try:
+            return runtime_file(str(path), max_bytes=4 * 1024 * 1024)
+        except Exception as exc:
+            _favorite_storage_error = str(exc)
+            logging.getLogger('instock_TK.GlobalFavoriteManager').error(
+                'Favorite RAMDisk unavailable; local snapshot is read-only: %s', exc)
     return str(path)
 WINDOW_CONFIG_FILE = _get_fav_config_path("window_config.json")
 FAVORITE_STOCKS_FILE = _get_fav_config_path("favorite_stocks.json")
 
 logger = logging.getLogger("instock_TK.GlobalFavoriteManager")
+_stock_code_catalog_lock = threading.RLock()
+_stock_code_catalog_cache = None
+_favorite_write_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="FavoriteStoreWriter")
+_favorite_write_slots = threading.BoundedSemaphore(64)
+
+
+def submit_favorite_write(function, *args, **kwargs):
+    """Queue one serialized favorite-store mutation without blocking a UI thread."""
+    if not callable(function):
+        raise TypeError("favorite_write_callable_required")
+    if not _favorite_write_slots.acquire(blocking=False):
+        future = Future()
+        future.set_exception(RuntimeError("favorite_write_queue_full"))
+        return future
+    try:
+        future = _favorite_write_executor.submit(function, *args, **kwargs)
+    except Exception:
+        _favorite_write_slots.release()
+        raise
+    future.add_done_callback(lambda _completed: _favorite_write_slots.release())
+    return future
+
+
+def _is_supported_a_share_code(code):
+    return (len(code) == 6 and code.isdigit() and code != "000000" and
+            code.startswith(("600", "601", "603", "605", "688", "689", "000", "001", "002", "003", "300", "301")))
+
+
+def _load_stock_code_catalog():
+    global _stock_code_catalog_cache
+    try:
+        path = sys_utils.get_conf_path("stock_codes.conf", _base_dir)
+        if not path or not os.path.isfile(path) or os.path.getsize(path) <= 0:
+            raise ValueError("stock_directory_unavailable")
+        stat = os.stat(path)
+        identity = (os.path.normcase(os.path.abspath(path)), stat.st_mtime_ns, stat.st_size)
+    except (OSError, TypeError, ValueError) as error:
+        if str(error) == "stock_directory_unavailable":
+            raise
+        raise ValueError("stock_directory_unavailable") from error
+
+    with _stock_code_catalog_lock:
+        cached = _stock_code_catalog_cache
+        if cached is not None and cached[0] == identity:
+            return cached[1]
+        try:
+            try:
+                with open(path, "r", encoding="utf-8-sig") as file_obj:
+                    payload = json.load(file_obj)
+            except UnicodeDecodeError:
+                with open(path, "r", encoding="gbk") as file_obj:
+                    payload = json.load(file_obj)
+            raw_codes = payload.get("stock") if isinstance(payload, dict) else None
+            if not isinstance(raw_codes, list):
+                raise ValueError("stock_directory_unavailable")
+            codes = frozenset(str(item).strip() for item in raw_codes if _is_supported_a_share_code(str(item).strip()))
+            if not codes:
+                raise ValueError("stock_directory_unavailable")
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as error:
+            if str(error) in ("stock_directory_unavailable", "stock_directory_stale"):
+                raise
+            raise ValueError("stock_directory_unavailable") from error
+        _stock_code_catalog_cache = (identity, codes)
+        return codes
 
 
 @contextlib.contextmanager
 def _favorites_file_lock(path: str, timeout: float = 8.0):
     """Serialize favorite-file updates across TK/ATS processes."""
+    if _favorite_storage_error and os.path.abspath(path) == os.path.abspath(FAVORITE_STOCKS_FILE):
+        # Read-only fallback must not create a lock file on local storage.
+        yield
+        return
     lock_path = f"{path}.lock"
     os.makedirs(os.path.dirname(os.path.abspath(lock_path)), exist_ok=True)
     handle = open(lock_path, "a+b")
@@ -274,6 +353,8 @@ class GlobalFavoriteManager:
             self.save_to_config(FAVORITE_STOCKS_FILE)
 
     def _read_store(self, path):
+        if os.path.exists(path) and os.path.getsize(path) > 4 * 1024 * 1024:
+            raise ValueError('favorite_store_size_limit')
         if not os.path.exists(path):
             return {}, {
                 "sectors": set(), "stocks": set(), "dates": {},
@@ -375,6 +456,8 @@ class GlobalFavoriteManager:
 
     @staticmethod
     def _write_store(path, payload, state):
+        if _favorite_storage_error and os.path.abspath(path) == os.path.abspath(FAVORITE_STOCKS_FILE):
+            raise RuntimeError('favorite_storage_read_only: ' + _favorite_storage_error)
         ui_key = "sector_bidding_panel_persistence_ui_state"
         ui_state = payload.get(ui_key)
         if not isinstance(ui_state, dict):
@@ -403,6 +486,12 @@ class GlobalFavoriteManager:
         payload["system_linkage"] = linkage
 
         content = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        if len(content) > 4 * 1024 * 1024:
+            raise ValueError("favorite_store_size_limit: reliable operation identities retained")
+        if os.path.exists(path):
+            with open(path, "rb") as existing:
+                if existing.read(4 * 1024 * 1024 + 1) == content:
+                    return content
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         tmp_path = f"{path}.tmp.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}"
         try:
@@ -542,17 +631,22 @@ class GlobalFavoriteManager:
             source = str(operation.get("source") or "")
             return bool(source and source in self.favorite_sources.get(code, {}))
 
+    def validate_stock_code(self, code):
+        code = str(code or "").strip()
+        if not _is_supported_a_share_code(code):
+            raise ValueError("unsupported_stock_code")
+        if code not in _load_stock_code_catalog():
+            raise ValueError("unsupported_stock_code")
+        return code
+
     def ensure_linkage_favorite(self, code, operation_id, add_date=None, metadata=None):
-        """Idempotently add one stock and atomically record the operation marker."""
+        """Idempotently add one catalog-listed A-share and record its operation marker."""
         code = str(code or "").strip()
         operation_id = str(operation_id or "").strip()
         if len(code) != 6 or not code.isdigit() or code == "000000":
             raise ValueError("invalid_stock_code")
         if not operation_id or len(operation_id) > 128:
             raise ValueError("invalid_operation_id")
-        if sys_utils.is_delisted_stock(code):
-            raise ValueError("delisted_stock")
-
         def apply(state):
             safe_metadata = dict(metadata or {})
             source_name = str(safe_metadata.get("source") or "sbc").strip()[:80]
@@ -566,6 +660,9 @@ class GlobalFavoriteManager:
                         or previous.get("source") not in (None, source)):
                     raise ValueError("operation_id_conflict")
                 return {"status": previous.get("status", "applied"), "already_applied": True}, False
+            if sys_utils.is_delisted_stock(code):
+                raise ValueError("delisted_stock")
+            self.validate_stock_code(code)
             already_present = code in state["stocks"]
             if not already_present:
                 state["stocks"].add(code)
@@ -615,9 +712,6 @@ class GlobalFavoriteManager:
                 expected_revision = max(0, int(expected_revision))
             except (TypeError, ValueError) as error:
                 raise ValueError("invalid_favorites_revision") from error
-        if action == "add" and sys_utils.is_delisted_stock(code):
-            raise ValueError("delisted_stock")
-
         def apply(state):
             previous = state["operations"].get(operation_id)
             if previous is not None:
@@ -627,6 +721,10 @@ class GlobalFavoriteManager:
                 return {"status": previous.get("status", "applied"), "already_applied": True}, False
             if expected_revision is not None and int(state["revision"]) != expected_revision:
                 raise ValueError("favorites_revision_conflict")
+            if action == "add":
+                if sys_utils.is_delisted_stock(code):
+                    raise ValueError("delisted_stock")
+                self.validate_stock_code(code)
             now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             if action == "add":
                 state["stocks"].add(code)
@@ -762,7 +860,7 @@ class GlobalFavoriteManager:
                         del state["dates"][code]
                 normalized = (before != (state["sectors"], state["stocks"], state["dates"])
                               or bool(delisted))
-                if normalized:
+                if normalized and not _favorite_storage_error:
                     state["revision"] += 1
                     content = self._write_store(path, payload, state)
                 else:
@@ -869,21 +967,69 @@ class GlobalFavoriteManager:
             return None
 
     def add_favorite_sector(self, sector: str):
+        try:
+            self.add_favorite_sector_result(sector)
+        except Exception as error:
+            logger.error("Favorite sector add was not persisted: %s", error)
+
+    def add_favorite_sector_result(self, sector: str):
         sector = str(sector or "").strip()
         if not sector:
-            return
-        self._legacy_change(lambda state: (state["sectors"].add(sector) or None, False))
+            raise ValueError("invalid_favorite_sector")
+
+        def add(state):
+            existed = sector in state["sectors"]
+            state["sectors"].add(sector)
+            return {"status": "already_present" if existed else "added"}, False
+
+        result, revision = self._mutate_store(add)
+        result.update({"persisted": True, "favorites_revision": revision})
+        return result
 
     def remove_favorite_sector(self, sector: str):
+        try:
+            self.remove_favorite_sector_result(sector)
+        except Exception as error:
+            logger.error("Favorite sector removal was not persisted: %s", error)
+
+    def remove_favorite_sector_result(self, sector: str):
         sector = str(sector or "").strip()
         if not sector:
-            return
-        self._legacy_change(lambda state: (state["sectors"].discard(sector) or None, False))
+            raise ValueError("invalid_favorite_sector")
+
+        def remove(state):
+            state["sectors"].discard(sector)
+            return {"status": "removed"}, False
+
+        result, revision = self._mutate_store(remove)
+        result.update({"persisted": True, "favorites_revision": revision})
+        return result
+
+    def remove_favorite_sectors_result(self, sectors):
+        normalized = list(dict.fromkeys(str(value or "").strip() for value in list(sectors or [])
+                                        if str(value or "").strip()))
+        if not normalized:
+            return {"persisted": True, "removed_count": 0, "favorites_revision": self.persistent_revision}
+
+        def remove_many(state):
+            for sector in normalized:
+                state["sectors"].discard(sector)
+            return None, False
+
+        _, revision = self._mutate_store(remove_many)
+        return {"persisted": True, "removed_count": len(normalized), "favorites_revision": revision}
 
     def toggle_favorite_sector(self, sector: str):
+        try:
+            return self.toggle_favorite_sector_result(sector)["status"]
+        except Exception as error:
+            logger.error("Favorite sector toggle was not persisted: %s", error)
+            return "error"
+
+    def toggle_favorite_sector_result(self, sector: str):
         sector = str(sector or "").strip()
         if not sector:
-            return "error"
+            raise ValueError("invalid_favorite_sector")
 
         def toggle(state):
             if sector in state["sectors"]:
@@ -892,25 +1038,36 @@ class GlobalFavoriteManager:
             state["sectors"].add(sector)
             return "added", False
 
-        return self._legacy_change(toggle) or "error"
+        status, revision = self._mutate_store(toggle)
+        return {"status": status, "persisted": True, "favorites_revision": revision}
 
     def is_favorite_sector(self, sector: str) -> bool:
         with self._lock:
             return sector in self.favorite_sectors
 
     def add_favorite_stock(self, code: str, add_date: str = None):
+        try:
+            self.add_favorite_stock_result(code, add_date)
+        except Exception as error:
+            logger.error("Favorite add was not persisted: %s", error)
+
+    def add_favorite_stock_result(self, code: str, add_date: str = None):
         code = str(code or "").strip()
         if not code.isdigit() or not 1 <= len(code) <= 6:
-            return
+            raise ValueError("invalid_stock_code")
         code = code.zfill(6)
-        if code == '000000' or sys_utils.is_delisted_stock(code):
-            if sys_utils.is_delisted_stock(code):
-                logger.warning(f"🚫 [GlobalFavorites] 拦截添加已知退市死码: {code}")
-            return
-            
-        self._legacy_change(lambda state: self._add_favorite_source_state(
-            state, code, "manual", add_date, {},
-        ))
+        if code == "000000" or sys_utils.is_delisted_stock(code):
+            raise ValueError("delisted_stock" if sys_utils.is_delisted_stock(code) else "unsupported_stock_code")
+        self.validate_stock_code(code)
+
+        def add(state):
+            existed = "manual" in state["sources"].get(code, {})
+            self._add_favorite_source_state(state, code, "manual", add_date, {})
+            return {"status": "already_present" if existed else "added"}, False
+
+        result, revision = self._mutate_store(add)
+        result.update({"persisted": True, "favorites_revision": revision})
+        return result
 
     def _add_favorite_source_state(self, state, code, source, add_date=None, metadata=None):
         state["stocks"].add(code)
@@ -926,35 +1083,62 @@ class GlobalFavoriteManager:
 
     def add_favorites_batch(self, items, add_date: str = None):
         """批量添加重点关注，支持 code 列表"""
-        if not items:
-            return
+        try:
+            self.add_favorites_batch_result(items, add_date)
+        except Exception as error:
+            logger.error("Favorite batch add was not persisted: %s", error)
+
+    def add_favorites_batch_result(self, items, add_date: str = None):
+        """Persist one validated batch and return per-item validation failures."""
+        accepted = {}
+        rejected = []
+        for item in list(items or []):
+            item_date = add_date
+            if isinstance(item, str):
+                raw_code = item.strip()
+            elif isinstance(item, (tuple, list)) and item:
+                raw_code = str(item[0]).strip()
+                if len(item) >= 2 and item[1]:
+                    item_date = str(item[1])
+            else:
+                rejected.append({"code": "", "error": "invalid_stock_code"})
+                continue
+            if not raw_code.isdigit() or not 1 <= len(raw_code) <= 6:
+                rejected.append({"code": raw_code, "error": "invalid_stock_code"})
+                continue
+            code = raw_code.zfill(6)
+            try:
+                if code == "000000" or sys_utils.is_delisted_stock(code):
+                    raise ValueError("delisted_stock" if sys_utils.is_delisted_stock(code) else "unsupported_stock_code")
+                self.validate_stock_code(code)
+            except (OSError, TypeError, ValueError) as error:
+                rejected.append({"code": code, "error": str(error) or "unsupported_stock_code"})
+                continue
+            accepted[code] = item_date
+
+        if not accepted:
+            return {"persisted": True, "added_count": 0, "rejected": rejected,
+                    "favorites_revision": self.persistent_revision}
 
         def add_batch(state):
-            for item in items:
-                code = None
-                item_date = add_date
-                if isinstance(item, str):
-                    code = item.strip()
-                elif isinstance(item, (tuple, list)) and len(item) >= 1:
-                    code = str(item[0]).strip()
-                    if len(item) >= 2 and item[1]:
-                        item_date = str(item[1])
-
-                if not code or not code.isdigit() or not 1 <= len(code) <= 6:
-                    continue
-                code = code.zfill(6)
-                if code == '000000' or sys_utils.is_delisted_stock(code):
-                    continue
-
+            for code, item_date in accepted.items():
                 self._add_favorite_source_state(state, code, "manual", item_date, {})
             return None, False
 
-        self._legacy_change(add_batch)
+        _, revision = self._mutate_store(add_batch)
+        return {"persisted": True, "added_count": len(accepted), "rejected": rejected,
+                "favorites_revision": revision}
 
     def remove_favorite_stock(self, code: str):
+        try:
+            self.remove_favorite_stock_result(code)
+        except Exception as error:
+            logger.error("Favorite removal was not persisted: %s", error)
+
+    def remove_favorite_stock_result(self, code: str):
         code = str(code or "").strip()
         if not code.isdigit() or not 1 <= len(code) <= 6:
-            return
+            raise ValueError("invalid_stock_code")
         code = code.zfill(6)
         def remove(state):
             state["stocks"].discard(code)
@@ -968,7 +1152,40 @@ class GlobalFavoriteManager:
             }
             return None, False
 
-        self._legacy_change(remove)
+        _, revision = self._mutate_store(remove)
+        return {"status": "removed", "persisted": True, "favorites_revision": revision}
+
+    def remove_favorites_batch_result(self, codes):
+        """Persist a multi-stock removal with one read/modify/write transaction."""
+        normalized = []
+        rejected = []
+        for value in list(codes or []):
+            code = str(value or "").strip()
+            if not code.isdigit() or not 1 <= len(code) <= 6:
+                rejected.append({"code": code, "error": "invalid_stock_code"})
+                continue
+            normalized.append(code.zfill(6))
+        normalized = list(dict.fromkeys(normalized))
+        if not normalized:
+            return {"persisted": True, "removed_count": 0, "rejected": rejected,
+                    "favorites_revision": self.persistent_revision}
+
+        def remove_batch(state):
+            for code in normalized:
+                state["stocks"].discard(code)
+                state["dates"].pop(code, None)
+                state["sources"].pop(code, None)
+                state["source_tombstones"].pop(code, None)
+                state["tombstones"][code] = {
+                    "operation_id": "local-remove-" + str(time.time_ns()),
+                    "local_revision": int(state["revision"]) + 1,
+                    "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                }
+            return None, False
+
+        _, revision = self._mutate_store(remove_batch)
+        return {"persisted": True, "removed_count": len(normalized), "rejected": rejected,
+                "favorites_revision": revision}
 
     def remove_favorite_source(self, code: str, source: str):
         code = str(code or "").strip()
@@ -993,12 +1210,19 @@ class GlobalFavoriteManager:
         self._legacy_change(remove)
 
     def toggle_favorite_stock(self, code: str, add_date: str = None):
+        try:
+            return self.toggle_favorite_stock_result(code, add_date)["status"]
+        except Exception as error:
+            logger.error("Favorite toggle was not persisted: %s", error)
+            return "error"
+
+    def toggle_favorite_stock_result(self, code: str, add_date: str = None):
         code = str(code or "").strip()
         if not code.isdigit() or not 1 <= len(code) <= 6:
-            return "error"
+            raise ValueError("invalid_stock_code")
         code = code.zfill(6)
-        if code == "000000" or sys_utils.is_delisted_stock(code):
-            return "error"
+        if code == "000000":
+            raise ValueError("unsupported_stock_code")
 
         def toggle(state):
             if code in state["stocks"]:
@@ -1012,10 +1236,14 @@ class GlobalFavoriteManager:
                     "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 }
                 return "removed", False
+            if sys_utils.is_delisted_stock(code):
+                raise ValueError("delisted_stock")
+            self.validate_stock_code(code)
             self._add_favorite_source_state(state, code, "manual", add_date, {})
             return "added", False
 
-        return self._legacy_change(toggle) or "error"
+        status, revision = self._mutate_store(toggle)
+        return {"status": status, "persisted": True, "favorites_revision": revision}
 
     def is_favorite_stock(self, code: str) -> bool:
         code = str(code).strip().zfill(6)

@@ -969,10 +969,12 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
 
     def _toggle_favorite(self, row, code, name_clean):
         try:
-            from global_favorites import GlobalFavoriteManager
-            fav_mgr = GlobalFavoriteManager()
-            fav_mgr.toggle_favorite_stock(code)
-            self.refresh_favorites_display()
+            from ats.ui.favorite_actions import submit_favorite_action
+            submit_favorite_action(
+                self, "toggle_favorite_stock_result", code,
+                on_complete=lambda owner, result, error: owner.refresh_favorites_display()
+                if error is None else None,
+            )
         except Exception as e:
             print(f"[DistributionDetailsDialog] Toggle favorite error: {e}")
 

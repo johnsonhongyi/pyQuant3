@@ -19,6 +19,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
+from linkage_storage import runtime_database, configure as configure_linkage_database, trim as trim_linkage_database
 from sys_utils import get_app_root
 from system_linkage_gateway import _resolve_key_file
 
@@ -348,8 +349,8 @@ class SystemLinkageContextClient:
     def __init__(self, config, callback=None, database_path=None, poll_interval=60):
         self.config = config
         self.callback = callback
-        self.database_path = database_path or os.path.join(get_app_root(), "system_linkage.sqlite3")
-        self.poll_interval = max(15, min(int(poll_interval), 300))
+        self.database_path = database_path or runtime_database(os.path.join(get_app_root(), "system_linkage.sqlite3"))
+        self.poll_interval = max(60, min(int(poll_interval), 300))
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread = None
@@ -377,7 +378,7 @@ class SystemLinkageContextClient:
         connection = sqlite3.connect(self.database_path, timeout=4.0)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout=4000")
-        connection.execute("PRAGMA synchronous=FULL")
+        configure_linkage_database(connection)
         return connection
 
     @contextmanager
@@ -395,7 +396,7 @@ class SystemLinkageContextClient:
     def _init_store(self):
         os.makedirs(os.path.dirname(os.path.abspath(self.database_path)), exist_ok=True)
         with self._connection() as connection:
-            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA journal_mode=DELETE")
             connection.execute("""CREATE TABLE IF NOT EXISTS linkage_context_snapshots (
                 snapshot_id TEXT PRIMARY KEY, trade_date TEXT NOT NULL DEFAULT '',
                 received_at TEXT NOT NULL, stored_at TEXT NOT NULL, payload BLOB NOT NULL)""")
@@ -707,6 +708,11 @@ class SystemLinkageContextClient:
 
     def _run(self):
         while not self._stop.is_set():
+            # A self-wakeup on revision conflict must not become a busy retry loop.
+            delay = getattr(self, '_next_attention_poll', 0.0) - time.monotonic()
+            if delay > 0 and self._stop.wait(delay):
+                break
+            self._next_attention_poll = time.monotonic() + 5.0
             try:
                 self._drain_source_events()
                 try:
@@ -722,6 +728,12 @@ class SystemLinkageContextClient:
                         if str(error) in ("attention_revision_conflict", "favorites_revision_conflict"):
                             self._attention_wakeup.set()
                         logger.debug("System-linkage attention sync failed: %s", error)
+                next_context_poll = getattr(self, '_next_context_poll', 0.0)
+                if time.monotonic() < next_context_poll:
+                    self._attention_wakeup.wait(min(self.poll_interval, next_context_poll - time.monotonic()))
+                    self._attention_wakeup.clear()
+                    continue
+                self._next_context_poll = time.monotonic() + self.poll_interval
                 snapshot = self._fetch_json("/api/v1/linkage/context")
                 if not isinstance(snapshot, dict) or snapshot.get("schema_version") != 1 or not snapshot.get("snapshot_id"):
                     raise ValueError("invalid_context_snapshot")
@@ -792,14 +804,26 @@ class SystemLinkageContextClient:
         payload = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if len(payload) > _MAX_CONTEXT_BYTES:
             raise ValueError("linkage_context_too_large")
+        significant = {key: value for key, value in snapshot.items()
+                       if key not in ('snapshot_id', 'received_at', 'stored_at', 'as_of', 'generated_at')}
+        digest = hashlib.sha256(json.dumps(significant, ensure_ascii=False, sort_keys=True,
+                                           separators=(',', ':')).encode('utf-8')).hexdigest()
         with self._connection() as connection:
-            cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
-            connection.execute("INSERT OR IGNORE INTO linkage_context_snapshots(snapshot_id,trade_date,received_at,stored_at,payload) VALUES(?,?,?,?,?)",
-                               (snapshot["snapshot_id"], snapshot.get("trade_date", ""), snapshot.get("received_at", ""),
-                                datetime.now(timezone.utc).isoformat(), payload))
-            connection.execute("DELETE FROM linkage_context_snapshots WHERE stored_at < ?", (cutoff,))
-            connection.execute("DELETE FROM linkage_context_snapshots WHERE snapshot_id NOT IN ("
-                               "SELECT snapshot_id FROM linkage_context_snapshots ORDER BY stored_at DESC,snapshot_id DESC LIMIT 500)")
+            connection.execute("CREATE TABLE IF NOT EXISTS linkage_context_dedup ("
+                               "kind TEXT NOT NULL, digest TEXT NOT NULL, repeat_count INTEGER NOT NULL DEFAULT 1, "
+                               "last_seen TEXT NOT NULL, PRIMARY KEY(kind,digest))")
+            now = datetime.now(timezone.utc).isoformat()
+            previous = connection.execute("SELECT digest FROM linkage_context_dedup WHERE kind='snapshot'").fetchone()
+            if previous and previous['digest'] == digest:
+                connection.execute("UPDATE linkage_context_dedup SET repeat_count=repeat_count+1,last_seen=? "
+                                   "WHERE kind='snapshot' AND digest=?", (now, digest))
+                return
+            connection.execute("DELETE FROM linkage_context_dedup WHERE kind='snapshot'")
+            connection.execute("INSERT INTO linkage_context_dedup(kind,digest,last_seen) VALUES('snapshot',?,?)", (digest, now))
+            connection.execute("DELETE FROM linkage_context_snapshots")
+            connection.execute("INSERT INTO linkage_context_snapshots(snapshot_id,trade_date,received_at,stored_at,payload) VALUES(?,?,?,?,?)",
+                               (snapshot["snapshot_id"], snapshot.get("trade_date", ""), snapshot.get("received_at", ""), now, payload))
+            trim_linkage_database(connection)
 
     def _sync_events(self):
         with self._connection() as connection:
@@ -813,18 +837,40 @@ class SystemLinkageContextClient:
         if not events:
             return
         with self._connection() as connection:
-            cutoff = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
             for event in events[:200]:
-                if not isinstance(event, dict) or not event.get("event_id"):
+                if (not isinstance(event, dict) or not event.get("event_id")
+                        or not event.get('event_type') or not event.get('occurred_at')):
                     continue
                 payload = json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-                connection.execute("INSERT OR IGNORE INTO linkage_context_events(event_id,event_type,occurred_at,payload) VALUES(?,?,?,?)",
-                                   (event["event_id"], event.get("event_type", ""), event.get("occurred_at", ""), payload))
+                if len(payload) > 64 * 1024:
+                    logger.warning('Oversized linkage event skipped: %s', event.get('event_type'))
+                    continue
+                significant = {key: value for key, value in event.items()
+                               if key not in ('event_id', 'occurred_at', 'received_at', 'as_of')}
+                digest = hashlib.sha256(json.dumps(significant, ensure_ascii=False, sort_keys=True,
+                                                   separators=(',', ':')).encode('utf-8')).hexdigest()
+                dedup_id = 'content:' + digest
+                previous = connection.execute("SELECT payload FROM linkage_context_events WHERE event_id=?", (dedup_id,)).fetchone()
+                if previous:
+                    retained = json.loads(bytes(previous['payload']).decode('utf-8'))
+                    if retained.get('_last_event_id', retained.get('event_id')) == event['event_id']:
+                        continue
+                    retained['_last_event_id'] = event['event_id']
+                    retained['repeat_count'] = int(retained.get('repeat_count', 1)) + 1
+                    retained['last_seen'] = event.get('occurred_at', '')
+                    payload = json.dumps(retained, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+                    connection.execute("UPDATE linkage_context_events SET payload=?,occurred_at=? WHERE event_id=?",
+                                       (payload, event.get('occurred_at', ''), dedup_id))
+                else:
+                    connection.execute("INSERT INTO linkage_context_events(event_id,event_type,occurred_at,payload) VALUES(?,?,?,?)",
+                                       (dedup_id, event.get("event_type", ""), event.get("occurred_at", ""), payload))
             cursor = str(events[min(len(events), 200) - 1].get("event_id", ""))
             if cursor:
                 connection.execute("INSERT INTO linkage_context_cursor(cursor_key,cursor_value) VALUES('events',?) ON CONFLICT(cursor_key) DO UPDATE SET cursor_value=excluded.cursor_value",
                                    (cursor,))
             connection.execute("DELETE FROM linkage_context_events WHERE occurred_at < ?", (cutoff,))
+            trim_linkage_database(connection)
             rows = connection.execute("SELECT payload FROM linkage_context_events ORDER BY occurred_at DESC,event_id DESC LIMIT 100").fetchall()
         events_cache = []
         for row in rows:
@@ -1058,6 +1104,15 @@ class SystemLinkageContextClient:
                 if current and int(current.get("revision", 0) or 0) > int(state.get("attention_revision", 0) or 0):
                     conflicts += 1
                     continue
+                validator = getattr(manager, "validate_stock_code", None)
+                if callable(validator):
+                    try:
+                        validator(code)
+                    except ValueError as error:
+                        if str(error) in ("unsupported_stock_code", "stock_directory_unavailable", "delisted_stock"):
+                            conflicts += 1
+                            continue
+                        raise
                 intent_id = _attention_intent_id(self._workspace_id, self._node_id, symbol, source, "add",
                                                  (metadata or {}).get("local_revision", state["favorites_revision"]),
                                                  (metadata or {}).get("operation_id", ""))
@@ -1095,10 +1150,16 @@ class SystemLinkageContextClient:
                 continue
             present = source in local.get("sources", {}).get(code, {})
             if remote.get("active") and not present:
-                result = manager.apply_favorite_source_intent(
-                    code, source, "add", remote.get("intent_id"), origin="remote_sync",
-                    expected_revision=local_revision,
-                )
+                try:
+                    result = manager.apply_favorite_source_intent(
+                        code, source, "add", remote.get("intent_id"), origin="remote_sync",
+                        expected_revision=local_revision,
+                    )
+                except ValueError as error:
+                    if str(error) in ("unsupported_stock_code", "stock_directory_unavailable", "delisted_stock"):
+                        conflicts += 1
+                        continue
+                    raise
                 local_revision = int(result.get("favorites_revision", local_revision) or local_revision)
             elif not remote.get("active") and present:
                 result = manager.apply_favorite_source_intent(

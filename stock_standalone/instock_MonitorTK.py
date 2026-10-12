@@ -611,6 +611,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 初始化退出与任务追踪 system (必须放在最前面)
         self._is_closing = False
         self._after_ids = []
+        self._favorite_write_results = Queue(maxsize=64)
         self._last_dispatch_kick = 0  
         self._dispatch_running = False # ✅ [FIX] 调度运行状态位，防止 Watchdog 重复调度堆积
         self._is_ui_sync_pending = False # 🛡️ [NEW] UI 同步任务待处理标志位
@@ -715,6 +716,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._df_first_send_done = False # ⭐ [FIX] 初始化首发标志
         self._force_full_sync_pending = False # ⭐ [FIX] 初始化强制全量同步标志
         self._force_ui_refresh_pending = False
+        self._tk_linkage_consumed_revision = 0
+        self._tk_linkage_pending_receipts = {}
+        self._tk_linkage_receipt_lock = threading.Lock()
+        self._tk_linkage_receipt_running = False
         self.sync_version = 0          # ⭐ 数据同步序列号
         self.last_vis_var_status = None 
         self._feedback_listener_thread = None  # 🛡️ [NEW] 线程守卫：防止重复启动监听器
@@ -6557,6 +6562,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     df_filtered = None
                     full_df_res = None
                     df_filtered_res = None
+                    linkage_receipt = None
                     if isinstance(latest_p, dict):
                         full_df = latest_p.get('full_snapshot')
                         df_filtered = latest_p.get('filtered_ui_data')
@@ -6574,6 +6580,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 self._linkage_quote_statuses = dict(linkage_statuses)
                                 self._linkage_favorites_revision = linkage_revision
                                 self._linkage_quote_frame_at = time.monotonic()
+                            linkage_receipt = (linkage_revision, linkage_statuses)
                             if previous_revision is not None and previous_revision != linkage_revision:
                                 self._linkage_quote_send_cursor = 0
                             if linkage_statuses or (linkage_quotes is not None and not linkage_quotes.empty):
@@ -6590,6 +6597,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if full_df is not None:
                         # 发布原始快照，不在接收线程等待历史缓存锁；动态列由 compute 补齐。
                         self.market_bus.publish(full_df, df_filtered, full_df_res, df_filtered_res)
+                        if linkage_receipt is not None:
+                            self._record_system_linkage_consumer_snapshot(*linkage_receipt)
                         self._last_snapshot_recv_time = time.time()
                         if not getattr(self, '_first_snapshot_published', False):
                             self._first_snapshot_published = True
@@ -7767,27 +7776,90 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         or operation.get('action', 'add') != 'add'):
                     status = 'error'
                 else:
-                    if manager.is_linkage_operation_active(code, operation_id):
-                        favorite_codes = sorted(
-                            str(item).strip().zfill(6)
-                            for item in manager.get_favorite_stocks()
-                        )
-                        self.global_dict['linkage_monitor_codes'] = favorite_codes
-                        self.global_dict['linkage_favorites_revision'] = int(manager.version)
-                    else:
+                    if not manager.is_linkage_operation_active(code, operation_id):
                         logger.info("Skipping superseded linkage monitor command %s for %s", operation_id, code)
-                        quote_status = 'unknown'
+                    favorite_codes = sorted(
+                        str(item).strip().zfill(6)
+                        for item in manager.get_favorite_stocks()
+                    )
+                    revision = max(revision, int(manager.persistent_revision))
+                    self.global_dict['linkage_monitor_codes'] = favorite_codes
+                    self.global_dict['linkage_favorites_revision'] = revision
                     self._force_full_sync_pending = True
                     self._force_ui_refresh_pending = True
-                    status = 'synced'
+                    with self._tk_linkage_receipt_lock:
+                        self._tk_linkage_pending_receipts[operation_id] = {
+                            'code': code, 'favorites_revision': revision,
+                        }
+                    # Queueing shared state is not proof the collector consumed it.
+                    status = 'pending'
             except Exception:
                 logger.exception("Could not add linkage favorite %s to monitor", code)
-        if gateway and operation_id:
+        if gateway and operation_id and status in ('error', 'not_running'):
             threading.Thread(
                 target=gateway.report_consumer,
                 args=(operation_id, 'TK', status, revision, quote_status),
                 name="LinkageTKReceipt", daemon=True,
             ).start()
+
+    def _record_system_linkage_consumer_snapshot(self, revision, quote_statuses=None):
+        """ACK only after the collector output carries the requested durable revision."""
+        try:
+            consumed_revision = int(revision or 0)
+        except (TypeError, ValueError, OverflowError):
+            return
+        if consumed_revision < 0:
+            return
+        quote_statuses = quote_statuses if isinstance(quote_statuses, dict) else {}
+        with self._tk_linkage_receipt_lock:
+            previous_revision = int(getattr(self, '_tk_linkage_consumed_revision', 0) or 0)
+            if consumed_revision < previous_revision:
+                return
+            self._tk_linkage_consumed_revision = consumed_revision
+            actual_revision = consumed_revision
+            eligible = {
+                operation_id: dict(record)
+                for operation_id, record in self._tk_linkage_pending_receipts.items()
+                if int(record.get('favorites_revision', 0) or 0) <= actual_revision
+            }
+            if not eligible or self._tk_linkage_receipt_running:
+                return
+            self._tk_linkage_receipt_running = True
+        gateway = getattr(self, '_system_linkage_gateway', None)
+        if gateway is None:
+            with self._tk_linkage_receipt_lock:
+                self._tk_linkage_receipt_running = False
+            return
+        try:
+            threading.Thread(
+                target=self._report_system_linkage_consumed,
+                args=(gateway, actual_revision, eligible, quote_statuses),
+                name="LinkageTKReceipt", daemon=True,
+            ).start()
+        except Exception:
+            with self._tk_linkage_receipt_lock:
+                self._tk_linkage_receipt_running = False
+            logger.exception("Could not start TK linkage consumer receipt worker")
+
+    def _report_system_linkage_consumed(self, gateway, revision, operations, quote_statuses):
+        try:
+            for operation_id, record in operations.items():
+                quote_status = quote_statuses.get(record.get('code'), 'pending_fetch')
+                try:
+                    saved = gateway.report_consumer(
+                        operation_id, 'TK', 'synced', revision, quote_status
+                    )
+                except Exception:
+                    saved = False
+                    logger.exception("Could not persist TK consumer receipt for %s", operation_id)
+                if saved:
+                    with self._tk_linkage_receipt_lock:
+                        current = self._tk_linkage_pending_receipts.get(operation_id)
+                        if current == record:
+                            self._tk_linkage_pending_receipts.pop(operation_id, None)
+        finally:
+            with self._tk_linkage_receipt_lock:
+                self._tk_linkage_receipt_running = False
 
     def _system_linkage_quote_status(self, code, frame=None, frame_at=None):
         """只用当前内存行情判断关注股状态；不回退到昨日价格冒充实时行情。"""
@@ -7842,34 +7914,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             from global_favorites import GlobalFavoriteManager
 
             manager = GlobalFavoriteManager()
-            revision = manager.get_persistent_revision()
+            with self._tk_linkage_receipt_lock:
+                revision = int(getattr(self, '_tk_linkage_consumed_revision', 0) or 0)
             favorites = {str(code).strip().zfill(6) for code in manager.get_favorite_stocks()}
-            operations = manager.list_linkage_operations()
             with self._df_lock:
                 frame = getattr(self, 'df_all', None)
                 frame_at = getattr(self, '_linkage_market_frame_at', 0.0)
-
-            states = {}
-            for operation_id, record in operations.items():
-                if not isinstance(record, dict):
-                    continue
-                code = str(record.get('code', '')).strip().zfill(6)
-                if code in favorites:
-                    states[str(operation_id)] = (code, self._system_linkage_quote_status(code, frame, frame_at))
-
-            last_reported = getattr(self, '_system_linkage_reported_states', {})
-            pending = [
-                {'operation_id': operation_id, 'quote_status': quote_status}
-                for operation_id, (_code, quote_status) in states.items()
-                if last_reported.get(operation_id) != (revision, quote_status)
-            ][:128]
-            if pending:
-                reported = gateway.report_consumer_batch('TK', pending, revision)
-                if reported == len(pending):
-                    for item in pending:
-                        last_reported[item['operation_id']] = (revision, item['quote_status'])
-                    self._system_linkage_reported_states = last_reported
-
             favorite_statuses = [
                 self._system_linkage_quote_status(code, frame, frame_at)
                 for code in list(favorites)[:512]
@@ -11561,12 +11611,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if is_fav:
                 menu.add_command(
                     label=f"⭐ 取消重点个股 ({stock_code})",
-                    command=lambda sc=stock_code: [fav_mgr.remove_favorite_stock(sc), self._on_favorites_changed()]
+                    command=lambda sc=stock_code: self._submit_favorite_write(
+                        "remove_favorite_stock_result", "remove", sc
+                    )
                 )
             else:
                 menu.add_command(
                     label=f"⭐ 设为重点个股 ({stock_code})",
-                    command=lambda sc=stock_code: [fav_mgr.add_favorite_stock(sc), self._on_favorites_changed()]
+                    command=lambda sc=stock_code: self._submit_favorite_write(
+                        "add_favorite_stock_result", "add", sc
+                    )
                 )
             
             # 批量操作
@@ -11755,6 +11809,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if getattr(self, '_is_closing', False):
             return
         try:
+            self._drain_favorite_write_results()
             from global_favorites import GlobalFavoriteManager
             import time
             current_version = GlobalFavoriteManager().version
@@ -11762,7 +11817,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             cur_stocks = fav_mgr.get_favorite_stocks()
             cur_sectors = fav_mgr.get_favorite_sectors()
             linkage_codes = sorted(str(code).strip().zfill(6) for code in cur_stocks)
-            linkage_revision = int(fav_mgr.version)
+            linkage_revision = int(fav_mgr.persistent_revision)
             if (list(self.global_dict.get('linkage_monitor_codes', [])) != linkage_codes
                     or int(self.global_dict.get('linkage_favorites_revision', 0) or 0) != linkage_revision):
                 self.global_dict['linkage_monitor_codes'] = linkage_codes
@@ -11796,45 +11851,115 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         finally:
             self.after(500, self._poll_favorites_loop)
 
+    def _drain_favorite_write_results(self):
+        """在 Tk 主线程展示异步收藏写入回执。"""
+        while True:
+            try:
+                event = self._favorite_write_results.get_nowait()
+            except Empty:
+                return
+            if event.get("error"):
+                message = f"❌ 批量关注保存失败: {event['error']}"
+            else:
+                result = event.get("result") or {}
+                rejected = result.get("rejected") or []
+                if event.get("operation") == "toggle":
+                    action = "已加入" if result.get("status") == "added" else "已移除"
+                    message = f"✅ 重点关注{action}"
+                elif "added_count" in result or "removed_count" in result:
+                    count_key = "added_count" if event.get("operation") == "add" else "removed_count"
+                    count = int(result.get(count_key, 0) or 0)
+                    if rejected and count == 0:
+                        message = f"⚠️ 批量关注未处理：{len(rejected)} 只被拒绝"
+                    elif rejected:
+                        message = f"⚠️ 批量关注部分完成：已保存 {count} 只，拒绝 {len(rejected)} 只"
+                    else:
+                        message = f"✅ 批量关注已保存 {count} 只"
+                else:
+                    status = result.get("status", "saved")
+                    action = "已加入" if event.get("operation") == "add" else "已移除"
+                    message = f"✅ 重点关注{action}（{status}）"
+                    if rejected:
+                        message += f"，{len(rejected)} 只未处理"
+            try:
+                self.status_var.set(message[:180])
+            except Exception:
+                logger.info(message)
+            callback = event.get("on_complete")
+            if callback is not None:
+                try:
+                    callback(self, event.get("result"), event.get("error") or None)
+                except Exception:
+                    logger.exception("Favorite completion callback failed")
+
     def _refresh_ui_favorites(self):
-        """[0ms 内存重绘] 收到重点关注通知后，仅在内存层面对当前数据做二次置顶并重绘 UI"""
-        try:
+        """Coalesce quote/favorite refreshes; prepare frames away from Tcl/Tk."""
+        if getattr(self, '_is_closing', False):
+            return
+        self._favorites_refresh_pending = True
+        if getattr(self, '_favorites_view_future', None) is not None:
+            return
+        self._favorites_refresh_pending = False
+        source = getattr(self, 'current_df', None)
+        context = self._view_work_context()
+        data_version = getattr(self, '_data_update_version', 0)
+        sort_state = self._capture_sort_state()
+        prior_codes = set(getattr(self, '_linkage_ui_only_codes', set()))
+        from global_favorites import GlobalFavoriteManager
+        favorites_snapshot = set(GlobalFavoriteManager().get_favorite_stocks())
+        with self._df_lock:
+            source_frame_snapshot = getattr(self, 'df_all', None)
+            quote_snapshot = getattr(self, '_linkage_quote_frame', None)
+            statuses_snapshot = dict(getattr(self, '_linkage_quote_statuses', {}))
+
+        def prepare():
             import pandas as pd
-            df = (self.current_df.copy()
-                  if isinstance(getattr(self, 'current_df', None), pd.DataFrame)
+            df = (source.copy()
+                  if isinstance(source, pd.DataFrame)
                   else pd.DataFrame())
             if 'code' not in df.columns:
                 df['code'] = df.index.astype(str)
-            prior_linkage_only = set(getattr(self, '_linkage_ui_only_codes', set()))
+            prior_linkage_only = set(prior_codes)
             if prior_linkage_only and not df.empty:
-                with self._df_lock:
-                    source_frame = getattr(self, 'df_all', None)
-                    source_codes = set(
-                        source_frame.index.astype(str).str.strip().str.zfill(6)
-                    ) if source_frame is not None and not source_frame.empty else set()
+                source_frame = source_frame_snapshot
+                source_codes = set(
+                    source_frame.index.astype(str).str.strip().str.zfill(6)
+                ) if source_frame is not None and not source_frame.empty else set()
                 remove_codes = prior_linkage_only - source_codes
                 if remove_codes:
                     row_codes = df['code'].astype(str).str.strip().str.zfill(6)
                     df = df.loc[~row_codes.isin(remove_codes)].copy()
-            with self._df_lock:
-                linkage_frame = getattr(self, '_linkage_quote_frame', None)
-                linkage_frame = linkage_frame.copy() if linkage_frame is not None else None
+            linkage_frame = quote_snapshot
+            linkage_frame = linkage_frame.copy() if linkage_frame is not None else None
             linkage_ui_only = set()
             try:
                 from global_favorites import GlobalFavoriteManager
                 from system_linkage_quotes import frame_quote_row, normalize_supported_stock_code
-                fav_stocks = GlobalFavoriteManager().get_favorite_stocks()
+                fav_stocks = favorites_snapshot
                 normalized_favorites = {
                     str(code).strip().zfill(6) for code in fav_stocks if str(code).strip()
                 }
+                row_codes = df['code'].astype(str).str.strip().str.zfill(6)
+                row_indices = {}
+                for row_index, row_code in zip(df.index, row_codes):
+                    row_indices.setdefault(row_code, row_index)
+                added_rows = []
+                added_codes = []
+                quote_rows = {}
+                if linkage_frame is not None and not linkage_frame.empty:
+                    quote_codes = (linkage_frame['code'] if 'code' in linkage_frame.columns
+                                   else linkage_frame.index)
+                    for position, quote_code in enumerate(quote_codes):
+                        quote_rows.setdefault(str(quote_code).strip().zfill(6), position)
                 for code in normalized_favorites:
                     if not normalize_supported_stock_code(code):
                         continue
-                    quote_row = frame_quote_row(linkage_frame, code)
+                    quote_position = quote_rows.get(code)
+                    quote_row = (linkage_frame.iloc[quote_position] if quote_position is not None
+                                 else frame_quote_row(linkage_frame, code))
                     if quote_row is None:
                         continue
-                    row_codes = df['code'].astype(str).str.strip().str.zfill(6)
-                    matches = df.index[row_codes == code].tolist()
+                    matches = [row_indices[code]] if code in row_indices else []
                     quote_values = quote_row.to_dict()
                     quote_values['code'] = code
                     if 'now' in quote_values:
@@ -11846,49 +11971,86 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 df[column] = pd.NA
                             df.at[row_index, column] = value
                     else:
-                        quote_values['linkage_quote_status'] = getattr(
-                            self, '_linkage_quote_statuses', {}
-                        ).get(code, 'unknown')
-                        df = pd.concat([df, pd.DataFrame([quote_values], index=[code])], sort=False)
+                        quote_values['linkage_quote_status'] = statuses_snapshot.get(code, 'unknown')
+                        added_rows.append(quote_values)
+                        added_codes.append(code)
                         linkage_ui_only.add(code)
+                if added_rows:
+                    df = pd.concat([df, pd.DataFrame(added_rows, index=added_codes)], sort=False)
                 row_codes = df['code'].astype(str).str.strip().str.zfill(6)
                 df['is_fav'] = row_codes.isin(normalized_favorites).astype(int)
-                sort_col = getattr(self, 'sortby_col', None)
-                sort_col_asc = getattr(self, 'sortby_col_ascend', False)
-                if sort_col and sort_col in df.columns:
-                    df = df.sort_values(by=['is_fav', sort_col], ascending=[False, sort_col_asc])
-                else:
-                    df = df.sort_values(by='is_fav', ascending=False)
-                if 'is_fav' in df.columns:
-                    df.drop(columns=['is_fav'], inplace=True)
-            except Exception as e:
-                logger.warning(f"Failed to sort favorites on refresh: {e}")
-            self._linkage_ui_only_codes = linkage_ui_only
-            if hasattr(self, 'tree_updater'):
-                self.tree_updater._values_cache.clear()
-            self.refresh_tree(df, force=True)
-        except Exception as e:
-            logger.warning(f"Failed to refresh favorites display: {e}")
+                df = self._sort_dataframe(df, sort_state)
+            except Exception:
+                logger.exception('Failed to prepare favorites refresh')
+                return None, set()
+            return df, linkage_ui_only
 
-    def _add_favorites_batch(self, codes):
+        def completed(future):
+            def deliver():
+                self._favorites_view_future = None
+                if getattr(self, '_is_closing', False):
+                    return
+                stale = (source is not getattr(self, 'current_df', None)
+                         or context != self._view_work_context()
+                         or data_version != getattr(self, '_data_update_version', 0))
+                try:
+                    if not stale and not self._favorites_refresh_pending:
+                        frame, linkage_codes = future.result()
+                        if frame is not None:
+                            self._linkage_ui_only_codes = linkage_codes
+                            self._favorites_render_generation = getattr(self, '_favorites_render_generation', 0) + 1
+                            self.refresh_tree(frame, force=True, skip_sort=True,
+                                              source_version=('favorites', self._favorites_render_generation))
+                except Exception:
+                    logger.exception('后台重点关注刷新失败')
+                if stale or self._favorites_refresh_pending:
+                    self._refresh_ui_favorites()
+            self._put_deduped_task('favorites_view_done', deliver)
         try:
-            from global_favorites import GlobalFavoriteManager
-            fav_mgr = GlobalFavoriteManager()
-            for c in codes:
-                fav_mgr.add_favorite_stock(c)
-            self._on_favorites_changed()
+            self._favorites_view_future = self.view_executor.submit(prepare)
+            self._favorites_view_future.add_done_callback(completed)
+        except RuntimeError:
+            self._favorites_view_future = None
+            if not getattr(self, '_is_closing', False):
+                logger.exception('提交重点关注刷新失败')
+
+    def _add_favorites_batch(self, codes, on_complete=None):
+        try:
+            self._submit_favorite_write(
+                "add_favorites_batch_result", "add", list(codes or []), on_complete=on_complete
+            )
         except Exception as e:
             logger.error(f"Failed to add favorites batch: {e}")
 
-    def _remove_favorites_batch(self, codes):
+    def _remove_favorites_batch(self, codes, on_complete=None):
         try:
-            from global_favorites import GlobalFavoriteManager
-            fav_mgr = GlobalFavoriteManager()
-            for c in codes:
-                fav_mgr.remove_favorite_stock(c)
-            self._on_favorites_changed()
+            self._submit_favorite_write(
+                "remove_favorites_batch_result", "remove", list(codes or []), on_complete=on_complete
+            )
         except Exception as e:
             logger.error(f"Failed to remove favorites batch: {e}")
+
+    def _submit_favorite_write(self, method_name, operation, *args, on_complete=None):
+        from global_favorites import GlobalFavoriteManager, submit_favorite_write
+        manager = GlobalFavoriteManager()
+        future = submit_favorite_write(getattr(manager, method_name), *args)
+        self._queue_favorite_write_result(future, operation, on_complete=on_complete)
+
+    def _queue_favorite_write_result(self, future, operation, on_complete=None):
+        def completed(done):
+            try:
+                event = {"operation": operation, "result": done.result(), "error": "",
+                         "on_complete": on_complete}
+                self._on_favorites_changed()
+            except Exception as error:
+                event = {"operation": operation, "result": None, "error": str(error),
+                         "on_complete": on_complete}
+            try:
+                self._favorite_write_results.put_nowait(event)
+            except Exception:
+                logger.error("Favorite write completed but the UI receipt queue is full")
+
+        future.add_done_callback(completed)
 
     def _run_dna_audit_batch(self, code_to_name, end_date=None):
         from backtest_feature_auditor import audit_multiple_codes, show_dna_audit_report_window
@@ -16449,6 +16611,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             try:
                 # Force one fresh scan, including negative results when either app is closed.
                 self._scan_external_windows(force=force)
+                from ats.ui.ipo_detector_ipc import find_ipo_detector_window
+                snapshot = dict(self._win_cache)
+                snapshot['ipo_detector'] = find_ipo_detector_window()
+                self._win_cache = snapshot
             except Exception:
                 logger.exception("[WINDOW-SCAN-FAIL] 外部窗口后台扫描失败，保留已有缓存")
             finally:
@@ -16669,8 +16835,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 5.2. 🎯 新股次新股超短检测工具 (外部独立进程 / PyQt6)
         try:
-            from ats.ui.ipo_detector_ipc import find_ipo_detector_window
-            ipo_hwnd = find_ipo_detector_window()
+            ipo_hwnd = self._scan_windows_cached().get('ipo_detector', 0)
             if ipo_hwnd:
                 import ctypes
                 if ctypes.windll.user32.IsWindow(ipo_hwnd) and ctypes.windll.user32.IsWindowVisible(ipo_hwnd):
@@ -18496,7 +18661,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             c for c in ['code', 'trade', 'now', 'price', 'close', 'percent', 'signal', 'name', *self.current_cols]
             if c in df.columns
         ))
-        content_hash = source_version if source_version is not None else frame_fingerprint(df[cols_to_check])
+        prepared_fingerprint = df.attrs.pop('_tk_prepared_fingerprint', None)
+        if source_version is not None:
+            content_hash = source_version
+        elif prepared_fingerprint is not None and prepared_fingerprint[0] == tuple(self.current_cols):
+            content_hash = prepared_fingerprint[1]
+        else:
+            content_hash = frame_fingerprint(df[cols_to_check])
         current_fingerprint = None if content_hash is None else (tuple(self.current_cols), content_hash)
 
         # 触发判断：非强制刷新时，如果指纹一致则跳过
@@ -18802,6 +18973,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if job is None or getattr(self, '_is_closing', False):
             return
         source, query, on_ready, context, sort_state, data_version = job
+        render_columns = tuple(self.current_cols)
 
         def compute_view():
             try:
@@ -18814,7 +18986,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             return None, engine.last_error
                     else:
                         frame = frame.query(query, engine='python')
-                return self._sort_dataframe(frame, sort_state), ''
+                frame = self._sort_dataframe(frame, sort_state)
+                fingerprint_columns = list(dict.fromkeys(
+                    column for column in ['code', 'trade', 'now', 'price', 'close',
+                                          'percent', 'signal', 'name', *render_columns]
+                    if column in frame.columns
+                ))
+                frame.attrs['_tk_prepared_fingerprint'] = (
+                    render_columns, frame_fingerprint(frame[fingerprint_columns]))
+                return frame, ''
             except Exception as exc:
                 logger.exception('后台查询/排序失败')
                 return None, str(exc)
@@ -20808,28 +20988,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if not is_init and (not win.winfo_viewable() or is_iconic) and has_items:
             return
 
-        # 如果 df_concept 为 None，则从 self.df_all 动态获取
-        if df_concept is None:
-            # ✅ [OPTIMIZE] 缓存板块筛选索引，避免高频 str.contains 重复扫描
-            pure_name = concept_name.split('(')[0]
-            if not hasattr(self, "_concept_index_cache"): self._concept_index_cache = {}
-            
-            # 使用 concept 名称 + df_all 的长度和第一个代码作为缓存键 (粗略判断数据源是否变化)
-            current_data_key = (len(self.df_all), self.df_all.index[0] if not self.df_all.empty else None)
-            cache_entry = self._concept_index_cache.get(pure_name)
-            
-            if cache_entry and cache_entry['key'] == current_data_key:
-                df_concept = self.df_all.loc[cache_entry['indices']]
-            else:
-                df_concept = self.df_all[self.df_all['category'].str.contains(pure_name, na=False)]
-                self._concept_index_cache[pure_name] = {
-                    'key': current_data_key,
-                    'indices': df_concept.index
-                }
-
-        if df_concept is None or df_concept.empty:
+        request = (concept_name, df_concept, code, limit, is_init)
+        win._top10_pending_request = request
+        if getattr(win, '_top10_refresh_busy', False):
             return
-
+        win._top10_refresh_busy = True
+        win._top10_pending_request = None
         # 排序状态获取
         self._init_tree_sort_state(tree)
         if getattr(self, '_opening_preferred_concept', False):
@@ -20848,154 +21012,247 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             ascending = bool(tree.sortby_col_ascend)
         else:
             ascending = False
-        
-        # 🛡️ 智能排序列映射与容错转换 (支持动态添加列后的正确数值排序)
-        df_sorted = df_concept.copy()
-        actual_col = sort_col
-        
-        if sort_col == "rank":
-            if "rank" not in df_sorted.columns and "Rank" in df_sorted.columns:
-                actual_col = "Rank"
-            
-            if actual_col in df_sorted.columns:
-                # 为 Rank 进行鲁棒的数值化以实现正确排序。缺失值根据升降序填充极端垫底值。
-                fill_val = float('inf') if ascending else float('-inf')
-                df_sorted[actual_col] = pd.to_numeric(df_sorted[actual_col], errors='coerce').fillna(fill_val)
-        
-        # 对已知的数值列进行填充与数值化，确保即便含有 None 也能稳健排序
-        numeric_candidates = ["percent", "dff", "dff2", "volume", "win", "red"]
-        if actual_col in df_sorted.columns and actual_col in numeric_candidates:
-            df_sorted[actual_col] = pd.to_numeric(df_sorted[actual_col], errors='coerce').fillna(0)
 
-        # 准备显示数据
-        if actual_col in df_sorted.columns:
-            df_display = df_sorted.sort_values(actual_col, ascending=ascending).head(limit)
-        else:
-            df_display = df_sorted.head(limit)
-        
-        tree._full_df = df_concept.copy()
-        tree._display_limit = limit
+        columns = tuple(tree['columns'])
+        with self._df_lock:
+            market_frame = self.df_all
+            source_version = getattr(self, '_data_update_version', 0)
 
-        old_items = set(tree.get_children())
-        if not old_items:
-            tree.config(height=10)
-        desired_items = set()
-        old_yview = tree.yview()
-
-        code_to_iid = {}
-        for idx, row in enumerate(df_display.itertuples()):
-            code_row = row.Index
-            iid = str(idx)
-            # Row data (from itertuples namedtuple 'Pandas')
-            row_dict = row._asdict()
-            
-            # 获取最新的实时行情
-            latest_row = self.df_all.loc[code_row] if code_row in self.df_all.index else pd.Series(row_dict)
-            if isinstance(latest_row, pd.DataFrame):
-                latest_row = latest_row.iloc[0]
-                
-            percent = latest_row.get("percent", row_dict.get("percent", 0))
-            # === 行条件判断 ===
-            row_tags = get_row_tags(latest_row)
-
-            if pd.isna(percent) or percent == 0:
-                percent = latest_row.get("per1d", row_dict.get("per1d", 0))
-
-            rank_val = latest_row.get("Rank", row_dict.get("Rank", 0))
-            rank_str = str(int(rank_val)) if pd.notna(rank_val) else "0"
-
-            row_vals = []
-            for col in tree["columns"]:
-                if col == "code":
-                    row_vals.append(code_row)
-                elif col == "name":
-                    row_vals.append(latest_row.get("name", row_dict.get("name", "")))
-                elif col == "rank":
-                    row_vals.append(rank_str)
-                elif col == "percent":
-                    row_vals.append(f"{percent:.2f}")
-                elif col == "dff":
-                    row_vals.append(f"{latest_row.get('dff', row_dict.get('dff', 0)):.1f}")
-                elif col == "volume":
-                    row_vals.append(f"{latest_row.get('volume', row_dict.get('volume', 0)):.1f}")
-                elif col == "red":
-                    row_vals.append(latest_row.get("red", row_dict.get("red", 0)))
-                elif col == "win":
-                    row_vals.append(latest_row.get("win", row_dict.get("win", 0)))
-                else:
-                    # print(f'col: {col} : {latest_row.get(col, row_dict.get(col, ""))}')
-                    raw_val = latest_row.get(col, row_dict.get(col, ""))
-                    row_vals.append(f"{raw_val:.2f}" if isinstance(raw_val, float) else raw_val)
-
-            values, tags = tuple(row_vals), tuple(row_tags)
-            desired_items.add(iid)
-            if iid in old_items:
-                if tuple(str(value) for value in tree.item(iid, "values")) != tuple(str(value) for value in values) or tree.item(iid, "tags") != tags:
-                    tree.item(iid, values=values, tags=tags)
-                tree.move(iid, "", idx)
+        def prepare():
+            df_concept = request[1]
+            if df_concept is None:
+                pure_name = concept_name.split('(')[0]
+                df_concept = market_frame.loc[market_frame['category'].str.contains(pure_name, na=False)].copy()
             else:
-                tree.insert("", "end", iid=iid, values=values, tags=tags)
-            code_to_iid[code_row] = iid
+                df_concept = df_concept.copy()
+            if df_concept.empty:
+                return df_concept, []
+            # 🛡️ 智能排序列映射与容错转换 (支持动态添加列后的正确数值排序)
+            df_sorted = df_concept.copy()
+            actual_col = sort_col
 
-        removed_items = old_items - desired_items
-        if removed_items:
-            tree.delete(*removed_items)
-        if old_yview and not is_init and not code:
-            tree.yview_moveto(old_yview[0])
+            if sort_col == "rank":
+                if "rank" not in df_sorted.columns and "Rank" in df_sorted.columns:
+                    actual_col = "Rank"
 
-        # 仅当启用了二级排序复合列时才执行耗时的 perform_tree_multi_level_sort，单列已由 DataFrame 排序保真
-        if getattr(tree, 'sort_level2_col', None):
-            self.perform_tree_multi_level_sort(tree)
+                if actual_col in df_sorted.columns:
+                    # 为 Rank 进行鲁棒的数值化以实现正确排序。缺失值根据升降序填充极端垫底值。
+                    fill_val = float('inf') if ascending else float('-inf')
+                    df_sorted[actual_col] = pd.to_numeric(df_sorted[actual_col], errors='coerce').fillna(fill_val)
 
-        # --- 更新状态栏数量 ---
-        children = list(tree.get_children())
-        if children:
-            # 优先使用窗口当前选中 code，其次使用传入 code
-            target_code = getattr(win, "select_code", None) or code
-            target_iid = code_to_iid.get(target_code, children[0])
+            # 对已知的数值列进行填充与数值化，确保即便含有 None 也能稳健排序
+            numeric_candidates = ["percent", "dff", "dff2", "volume", "win", "red"]
+            if actual_col in df_sorted.columns and actual_col in numeric_candidates:
+                df_sorted[actual_col] = pd.to_numeric(df_sorted[actual_col], errors='coerce').fillna(0)
 
-            tree.selection_set(target_iid)
-            tree.focus(target_iid)
-            # # 强制刷新 Treeview 渲染，再滚动
-            def scroll_and_highlight():
+            # 准备显示数据
+            if actual_col in df_sorted.columns:
+                df_display = df_sorted.sort_values(actual_col, ascending=ascending).head(limit)
+            else:
+                df_display = df_sorted.head(limit)
+
+            rows = []
+            for idx, row in enumerate(df_display.itertuples()):
+                code_row = row.Index
+                iid = str(idx)
+                # Row data (from itertuples namedtuple 'Pandas')
+                row_dict = row._asdict()
+
+                # 获取最新的实时行情
+                latest_row = market_frame.loc[code_row] if code_row in market_frame.index else pd.Series(row_dict)
+                if isinstance(latest_row, pd.DataFrame):
+                    latest_row = latest_row.iloc[0]
+
+                percent = latest_row.get("percent", row_dict.get("percent", 0))
+                # === 行条件判断 ===
+                row_tags = get_row_tags(latest_row)
+
+                if pd.isna(percent) or percent == 0:
+                    percent = latest_row.get("per1d", row_dict.get("per1d", 0))
+
+                rank_val = latest_row.get("Rank", row_dict.get("Rank", 0))
+                rank_str = str(int(rank_val)) if pd.notna(rank_val) else "0"
+
+                row_vals = []
+                for col in columns:
+                    if col == "code":
+                        row_vals.append(code_row)
+                    elif col == "name":
+                        row_vals.append(latest_row.get("name", row_dict.get("name", "")))
+                    elif col == "rank":
+                        row_vals.append(rank_str)
+                    elif col == "percent":
+                        row_vals.append(f"{percent:.2f}")
+                    elif col == "dff":
+                        row_vals.append(f"{latest_row.get('dff', row_dict.get('dff', 0)):.1f}")
+                    elif col == "volume":
+                        row_vals.append(f"{latest_row.get('volume', row_dict.get('volume', 0)):.1f}")
+                    elif col == "red":
+                        row_vals.append(latest_row.get("red", row_dict.get("red", 0)))
+                    elif col == "win":
+                        row_vals.append(latest_row.get("win", row_dict.get("win", 0)))
+                    else:
+                        # print(f'col: {col} : {latest_row.get(col, row_dict.get(col, ""))}')
+                        raw_val = latest_row.get(col, row_dict.get(col, ""))
+                        row_vals.append(f"{raw_val:.2f}" if isinstance(raw_val, float) else raw_val)
+
+                values, tags = tuple(row_vals), tuple(row_tags)
+                rows.append((code_row, values, tags))
+            return df_concept, rows
+
+        def render(df_concept, rows):
+            import time
+            tree = win._tree_top10
+            tree._full_df = df_concept
+            tree._display_limit = limit
+            old_children = tuple(tree.get_children())
+            old_items = set(old_children)
+            if not old_items:
+                tree.config(height=10)
+            order_changed = old_children != tuple(str(i) for i in range(len(rows)))
+            desired_items = set()
+            old_yview = tree.yview()
+            code_to_iid = {}
+            deadline = time.perf_counter() + 0.004
+            for idx, (code_row, values, tags) in enumerate(rows):
+                iid = str(idx)
+                desired_items.add(iid)
+                if iid in old_items:
+                    if tuple(str(value) for value in tree.item(iid, "values")) != tuple(str(value) for value in values) or tree.item(iid, "tags") != tags:
+                        tree.item(iid, values=values, tags=tags)
+                    if order_changed:
+                        tree.move(iid, "", idx)
+                else:
+                    tree.insert("", "end", iid=iid, values=values, tags=tags)
+                code_to_iid[code_row] = iid
+
+                if time.perf_counter() >= deadline:
+                    yield
+                    deadline = time.perf_counter() + 0.004
+            removed_items = old_items - desired_items
+            if removed_items:
+                tree.delete(*removed_items)
+            if old_yview and not is_init and not code:
+                tree.yview_moveto(old_yview[0])
+
+            # 仅当启用了二级排序复合列时才执行耗时的 perform_tree_multi_level_sort，单列已由 DataFrame 排序保真
+            if getattr(tree, 'sort_level2_col', None):
+                self.perform_tree_multi_level_sort(tree)
+
+            # --- 更新状态栏数量 ---
+            children = list(tree.get_children())
+            if children:
+                # 优先使用窗口当前选中 code，其次使用传入 code
+                target_code = getattr(win, "select_code", None) or code
+                target_iid = code_to_iid.get(target_code, children[0])
+
+                if tuple(tree.selection()) != (target_iid,):
+                    tree.selection_set(target_iid)
+                if tree.focus() != target_iid:
+                    tree.focus(target_iid)
+                # # 强制刷新 Treeview 渲染，再滚动
+                def scroll_and_highlight():
+                    try:
+                        if tree.winfo_exists() and tree.exists(target_iid):
+                            # 🛡️ 避免排序时的滚动冲突：若外部标记跳过 once，则只高亮、不 see
+                            should_see = is_init or bool(code)
+                            if getattr(win, "_skip_see_once", False):
+                                win._skip_see_once = False # 消费并重置标记
+                                should_see = False
+
+                            if is_init and bool(getattr(tree, 'sort_level1_col', None)):
+                                should_see = False
+
+                            if should_see:
+                                tree.see(target_iid)
+
+                            self._highlight_tree_selection(tree, target_iid)
+                    except Exception as e:
+                        # 静默处理：项可能在 50ms 延迟期间被删除或刷新
+                        pass
+
+                pending_highlight = getattr(win, '_top10_highlight_id', None)
+                if pending_highlight is not None:
+                    try:
+                        win.after_cancel(pending_highlight)
+                    except tk.TclError:
+                        pass
+                win._top10_highlight_id = win.after(50, scroll_and_highlight)
+                # 更新窗口索引和选中 code
+                win._selected_index = children.index(target_iid)
+                win.select_code = tree.item(target_iid, "values")[0]
+
+            # --- 更新状态栏 ---
+            if hasattr(win, "_status_label_top10"):
+                visible_count = len(rows)
+                total_count = len(df_concept)
+                win._status_label_top10.config(text=f"显示 {visible_count}/{total_count} 只")
+
+
+
+
+        def finish():
+            win._top10_refresh_busy = False
+            pending = getattr(win, '_top10_pending_request', None)
+            win._top10_pending_request = None
+            if pending is not None and win.winfo_exists() and not getattr(self, '_is_closing', False):
+                self._fill_concept_top10_content(win, *pending)
+
+        def poll():
+            if getattr(self, '_is_closing', False) or not win.winfo_exists():
+                win._top10_refresh_busy = False
+                return
+            if not future.done():
+                win.after(20, poll)
+                return
+            if (market_frame is not self.df_all
+                    or source_version != getattr(self, '_data_update_version', 0)):
+                if win._top10_pending_request is None:
+                    win._top10_pending_request = request
+                finish()
+                return
+            if win._top10_pending_request is not None:
+                finish()
+                return
+            try:
+                frame, rows = future.result()
+                iterator = render(frame, rows)
+            except Exception:
+                logger.exception('Top10后台准备失败: %s', concept_name)
+                finish()
+                return
+
+            def step():
+                if getattr(self, '_is_closing', False) or not win.winfo_exists():
+                    win._top10_refresh_busy = False
+                    return
+                if (market_frame is not self.df_all
+                        or source_version != getattr(self, '_data_update_version', 0)
+                        or win._top10_pending_request is not None):
+                    if win._top10_pending_request is None:
+                        win._top10_pending_request = request
+                    finish()
+                    return
                 try:
-                    if tree.winfo_exists() and tree.exists(target_iid):
-                        # 🛡️ 避免排序时的滚动冲突：若外部标记跳过 once，则只高亮、不 see
-                        should_see = is_init or bool(code)
-                        if getattr(win, "_skip_see_once", False):
-                            win._skip_see_once = False # 消费并重置标记
-                            should_see = False
-                        
-                        if is_init and bool(getattr(tree, 'sort_level1_col', None)):
-                            should_see = False
-                            
-                        if should_see:
-                            tree.see(target_iid)
-                        
-                        self._highlight_tree_selection(tree, target_iid)
-                except Exception as e:
-                    # 静默处理：项可能在 50ms 延迟期间被删除或刷新
-                    pass
+                    next(iterator)
+                except StopIteration:
+                    finish()
+                    return
+                except Exception:
+                    logger.exception('Top10分片刷新失败: %s', concept_name)
+                    finish()
+                    return
+                win.after(8, step)
+            step()
 
-            pending_highlight = getattr(win, '_top10_highlight_id', None)
-            if pending_highlight is not None:
-                try:
-                    win.after_cancel(pending_highlight)
-                except tk.TclError:
-                    pass
-            win._top10_highlight_id = win.after(50, scroll_and_highlight)
-            # 更新窗口索引和选中 code
-            win._selected_index = children.index(target_iid)
-            win.select_code = tree.item(target_iid, "values")[0]
-
-        # --- 更新状态栏 ---
-        if hasattr(win, "_status_label_top10"):
-            visible_count = len(df_display)
-            total_count = len(df_concept)
-            win._status_label_top10.config(text=f"显示 {visible_count}/{total_count} 只")
-
-
-
+        try:
+            future = self.view_executor.submit(prepare)
+        except RuntimeError:
+            win._top10_refresh_busy = False
+            if not getattr(self, '_is_closing', False):
+                logger.exception('提交Top10刷新失败')
+            return
+        win.after(8, poll)
 
     def _setup_tree_bindings_newTop10(self, tree):
         """
@@ -24326,15 +24583,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                     def toggle_favorite():
                         try:
-                            from global_favorites import GlobalFavoriteManager
-                            manager = GlobalFavoriteManager()
-                            if is_fav:
-                                manager.remove_favorite_stock(code)
-                                logger.warning(f"手动操作：已将 {code} 移出重点关注个股")
-                            else:
-                                manager.add_favorite_stock(code)
-                                logger.warning(f"手动操作：已将 {code} 设为重点关注个股")
-                            refresh_pool_data()
+                            self._submit_favorite_write(
+                                "toggle_favorite_stock_result", "toggle", code,
+                                on_complete=lambda owner, result, error: refresh_pool_data()
+                                if error is None else None,
+                            )
                         except Exception as e:
                             logger.error(f"Toggle favorite failed: {e}")
 
@@ -24353,12 +24606,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                     def batch_toggle_fav(add: bool):
                         try:
-                            from global_favorites import GlobalFavoriteManager
-                            manager = GlobalFavoriteManager()
-                            for c in selected_codes:
-                                if add: manager.add_favorite_stock(c)
-                                else: manager.remove_favorite_stock(c)
-                            refresh_pool_data()
+                            callback = lambda owner, result, error: refresh_pool_data() if error is None else None
+                            if add:
+                                self._add_favorites_batch(selected_codes, on_complete=callback)
+                            else:
+                                self._remove_favorites_batch(selected_codes, on_complete=callback)
                         except Exception as e:
                             logger.error(f"Batch toggle favorite failed: {e}")
 

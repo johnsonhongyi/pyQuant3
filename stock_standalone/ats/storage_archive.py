@@ -5,6 +5,10 @@ import os
 import tempfile
 import json
 
+MAX_ARCHIVE_BYTES = 100 * 1024 * 1024
+MAX_SEGMENT_BYTES = 16 * 1024 * 1024
+MAX_SEGMENTS = 64
+
 
 def archive_verified(source, target):
     os.makedirs(os.path.dirname(target), exist_ok=True)
@@ -57,7 +61,10 @@ def write_json_gzip(path, value):
         with os.fdopen(fd, 'wb') as raw:
             with gzip.GzipFile(fileobj=raw, mode='wb', compresslevel=3) as packed:
                 payload = json.dumps(value, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
-                packed.write(payload.encode('utf-8'))
+                encoded = payload.encode('utf-8')
+                if len(encoded) > MAX_SEGMENT_BYTES:
+                    raise ValueError('archive_payload_size_limit')
+                packed.write(encoded)
             raw.flush()
             os.fsync(raw.fileno())
         from ats.persistence_lock import replace_with_retry
@@ -85,11 +92,27 @@ def append_jsonl_gzip(path, records):
     try:
         with os.fdopen(fd, 'wb') as raw:
             with gzip.GzipFile(fileobj=raw, mode='wb', compresslevel=3) as writer:
+                total_bytes = 0
                 for record in records:
-                    writer.write((json.dumps(record, ensure_ascii=False, separators=(',', ':')) + '\n').encode('utf-8'))
+                    encoded = (json.dumps(record, ensure_ascii=False, separators=(',', ':')) + '\n').encode('utf-8')
+                    total_bytes += len(encoded)
+                    if total_bytes > MAX_SEGMENT_BYTES:
+                        raise ValueError('archive_segment_size_limit')
+                    writer.write(encoded)
             raw.flush()
             os.fsync(raw.fileno())
         os.replace(temporary, os.path.join(directory, name))
+        # Only managed segments are eligible for bounded diagnostic retention.
+        from pathlib import Path
+        root = Path(directory).resolve()
+        segments = sorted((item for item in root.glob('*.jsonl.gz')
+                           if item.is_file() and not item.is_symlink()
+                           and item.resolve().parent == root), reverse=True)
+        retained_bytes = 0
+        for index, segment in enumerate(segments):
+            retained_bytes += segment.stat().st_size
+            if index >= MAX_SEGMENTS or retained_bytes > MAX_ARCHIVE_BYTES:
+                segment.unlink()
         _trace_tail.cache_clear()
         _trace_index.cache_clear()
         _trace_code.cache_clear()

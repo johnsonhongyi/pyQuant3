@@ -1374,19 +1374,27 @@ class PRServiceGUI:
 
     def add_to_favorites(self, code):
         try:
-            from global_favorites import GlobalFavoriteManager
-            GlobalFavoriteManager().add_favorite_stock(code)
-            self.lbl_status.config(text=f"已添加重点关注: {code}", fg="darkgreen")
+            from tk_gui_modules.favorite_actions import submit_tk_favorite_action
+            submit_tk_favorite_action(
+                self, "add_favorite_stock_result", code, after_target=self.root,
+                success_message=f"已添加重点关注: {code}",
+                on_complete=lambda owner, result, error: owner._refresh_ui_favorites()
+                if error is None else None,
+            )
         except Exception as e:
-            messagebox.showerror("错误", f"添加重点关注失败: {e}")
+            self.lbl_status.config(text=f"添加重点关注失败: {e}", fg="red")
 
     def remove_from_favorites(self, code):
         try:
-            from global_favorites import GlobalFavoriteManager
-            GlobalFavoriteManager().remove_favorite_stock(code)
-            self.lbl_status.config(text=f"已取消重点关注: {code}", fg="blue")
+            from tk_gui_modules.favorite_actions import submit_tk_favorite_action
+            submit_tk_favorite_action(
+                self, "remove_favorite_stock_result", code, after_target=self.root,
+                success_message=f"已取消重点关注: {code}",
+                on_complete=lambda owner, result, error: owner._refresh_ui_favorites()
+                if error is None else None,
+            )
         except Exception as e:
-            messagebox.showerror("错误", f"取消重点关注失败: {e}")
+            self.lbl_status.config(text=f"取消重点关注失败: {e}", fg="red")
 
     def get_current_df(self, codes=None):
         """获取独立快照，可按代码取行；默认完整数据接口保持不变。"""

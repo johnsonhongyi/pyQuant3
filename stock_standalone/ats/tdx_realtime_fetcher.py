@@ -526,19 +526,10 @@ class TDXGlobalCachePool:
             return cls._instance
 
     def _get_ramdisk_cache_path(self) -> str:
-        """获取 RamDisk 内存盘缓存文件绝对路径 (基于 cct.get_ramdisk_dir, 读写数十 GB/s)"""
-        try:
-            ram_dir = cct.get_ramdisk_dir()
-            if not ram_dir:
-                ram_dir = os.path.join(os.path.expanduser("~"), ".ats_cache")
-                os.makedirs(ram_dir, exist_ok=True)
-            elif ram_dir.endswith(":") and len(ram_dir) == 2:
-                ram_dir = ram_dir + os.sep
-            return os.path.join(ram_dir, "tdx_global_cache_pool.pkl.z")
-        except Exception:
-            fallback = os.path.join(os.path.expanduser("~"), ".ats_cache")
-            os.makedirs(fallback, exist_ok=True)
-            return os.path.join(fallback, "tdx_global_cache_pool.pkl.z")
+        """RAMDisk only: never silently redirect high-frequency cache writes to SSD."""
+        from linkage_storage import configured_ramdisk_root
+        ram_dir = str(configured_ramdisk_root())
+        return os.path.join(ram_dir, "tdx_global_cache_pool.pkl.z")
 
     @staticmethod
     def is_trading_day(dt_str: Optional[str] = None) -> bool:
@@ -1327,7 +1318,7 @@ class TDXGlobalCachePool:
                 return False
             now = time.time()
             from ats.archive_policy import archive_window
-            if archive_window()[0] != 'close' and interval > 0 and (now - self._last_flush_ts < max(1800.0, interval)):
+            if archive_window(allow_market=True)[0] != 'close' and interval > 0 and (now - self._last_flush_ts < max(1800.0, interval)):
                 return False
         return self.flush_to_ramdisk(force=True)
 
@@ -1339,7 +1330,7 @@ class TDXGlobalCachePool:
         """
         now = time.time()
         from ats.archive_policy import archive_window, ARCHIVE_INTERVAL
-        window, day = archive_window()
+        window, day = archive_window(allow_market=True)
         if (window is None and not history_checkpoint) or not self._is_dirty:
             return False
         if not history_checkpoint and window == 'market' and now - self._last_flush_ts < ARCHIVE_INTERVAL:

@@ -1,13 +1,26 @@
 import json
+import os
 import subprocess
 import sys
 import threading
+from contextlib import contextmanager
 
 import global_favorites
+import pytest
 
 
 def _manager_at(path, monkeypatch):
     monkeypatch.setattr(global_favorites, "FAVORITE_STOCKS_FILE", str(path))
+    catalog_path = path.parent / "stock_codes.conf"
+    codes = [f"{value:06d}" for value in range(600000, 600020)]
+    codes.extend(f"{value:06d}" for value in range(1, 20))
+    catalog_path.write_text(json.dumps({"stock": codes}), encoding="utf-8")
+    get_conf_path = global_favorites.sys_utils.get_conf_path
+    monkeypatch.setattr(
+        global_favorites.sys_utils, "get_conf_path",
+        lambda filename, *args, **kwargs: str(catalog_path) if os.path.basename(str(filename)) == "stock_codes.conf"
+        else get_conf_path(filename, *args, **kwargs),
+    )
     monkeypatch.setattr(global_favorites.sys_utils, "is_delisted_stock", lambda _code: False)
     manager = object.__new__(global_favorites.GlobalFavoriteManager)
     manager.favorite_sectors = set()
@@ -79,6 +92,148 @@ def test_linkage_add_operation_is_idempotent_and_conflicts_on_reuse(tmp_path, mo
         assert str(error) == "operation_id_conflict"
     else:
         raise AssertionError("reused operation id for another stock was accepted")
+
+
+def test_linkage_adds_require_catalog_and_catalog_refresh_is_observed(tmp_path, monkeypatch):
+    manager = _manager_at(tmp_path / "favorites.json", monkeypatch)
+    manager.validate_stock_code("600000")
+    with pytest.raises(ValueError, match="unsupported_stock_code"):
+        manager.add_favorite_stock_result("510300")
+    with pytest.raises(ValueError, match="unsupported_stock_code"):
+        manager.toggle_favorite_stock_result("510300")
+    catalog_path = tmp_path / "stock_codes.conf"
+    before = catalog_path.stat()
+    catalog_path.write_text(json.dumps({"stock": ["600001"]}), encoding="utf-8")
+    os.utime(catalog_path, ns=(before.st_atime_ns, before.st_mtime_ns + 2_000_000_000))
+
+    manager.validate_stock_code("600001")
+    try:
+        manager.validate_stock_code("600000")
+    except ValueError as error:
+        assert str(error) == "unsupported_stock_code"
+    else:
+        raise AssertionError("removed catalog stock was accepted")
+    for invalid in ("510300", "399001", "430001", "900901", "200001", "600999"):
+        try:
+            manager.validate_stock_code(invalid)
+        except ValueError as error:
+            assert str(error) == "unsupported_stock_code"
+        else:
+            raise AssertionError(f"unsupported stock code {invalid} was accepted")
+
+
+def test_linkage_add_fails_closed_when_catalog_is_unavailable_but_removal_is_allowed(tmp_path, monkeypatch):
+    manager = _manager_at(tmp_path / "favorites.json", monkeypatch)
+    manager.apply_favorite_source_intent("600000", "manual", "add", "catalog-add")
+    catalog_path = tmp_path / "stock_codes.conf"
+    catalog_path.write_text("invalid json", encoding="utf-8")
+    try:
+        manager.apply_favorite_source_intent("600001", "manual", "add", "catalog-down-add")
+    except ValueError as error:
+        assert str(error) == "stock_directory_unavailable"
+    else:
+        raise AssertionError("add was accepted without a valid stock catalog")
+
+    removed = manager.apply_favorite_source_intent("600000", "manual", "remove_source", "catalog-remove")
+    assert removed["persisted"] is True
+    assert not manager.is_favorite_stock("600000")
+
+
+def test_batch_favorite_mutations_commit_once_and_report_invalid_additions(tmp_path, monkeypatch):
+    manager = _manager_at(tmp_path / "favorites.json", monkeypatch)
+    mutate_calls = []
+    original_mutate = manager._mutate_store
+
+    def counted_mutate(*args, **kwargs):
+        mutate_calls.append(1)
+        return original_mutate(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "_mutate_store", counted_mutate)
+    added = manager.add_favorites_batch_result(["600000", "510300", "600001", "600000"])
+
+    assert added["persisted"] is True
+    assert added["added_count"] == 2
+    assert added["rejected"] == [{"code": "510300", "error": "unsupported_stock_code"}]
+    assert len(mutate_calls) == 1
+    assert manager.get_persistent_favorite_attention_state()["stocks"] == ["600000", "600001"]
+
+    removed = manager.remove_favorites_batch_result(["600000", "600001", "510300", "600001"])
+    assert removed["persisted"] is True
+    assert removed["removed_count"] == 3
+    assert len(mutate_calls) == 2
+    assert not manager.get_persistent_favorite_attention_state()["stocks"]
+    assert "510300" in manager.get_persistent_favorite_attention_state()["tombstones"]
+
+
+def test_sector_favorite_result_apis_keep_legacy_status_and_batch_remove(tmp_path, monkeypatch):
+    manager = _manager_at(tmp_path / "favorites.json", monkeypatch)
+    assert manager.add_favorite_sector_result("半导体")["status"] == "added"
+    assert manager.toggle_favorite_sector("半导体") == "removed"
+    manager.add_favorite_sector_result("半导体")
+    mutate_calls = []
+    original_mutate = manager._mutate_store
+
+    def counted_mutate(*args, **kwargs):
+        mutate_calls.append(1)
+        return original_mutate(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "_mutate_store", counted_mutate)
+    result = manager.remove_favorite_sectors_result(["半导体", "新能源", "半导体"])
+    assert result["persisted"] is True
+    assert result["removed_count"] == 2
+    assert len(mutate_calls) == 1
+    assert manager.get_favorite_sectors() == set()
+
+
+def test_favorite_write_submission_runs_off_caller_and_surfaces_persist_failure(tmp_path, monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+    caller_thread = threading.get_ident()
+    worker_threads = []
+
+    def blocked_write():
+        worker_threads.append(threading.get_ident())
+        entered.set()
+        assert release.wait(2)
+        return "done"
+
+    future = global_favorites.submit_favorite_write(blocked_write)
+    assert entered.wait(1)
+    assert not future.done()
+    release.set()
+    assert future.result(timeout=2) == "done"
+    assert worker_threads and worker_threads[0] != caller_thread
+
+    manager = _manager_at(tmp_path / "favorites.json", monkeypatch)
+    lock_entered = threading.Event()
+    release_lock = threading.Event()
+
+    @contextmanager
+    def held_file_lock(_path):
+        lock_entered.set()
+        assert release_lock.wait(2)
+        yield
+
+    monkeypatch.setattr(global_favorites, "_favorites_file_lock", held_file_lock)
+    locked_write = global_favorites.submit_favorite_write(
+        manager.add_favorites_batch_result, ["600000"]
+    )
+    assert lock_entered.wait(1)
+    assert not locked_write.done()
+    release_lock.set()
+    locked_result = locked_write.result(timeout=2)
+    assert locked_result["persisted"] is True
+    assert manager.get_persistent_favorite_attention_state()["stocks"] == ["600000"]
+
+    def fail_write(_path, _payload, _state):
+        raise OSError("disk_write_failed")
+
+    monkeypatch.setattr(manager, "_write_store", fail_write)
+    failed = global_favorites.submit_favorite_write(
+        manager.add_favorites_batch_result, ["600001"]
+    )
+    with pytest.raises(OSError, match="disk_write_failed"):
+        failed.result(timeout=2)
 
 
 def test_sbc_source_is_normalized_and_removed_queued_operation_is_inactive(tmp_path, monkeypatch):
@@ -185,12 +340,21 @@ def test_concurrent_process_additions_and_removal_merge_without_lost_updates(tmp
     initial_manager = _manager_at(favorite_path, monkeypatch)
     initial_manager.add_favorite_stock("600002", "2026-10-10")
     child_script = r"""
+import json
+import os
 import sys
 import threading
 import global_favorites
 
 path, action, code, operation_id, source = sys.argv[1:]
 global_favorites.FAVORITE_STOCKS_FILE = path
+catalog_path = os.path.join(os.path.dirname(path), "stock_codes.conf")
+if not os.path.exists(catalog_path):
+    with open(catalog_path, "w", encoding="utf-8") as file_obj:
+        json.dump({"stock": ["600000", "600001", "600002", "000001"]}, file_obj)
+global_favorites.sys_utils.get_conf_path = lambda filename, *_args, **_kwargs: (
+    catalog_path if os.path.basename(str(filename)) == "stock_codes.conf" else filename
+)
 global_favorites.sys_utils.is_delisted_stock = lambda _code: False
 manager = object.__new__(global_favorites.GlobalFavoriteManager)
 manager.favorite_sectors = set()

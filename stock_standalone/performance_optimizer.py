@@ -164,7 +164,7 @@ class TreeviewIncrementalUpdater:
             # The worker must not own a root/widget reference, even for cleanup.
             preparer = type(self)(None, list(self.columns), feature_marker=marker)
             try:
-                future = executor.submit(preparer._prepare_render_rows, df.copy())
+                future = executor.submit(preparer._prepare_render_rows, df)
             except RuntimeError:
                 if getattr(self.root, '_is_closing', False):
                     self._chunked_insert_pending = False
@@ -302,6 +302,7 @@ class TreeviewIncrementalUpdater:
 
     def _prepare_render_rows(self, df):
         """Worker-only formatting; no Tcl/Tk calls are allowed here."""
+        df = df.copy()
         favorites = set()
         if GlobalFavoriteManager is not None:
             try:
@@ -1093,8 +1094,10 @@ class TreeviewIncrementalUpdater:
             return False
         if code and code in self._item_map:
             iid = self._item_map[code]
-            self.tree.selection_set(iid)
-            self.tree.focus(iid)
+            if tuple(self.tree.selection()) != (iid,):
+                self.tree.selection_set(iid)
+            if self.tree.focus() != iid:
+                self.tree.focus(iid)
             # 当存在活跃的多级/普通排序时，不进行自动滚动定位
             has_active_sort = bool(getattr(self.tree, 'sort_level1_col', None) or getattr(self.tree, 'sortby_col', None))
             if scroll_to_view and not has_active_sort:

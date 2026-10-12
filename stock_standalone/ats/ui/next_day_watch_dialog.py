@@ -1249,12 +1249,13 @@ class NextDayAnomalyWatchWidget(QWidget):
             send_to_linkage(code, name, self)
         elif action == act_favorite:
             try:
-                from global_favorites import GlobalFavoriteManager
-                GlobalFavoriteManager().toggle_favorite_stock(code)
-                main = self._main_window()
-                if main is not None and hasattr(main, "_safe_favorites_changed"):
-                    main._safe_favorites_changed()
-                self.status_message_changed.emit(f"已更新重点关注: {name} ({code})")
+                from ats.ui.favorite_actions import submit_favorite_action
+                submit_favorite_action(
+                    self, "toggle_favorite_stock_result", code,
+                    on_complete=lambda owner, result, error: owner.status_message_changed.emit(
+                        f"已更新重点关注: {name} ({code})"
+                    ) if error is None else None,
+                )
             except Exception as exc:
                 logger.warning("[NextDayWatchWidget] Favorite update failed: %s", exc)
 
