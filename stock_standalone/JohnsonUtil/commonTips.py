@@ -659,7 +659,10 @@ def safe_load_json(raw):
 class GlobalConfig:
     def __init__(self, cfg_file=None, **updates):
         if not cfg_file:
-            cfg_file = os.path.join(os.path.dirname(__file__), "global.ini")
+            # 统一使用 LoggerFactory 的配置自释放路径（EXE 根目录/global.ini）。
+            cfg_file = LoggerFactory.get_conf_path("global.ini") or os.path.join(
+                os.path.dirname(__file__), "global.ini"
+            )
 
         self.cfg_file = cfg_file
         self.cfg = configparser.ConfigParser(

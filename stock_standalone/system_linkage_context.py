@@ -590,7 +590,11 @@ class SystemLinkageContextClient:
                     "state": payload.get("state", "unknown"),
                     "trade_date": evidence_trade_date,
                     "as_of": evidence.get("as_of", ""),
-                    "freshness": "fresh" if evidence_trade_date == snapshot.get("trade_date") else "stale",
+                    "freshness": _auction_evidence_freshness(
+                        evidence_trade_date, evidence.get("as_of", ""), snapshot.get("trade_date", ""),
+                        source_freshness=evidence.get("freshness", "unknown"),
+                        payload_freshness=payload.get("source_freshness", ""),
+                    ),
                     "candidate": normalized in candidate_codes,
                     "stock": stock_evidence,
                 }
@@ -1196,6 +1200,52 @@ def _attention_intent_id(workspace_id, node_id, symbol, source, action, local_re
                     str(local_revision), str(operation_id)))
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:40]
     return "attn-" + digest
+
+
+def _auction_evidence_freshness(
+        trade_date, as_of, snapshot_trade_date, now=None, source_freshness="fresh", payload_freshness=""):
+    """Keep opening-auction evidence historical after the opening session ends."""
+    from zoneinfo import ZoneInfo
+
+    if not trade_date or not snapshot_trade_date:
+        return "unknown"
+    if trade_date != snapshot_trade_date:
+        return "stale"
+    if source_freshness == "stale" or payload_freshness == "stale":
+        return "stale"
+    if source_freshness == "unknown":
+        return "unknown"
+    if source_freshness == "historical":
+        return "historical"
+    if source_freshness != "fresh":
+        return "unknown"
+    observed_at = _parse_time(as_of)
+    if observed_at is None:
+        return "unknown"
+    try:
+        shanghai = ZoneInfo("Asia/Shanghai")
+        if now is None:
+            now_at = datetime.now(timezone.utc)
+        elif isinstance(now, datetime):
+            now_at = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+        else:
+            return "unknown"
+        local_now = now_at.astimezone(shanghai)
+        if observed_at.tzinfo is None:
+            return "unknown"
+        local_observed = observed_at.astimezone(shanghai)
+    except (TypeError, ValueError, OverflowError):
+        return "unknown"
+    if local_now.date().isoformat() != trade_date or local_observed.date().isoformat() != trade_date:
+        return "stale"
+    if local_observed.hour != 9 or not 15 <= local_observed.minute < 30:
+        return "unknown"
+    if local_now.hour > 9 or local_now.hour == 9 and local_now.minute >= 30:
+        return "historical"
+    age_seconds = (local_now - local_observed).total_seconds()
+    if age_seconds > 300 or age_seconds < -30:
+        return "stale"
+    return "fresh"
 
 
 def _parse_time(value):
