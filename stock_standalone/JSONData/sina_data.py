@@ -2121,6 +2121,7 @@ class Sina:
         cache_key_df = f'unified_h5_hist_{table}'
         cache_key_time = f'unified_h5_hist_time_{table}'
         now_time = time.time()
+        on_ui_thread = threading.current_thread() is threading.main_thread()
 
         # 1. [Memory Cache Check] - 无锁快查
         item = self._MEM_CACHE.get(table)
@@ -2154,6 +2155,11 @@ class Sina:
             if item and item.get('ready'):
                 # 💡 [OPTIMIZE] 如果已经有旧缓存数据，直接返回旧数据，不阻塞等待后台刷新
                 return item['df']
+
+            if on_ui_thread:
+                pending = pd.DataFrame()
+                pending.attrs.update(source='sina_hdf', freshness='loading', table=table)
+                return pending
 
             if debug:
                 log.info(f"[SingleFlight] Waiter blocking for {table} ...")
@@ -2206,12 +2212,26 @@ class Sina:
                         del self._LOADING_ST[table]
                 event.set() 
 
-        # 💡 [OPTIMIZE] 如果已有旧缓存（非冷启动），则派发到后台线程执行，立即返回旧数据
-        if item and item.get('ready'):
-            threading.Thread(target=_do_load, name=f"HDF5_AsyncLoader_{table}", daemon=True).start()
-            return item['df']
+        # UI 冷启动也异步加载；已有缓存时维持立即返回的兼容行为。
+        if (item and item.get('ready')) or on_ui_thread:
+            load_error = None
+            try:
+                threading.Thread(target=_do_load, name=f"HDF5_AsyncLoader_{table}", daemon=True).start()
+            except Exception as exc:
+                load_error = str(exc)
+                with self._LOAD_LOCK:
+                    if self._LOADING_ST.get(table) is event:
+                        del self._LOADING_ST[table]
+                event.set()
+                log.exception('Could not start HDF loader for %s', table)
+            if item and item.get('ready'):
+                return item['df']
+            pending = pd.DataFrame()
+            pending.attrs.update(source='sina_hdf', freshness='error' if load_error else 'loading',
+                                 table=table, error=load_error)
+            return pending
         else:
-            # 冷启动，必须同步阻塞执行
+            # 后台调用者冷启动仍等待完整结果，不改变恢复与聚合调用契约。
             _do_load()
             res = self._MEM_CACHE.get(table)
             return res['df'] if res and res.get('ready') else pd.DataFrame()
@@ -2283,7 +2303,7 @@ class Sina:
         )
 
         if h5_hist.empty:
-            return pd.DataFrame()
+            return h5_hist
 
         # --- 2. 统一 code 列表格式 ---
         codes = [code] if isinstance(code, str) else code
