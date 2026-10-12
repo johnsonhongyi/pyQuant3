@@ -14,7 +14,7 @@ from unittest.mock import patch
 from pandas import NA
 
 from system_linkage_context import (
-    SystemLinkageContextClient, _require_private_host, build_ats_leader_evidence,
+    SystemLinkageContextClient, _auction_evidence_freshness, _require_private_host, build_ats_leader_evidence,
     build_instock_candidate_evidence, build_ipo_linkage_evidence,
     classify_linkage_quote_status,
     publish_ats_leader_evidence, publish_instock_candidate_evidence,
@@ -275,6 +275,23 @@ class SystemLinkageContextTests(unittest.TestCase):
             self.assertEqual(summary["auction"]["freshness"], "stale")
             self.assertTrue(summary["auction"]["candidate"])
             self.assertEqual(summary["event_summary"], "heat.rank_changed 12→7")
+
+    def test_auction_evidence_changes_from_current_to_historical_after_open(self):
+        as_of = "2026-10-10T01:25:00+00:00"
+        before_close = datetime(2026, 10, 10, 1, 29, tzinfo=timezone.utc)
+        after_close = datetime(2026, 10, 10, 6, 0, tzinfo=timezone.utc)
+        next_day = datetime(2026, 10, 11, 1, 0, tzinfo=timezone.utc)
+
+        self.assertEqual(_auction_evidence_freshness("2026-10-10", as_of, "2026-10-10", before_close), "fresh")
+        self.assertEqual(_auction_evidence_freshness(
+            "2026-10-10", as_of, "2026-10-10", before_close, source_freshness="stale"
+        ), "stale")
+        self.assertEqual(_auction_evidence_freshness(
+            "2026-10-10", as_of, "2026-10-10", before_close, source_freshness="unknown"
+        ), "unknown")
+        self.assertEqual(_auction_evidence_freshness("2026-10-10", as_of, "2026-10-10", after_close), "historical")
+        self.assertEqual(_auction_evidence_freshness("2026-10-10", as_of, "2026-10-10", next_day), "stale")
+        self.assertEqual(_auction_evidence_freshness("2026-10-10", "bad-time", "2026-10-10", before_close), "unknown")
 
     def test_instock_nonmatch_discloses_sample_coverage_and_stale_date(self):
         for complete, expected in ((False, "当前样本未列入"), (True, "当前 selector 未列入")):

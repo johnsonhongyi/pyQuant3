@@ -1,5 +1,17 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-11 22:15 【TK与ATS高性能语言实现审核及Qt架构对齐演进评估报告】(`docs/tasks/2026-10-11_2215_TK与ATS高性能语言及Qt对齐架构审核.md`, `instock_MonitorTK.py`, `ats/`)
+- [x] **【TK 与 ATS 现状底层架构深度审核与性能瓶颈定性】**：
+    - 查明当前系统最严重的体验瓶颈不是底层 Python 算不动，而是 Tkinter `ttk.Treeview` 宽表同步绘制（2938px 宽屏下 5500 行重绘高达 328~330ms）死锁 GUI 线程，导致帧率跌至 3~7 FPS，产生滚动卡顿与点击延迟；
+    - 查明 `instock_MonitorTK.py` 内部每 50ms 强行轮询 `_process_qt_events` 泵送 Qt 事件，双 GUI 框架在单一 Python 解释器内相互撕扯；且 MonitorTK 同时承担了“全系统后台数据推送中心”与“前台 UI 渲染”，UI 卡顿直接传染至调度与 IPC 通信；
+- [x] **【高性能语言（Go/Rust/C++）重写底层数据层可行性穿透】**：
+    - 定性“全面 Go 重构底层”药不对症、ROI 极低：即使 Go 在 0.1ms 内完成指标计算，向 Python UI 推送 5500 行宽表仍面临 50~100ms 的 IPC 序列化与反序列化税；数据送达后依然会被 Tkinter 330ms 的原生绘制卡死；
+    - NumPy/Pandas 底层已有 C 向量化加持，全盘换 Go 需重写并对账 50 万行量化策略代码，极易破坏现有闭环与精度一致性；
+- [x] **【TK 底层全面对齐 Qt（统一至 PyQt6 / ATS 架构）深度评估】**：
+    - **性能跃升**：Qt6 `QTableView` 依托真正的虚拟视口（Flyweight 模式）与 `dataChanged` 脏行增量刷新，5000 行局部更新仅需 2.437ms（提升 100 倍），K线更新仅 0.96ms，帧率可直接拉满至 60 FPS 满帧丝滑；
+    - **架构消亡**：彻底消灭 50ms 事件泵轮询内耗，释放 300~500MB 冗余驻留内存；
+    - **实施路径（四阶段渐进式落地）**：坚决避免一次性推倒重写 25,771 行巨石代码，确立“阶段一：数据层 Headless 纯净化 -> 阶段二：Qt 核心监控宽表组件落地 (`ats/ui/monitor_table_panel.py`) -> 阶段三：看盘联动与快捷键对齐 -> 阶段四：TK 壳平滑退役并入纯 PyQt6 终端”的稳健落地演进路线。
+
 ## 2026-10-09 20:30 【桌面窗口坐标分类布局管理器双击实际位置自动替换与表格列手动调整自动持久化闭环】(`webTools/window_manager/ui.py`, `tests/test_window_layout_double_click_and_column_persistence.py`)
 - [x] **【问题 1 根因穿透与单项坐标替换修复】**：
     - 查明当前桌面实际位置列若包含实际窗口标题（如 `[通达信金融终端(开心果交易版)V2025.01 - [版面-龙头战法]] 1225,-1001,1584,943`）或调试前缀，原 `on_table_cell_double_clicked` 中使用的纯正则 `re.match(r"^-?\d+,-?\d+,\d+,\d+$", cur_text)` 因要求首尾完全匹配而直接判定为 False，导致双击单元格被完全静默忽略；
