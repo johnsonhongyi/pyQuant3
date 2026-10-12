@@ -121,33 +121,6 @@ class TreeviewIncrementalUpdater:
             df = pd.DataFrame()
         previous_selection = self.tree.selection()
         children = self.tree.get_children()
-        existing_ids = set(children)
-        # User actions may remove rows directly; discard obsolete Tcl item IDs.
-        for code, iid in list(self._item_map.items()):
-            if iid not in existing_ids:
-                self._item_map.pop(code, None)
-                self._values_cache.pop(code, None)
-                self._tags_cache.pop(code, None)
-        codes = (df['code'].astype(str).tolist() if 'code' in df.columns
-                 else df.index.astype(str).tolist())
-        new_codes = set(codes)
-        order_matches = tuple(self._item_map.get(code) for code in codes) == children
-        removed = [code for code in self._item_map if code not in new_codes]
-        following = dict(zip(children, (*children[1:], None))) if not order_matches else {}
-        preceding = dict(zip(children, (None, *children[:-1]))) if not order_matches else {}
-        head = children[0] if children else None
-
-        def unlink(iid):
-            nonlocal head
-            before, after = preceding.pop(iid, None), following.pop(iid, None)
-            if before is None:
-                head = after
-            else:
-                following[before] = after
-            if after is not None:
-                preceding[after] = before
-
-        counts = [len(new_codes - self._item_map.keys()), 0, len(removed)]
         self._chunked_insert_pending = True
         position = 0
         delete_position = 0
@@ -157,6 +130,8 @@ class TreeviewIncrementalUpdater:
         batch_size = min(64, max(1, self.chunk_size))
         executor = getattr(self.root, 'view_executor', None)
         future = None
+        render_plan = {'plan': None}
+        counts = [0, 0, 0]
         if executor is not None:
             marker = copy.copy(self.feature_marker)
             if marker is not None:
@@ -164,12 +139,24 @@ class TreeviewIncrementalUpdater:
             # The worker must not own a root/widget reference, even for cleanup.
             preparer = type(self)(None, list(self.columns), feature_marker=marker)
             try:
-                future = executor.submit(preparer._prepare_render_rows, df)
+                # DataFrame/code scans and O(n) diff/link-map construction must
+                # not run in the Tk callback; the worker receives no widgets.
+                future = executor.submit(
+                    preparer._prepare_render_plan, preparer, df, children,
+                    dict(self._item_map),
+                )
             except RuntimeError:
                 if getattr(self.root, '_is_closing', False):
                     self._chunked_insert_pending = False
                     return (0, 0, 0)
                 logger.exception('[TreeviewUpdater] Background preparation unavailable')
+
+        if future is None:
+            codes = (df['code'].astype(str).tolist() if 'code' in df.columns
+                     else df.index.astype(str).tolist())
+            render_plan['plan'] = self._build_render_plan(codes, children, dict(self._item_map))
+            counts = render_plan['plan']['counts']
+            self._discard_stale_items(render_plan['plan']['stale_codes'])
 
         # 🚀 [PERF OPTIMIZE] 帧外预提取一次全局自选，供所有分批闭包复用
         favorites = set()
@@ -190,6 +177,17 @@ class TreeviewIncrementalUpdater:
                 self._render_in_chunks(*pending)
                 if selection_request:
                     self.restore_selection(*selection_request)
+
+        def unlink(iid):
+            plan = render_plan['plan']
+            before = plan['preceding'].pop(iid, None)
+            after = plan['following'].pop(iid, None)
+            if before is None:
+                plan['head'] = after
+            else:
+                plan['following'][before] = after
+            if after is not None:
+                plan['preceding'][after] = before
 
         def render_batch():
             nonlocal position, delete_position, rows, prepared_until, paused_for_input
@@ -216,12 +214,15 @@ class TreeviewIncrementalUpdater:
             batch_start = time.perf_counter()
             deadline = batch_start + 0.004
             try:
-                if future is not None and prepared_until == 0:
-                    rows = iter(future.result())
+                if future is not None and render_plan['plan'] is None:
+                    render_plan['plan'] = future.result()
+                    self._discard_stale_items(render_plan['plan']['stale_codes'])
+                    counts[:] = render_plan['plan']['counts']
+                    rows = iter(render_plan['plan']['rows'])
                     prepared_until = len(df)
                 # Deletion, formatting, tag calculation and Tcl writes all yield.
-                while delete_position < len(removed):
-                    code = removed[delete_position]
+                while delete_position < len(render_plan['plan']['removed']):
+                    code = render_plan['plan']['removed'][delete_position]
                     iid = self._item_map.pop(code)
                     self.tree.delete(iid)
                     unlink(iid)
@@ -230,7 +231,7 @@ class TreeviewIncrementalUpdater:
                     delete_position += 1
                     if time.perf_counter() >= deadline:
                         break
-                while delete_position == len(removed) and position < len(df):
+                while delete_position == len(render_plan['plan']['removed']) and position < len(df):
                     if future is None and position == prepared_until:
                         prepared_until = min(position + batch_size, len(df))
                         rows = iter(self._prepare_rows(df.iloc[position:prepared_until], fav_stocks=favorites))
@@ -270,8 +271,8 @@ class TreeviewIncrementalUpdater:
                         if changed or options:
                             counts[1] += 1
                         # Moving existing items preserves selection and avoids full rebuilds.
-                        if not order_matches:
-                            if iid != head:
+                        if not render_plan['plan']['order_matches']:
+                            if iid != render_plan['plan']['head']:
                                 self.tree.move(iid, '', position)
                             unlink(iid)
                     self._values_cache[code] = values
@@ -279,7 +280,8 @@ class TreeviewIncrementalUpdater:
                     position += 1
                     if time.perf_counter() >= deadline:
                         break
-                if delete_position < len(removed) or position < len(df):
+                if (delete_position < len(render_plan['plan']['removed'])
+                        or position < len(df)):
                     self._render_after_id = self.root.after(8, render_batch)
                 else:
                     if self._selection_request and self._pending_render is None:
@@ -299,6 +301,44 @@ class TreeviewIncrementalUpdater:
 
         render_batch()
         return tuple(counts)
+
+    @staticmethod
+    def _build_render_plan(codes, children, item_map_snapshot):
+        """Build the pure-Python diff plan without accessing Tk widgets."""
+        existing_ids = set(children)
+        stale_codes = [code for code, iid in item_map_snapshot.items() if iid not in existing_ids]
+        item_map = {code: iid for code, iid in item_map_snapshot.items() if iid in existing_ids}
+        new_codes = set(codes)
+        order_matches = tuple(item_map.get(code) for code in codes) == children
+        removed = [code for code in item_map if code not in new_codes]
+        following = dict(zip(children, (*children[1:], None))) if not order_matches else {}
+        preceding = dict(zip(children, (None, *children[:-1]))) if not order_matches else {}
+        return {
+            'stale_codes': stale_codes,
+            'order_matches': order_matches,
+            'removed': removed,
+            'following': following,
+            'preceding': preceding,
+            'head': children[0] if children else None,
+            'counts': [len(new_codes - item_map.keys()), 0, len(removed)],
+        }
+
+    @staticmethod
+    def _prepare_render_plan(preparer, df, children, item_map_snapshot):
+        """Prepare rows and their diff plan off-thread; never pass Tk objects."""
+        rows = preparer._prepare_render_rows(df)
+        plan = TreeviewIncrementalUpdater._build_render_plan(
+            [row[0] for row in rows], children, item_map_snapshot,
+        )
+        plan['rows'] = rows
+        return plan
+
+    def _discard_stale_items(self, codes):
+        """Remove row mappings invalidated by direct user-side Treeview deletes."""
+        for code in codes:
+            self._item_map.pop(code, None)
+            self._values_cache.pop(code, None)
+            self._tags_cache.pop(code, None)
 
     def _prepare_render_rows(self, df):
         """Worker-only formatting; no Tcl/Tk calls are allowed here."""
