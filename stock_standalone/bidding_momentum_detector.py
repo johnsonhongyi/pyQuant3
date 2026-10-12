@@ -1306,35 +1306,6 @@ class BiddingMomentumDetector:
         if 'code' not in df.columns:
             df['code'] = df.index.astype(str)
 
-        # update_meta does not consume source timestamps; track them globally below.
-        # Hash only its actual per-stock inputs so repeated snapshots do not rebuild
-        # identical TickSeries fields or custom-column dictionaries.
-        time_columns = {'ticktime', 'timestamp', 'time', 'datetime'}
-        fingerprint_columns = tuple(
-            col for col in meta_columns
-            if col not in time_columns or col in configured_custom_columns
-        )
-        try:
-            row_fingerprints = pd.util.hash_pandas_object(
-                df.loc[:, fingerprint_columns], index=False
-            ).to_numpy(dtype='uint64', copy=False)
-        except Exception:
-            # Unsupported custom objects use the original update-every-row path.
-            row_fingerprints = None
-
-        def _meta_state_signature(ts):
-            # update_meta also resets fields that scoring/kline updates may mutate.
-            # Only skip it while every field it writes still matches its last result.
-            return (
-                ts.last_close, ts.open_price, ts.last_high, ts.last_low,
-                ts.now_price, ts.price_anchor, ts.price_diff, ts.pct_diff,
-                ts.high_day, ts.low_day, ts.ma5, ts.ma20, ts.ma60,
-                ts.category, ts.name, ts.lastdu, ts.lastdu4, ts.ral, ts.dff,
-                tuple(sorted((ts.custom_cols or {}).items())), ts.vol_ratio,
-                ts.total_vol, ts.lvol, ts.last6vol, ts.top0, ts.top15,
-                ts.cycle_stage, ts.per1d,
-            )
-
         # ===============================
         # 2. 时间戳推进（极轻量）
         # ===============================
@@ -1369,8 +1340,6 @@ class BiddingMomentumDetector:
 
         self._lock.acquire()
         try:
-            if row_fingerprints is None:
-                self._meta_fingerprints.clear()
             for row_index, row in enumerate(df.itertuples(index=False)):
                 raw_code = getattr(row, 'code', '')
                 if isinstance(raw_code, str) and len(raw_code) == 6 and raw_code.isdigit():
@@ -1386,11 +1355,6 @@ class BiddingMomentumDetector:
                     continue
 
                 ts = self._tick_series.get(code)
-                row_fingerprint = (
-                    (id(ts), fingerprint_columns, int(row_fingerprints[row_index]),
-                     _meta_state_signature(ts))
-                    if row_fingerprints is not None and ts is not None else None
-                )
                 if ts is None:
                     row_data = row._asdict()
                     name = str(row_data.get('name', '')).strip()
@@ -1402,21 +1366,10 @@ class BiddingMomentumDetector:
                     self._tick_series[code] = ts
                     new_codes.append(code)
                     ts.update_meta(row_data, configured_custom_columns)
-                    if row_fingerprints is not None:
-                        self._meta_fingerprints[code] = (
-                            id(ts), fingerprint_columns, int(row_fingerprints[row_index]),
-                            _meta_state_signature(ts)
-                        )
                 else:
-                    if row_fingerprints is None or self._meta_fingerprints.get(code) != row_fingerprint:
-                        # [🚀 FAST-PATH] 已注册个股直接传 row，避免每秒创建 5000+ 个 _asdict() 临时字典
-                        ts.update_meta(row, configured_custom_columns)
-                        if row_fingerprints is not None:
-                            self._meta_fingerprints[code] = (
-                                id(ts), fingerprint_columns,
-                                int(row_fingerprints[row_index]),
-                                _meta_state_signature(ts),
-                            )
+                    # Prices normally change every live frame; update once,
+                    # without full-market hashing and state-signature scans.
+                    ts.update_meta(row, configured_custom_columns)
 
                 # ── 分片锁管理 ──
                 row_count += 1

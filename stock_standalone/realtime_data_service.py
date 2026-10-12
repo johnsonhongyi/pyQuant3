@@ -4424,21 +4424,22 @@ class DataPublisher:
                 logger.error(f"Snapshot load error: {e}")
                 self._is_recovered_empty = True
             finally:
-                # 恢复回放与实时更新共用一个写锁，避免新行情被旧快照反向覆盖。
-                with self._batch_update_lock:
-                    with self._pending_batch_lock:
-                        pending = list(self._pending_batches.values())
-                        self._pending_batches.clear()
-                        self.is_ready = True
-                    if pending:
-                        logger.info(f"🔄 Processing {len(pending)} buffered minute snapshots after recovery...")
-                    for pending_df in pending:
-                        if self._stop_event.is_set():
-                            break
+                # Keep incoming compute nonblocking until chronological replay
+                # finishes. Release the writer after each minute, never hold it
+                # across the entire recovery backlog or publish ready too early.
+                while not self._stop_event.is_set():
+                    with self._batch_update_lock:
+                        with self._pending_batch_lock:
+                            if not self._pending_batches:
+                                self.is_ready = True
+                                break
+                            minute = min(self._pending_batches)
+                            pending_df = self._pending_batches.pop(minute)
                         try:
                             self._apply_batch(pending_df)
-                        except Exception as p_e:
-                            logger.error(f"Error processing pending batch: {p_e}")
+                        except Exception:
+                            logger.exception("Error processing recovery minute %s", minute)
+                    time.sleep(0)
 
         threading.Thread(target=run_recovery, name="DataPublisher_Recovery", daemon=True).start()
 
@@ -4967,11 +4968,14 @@ class DataPublisher:
         """
         if df is None or df.empty or self._stop_event.is_set():
             return
+        # Copy before taking the coordination lock; recovery never waits for a
+        # full-market copy while transitioning to ready.
+        buffered_df = df.copy() if not self.is_ready else None
         with self._pending_batch_lock:
             if not self.is_ready:
                 minute = int(time.time() // 60)
                 is_new_minute = minute not in self._pending_batches
-                self._pending_batches[minute] = df.copy()
+                self._pending_batches[minute] = buffered_df
                 if is_new_minute:
                     logger.info(f"⏳ Background recovery in progress. Buffered minute snapshot ({len(df)} rows).")
                 return

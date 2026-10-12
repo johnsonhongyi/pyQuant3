@@ -2,6 +2,9 @@
 import ast
 import threading
 import time
+
+import pandas as pd
+from system_linkage_quotes import AsyncLinkageQuoteFetcher
 from functools import lru_cache
 from pathlib import Path
 from types import MethodType, SimpleNamespace
@@ -555,3 +558,109 @@ def test_first_empty_shared_panel_requests_one_detector_seed_from_current_frame(
     owner.on_realtime_data_arrived.assert_called_once_with(
         frame, force_update=True, score_if_needed=True,
     )
+
+
+def test_slow_quote_request_is_single_flight_and_old_revision_is_discarded():
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+    def fetch(codes):
+        entered.set()
+        assert release.wait(2)
+        finished.set()
+        return None
+    worker = AsyncLinkageQuoteFetcher(fetch)
+    try:
+        assert worker.submit(1, '2026-10-12', ['600000'], True)
+        assert entered.wait(1)
+        assert worker.take_result(1, '2026-10-12') is None
+        assert not worker.submit(2, '2026-10-12', ['000001'], True)
+        release.set()
+        assert finished.wait(1)
+        deadline = time.monotonic() + 1
+        while worker._busy and time.monotonic() < deadline:
+            time.sleep(.001)
+        assert worker.take_result(2, '2026-10-12') is None
+        assert worker._result is None
+    finally:
+        release.set()
+
+
+def test_recovery_does_not_block_live_compute_or_publish_ready_before_replay():
+    entered, release, delivered = threading.Event(), threading.Event(), threading.Event()
+    applied = []
+    owner = SimpleNamespace(
+        simulation_mode=True, is_ready=False, _stop_event=threading.Event(),
+        _batch_update_lock=threading.RLock(), _pending_batch_lock=threading.Lock(),
+        _pending_batches={int(time.time() // 60) - 1: pd.DataFrame({'value': [1]})},
+    )
+    def apply(frame):
+        applied.append(int(frame['value'].iloc[0]))
+        if len(applied) == 1:
+            entered.set()
+            assert release.wait(2)
+    owner._apply_batch = apply
+    tree = ast.parse((Path(__file__).resolve().parents[1] / 'realtime_data_service.py').read_text(encoding='utf-8'))
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'DataPublisher')
+    init = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == '__init__')
+    node = next(n for n in ast.walk(init) if isinstance(n, ast.FunctionDef) and n.name == 'run_recovery')
+    ns = dict(self=owner, time=time, logger=Mock())
+    exec(compile(ast.Module(body=[node], type_ignores=[]), 'recovery', 'exec'), ns)
+    update = load_method('realtime_data_service.py', 'DataPublisher', 'update_batch', pd=pd)
+    replay = threading.Thread(target=ns['run_recovery'])
+    live = threading.Thread(target=lambda: (update(owner, pd.DataFrame({'value': [2]})), delivered.set()))
+    try:
+        replay.start()
+        assert entered.wait(1)
+        live.start()
+        assert delivered.wait(.5), 'live compute waited on recovery writer'
+        assert not owner.is_ready
+    finally:
+        release.set()
+        replay.join(2)
+        if live.ident is not None:
+            live.join(2)
+    assert not replay.is_alive() and owner.is_ready
+    assert applied == [1, 2]
+
+
+def test_stock_row_preparation_preserves_filter_and_favorite_priority_without_widgets():
+    import re
+    evaluate = load_method('sector_bidding_panel.py', 'SectorBiddingPanel', '_evaluate_search_condition',
+                           _RE_MACRO_COND=re.compile(r'(涨幅|现价|量比)(>=|<=|>|<|==|=)([-+]?\d*\.?\d+)'))
+    panel = SimpleNamespace(_evaluate_search_condition=evaluate)
+    prepare = load_method('sector_bidding_panel.py', 'SectorBiddingPanel', '_prepare_stock_rows',
+                          SectorBiddingPanel=panel)
+    data = dict(leader='600000', leader_name='leader', leader_price=10., leader_pct=1.,
+                followers=[dict(code='000001', name='favorite', price=8., pct=2.),
+                           dict(code='000002', name='filtered', price=9., pct=3.)])
+    options = dict(stock_cols=('code', 'name', 'price', 'percent'),
+                   _is_macro_active=False, _macro_filtered_codes=frozenset(),
+                   _force_show_all_in_stock_table=False, _active_search_query='leader',
+                   _sort_col=2, _sort_asc=False)
+    rows = prepare.__func__(data, {'000001'}, options)
+    assert [row['code'] for row in rows] == ['000001', '600000']
+    assert '_search_blob' not in data['followers'][0]
+
+
+def test_snapshot_copy_times_out_and_sector_preparation_does_not_modify_shared_rows():
+    import re
+    copy_snapshot = load_method('sector_bidding_panel.py', 'SectorBiddingPanel', '_copy_detector_ui_snapshot').__func__
+    detector = SimpleNamespace(_lock=threading.Lock(), data_version=3,
+                               active_sectors={'sector': {'score': 2, 'leader': '600000'}},
+                               daily_watchlist={})
+    detector._lock.acquire()
+    try:
+        assert copy_snapshot(detector) is None
+    finally:
+        detector._lock.release()
+    version, (sectors, watchlist) = copy_snapshot(detector)
+    assert version == 3 and sectors[0]['sector'] == 'sector' and watchlist == []
+    count = load_method('sector_bidding_panel.py', 'SectorBiddingPanel', '_get_filtered_stock_count')
+    evaluate = load_method('sector_bidding_panel.py', 'SectorBiddingPanel', '_evaluate_search_condition',
+                           _RE_MACRO_COND=re.compile(r'(涨幅|现价|量比)(>=|<=|>|<|==|=)([-+]?\d*\.?\d+)'))
+    panel = SimpleNamespace(_get_filtered_stock_count=count, _evaluate_search_condition=evaluate)
+    prepare = load_method('sector_bidding_panel.py', 'SectorBiddingPanel', '_prepare_sector_rows',
+                          SectorBiddingPanel=panel).__func__
+    options = dict(_active_search_query='', _force_show_all_in_stock_table=False,
+                   _is_macro_active=False, _macro_filtered_codes=frozenset())
+    rows = prepare(sectors, set(), set(), options, 4, False)
+    assert rows[0]['_filtered_count'] == 1 and '_filtered_count' not in sectors[0]

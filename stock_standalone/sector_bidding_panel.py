@@ -2000,6 +2000,9 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             timer.stop()
         self._table_render_jobs.clear()
         self._table_render_callbacks.clear()
+        table_executor = getattr(self, '_table_prepare_executor', None)
+        if table_executor is not None:
+            table_executor.shutdown(wait=False, cancel_futures=True)
         self._macro_pending_job = None
         if self._macro_future is not None:
             self._macro_future.cancel()
@@ -3159,29 +3162,13 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             with self._update_lock:
                 self._ui_refresh_pending = False
 
-    def _get_detector_ui_snapshot(self):
-        """Never make the shared Tk/Qt GUI wait for the scoring worker's lock."""
-        detector = getattr(self, 'detector', None)
-        if detector is None:
-            self._ui_snapshot_fresh = True
-            return getattr(self, '_ui_detector_snapshot', ([], []))
-        if (hasattr(self, '_ui_detector_snapshot') and
-                getattr(self, '_ui_snapshot_version', -1) == getattr(detector, 'data_version', -1)):
-            self._ui_snapshot_fresh = True
-            return self._ui_detector_snapshot
-        if not detector._lock.acquire(blocking=False):
-            self._ui_snapshot_fresh = False
-            if not getattr(self, '_panel_closing', False) and (hasattr(self, '_snapshot_retry_timer') and not self._snapshot_retry_timer.isActive()):
-                self._snapshot_retry_timer.start(100)
-            now = time.monotonic()
-            if now - getattr(self, '_last_detector_busy_log', 0) >= 30:
-                self._last_detector_busy_log = now
-                logger.warning("[SECTOR-UI-CACHE-BUSY] 后台评分持锁，使用上一轮界面快照")
-            return getattr(self, '_ui_detector_snapshot', ([], []))
+    @staticmethod
+    def _copy_detector_ui_snapshot(detector):
+        # A bounded wait in a worker; GUI callbacks never acquire detector locks.
+        if not detector._lock.acquire(timeout=0.05):
+            return None
         try:
-            self._ui_snapshot_fresh = True
             version = detector.data_version
-            # Copy UI rows only; never recursively traverse per-stock kline/history payloads.
             def copy_row(info):
                 row = dict(info)
                 for key in ('followers', 'race_candidates'):
@@ -3189,17 +3176,45 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                         row[key] = [dict(item) if isinstance(item, dict) else item
                                     for item in row[key]]
                 return row
-
             sectors = [dict(copy_row(info), sector=info.get('sector', name))
                        for name, info in detector.active_sectors.items() if isinstance(info, dict)]
             snapshot = (sectors, [copy_row(info) for info in detector.daily_watchlist.values()])
         finally:
             detector._lock.release()
-        snapshot[0].sort(key=lambda row: row.get('score', 0), reverse=True)
-        self._ui_detector_snapshot = snapshot
-        self._ui_snapshot_version = version
-        self._ui_snapshot_ts = time.monotonic()
-        return snapshot
+        sectors.sort(key=lambda row: row.get('score', 0), reverse=True)
+        return version, snapshot
+
+    def _get_detector_ui_snapshot(self):
+        detector = getattr(self, 'detector', None)
+        if detector is None:
+            self._ui_snapshot_fresh = True
+            return getattr(self, '_ui_detector_snapshot', ([], []))
+        future = getattr(self, '_ui_snapshot_future', None)
+        if future is not None and future.done():
+            self._ui_snapshot_future = None
+            try:
+                result = future.result()
+                if result is not None:
+                    self._ui_snapshot_version, self._ui_detector_snapshot = result
+                    self._ui_snapshot_ts = time.monotonic()
+                    # Render a completed coherent frame even if another tick has
+                    # arrived; requiring exact latest version would starve UI.
+                    self._ui_snapshot_fresh = True
+                    return self._ui_detector_snapshot
+            except Exception:
+                logger.exception('Detector UI snapshot preparation failed')
+        if (hasattr(self, '_ui_detector_snapshot') and
+                getattr(self, '_ui_snapshot_version', -1) == getattr(detector, 'data_version', -1)):
+            self._ui_snapshot_fresh = True
+            return self._ui_detector_snapshot
+        if getattr(self, '_ui_snapshot_future', None) is None and not getattr(self, '_panel_closing', False):
+            executor = self._get_table_prepare_executor()
+            self._ui_snapshot_future = executor.submit(type(self)._copy_detector_ui_snapshot, detector)
+        self._ui_snapshot_fresh = False
+        if (not getattr(self, '_panel_closing', False) and
+                not self._snapshot_retry_timer.isActive()):
+            self._snapshot_retry_timer.start(100)
+        return getattr(self, '_ui_detector_snapshot', ([], []))
 
     def _get_ui_active_sectors(self):
         return self._get_detector_ui_snapshot()[0]
@@ -3209,6 +3224,29 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
     def _refresh_sector_list(self, reset_to_top: bool = False):
         self._start_table_render(self.sector_table, self._iter_sector_rows(reset_to_top))
+
+    @staticmethod
+    def _prepare_sector_rows(sectors, favorite_sectors, favorite_stocks, options, col, asc):
+        from types import SimpleNamespace
+        self = SimpleNamespace(**options)
+        self._evaluate_search_condition = lambda query, row: SectorBiddingPanel._evaluate_search_condition(None, query, row)
+        self._get_filtered_stock_count = lambda data, favorites: SectorBiddingPanel._get_filtered_stock_count(self, data, favorites)
+        sectors = [dict(row) for row in sectors]
+        # 计算每个板块符合当前过滤条件的个股数并存入 _filtered_count
+        for sdata in sectors:
+            sdata['_filtered_count'] = self._get_filtered_stock_count(sdata, favorites=favorite_stocks)
+
+        is_fav = lambda x: 1 if x.get('sector', '') in favorite_sectors else 0
+
+        if col == 0: sectors.sort(key=lambda x: x.get('sector', ''), reverse=not asc)
+        elif col == 1: sectors.sort(key=lambda x: x.get('score', 0), reverse=not asc)
+        elif col == 2: sectors.sort(key=lambda x: x.get('avg_pct_diff', 0.0), reverse=not asc)
+        elif col == 3: sectors.sort(key=lambda x: x.get('leader_name', ''), reverse=not asc)
+        elif col == 4: sectors.sort(key=lambda x: x.get('_filtered_count', 0), reverse=not asc)
+
+        sectors.sort(key=is_fav, reverse=True)
+
+        return sectors
 
     def _iter_sector_rows(self, reset_to_top=False):
         favorite_sectors = self.favorite_sectors
@@ -3272,20 +3310,15 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         #             filtered_sectors.append(s)
         #     sectors = filtered_sectors
 
-        # 计算每个板块符合当前过滤条件的个股数并存入 _filtered_count
-        for sdata in sectors:
-            sdata['_filtered_count'] = self._get_filtered_stock_count(sdata, favorites=favorite_stocks)
-            yield
-
-        is_fav = lambda x: 1 if x.get('sector', '') in favorite_sectors else 0
-
-        if col == 0: sectors.sort(key=lambda x: x.get('sector', ''), reverse=not asc)
-        elif col == 1: sectors.sort(key=lambda x: x.get('score', 0), reverse=not asc)
-        elif col == 2: sectors.sort(key=lambda x: x.get('avg_pct_diff', 0.0), reverse=not asc)
-        elif col == 3: sectors.sort(key=lambda x: x.get('leader_name', ''), reverse=not asc)
-        elif col == 4: sectors.sort(key=lambda x: x.get('_filtered_count', 0), reverse=not asc)
-
-        sectors.sort(key=is_fav, reverse=True)
+        options = {
+            '_active_search_query': getattr(self, '_active_search_query', ''),
+            '_force_show_all_in_stock_table': getattr(self, '_force_show_all_in_stock_table', False),
+            '_is_macro_active': self._is_macro_active,
+            '_macro_filtered_codes': frozenset(self._macro_filtered_codes),
+        }
+        sectors = yield from self._prepare_table_rows(
+            'sectors', type(self)._prepare_sector_rows, sectors, favorite_sectors,
+            favorite_stocks, options, col, asc)
 
         # 6. 表格渲染 (Dirty Check Update)
         current_rows = self.sector_table.rowCount()
@@ -3988,6 +4021,11 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         active_query = getattr(self, '_active_search_query', '')
         penetrating = getattr(self, '_force_show_all_in_stock_table', False)
         if not active_query or penetrating:
+            if not self._is_macro_active:
+                candidates = data.get('race_candidates', [])
+                if candidates and not penetrating:
+                    return len(candidates)
+                return int(bool(data.get('leader'))) + len(data.get('followers', []))
             # Counts need only codes; avoid building a display dictionary for every stock.
             from itertools import chain
             candidates = data.get('race_candidates', [])
@@ -4102,23 +4140,18 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     def _populate_table(self, data: dict, reset_to_top: bool = False):
         self._start_table_render(self.stock_table, self._iter_stock_rows(data, reset_to_top))
 
-    def _iter_stock_rows(self, data, reset_to_top=False):
-        favorite_stocks = self.favorite_stocks
-        selection_serial = self._stock_selection_serial
+    @staticmethod
+    def _prepare_stock_rows(data, favorite_stocks, options):
+        """Pure row assembly/filter/sort; the worker owns no QWidget references."""
+        from types import SimpleNamespace
+        self = SimpleNamespace(**options)
+        self._evaluate_search_condition = lambda query, row: SectorBiddingPanel._evaluate_search_condition(None, query, row)
         leader_code   = data.get('leader', '')
         leader_name   = data.get('leader_name', leader_code)
         leader_pct    = data.get('leader_pct', 0.0)
         leader_price  = data.get('leader_price', 0.0)
         leader_klines = data.get('leader_klines', [])
         followers     = data.get('followers', [])
-
-        mini = _ascii_kline(leader_klines, width=44, last_close=data.get('leader_last_close', 0))
-        self.kline_lbl.setText(f"龙头分时: {mini}")
-        self.leader_lbl.setText(
-            f"🏆 {leader_name} [{leader_code}]  "
-            f"现价:{leader_price:.2f}  涨幅:{leader_pct:+.2f}%  "
-            f"K线:{len(leader_klines)}棒"
-        )
 
         # [NEW] 支撑精细化角色显示 (龙头竞赛逻辑)
         race_candidates = data.get('race_candidates', [])
@@ -4279,13 +4312,6 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                     filtered_rows.append(r)
             rows = filtered_rows
         
-        # [NEW] 更新搜索状态提示 (集成到 leader 标签)
-        if active_query:
-            status = f" [搜索穿透]" if force_show_all else f" [过滤🔍:{active_query}]"
-            curr_text = self.leader_lbl.text()
-            if status not in curr_text:
-                self.leader_lbl.setText(curr_text + status)
-
         # 应用排序 (Manual Sort)
         col = self._sort_col
         rev = not self._sort_asc
@@ -4335,6 +4361,57 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             if '_search_blob' not in r:
                 r['_search_blob'] = (f"{r['code']} {r['name']} {r['hint']} {r['role']}").lower()
  
+        return rows
+
+    def _get_table_prepare_executor(self):
+        from concurrent.futures import ThreadPoolExecutor
+        executor = getattr(self, '_table_prepare_executor', None)
+        if executor is None:
+            executor = self._table_prepare_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix='bidding_rows')
+            self._table_prepare_futures = {}
+        return executor
+
+    def _prepare_table_rows(self, key, prepare, *args):
+        """Only one outstanding job per table; abandoned refreshes never build a queue."""
+        executor = self._get_table_prepare_executor()
+        previous = self._table_prepare_futures.get(key)
+        while previous is not None and not previous.done():
+            yield False
+        if getattr(self, '_panel_closing', False):
+            return []
+        future = executor.submit(prepare, *args)
+        self._table_prepare_futures[key] = future
+        while not future.done():
+            yield False
+        return future.result()
+
+    def _iter_stock_rows(self, data, reset_to_top=False):
+        favorite_stocks = self.favorite_stocks
+        selection_serial = self._stock_selection_serial
+        options = {
+            'stock_cols': tuple(self.stock_cols),
+            '_force_show_all_in_stock_table': getattr(self, '_force_show_all_in_stock_table', False),
+            '_is_macro_active': self._is_macro_active,
+            '_macro_filtered_codes': frozenset(self._macro_filtered_codes),
+            '_active_search_query': getattr(self, '_active_search_query', ''),
+            '_sort_col': self._sort_col, '_sort_asc': self._sort_asc,
+        }
+        rows = yield from self._prepare_table_rows(
+            'stocks', type(self)._prepare_stock_rows, data, favorite_stocks, options)
+        leader_code = data.get('leader', '')
+        leader_name = data.get('leader_name', leader_code)
+        leader_klines = data.get('leader_klines', [])
+        mini = _ascii_kline(leader_klines, width=44, last_close=data.get('leader_last_close', 0))
+        self.kline_lbl.setText(f"龙头分时: {mini}")
+        self.leader_lbl.setText(
+            f"🏆 {leader_name} [{leader_code}]  现价:{data.get('leader_price', 0.0):.2f}  "
+            f"涨幅:{data.get('leader_pct', 0.0):+.2f}%  K线:{len(leader_klines)}棒")
+        active_query = options['_active_search_query']
+        if active_query:
+            status = " [搜索穿透]" if options['_force_show_all_in_stock_table'] else f" [过滤🔍:{active_query}]"
+            self.leader_lbl.setText(self.leader_lbl.text() + status)
+
         # 💡 [ENHANCEMENT] 如果用户没有主动点击排序，默认将龙头置顶
         # (这仅在上述 col 匹配不到或强制恢复时生效)
         # if col == -1: ...
@@ -4587,11 +4664,12 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         table.setUpdatesEnabled(False)
         finished = False
         failed = False
+        waiting = False
         try:
             deadline = time.perf_counter() + 0.006
             for _ in range(24):
-                next(rows)
-                if time.perf_counter() >= deadline:
+                waiting = next(rows) is False
+                if waiting or time.perf_counter() >= deadline:
                     break
         except StopIteration:
             finished = True
@@ -4615,7 +4693,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
                 except Exception:
                     logger.exception('[SectorBiddingPanel] Selection restore failed')
         else:
-            timer.start(1)
+            timer.start(8 if waiting else 1)
 
     def _after_table_render(self, table, callback):
         job = self._table_render_jobs.get(table)
@@ -4764,6 +4842,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             
             unique_leaders = {} # code -> merged_record
             for d in history_data: # 按从新到旧遍历
+                yield
                 code = d['code']
                 if code not in unique_leaders:
                     # 首次遇到 (最新的)：保留状态、分值、原因
@@ -4785,6 +4864,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             watchlist = []
             snap = self.detector._global_snap_cache
             for code, d in unique_leaders.items():
+                yield
                 curr_price = 0.0
                 curr_vol_ratio = 0.0
                 if code in snap:
@@ -4825,6 +4905,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             seen_codes = set()
             sectors = self._get_ui_active_sectors()
             for d in sectors:
+                yield
                 code = d.get('leader', '')
                 if not code or code in seen_codes:
                     continue
@@ -4866,6 +4947,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             
             # Step 1: Filter existing watchlist items
             for w in watchlist:
+                yield
                 # [NEW] 同时满足宏观查询 (如果激活)
                 if self._is_macro_active:
                     if w['code'] not in self._macro_filtered_codes:
@@ -4886,6 +4968,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
             if is_direct_stock_search:
                 sector_results = self._search_sectors_by_stock(active_query)
                 for sr in sector_results:
+                    yield
                     # 避免重复 (如果已经是 watchlist 个股则跳过)
                     if sr['code'] not in seen_codes_in_wl or sr.get('_is_sector_entry'):
                         filtered_wl.append(sr)
@@ -4906,6 +4989,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         
         # [NEW] Pre-compute search blobs for watchlist (O(1) logic)
         for w in watchlist:
+            yield
             if '_search_blob' not in w:
                 w['_search_blob'] = (f"{w['code']} {w['name']} {w.get('sector', '')} {w.get('reason', '')}").lower()
         
@@ -4939,6 +5023,7 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         target_row = -1
         
         for i, w in enumerate(watchlist):
+            yield
             # 1. 代码
             self._update_cell(self.watchlist_table, i, 0, w['code'])
             

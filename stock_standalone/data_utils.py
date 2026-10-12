@@ -19,7 +19,7 @@ from db_utils import get_indb_df
 from system_linkage_quotes import (
     LINKAGE_QUOTE_BATCH_SIZE,
     LINKAGE_QUOTE_CACHE_SIZE,
-    collect_linkage_quote_batch,
+    AsyncLinkageQuoteFetcher,
     frame_quote_row,
     normalize_supported_stock_code,
     quote_row_status,
@@ -3380,8 +3380,13 @@ def fetch_and_process(
     linkage_quote_cache = pd.DataFrame()
     linkage_quote_cache_at = {}
     linkage_quote_cache_revision = None
+    linkage_quote_cache_trade_date = None
     linkage_quote_failures = {}
+    linkage_quote_fetcher = AsyncLinkageQuoteFetcher(
+        lambda codes: Sina(readonly=True).get_stock_list_data(codes, force_network=True)
+    )
     last_market_source_audit = None
+    last_market_source_audit_at = 0.0
     last_queue_backpressure_log = 0.0
     while True:
         loop_counter += 1
@@ -3600,11 +3605,14 @@ def fetch_and_process(
                     930 <= now_int <= 1130 or 1300 <= now_int <= 1500
                 )
                 latest_trade_date = cct.get_last_trade_date()
-                if linkage_quote_cache_revision != linkage_favorites_revision:
+                if (linkage_quote_cache_revision != linkage_favorites_revision or
+                        linkage_quote_cache_trade_date != latest_trade_date):
                     linkage_quote_cache = pd.DataFrame()
                     linkage_quote_cache_at = {}
                     linkage_quote_failures = {}
                     linkage_quote_cache_revision = linkage_favorites_revision
+                    linkage_quote_cache_trade_date = latest_trade_date
+                    linkage_quote_cursor = 0
                 supported_favorites = set()
                 for value in linkage_favorite_codes:
                     code = normalize_supported_stock_code(value)
@@ -3620,6 +3628,28 @@ def fetch_and_process(
                         linkage_quote_failures.pop(removed_code, None)
 
                 now_monotonic = time.monotonic()
+                completed = linkage_quote_fetcher.take_result(
+                    linkage_favorites_revision, latest_trade_date
+                )
+                if completed is not None:
+                    fetched_request_codes, fetched_quotes, fetched_statuses, fetched_at = completed
+                    fetched_code_set = set()
+                    if fetched_quotes is not None and not fetched_quotes.empty:
+                        fetched_codes = fetched_quotes.index.astype(str).str.strip().str.zfill(6)
+                        fetched_code_set = set(fetched_codes)
+                        previous_codes = linkage_quote_cache.index.astype(str).str.strip().str.zfill(6)
+                        linkage_quote_cache = pd.concat([
+                            linkage_quote_cache.loc[~previous_codes.isin(set(fetched_codes))],
+                            fetched_quotes,
+                        ], sort=False)
+                        for code in fetched_codes:
+                            linkage_quote_cache_at[code] = fetched_at
+                            linkage_quote_failures.pop(code, None)
+                    for code in fetched_request_codes:
+                        if code not in fetched_code_set:
+                            failure_status = fetched_statuses.get(code, 'pending_fetch')
+                            if failure_status in ('quota_limited', 'pending_fetch'):
+                                linkage_quote_failures[code] = failure_status
                 fresh_cache_codes = []
                 for code in supported_favorites:
                     cached_row = frame_quote_row(linkage_quote_cache, code)
@@ -3646,34 +3676,13 @@ def fetch_and_process(
                     limit=LINKAGE_QUOTE_BATCH_SIZE, frame_age_seconds=0,
                 )
                 if linkage_codes and now_monotonic - linkage_quote_last_fetch >= 5.0:
-                    fetched_quotes, linkage_statuses, linkage_quote_cursor = collect_linkage_quote_batch(
-                        linkage_favorite_codes, schedule_frame, latest_trade_date,
-                        linkage_market_active,
-                        lambda codes: Sina(readonly=True).get_stock_list_data(
-                            codes, force_network=True
-                        ),
-                        cursor=linkage_scan_cursor,
-                        limit=LINKAGE_QUOTE_BATCH_SIZE, frame_age_seconds=0,
-                    )
-                    linkage_quote_last_fetch = now_monotonic
-                    fetched_code_set = set()
-                    if fetched_quotes is not None and not fetched_quotes.empty:
-                        fetched_codes = fetched_quotes.index.astype(str).str.strip().str.zfill(6)
-                        fetched_code_set = set(fetched_codes)
-                        previous_codes = linkage_quote_cache.index.astype(str).str.strip().str.zfill(6)
-                        linkage_quote_cache = pd.concat([
-                            linkage_quote_cache.loc[~previous_codes.isin(set(fetched_codes))],
-                            fetched_quotes,
-                        ], sort=False)
-                        for code in fetched_codes:
-                            linkage_quote_cache_at[code] = now_monotonic
-                            linkage_quote_failures.pop(code, None)
-                    for code in linkage_codes:
-                        if code not in fetched_code_set:
-                            failure_status = linkage_statuses.get(code, 'pending_fetch')
-                            if failure_status in ('quota_limited', 'pending_fetch'):
-                                linkage_quote_failures[code] = failure_status
-                else:
+                    if linkage_quote_fetcher.submit(
+                        linkage_favorites_revision, latest_trade_date,
+                        linkage_codes, linkage_market_active,
+                    ):
+                        linkage_quote_last_fetch = now_monotonic
+                        linkage_quote_cursor = next_cursor
+                elif not linkage_codes:
                     linkage_quote_cursor = next_cursor
                 if len(linkage_quote_cache) > LINKAGE_QUOTE_CACHE_SIZE:
                     cached_codes = linkage_quote_cache.index.astype(str).str.strip().str.zfill(6)
@@ -3834,42 +3843,44 @@ def fetch_and_process(
             # Capture whether the sparse fields are already missing before the frame crosses IPC.
             # The UI-side TREE-FRAME-AUDIT then distinguishes source gaps from Treeview write gaps.
             try:
-                source_probe_cols = ('dff', 'dff2', 'percent', 'ma5d', 'high4', 'upper')
-                source_audit = []
-                source_signature = []
-                for track_name, frame in (('full', top_all), ('ui', df_all)):
-                    if frame is None or frame.empty:
-                        source_audit.append((track_name, 0, source_probe_cols, (), ()))
-                        source_signature.append((track_name, 0, source_probe_cols, ()))
-                        continue
-                    absent = tuple(col for col in source_probe_cols if col not in frame.columns)
-                    probe = [col for col in source_probe_cols if col in frame.columns]
-                    counts = tuple((col, int(frame[col].notna().sum())) for col in probe)
-                    coverage = tuple(
-                        (col, int(round((count * 100.0 / len(frame)) / 5.0) * 5))
-                        for col, count in counts
-                    )
-                    sparse_codes = ()
-                    if probe:
-                        missing = frame[probe].isna().sum(axis=1)
-                        threshold = max(1, (len(probe) + 1) // 2)
-                        sample_positions = [
-                            i for i, count in enumerate(missing.to_numpy())
-                            if count >= threshold
-                        ][:5]
-                        if 'code' in frame.columns:
-                            sparse_codes = tuple(
-                                str(frame['code'].iloc[pos]) for pos in sample_positions
-                            )
-                        else:
-                            sparse_codes = tuple(str(frame.index[pos]) for pos in sample_positions)
-                    source_audit.append((track_name, len(frame), absent, counts, sparse_codes))
-                    source_signature.append((track_name, len(frame) // 100, absent, coverage))
-                source_audit = tuple(source_audit)
-                source_signature = tuple(source_signature)
-                if source_signature != last_market_source_audit:
-                    logger.info('[MARKET-FRAME-SOURCE] pre-IPC quality=%s', source_audit)
-                    last_market_source_audit = source_signature
+                if time.monotonic() - last_market_source_audit_at >= 30.0:
+                    last_market_source_audit_at = time.monotonic()
+                    source_probe_cols = ('dff', 'dff2', 'percent', 'ma5d', 'high4', 'upper')
+                    source_audit = []
+                    source_signature = []
+                    for track_name, frame in (('full', top_all), ('ui', df_all)):
+                        if frame is None or frame.empty:
+                            source_audit.append((track_name, 0, source_probe_cols, (), ()))
+                            source_signature.append((track_name, 0, source_probe_cols, ()))
+                            continue
+                        absent = tuple(col for col in source_probe_cols if col not in frame.columns)
+                        probe = [col for col in source_probe_cols if col in frame.columns]
+                        counts = tuple((col, int(frame[col].notna().sum())) for col in probe)
+                        coverage = tuple(
+                            (col, int(round((count * 100.0 / len(frame)) / 5.0) * 5))
+                            for col, count in counts
+                        )
+                        sparse_codes = ()
+                        if probe:
+                            missing = frame[probe].isna().sum(axis=1)
+                            threshold = max(1, (len(probe) + 1) // 2)
+                            sample_positions = [
+                                i for i, count in enumerate(missing.to_numpy())
+                                if count >= threshold
+                            ][:5]
+                            if 'code' in frame.columns:
+                                sparse_codes = tuple(
+                                    str(frame['code'].iloc[pos]) for pos in sample_positions
+                                )
+                            else:
+                                sparse_codes = tuple(str(frame.index[pos]) for pos in sample_positions)
+                        source_audit.append((track_name, len(frame), absent, counts, sparse_codes))
+                        source_signature.append((track_name, len(frame) // 100, absent, coverage))
+                    source_audit = tuple(source_audit)
+                    source_signature = tuple(source_signature)
+                    if source_signature != last_market_source_audit:
+                        logger.info('[MARKET-FRAME-SOURCE] pre-IPC quality=%s', source_audit)
+                        last_market_source_audit = source_signature
             except Exception:
                 logger.debug('[MARKET-FRAME-SOURCE] quality snapshot failed', exc_info=True)
 
