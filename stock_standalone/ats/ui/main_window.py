@@ -2060,6 +2060,7 @@ class ATSMainWindow(QMainWindow):
             self._linkage_pending_operations = {}
             self._linkage_last_reported = {}
             self._linkage_state_lock = threading.Lock()
+            self._ats_linkage_consumed_revision = 0
             self._linkage_favorites_listener = self._on_linkage_store_changed_from_worker
             favorite_manager = GlobalFavoriteManager()
             favorite_manager.add_change_listener(self._linkage_favorites_listener)
@@ -4582,6 +4583,8 @@ class ATSMainWindow(QMainWindow):
                 return
             frame = frame.copy()
             revision = int(package.get('favorites_revision', 0) or 0)
+            if not self._accept_linkage_quote_revision(revision):
+                return
             previous_revision = getattr(self, '_linkage_favorites_revision', None)
             existing_frame = getattr(self, '_linkage_quote_frame', None)
             statuses = dict(package.get('statuses') or {})
@@ -6954,9 +6957,8 @@ class ATSMainWindow(QMainWindow):
         else:
             fav_act = QAction(f"⭐ 设为重点关注 (加入自选)", self)
         def _toggle_fav():
-            fav_mgr.toggle_favorite_stock(code_clean)
-            if hasattr(self, '_safe_favorites_changed'):
-                self._safe_favorites_changed()
+            from ats.ui.favorite_actions import submit_favorite_action
+            submit_favorite_action(self, "toggle_favorite_stock_result", code_clean)
         fav_act.triggered.connect(_toggle_fav)
         menu.addAction(fav_act)
 
@@ -7894,9 +7896,11 @@ class ATSMainWindow(QMainWindow):
     def _handle_linkage_store_changed(self, event):
         if getattr(self, '_is_closing', False):
             return
-        self._safe_favorites_changed()
+        if not self._safe_favorites_changed():
+            return
         self._queue_linkage_consumption(
-            event.get('new_operations') or {}, event.get('favorites_revision', 0)
+            event.get('new_operations') or {},
+            getattr(self, '_ats_linkage_consumed_revision', 0),
         )
 
     def _reconcile_linkage_favorites(self):
@@ -7911,8 +7915,11 @@ class ATSMainWindow(QMainWindow):
                 for operation_id, record in manager.list_linkage_operations().items()
                 if record.get('code') in favorites
             }
-            self._safe_favorites_changed()
-            self._queue_linkage_consumption(operations, manager.persistent_revision)
+            if not self._safe_favorites_changed():
+                return
+            self._queue_linkage_consumption(
+                operations, getattr(self, '_ats_linkage_consumed_revision', 0)
+            )
         except Exception:
             logger.exception("ATS could not reconcile persisted watchlist linkage operations")
 
@@ -7958,6 +7965,13 @@ class ATSMainWindow(QMainWindow):
         import queue
 
         if not isinstance(operations, dict) or not hasattr(self, '_linkage_receipt_queue'):
+            return
+        try:
+            favorites_revision = int(favorites_revision or 0)
+            consumed_revision = int(getattr(self, '_ats_linkage_consumed_revision', 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            return
+        if favorites_revision < 0 or favorites_revision > consumed_revision:
             return
         items = []
         reported_states = {}
@@ -8030,7 +8044,7 @@ class ATSMainWindow(QMainWindow):
             self._refresh_linkage_quote_receipts()
             payload = {
                 'cmd': 'WATCHLIST_HEARTBEAT', 'consumer': 'ATS',
-                'favorites_revision': GlobalFavoriteManager().persistent_revision,
+                'favorites_revision': int(getattr(self, '_ats_linkage_consumed_revision', 0) or 0),
                 'quote_status': self._linkage_heartbeat_quote_status(),
             }
             self._linkage_receipt_queue.put_nowait(payload)
@@ -8060,8 +8074,15 @@ class ATSMainWindow(QMainWindow):
                         self._linkage_last_reported.pop(str(item.get('operation_id', '')), None)
 
     def _on_favorites_changed(self):
-        # Thread-safe trigger UI refresh on favorite changes using QTimer
-        QTimer.singleShot(0, self._safe_favorites_changed)
+        if getattr(self, '_favorites_refresh_scheduled', False):
+            return
+        self._favorites_refresh_scheduled = True
+
+        def deliver():
+            self._favorites_refresh_scheduled = False
+            if not getattr(self, '_is_closing', False):
+                self._safe_favorites_changed()
+        QTimer.singleShot(50, deliver)
 
     def _poll_favorites_loop(self):
         try:
@@ -8076,15 +8097,35 @@ class ATSMainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _record_linkage_favorites_consumed(self, revision):
+        try:
+            value = int(revision or 0)
+        except (TypeError, ValueError, OverflowError):
+            return int(getattr(self, '_ats_linkage_consumed_revision', 0) or 0)
+        if value >= 0:
+            self._ats_linkage_consumed_revision = max(
+                int(getattr(self, '_ats_linkage_consumed_revision', 0) or 0), value
+            )
+        return self._ats_linkage_consumed_revision
+
+    def _accept_linkage_quote_revision(self, revision):
+        try:
+            value = int(revision or 0)
+            previous = getattr(self, '_linkage_favorites_revision', None)
+            return value >= 0 and (previous is None or value >= int(previous or 0))
+        except (TypeError, ValueError, OverflowError):
+            return False
+
     def _safe_favorites_changed(self):
         if getattr(self, '_is_closing', False):
-            return
+            return False
         try:
             from global_favorites import GlobalFavoriteManager
             import time
             import pandas as pd
 
             fav_mgr = GlobalFavoriteManager()
+            favorites_revision = int(fav_mgr.persistent_revision)
             fav_stocks = fav_mgr.get_favorite_stocks()
             fav_stocks_clean = {str(c).strip().zfill(6) for c in fav_stocks}
             from system_linkage_quotes import (
@@ -8241,8 +8282,11 @@ class ATSMainWindow(QMainWindow):
                             d.refresh_favorites_display()
                     except Exception:
                         pass
+            self._record_linkage_favorites_consumed(favorites_revision)
+            return True
         except Exception as e:
             print(f"[ATSMainWindow] Error refreshing UI on favorites changed: {e}")
+            return False
 
 
     def open_next_day_watch_dialog(self, force_dialog: bool = False):

@@ -841,9 +841,14 @@ class SectorHeatmapWidget(QWidget):
             menu.addSeparator()
             clear_action = QAction(f"🗑️ 清空所有重点关注板块 ({len(fav_sectors)}个)", self)
             def _clear_all_favs():
-                for s in list(fav_sectors):
-                    fav_mgr.remove_favorite_sector(s)
-                self.sort_sectors(self.sort_combo.currentIndex())
+                from ats.ui.favorite_actions import submit_favorite_action
+                submit_favorite_action(
+                    self, "remove_favorite_sectors_result", list(fav_sectors),
+                    on_complete=lambda owner, result, error: owner.sort_sectors(
+                        owner.sort_combo.currentIndex()
+                    ) if error is None else None,
+                    success_message=f"已清除 {len(fav_sectors)} 个重点板块",
+                )
             clear_action.triggered.connect(_clear_all_favs)
             menu.addAction(clear_action)
         
@@ -859,18 +864,13 @@ class SectorHeatmapWidget(QWidget):
         try:
             import re
             clean_sec = re.sub(r'^[^\w\u4e00-\u9fa5]+', '', str(sector_name)).strip()
-            from global_favorites import GlobalFavoriteManager
-            fav_mgr = GlobalFavoriteManager()
-            fav_sectors = fav_mgr.get_favorite_sectors()
-            
-            if clean_sec in fav_sectors or sector_name in fav_sectors:
-                fav_mgr.remove_favorite_sector(clean_sec)
-                fav_mgr.remove_favorite_sector(sector_name)
-            else:
-                fav_mgr.add_favorite_sector(clean_sec)
-
-            # 立即原地触发重新排序与网格刷新
-            self.sort_sectors(self.sort_combo.currentIndex())
+            from ats.ui.favorite_actions import submit_favorite_action
+            submit_favorite_action(
+                self, "toggle_favorite_sector_result", clean_sec,
+                on_complete=lambda owner, result, error: owner.sort_sectors(
+                    owner.sort_combo.currentIndex()
+                ) if error is None else None,
+            )
         except Exception as e:
             print(f"[SectorHeatmap] Toggle favorite sector error: {e}")
 

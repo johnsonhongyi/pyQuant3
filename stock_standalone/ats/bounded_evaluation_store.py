@@ -15,7 +15,9 @@ RECOVERY_JOURNAL_NAME = '.ats_archive_recovery.json.gz'
 
 
 def recovery_journal_path(root):
-    return os.path.join(os.path.abspath(root), 'datacsv', RECOVERY_JOURNAL_NAME)
+    from linkage_storage import runtime_file
+    return runtime_file(os.path.join(os.path.abspath(root), 'datacsv', RECOVERY_JOURNAL_NAME),
+                        max_bytes=16 * 1024 * 1024, archive=False)
 
 
 def compact_checkpoints(evaluation):
@@ -140,13 +142,23 @@ class EvaluationStore:
 
     def _remember(self, path, entry):
         if path not in self._cache and len(self._cache) >= 128:
-            clean = next((key for key, value in self._cache.items() if not value['dirty']), None)
+            clean = next((key for key, value in self._cache.items() if not value.get('dirty')), None)
             if clean is None:
-                clean = None  # Pending archives stay in memory until the permitted checkpoint.
+                return self._capacity_rejected('128 dirty paths')
             if clean is not None:
                 del self._cache[clean]
         self._cache[path] = entry
         self._cache.move_to_end(path)
+        return True
+
+    def _capacity_rejected(self, reason):
+        now = time.monotonic()
+        if now - getattr(self, '_last_capacity_warning', float('-inf')) >= 300:
+            self._last_capacity_warning = now
+            import logging
+            logging.getLogger('ATS.ArchiveCache').error(
+                'Archive update rejected; existing pending data retained: %s', reason)
+        return False
 
     def read(self, path, default):
         path = os.path.abspath(path)
@@ -234,7 +246,8 @@ class EvaluationStore:
             entry['writer'] = writer
             if on_commit is not None:
                 entry['on_commit'] = on_commit
-            self._remember(path, entry)
+            if not self._remember(path, entry):
+                return False
             if not self._started:
                 self._started = True
                 threading.Thread(target=self._flush_loop, daemon=True, name='ATS-ArchiveCache').start()
@@ -261,11 +274,14 @@ class EvaluationStore:
             else:
                 if coalesce_key is not None:
                     indices[coalesce_key] = len(records)
+                if len(records) >= 4096:
+                    return self._capacity_rejected('4096 pending records')
                 records.append(val_copy)
             entry['value'] = records
             entry['coalesced'] = indices
             entry.update(dirty=True, writer=writer, kind='append')
-            self._remember(path, entry)
+            if not self._remember(path, entry):
+                return False
             if not self._started:
                 self._started = True
                 threading.Thread(target=self._flush_loop, daemon=True, name='ATS-ArchiveCache').start()
@@ -281,7 +297,10 @@ class EvaluationStore:
             self.flush()
 
     def flush(self, timeout_sec=0.0, require_clean=False, force=False):
-        """Flush due checkpoints, or write all dirty entries during orderly shutdown."""
+        """Flush closing checkpoints; force cannot bypass the local archive window."""
+        if archive_window()[0] != 'close':
+            return False
+        force = False
         if not self._flush_lock.acquire(timeout=max(0.0, float(timeout_sec))):
             return False
         try:
@@ -328,6 +347,8 @@ class EvaluationStore:
             payload = json.dumps(
                 {'format_version': 1, 'entries': entries},
                 ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode('utf-8')
+            if len(payload) > 16 * 1024 * 1024:
+                raise ValueError('archive_recovery_size_limit')
             directory = os.path.dirname(recovery_path)
             os.makedirs(directory, exist_ok=True)
             fd, temporary = tempfile.mkstemp(prefix='.ats_archive_recovery_', dir=directory)
@@ -416,6 +437,9 @@ class EvaluationStore:
 
     def _flush_pending(self, force=False):
         success = True
+        force = False
+        if archive_window()[0] != 'close':
+            return False
         for path, value in self.pending(force=force):
             if not force and archive_window()[0] is None:
                 break
@@ -432,11 +456,10 @@ class EvaluationStore:
                     window, day = archive_window()
                     if window is None and not force:
                         break
-                    if not force and window == 'close' and self._saved_close_day(path) == day:
-                        with self._lock:
-                            if path in self._cache:
-                                self._cache[path]['close_date'] = day
-                        continue
+                    if window == 'close':
+                        stamp = self._latest_write_ts(path)
+                        if stamp and time.time() - stamp < WRITE_INTERVAL:
+                            continue
                     if not force and window == 'market':
                         stamp = self._latest_write_ts(path)
                         elapsed = max(0.0, time.time() - stamp)
@@ -450,15 +473,6 @@ class EvaluationStore:
                     if written is False:
                         success = False
                         continue  # Keep dirty data and receipts available for retry.
-                    if window == 'close' and written is not False:
-                        from datetime import datetime, timedelta, timezone
-                        try:
-                            close_ts = datetime.strptime(day + " 15:05:00", "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone(timedelta(hours=8))).timestamp()
-                            target_file = path + '.gz' if os.path.exists(path + '.gz') else path
-                            if os.path.exists(target_file):
-                                os.utime(target_file, (close_ts, close_ts))
-                        except Exception:
-                            pass
                     self.committed(path, value, written is not False, original=original)
                 if on_commit is not None and written is not False:
                     on_commit(value)
@@ -530,8 +544,8 @@ class EvaluationStore:
             if window is None and not force:
                 return raw_items
             for path, entry in self._cache.items():
-                due = (force or window == 'market' and time.monotonic() - entry['last_write'] >= WRITE_INTERVAL
-                       or window == 'close' and entry.get('close_date') != day)
+                due = (window == 'close' and (entry.get('close_date') != day
+                       or time.monotonic() - entry.get('last_write', 0) >= WRITE_INTERVAL))
                 if entry.get("dirty") and due:
                     raw_items.append((path, entry["value"]))
         # ⚡ 锁外执行 deepcopy，消除大归档复制期间持有缓存全局锁阻塞其他操作；COW保证锁外深拷贝无并发修改撕裂

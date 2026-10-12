@@ -1,4 +1,4 @@
-"""Archive only during market hours, plus one changed closing snapshot per day."""
+"""Local archives are allowed only after close, once per trade day."""
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 
@@ -20,7 +20,7 @@ def _effective_trade_date(day):
         return None
 
 
-def archive_window(now=None):
+def archive_window(now=None, allow_market=False):
     now = now or datetime.now(timezone(timedelta(hours=8)))
     calendar_day = now.strftime('%Y-%m-%d')
     day = _effective_trade_date(calendar_day)
@@ -29,8 +29,8 @@ def archive_window(now=None):
     if day != calendar_day:
         return None, day
     minute = now.hour * 60 + now.minute
-    if 570 <= minute < 690 or 780 <= minute < 900:
+    if allow_market and (570 <= minute < 690 or 780 <= minute < 900):
         return 'market', day
-    if minute >= 900:
+    if minute >= (900 if allow_market else 930):
         return 'close', day
     return None, day

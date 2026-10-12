@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
+from linkage_storage import runtime_database, configure as configure_linkage_database, trim as trim_linkage_database
 from sys_utils import get_app_root, get_base_path, get_conf_path
 
 logger = logging.getLogger("system_linkage_gateway")
@@ -369,7 +370,7 @@ class SystemLinkageGateway:
         self.dispatch_to_ui = dispatch_to_ui
         self.manager_factory = manager_factory
         self.on_configured = on_configured
-        self.database_path = database_path or os.path.join(get_app_root(), "system_linkage.sqlite3")
+        self.database_path = database_path or runtime_database(os.path.join(get_app_root(), "system_linkage.sqlite3"))
         self.node_id = str(getattr(config, "ipc_node_id", "") or "").strip()
         self.workspace_id = str(getattr(config, "ipc_workspace_id", "") or "").strip()
         self._allowlist = list(getattr(config, "ipc_peer_allowlist", []) or [])
@@ -388,7 +389,7 @@ class SystemLinkageGateway:
         connection = sqlite3.connect(self.database_path, timeout=3.0)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout=3000")
-        connection.execute("PRAGMA synchronous=FULL")
+        configure_linkage_database(connection)
         return connection
 
     @contextlib.contextmanager
@@ -406,8 +407,8 @@ class SystemLinkageGateway:
     def _init_database(self):
         os.makedirs(os.path.dirname(os.path.abspath(self.database_path)), exist_ok=True)
         with self._db() as connection:
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute("PRAGMA synchronous=FULL")
+            connection.execute("PRAGMA journal_mode=DELETE")
+            configure_linkage_database(connection)
             connection.execute("PRAGMA busy_timeout=3000")
             connection.executescript("""
                 CREATE TABLE IF NOT EXISTS linkage_operations (

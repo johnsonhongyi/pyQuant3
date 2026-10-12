@@ -2329,14 +2329,12 @@ class NewStockPanel(QWidget):
         if not self.selected_code:
             return
         try:
-            from global_favorites import GlobalFavoriteManager
-            fav_mgr = GlobalFavoriteManager()
-            fav_mgr.toggle_favorite_stock(self.selected_code)
-            self._render_table()
-            
-            # 主动通知 ATS 主窗口同步刷新重点关注 Tab 与左侧策略股票池
-            if self.main_window and hasattr(self.main_window, '_safe_favorites_changed'):
-                self.main_window._safe_favorites_changed()
+            from ats.ui.favorite_actions import submit_favorite_action
+            submit_favorite_action(
+                self, "toggle_favorite_stock_result", self.selected_code,
+                on_complete=lambda owner, result, error: owner._render_table()
+                if error is None else None,
+            )
         except Exception as e:
             logger.debug(f"Toggle favorite error: {e}")
 

@@ -92,11 +92,32 @@ def list_archives(archive_dir: str, prefix: str = "search_history") -> List[str]
     return files
 
 def archive_file_tools(src_file: str, prefix: str, archive_dir: str, logger: Any, max_keep: int = 15, deadline: Optional[float] = None) -> None:
-    """通用备份函数，支持 JSON 和 SQLite 数据库文件"""
+    from ats.archive_policy import archive_window
+    if archive_window()[0] != 'close':
+        return
+    from ats.persistence_lock import directory_write_lock
+    try:
+        with directory_write_lock(archive_dir, timeout=0.25):
+            _archive_file_tools_locked(src_file, prefix, archive_dir, logger, max_keep, deadline)
+    except TimeoutError:
+        logger.info('Archive writer busy; deferred: %s', prefix)
+
+
+def _archive_file_tools_locked(src_file: str, prefix: str, archive_dir: str, logger: Any, max_keep: int = 15, deadline: Optional[float] = None) -> None:
+    """收盘后每日一次归档；严格限制文件及每类归档预算。"""
+    from ats.archive_policy import archive_window
+    window, archive_day = archive_window()
+    if window != 'close':
+        return
     if not os.path.exists(src_file):
         logger.info(f"⚠ {src_file} 不存在，跳过存档")
         return
 
+    source_limit = (256 * 1024 * 1024 if src_file.lower().endswith(('.db', '.sqlite', '.sqlite3'))
+                    else 4 * 1024 * 1024)
+    if os.path.getsize(src_file) > source_limit:
+        logger.warning('Archive size budget exceeded; original retained: %s', prefix)
+        return
     # 对 JSON 文件进行内容读取比对
     is_json = src_file.lower().endswith(".json")
     content = None
@@ -134,12 +155,16 @@ def archive_file_tools(src_file: str, prefix: str, archive_dir: str, logger: Any
 
     # 构建归档文件名
     # timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H")
+    timestamp = archive_day
     ext = os.path.splitext(src_file)[1]
     filename = f"{prefix}_{timestamp}{ext}"
     dest = os.path.join(archive_dir, filename)
+    if os.path.exists(dest):
+        return
 
     tmp_dest = f"{dest}.{os.getpid()}.tmp"
+    if deadline is None:
+        deadline = time.monotonic() + 60.0
     try:
         if deadline is None:
             shutil.copy2(src_file, tmp_dest)
@@ -154,6 +179,10 @@ def archive_file_tools(src_file: str, prefix: str, archive_dir: str, logger: Any
                 from pathlib import Path
                 source = sqlite3.connect(Path(src_file).resolve().as_uri() + "?mode=ro", uri=True, timeout=0.2)
                 try:
+                    pages = source.execute('PRAGMA page_count').fetchone()[0]
+                    page_size = source.execute('PRAGMA page_size').fetchone()[0]
+                    if pages * page_size > source_limit:
+                        raise ValueError('archive_database_size_limit')
                     target = sqlite3.connect(tmp_dest, timeout=0.2)
                     try:
                         source.backup(target, pages=128, progress=check_deadline, sleep=0.01)
@@ -171,6 +200,8 @@ def archive_file_tools(src_file: str, prefix: str, archive_dir: str, logger: Any
                         target.write(chunk)
             check_deadline()
             shutil.copystat(src_file, tmp_dest)
+        if os.path.getsize(tmp_dest) > source_limit:
+            raise ValueError('archive_file_size_limit')
         os.replace(tmp_dest, dest)
         logger.info(f"✅ 已归档：{os.path.relpath(dest)}")
     except Exception as e:
@@ -189,7 +220,12 @@ def archive_file_tools(src_file: str, prefix: str, archive_dir: str, logger: Any
         key=os.path.getmtime,
         reverse=True
     )
-    for old_file in files[max_keep:]:
+    retained_bytes = 0
+    keep_count = min(max_keep, 2)
+    for index, old_file in enumerate(files):
+        retained_bytes += os.path.getsize(old_file)
+        if index < keep_count and retained_bytes <= 512 * 1024 * 1024:
+            continue
         try:
             os.remove(old_file)
             logger.info(f"🗑 删除旧归档: {os.path.basename(old_file)}")
@@ -251,51 +287,17 @@ def archive_file_tools(src_file: str, prefix: str, archive_dir: str, logger: Any
 #             logger.info(f"⚠ 删除失败 {old_file} -> {e}")
 
 def archive_search_history_list(monitor_list_file: str, search_history_file: str, archive_dir: str, logger: Any) -> None:
-    """归档监控文件，避免空或重复存档"""
+    """Use the same closing gate, deduplication and capacity policy for histories."""
     archive_file_tools(monitor_list_file, "monitor_category_list", archive_dir, logger)
+    archive_file_tools(search_history_file, "search_history", archive_dir, logger)
     try:
         from sys_utils import get_conf_path
         mp_file = get_conf_path("multi_period_strategies.json")
         if mp_file and os.path.exists(mp_file):
             archive_file_tools(mp_file, "multi_period_strategies", archive_dir, logger)
-    except Exception as e:
-        logger.info(f"⚠ 多周期策略存档过程异常: {e}")
+    except Exception as error:
+        logger.warning('Multi-period strategy archive deferred: %s', error)
 
-    if not os.path.exists(search_history_file):
-        logger.info(f"⚠ {search_history_file} 不存在，跳过归档")
-        return
-
-    try:
-        with open(search_history_file, "r", encoding="utf-8") as f:
-            content = f.read().strip()
-    except Exception as e:
-        logger.info(f"⚠ 无法读取监控文件: {e}")
-        return
-
-    if not content or content in ("[]", "{}"):
-        logger.info(f"⚠ {search_history_file} 内容为空，跳过归档")
-        return
-
-    os.makedirs(archive_dir, exist_ok=True)
-
-    files = sorted(list_archives(archive_dir, "search_history"), reverse=True)
-    if files:
-        last_file = os.path.join(archive_dir, files[0])
-        try:
-            with open(last_file, "r", encoding="utf-8") as f:
-                last_content = f.read().strip()
-            if content == last_content:
-                logger.info("⚠ 内容与上一次存档相同，跳过归档")
-                return
-        except Exception as e:
-            logger.info(f"⚠ 无法读取最近存档: {e}")
-
-    today = datetime.now().strftime("%Y-%m-%d-%H")
-    filename = f"search_history_{today}.json"
-    dest = os.path.join(archive_dir, filename)
-
-    shutil.copy2(search_history_file, dest)
-    logger.info(f"✅ 已归档监控文件: {dest}")
 
 def ensure_parentheses_balanced(expr: str) -> str:
     """确保表达式括号平衡且外层包裹"""

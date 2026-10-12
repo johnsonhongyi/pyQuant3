@@ -399,12 +399,11 @@ class BaseATSTableWidget(QTableWidget):
 
     def _toggle_favorite(self, code):
         try:
-            from global_favorites import GlobalFavoriteManager
-            fav_mgr = GlobalFavoriteManager()
-            fav_mgr.toggle_favorite_stock(str(code).strip())
-            win = self.window()
-            if win and hasattr(win, '_safe_favorites_changed'):
-                win._safe_favorites_changed()
+            from ats.ui.favorite_actions import submit_favorite_action
+            submit_favorite_action(
+                self, "toggle_favorite_stock_result", str(code).strip(),
+                success_message="重点关注已保存",
+            )
         except Exception as e:
             print(f"[BaseATSTable] Toggle favorite stock error: {e}")
 

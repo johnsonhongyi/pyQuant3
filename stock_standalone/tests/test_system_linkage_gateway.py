@@ -1,17 +1,147 @@
 import configparser
+import ast
 import json
 import hashlib
 import hmac
 import http.client
+import queue
 import socket
+import threading
 import time
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
+from pathlib import Path
+from types import MethodType, SimpleNamespace
 
 import pytest
 
 import system_linkage_gateway
 from system_linkage_gateway import SystemLinkageGateway
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _load_method(path, class_name, method_name, **namespace):
+    tree = ast.parse((ROOT / path).read_text(encoding="utf-8"))
+    cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name)
+    method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == method_name)
+    method = ast.FunctionDef(name=method.name, args=method.args, body=method.body,
+                             decorator_list=[], returns=method.returns, type_comment=None)
+    ast.fix_missing_locations(method)
+    namespace.setdefault("threading", threading)
+    namespace.setdefault("logger", SimpleNamespace(info=lambda *a, **k: None,
+                                                     exception=lambda *a, **k: None))
+    exec(compile(ast.Module(body=[method], type_ignores=[]), path, "exec"), namespace)
+    return namespace[method_name]
+
+
+def test_ats_does_not_receipt_when_favorite_ui_refresh_fails():
+    handler = _load_method("ats/ui/main_window.py", "ATSMainWindow",
+                           "_handle_linkage_store_changed")
+    queued = []
+    owner = SimpleNamespace(
+        _is_closing=False,
+        _safe_favorites_changed=lambda: False,
+        _queue_linkage_consumption=lambda *args: queued.append(args),
+    )
+
+    handler(owner, {"new_operations": {"op": {"code": "600000"}},
+                    "favorites_revision": 3})
+
+    assert queued == []
+
+
+def test_ats_heartbeat_cursor_tracks_applied_revision_and_rejects_late_quotes():
+    record_consumed = _load_method(
+        "ats/ui/main_window.py", "ATSMainWindow", "_record_linkage_favorites_consumed"
+    )
+    accept_quote_revision = _load_method(
+        "ats/ui/main_window.py", "ATSMainWindow", "_accept_linkage_quote_revision"
+    )
+    queue_receipt = _load_method(
+        "ats/ui/main_window.py", "ATSMainWindow", "_queue_linkage_consumption"
+    )
+    owner = SimpleNamespace(
+        _ats_linkage_consumed_revision=4,
+        _linkage_favorites_revision=4,
+        _linkage_receipt_queue=queue.Queue(),
+    )
+
+    assert record_consumed(owner, 3) == 4
+    assert record_consumed(owner, 5) == 5
+    assert record_consumed(owner, 2) == 5
+    assert not accept_quote_revision(owner, 3)
+    assert accept_quote_revision(owner, 5)
+    assert not accept_quote_revision(owner, -1)
+
+    queue_receipt(owner, {"op": {"code": "600000"}}, 6)
+    assert owner._linkage_receipt_queue.empty()
+
+
+def test_tk_receipts_only_after_collector_consumes_current_revision(monkeypatch):
+    import sys
+
+    reports = []
+    reported = threading.Event()
+
+    class FakeManager:
+        persistent_revision = 2
+
+        def list_linkage_operations(self):
+            return {"op-1": {"code": "600000", "action": "add"}}
+
+        def is_linkage_operation_active(self, _code, _operation_id):
+            return True
+
+        def get_favorite_stocks(self):
+            return {"600000"}
+
+    class FakeGateway:
+        def report_consumer(self, *args):
+            reports.append(args)
+            reported.set()
+            return True
+
+    monkeypatch.setitem(sys.modules, "global_favorites",
+                        SimpleNamespace(GlobalFavoriteManager=FakeManager))
+    apply_command = _load_method("instock_MonitorTK.py", "StockMonitorApp",
+                                 "_apply_system_linkage_monitor")
+    record_snapshot = _load_method(
+        "instock_MonitorTK.py", "StockMonitorApp",
+        "_record_system_linkage_consumer_snapshot",
+    )
+    report_consumed = _load_method(
+        "instock_MonitorTK.py", "StockMonitorApp",
+        "_report_system_linkage_consumed",
+    )
+    owner = SimpleNamespace(
+        _is_closing=False,
+        _system_linkage_gateway=FakeGateway(),
+        global_dict={},
+        _force_full_sync_pending=False,
+        _force_ui_refresh_pending=False,
+        _tk_linkage_consumed_revision=0,
+        _tk_linkage_pending_receipts={},
+        _tk_linkage_receipt_lock=threading.Lock(),
+        _tk_linkage_receipt_running=False,
+    )
+    owner._report_system_linkage_consumed = MethodType(report_consumed, owner)
+
+    apply_command(owner, {"operation_id": "op-1", "code": "600000",
+                          "favorites_revision": 2})
+    assert owner.global_dict["linkage_favorites_revision"] == 2
+    assert owner._tk_linkage_pending_receipts["op-1"]["favorites_revision"] == 2
+    assert reports == []
+
+    record_snapshot(owner, 1, {"600000": "ready"})
+    assert reports == []
+    record_snapshot(owner, 2, {"600000": "ready"})
+    assert reported.wait(2)
+    assert reports == [("op-1", "TK", "synced", 2, "ready")]
+    assert owner._tk_linkage_pending_receipts == {}
+
+    record_snapshot(owner, 1, {"600000": "stale"})
+    assert owner._tk_linkage_consumed_revision == 2
+    assert len(reports) == 1
 
 
 def test_custom_bind_ip_accepts_a_local_private_interface():

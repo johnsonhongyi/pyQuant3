@@ -3119,15 +3119,12 @@ class HotSectorLeaderboardDialog(QWidget, WindowMixin):
             act_fav = menu.addAction(f"⭐ 设为重点关注 ({code_clean})")
 
         def _toggle_fav():
-            fav_mgr.toggle_favorite_stock(code_clean)
-            main_win = self._get_parent_mw()
-            if main_win and hasattr(main_win, '_safe_favorites_changed'):
-                try:
-                    main_win._safe_favorites_changed()
-                except Exception:
-                    pass
-            # 立即触发表格重新渲染以更新重点关注置顶与金色高亮
-            self._render_table_data(self.cached_results)
+            from ats.ui.favorite_actions import submit_favorite_action
+            submit_favorite_action(
+                self, "toggle_favorite_stock_result", code_clean,
+                on_complete=lambda owner, result, error: owner._render_table_data(owner.cached_results)
+                if error is None else None,
+            )
 
         act_fav.triggered.connect(_toggle_fav)
 

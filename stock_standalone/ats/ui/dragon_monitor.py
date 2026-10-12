@@ -857,11 +857,11 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
                 self.blacklist_codes.remove(code_str)
             self.manual_codes.append(code_str)
             self._save_manual_codes()
-            from global_favorites import GlobalFavoriteManager
             try:
-                GlobalFavoriteManager().add_favorite_stock(code_str)
-            except Exception:
-                pass
+                from ats.ui.favorite_actions import submit_favorite_action
+                submit_favorite_action(self, "add_favorite_stock_result", code_str)
+            except Exception as error:
+                logger.warning("Manual favorite add could not be queued: %s", error)
             if getattr(self, 'current_df', None) is not None:
                 self.update_data(self.current_df, getattr(self, 'last_sh_pct', 0.0))
 
@@ -946,9 +946,10 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
             def _remove_fav():
                 self._remove_from_manual(code)
                 try:
-                    fav_mgr.remove_favorite_stock(code)
-                except Exception:
-                    pass
+                    from ats.ui.favorite_actions import submit_favorite_action
+                    submit_favorite_action(self, "remove_favorite_stock_result", code)
+                except Exception as error:
+                    logger.warning("Favorite removal could not be queued: %s", error)
             rm_act.triggered.connect(_remove_fav)
             
             black_act = menu.addAction(f"🚫 移出并加入黑名单 ({code})")
@@ -958,9 +959,10 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
             def _add_fav():
                 self._convert_to_manual(code)
                 try:
-                    fav_mgr.add_favorite_stock(code)
-                except Exception:
-                    pass
+                    from ats.ui.favorite_actions import submit_favorite_action
+                    submit_favorite_action(self, "add_favorite_stock_result", code)
+                except Exception as error:
+                    logger.warning("Favorite add could not be queued: %s", error)
             add_act.triggered.connect(_add_fav)
             
             black_act = menu.addAction(f"🚫 移除并加入黑名单 ({code})")

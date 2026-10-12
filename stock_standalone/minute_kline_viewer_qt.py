@@ -2244,12 +2244,19 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
         
         # 2. 重点关注 Action
         if fav_mgr is not None:
+            from ats.ui.favorite_actions import submit_favorite_action
             if is_fav:
                 action_fav = menu.addAction("❌ 取消重点个股")
-                action_fav.triggered.connect(lambda c=code: [fav_mgr.remove_favorite_stock(c), self.statusBar().showMessage(f"已取消重点个股: {c}", 2000)])
+                action_fav.triggered.connect(lambda c=code: submit_favorite_action(
+                    self, "remove_favorite_stock_result", c,
+                    success_message=f"已取消重点个股: {code}",
+                ))
             else:
                 action_fav = menu.addAction("⭐ 设为重点个股")
-                action_fav.triggered.connect(lambda c=code: [fav_mgr.add_favorite_stock(c), self.statusBar().showMessage(f"已设为重点个股: {c}", 2000)])
+                action_fav.triggered.connect(lambda c=code: submit_favorite_action(
+                    self, "add_favorite_stock_result", c,
+                    success_message=f"已设为重点个股: {code}",
+                ))
             menu.addSeparator()
             
         # 3. 诊断个股 Action

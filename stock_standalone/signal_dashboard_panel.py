@@ -5064,28 +5064,46 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         if code:
             copy_action = menu.addAction(f"📋 复制代码: {code}")
             copy_action.triggered.connect(lambda: QApplication.clipboard().setText(code))
+            from ats.ui.favorite_actions import submit_favorite_action
             
             menu.addSeparator()
             
             is_fav_stock = code in fav_mgr.favorite_stocks
             if is_fav_stock:
                 fav_action = menu.addAction(f"❌ 取消重点个股: {name} ({code})")
-                fav_action.triggered.connect(lambda: fav_mgr.remove_favorite_stock(code))
+                fav_action.triggered.connect(lambda c=code: submit_favorite_action(
+                    self, "remove_favorite_stock_result", c,
+                    on_complete=lambda owner, result, error: owner._refresh_ui_for_favorites()
+                    if error is None else None,
+                ))
             else:
                 fav_action = menu.addAction(f"⭐ 设为重点个股: {name} ({code})")
-                fav_action.triggered.connect(lambda: fav_mgr.add_favorite_stock(code))
+                fav_action.triggered.connect(lambda c=code: submit_favorite_action(
+                    self, "add_favorite_stock_result", c,
+                    on_complete=lambda owner, result, error: owner._refresh_ui_for_favorites()
+                    if error is None else None,
+                ))
                 
             menu.addSeparator()
 
         # 2. 板块重点关注
         if sector:
+            from ats.ui.favorite_actions import submit_favorite_action
             is_fav_sec = sector in fav_mgr.favorite_sectors
             if is_fav_sec:
                 sec_fav_action = menu.addAction(f"❌ 取消重点板块: {sector}")
-                sec_fav_action.triggered.connect(lambda: fav_mgr.remove_favorite_sector(sector))
+                sec_fav_action.triggered.connect(lambda s=sector: submit_favorite_action(
+                    self, "remove_favorite_sector_result", s,
+                    on_complete=lambda owner, result, error: owner._refresh_ui_for_favorites()
+                    if error is None else None,
+                ))
             else:
                 sec_fav_action = menu.addAction(f"⭐ 设为重点板块: {sector}")
-                sec_fav_action.triggered.connect(lambda: fav_mgr.add_favorite_sector(sector))
+                sec_fav_action.triggered.connect(lambda s=sector: submit_favorite_action(
+                    self, "add_favorite_sector_result", s,
+                    on_complete=lambda owner, result, error: owner._refresh_ui_for_favorites()
+                    if error is None else None,
+                ))
                 
             menu.addSeparator()
 

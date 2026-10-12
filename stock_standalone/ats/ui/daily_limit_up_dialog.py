@@ -3467,24 +3467,18 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                     if code_item:
                         c = code_item.text().strip().replace("⭐", "").strip()
                         try:
-                            from global_favorites import GlobalFavoriteManager
-                            fav_mgr = GlobalFavoriteManager()
-                            if c in fav_mgr.get_favorite_stocks():
-                                fav_mgr.remove_favorite_stock(c)
-                                self.lbl_status.setText(f"⭐ 已从重点关注移除: {c}")
-                            else:
-                                fav_mgr.add_favorite_stock(c)
-                                self.lbl_status.setText(f"⭐ 已加入重点关注: {c}")
-                            main_win = self.parent() or (self.window() if hasattr(self, 'window') else None)
-                            if main_win and hasattr(main_win, '_safe_favorites_changed'):
-                                try:
-                                    main_win._safe_favorites_changed()
-                                except Exception:
-                                    pass
-                            # 立即重排置顶并刷新高亮
-                            self._apply_filter()
-                        except Exception:
-                            pass
+                            from ats.ui.favorite_actions import submit_favorite_action
+                            submit_favorite_action(
+                                self, "toggle_favorite_stock_result", c,
+                                on_complete=lambda owner, result, error: (
+                                    owner.lbl_status.setText(
+                                        f"⭐ {'保存失败' if error else '关注已保存'}: {c}"
+                                    ),
+                                    owner._apply_filter() if error is None else None,
+                                ),
+                            )
+                        except Exception as error:
+                            self.lbl_status.setText(f"⭐ 保存失败: {error}")
                         event.accept()
                         return
 
@@ -3777,24 +3771,18 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 logger.debug(f"测算 60f 通道异常: {ex}")
         elif act_fav and action == act_fav:
             try:
-                from global_favorites import GlobalFavoriteManager
-                fav_mgr = GlobalFavoriteManager()
-                if clean_c in fav_mgr.get_favorite_stocks():
-                    fav_mgr.remove_favorite_stock(clean_c)
-                    self.lbl_status.setText(f"⭐ 已从重点关注移除: {clean_c}")
-                else:
-                    fav_mgr.add_favorite_stock(clean_c)
-                    self.lbl_status.setText(f"⭐ 已加入重点关注: {clean_c}")
-                main_win = self.parent() or (self.window() if hasattr(self, 'window') else None)
-                if main_win and hasattr(main_win, '_safe_favorites_changed'):
-                    try:
-                        main_win._safe_favorites_changed()
-                    except Exception:
-                        pass
-                # 立即重新执行过滤与复合排序，0 毫秒感知原地重排置顶并切换高亮！
-                self._apply_filter()
-            except Exception:
-                pass
+                from ats.ui.favorite_actions import submit_favorite_action
+                submit_favorite_action(
+                    self, "toggle_favorite_stock_result", clean_c,
+                    on_complete=lambda owner, result, error: (
+                        owner.lbl_status.setText(
+                            f"⭐ {'保存失败' if error else '关注已保存'}: {clean_c}"
+                        ),
+                        owner._apply_filter() if error is None else None,
+                    ),
+                )
+            except Exception as error:
+                self.lbl_status.setText(f"⭐ 保存失败: {error}")
         elif act_copy and action == act_copy:
             cb = QApplication.clipboard()
             if cb:

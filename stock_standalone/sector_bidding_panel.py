@@ -5651,14 +5651,22 @@ class SectorBiddingPanel(QWidget, WindowMixin):
     def _add_favorite_stock(self, code: str):
         if not code:
             return
-        from global_favorites import GlobalFavoriteManager
-        GlobalFavoriteManager().add_favorite_stock(code)
+        from ats.ui.favorite_actions import submit_favorite_action
+        submit_favorite_action(
+            self, "add_favorite_stock_result", code,
+            on_complete=lambda owner, result, error: owner._refresh_ui_for_favorites()
+            if error is None else None,
+        )
 
     def _remove_favorite_stock(self, code: str):
         if not code:
             return
-        from global_favorites import GlobalFavoriteManager
-        GlobalFavoriteManager().remove_favorite_stock(code)
+        from ats.ui.favorite_actions import submit_favorite_action
+        submit_favorite_action(
+            self, "remove_favorite_stock_result", code,
+            on_complete=lambda owner, result, error: owner._refresh_ui_for_favorites()
+            if error is None else None,
+        )
 
     # ------------------------------------------------------------------ strategy
     def _on_threshold_changed(self, val):
@@ -6139,18 +6147,26 @@ class SectorBiddingPanel(QWidget, WindowMixin):
         menu.exec(self.sector_table.viewport().mapToGlobal(pos))
         
     def _add_favorite_sector(self, sector_name):
-        from global_favorites import GlobalFavoriteManager
-        GlobalFavoriteManager().add_favorite_sector(sector_name)
-        if hasattr(self, 'status_lbl'):
-            self.status_lbl.setText(f"⭐ 板块 [{sector_name}] 已设为重点关注")
-            self.status_lbl.setStyleSheet("color: #00ff88; font-weight: bold;")
+        from ats.ui.favorite_actions import submit_favorite_action
+        def _report(owner, _result, error):
+            if hasattr(owner, 'status_lbl'):
+                owner.status_lbl.setText(
+                    f"{'⚠️ 保存失败' if error else '⭐ 已设为重点关注'}: {sector_name}"
+                )
+                owner.status_lbl.setStyleSheet("color: #ffaa00; font-weight: bold;" if error
+                                               else "color: #00ff88; font-weight: bold;")
+        submit_favorite_action(self, "add_favorite_sector_result", sector_name, on_complete=_report)
             
     def _remove_favorite_sector(self, sector_name):
-        from global_favorites import GlobalFavoriteManager
-        GlobalFavoriteManager().remove_favorite_sector(sector_name)
-        if hasattr(self, 'status_lbl'):
-            self.status_lbl.setText(f"❌ 板块 [{sector_name}] 已取消重点关注")
-            self.status_lbl.setStyleSheet("color: #ffaa00; font-weight: bold;")
+        from ats.ui.favorite_actions import submit_favorite_action
+        def _report(owner, _result, error):
+            if hasattr(owner, 'status_lbl'):
+                owner.status_lbl.setText(
+                    f"{'⚠️ 保存失败' if error else '❌ 已取消重点关注'}: {sector_name}"
+                )
+                owner.status_lbl.setStyleSheet("color: #ffaa00; font-weight: bold;" if error
+                                               else "color: #ffaa00; font-weight: bold;")
+        submit_favorite_action(self, "remove_favorite_sector_result", sector_name, on_complete=_report)
         
     def _handle_reconstruct_followers(self, sector_name):
         """调用 detector 重建跟随股并刷新 UI"""

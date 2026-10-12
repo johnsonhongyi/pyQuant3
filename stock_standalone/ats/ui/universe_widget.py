@@ -1275,13 +1275,12 @@ class UniverseTreeWidget(QWidget):
 
     def _toggle_favorite(self, code):
         try:
-            from global_favorites import GlobalFavoriteManager
-            fav_mgr = GlobalFavoriteManager()
-            fav_mgr.toggle_favorite_stock(str(code).strip())
-            self.refresh_favorites_display()
-            win = self.window()
-            if win and hasattr(win, '_safe_favorites_changed'):
-                win._safe_favorites_changed()
+            from ats.ui.favorite_actions import submit_favorite_action
+            submit_favorite_action(
+                self, "toggle_favorite_stock_result", str(code).strip(),
+                on_complete=lambda owner, result, error: owner.refresh_favorites_display()
+                if error is None else None,
+            )
         except Exception as e:
             print(f"[Universe] Toggle favorite stock error: {e}")
 

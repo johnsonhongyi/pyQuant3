@@ -25,6 +25,12 @@ class _MemoryFavorites:
     def __init__(self, state):
         self.state = deepcopy(state)
         self.applied = []
+        self.invalid_stock_codes = set()
+
+    def validate_stock_code(self, code):
+        if code in self.invalid_stock_codes:
+            raise ValueError("unsupported_stock_code")
+        return code
 
     def get_favorite_attention_state(self):
         return deepcopy(self.state)
@@ -37,6 +43,7 @@ class _MemoryFavorites:
             raise ValueError("favorites_revision_conflict")
         self.applied.append((code, source, action, operation_id, origin))
         if action == "add":
+            self.validate_stock_code(code)
             self.state["sources"].setdefault(code, {})[source] = {"operation_id": operation_id}
             self.state["stocks"] = sorted(set(self.state["stocks"]) | {code})
         elif action == "remove_source":
@@ -521,6 +528,35 @@ class SystemLinkageContextTests(unittest.TestCase):
 
         self.assertEqual(client.sent[0]["source"], "stock-strategy.sbc")
         self.assertEqual(client.snapshot["sources"][0]["source"], "stock-strategy.sbc")
+
+    def test_attention_sync_skips_catalog_invalid_local_add(self):
+        manager = _MemoryFavorites({"favorites_revision": 1, "attention_revision": 0,
+                                    "attention_favorites_revision": 0, "stocks": ["510300"],
+                                    "sources": {"510300": {"stock-strategy:sbc": {"local_revision": 1}}},
+                                    "tombstones": {}, "source_tombstones": {}})
+        manager.invalid_stock_codes.add("510300")
+        client = _MemoryAttentionClient(manager, {"schema_version": 1, "revision": 0,
+            "sources": [], "tombstones": []})
+
+        client._sync_attention()
+
+        self.assertEqual(client.sent, [])
+        self.assertEqual(client._attention_status, "synced_with_conflicts:1")
+
+    def test_attention_sync_does_not_project_catalog_invalid_remote_add(self):
+        manager = _MemoryFavorites({"favorites_revision": 0, "attention_revision": 0,
+                                    "attention_favorites_revision": 0, "stocks": [], "sources": {},
+                                    "tombstones": {}, "source_tombstones": {}})
+        manager.invalid_stock_codes.add("510300")
+        client = _MemoryAttentionClient(manager, {"schema_version": 1, "revision": 1,
+            "sources": [{"symbol": "510300.SH", "source": "stock-strategy:sbc", "active": True,
+                         "revision": 1, "intent_id": "invalid-central-add"}], "tombstones": []})
+
+        client._sync_attention()
+
+        self.assertEqual(manager.state["stocks"], [])
+        self.assertEqual(manager.state["sources"], {})
+        self.assertEqual(client._attention_status, "synced_with_conflicts:1")
 
     def test_workspace_sbc_attention_source_projects_to_local_identifier(self):
         manager = _MemoryFavorites({"favorites_revision": 1, "attention_revision": 0,
