@@ -303,6 +303,14 @@ class TreeviewIncrementalUpdater:
                 self.root._last_refresh_fingerprint = None
                 self.root._last_tree_refresh_time = 0
                 self.root._last_real_refresh_ts = 0
+                retry_frame = self._pending_render[0] if self._pending_render is not None else df
+                retry_count = int(retry_frame.attrs.get('_tk_render_retry_count', 0))
+                if retry_count < 1 and not getattr(self.root, '_is_closing', False):
+                    retry_frame = retry_frame.copy(deep=False)
+                    retry_frame.attrs['_tk_render_retry_count'] = retry_count + 1
+                    self._pending_render = (retry_frame, True)
+                    logger.warning('[TREE-FRAME-REPAIR] queued one bounded redraw after render exception; source_version=%s',
+                                   retry_frame.attrs.get('_tk_source_version'))
                 finish()
             finally:
                 record = getattr(self.root, '_record_latency_sample', None)
@@ -341,10 +349,19 @@ class TreeviewIncrementalUpdater:
             [row[0] for row in rows], children, item_map_snapshot,
         )
         plan['rows'] = rows
+        plan['frame'] = df
         plan['source_version'] = df.attrs.get('_tk_source_version')
         plan['non_null'] = {
             col: int(df[col].notna().sum()) if col in df.columns else 0
             for col in preparer.columns
+        }
+        plan['render_nonempty'] = {
+            col: sum(
+                value is not None and not (isinstance(value, str) and not value)
+                for _code, values, _row_data in rows
+                for value in (values[idx],)
+            )
+            for idx, col in enumerate(preparer.columns)
         }
         return plan
 
@@ -366,10 +383,10 @@ class TreeviewIncrementalUpdater:
             empty = [col for col, count in plan['non_null'].items() if not count]
             partial = [(col, count) for col, count in plan['non_null'].items()
                        if 0 < count < len(rows)]
-            check_cols = list(dict.fromkeys([
-                *(col for col in ('percent', 'dff', 'vwap', 'ma5d', 'ma20d')
-                  if col in self.columns), *self.columns,
-            ]))[:10]
+            render_loss = [
+                (col, count) for col, count in plan['non_null'].items()
+                if count and not plan['render_nonempty'].get(col, 0)
+            ]
             mismatches = []
             for position in sorted({0, len(rows) // 2, len(rows) - 1}):
                 if not rows:
@@ -379,15 +396,46 @@ class TreeviewIncrementalUpdater:
                 if iid is None or not self.tree.exists(iid):
                     mismatches.append((position, 'missing_row'))
                     continue
-                for col in check_cols:
-                    expected = self.tree.tk.call('format', '%s', values[self.columns.index(col)])
-                    if self.tree.set(iid, col) != expected:
+                # Tcl may return numeric Python objects here; Treeview.item() returns strings.
+                expected_values = tuple(str(value) for value in self.tree.tk.splitlist(
+                    self.tree.tk.call('list', *values)
+                ))
+                actual_values = tuple(str(value) for value in self.tree.item(iid, 'values'))
+                if len(actual_values) != len(expected_values):
+                    mismatches.append((position, 'value_count'))
+                    continue
+                for col, expected, actual in zip(self.columns, expected_values, actual_values):
+                    if actual != expected:
                         mismatches.append((position, col))
             logger.info(
                 '[TREE-FRAME-AUDIT] source_version=%s rows=%d empty_columns=%s '
-                'partial_columns=%s sampled_mismatches=%s',
-                plan['source_version'], len(rows), empty[:20], partial[:20], mismatches,
+                'partial_columns=%s render_loss_columns=%s sampled_mismatches=%s',
+                plan['source_version'], len(rows), empty[:20], partial[:20], render_loss[:20], mismatches,
             )
+            if mismatches:
+                # If the widget diverged from the prepared frame, clear the dirty cache and
+                # retry the newest pending frame as a full value update. Source NaNs remain blank.
+                self._values_cache.clear()
+                self._tags_cache.clear()
+                self.root._last_refresh_fingerprint = None
+                self.root._last_tree_refresh_time = 0
+                pending = self._pending_render
+                retry_frame = pending[0] if pending is not None else plan.get('frame')
+                if retry_frame is not None:
+                    retry_count = int(retry_frame.attrs.get('_tk_render_retry_count', 0))
+                    if retry_count < 1:
+                        retry_frame = retry_frame.copy(deep=False)
+                        retry_frame.attrs['_tk_render_retry_count'] = retry_count + 1
+                        self._pending_render = (retry_frame, True)
+                        logger.warning(
+                            '[TREE-FRAME-REPAIR] source_version=%s rows=%d mismatches=%s; queued one bounded redraw',
+                            plan['source_version'], len(rows), mismatches[:20],
+                        )
+                    else:
+                        logger.error(
+                            '[TREE-FRAME-REPAIR] retry exhausted source_version=%s rows=%d mismatches=%s',
+                            plan['source_version'], len(rows), mismatches[:20],
+                        )
         except Exception:
             logger.warning('[TREE-FRAME-AUDIT] 抽样核查失败', exc_info=True)
 

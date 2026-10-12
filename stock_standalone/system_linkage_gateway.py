@@ -377,6 +377,7 @@ class SystemLinkageGateway:
         self.workspace_id = str(getattr(config, "ipc_workspace_id", "") or "").strip()
         self._allowlist = list(getattr(config, "ipc_peer_allowlist", []) or [])
         self._stop_event = threading.Event()
+        self._inbox_wakeup = threading.Event()
         self._worker = None
         self._server = None
         self._server_thread = None
@@ -390,21 +391,25 @@ class SystemLinkageGateway:
         self._consumer_recovery_retry_after = {}
         self._init_database()
 
-    def _connect(self):
+    def _connect(self, read_only=False):
         connection = sqlite3.connect(self.database_path, timeout=3.0)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout=3000")
-        configure_linkage_database(connection)
+        if read_only:
+            connection.execute("PRAGMA query_only=ON")
+        else:
+            configure_linkage_database(connection)
         return connection
 
     @contextlib.contextmanager
-    def _db(self):
+    def _db(self, read_only=False):
         operation = 'gateway.' + sys._getframe(2).f_code.co_name
-        with database_access(self.database_path, operation):
-            connection = self._connect()
+        with database_access(self.database_path, operation, read_only=read_only):
+            connection = self._connect(read_only=read_only)
             try:
                 yield connection
-                connection.commit()
+                if not read_only:
+                    connection.commit()
             except Exception:
                 connection.rollback()
                 raise
@@ -638,6 +643,7 @@ class SystemLinkageGateway:
         self._server_thread = threading.Thread(target=self._server.serve_forever,
                                                name="SystemLinkageHTTP", daemon=True)
         self._worker = threading.Thread(target=self._worker_loop, name="SystemLinkageWorker", daemon=True)
+        self._inbox_wakeup.set()
         self._server_thread.start()
         self._worker.start()
         return self.registration()
@@ -654,6 +660,7 @@ class SystemLinkageGateway:
         server = self._server
         self._server = None
         self._stop_event.set()
+        self._inbox_wakeup.set()
         if server is not None:
             server.shutdown()
             server.server_close()
@@ -743,13 +750,18 @@ class SystemLinkageGateway:
                  "accepted", "{}", command["created_at"], command["expires_at"], now_text),
             )
         self._stop_event.clear()
+        self._inbox_wakeup.set()
         return 202, {"operation_id": command["operation_id"], "request_id": command["request_id"],
                      "status": "accepted"}
 
     def _worker_loop(self):
-        while not self._stop_event.wait(0.2):
+        while not self._stop_event.is_set():
+            self._inbox_wakeup.wait(1.0)
+            self._inbox_wakeup.clear()
+            if self._stop_event.is_set():
+                break
             try:
-                with self._db() as connection:
+                with self._db(read_only=True) as connection:
                     rows = connection.execute(
                         "SELECT operation_id,payload,expires_at FROM linkage_operations "
                         "WHERE status IN ('accepted','processing','retry') AND next_attempt<=? "
@@ -775,6 +787,8 @@ class SystemLinkageGateway:
                             self._dispatch_pending_notification(row["operation_id"], command, result)
                     except Exception:
                         logger.exception("Linkage notification recovery failed")
+                if len(rows) >= 8 or len(completed) >= 128:
+                    self._inbox_wakeup.set()
             except Exception:
                 logger.exception("Linkage worker could not read its inbox")
 
@@ -858,7 +872,7 @@ class SystemLinkageGateway:
             logger.exception("Could not persist favorite retry state: %s", operation_id)
 
     def _consumer_initial_status(self, consumer, revision):
-        with self._db() as connection:
+        with self._db(read_only=True) as connection:
             row = connection.execute(
                 "SELECT last_seen,favorites_revision,quote_status FROM linkage_consumer_health WHERE consumer=?",
                 (consumer,),
@@ -904,7 +918,7 @@ class SystemLinkageGateway:
             )
 
     def get_operation(self, operation_id):
-        with self._db() as connection:
+        with self._db(read_only=True) as connection:
             row = connection.execute(
                 "SELECT operation_id,request_id,status,result,updated_at FROM linkage_operations WHERE operation_id=?",
                 (operation_id,),

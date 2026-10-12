@@ -47,26 +47,35 @@ class MarketStateBus:
                 self._observers.append(callback)
         self._initialized = True
     
-    def publish(self, df_all, df_filtered=None, df_all_res=None, df_filtered_res=None):
+    def publish(self, df_all, df_filtered=None, df_all_res=None, df_filtered_res=None,
+                copy_data=True):
         """
         生产者调用（通常在 update_tree 或 fetch_and_process 线程中）
-        O(1) 覆盖写入。
+        覆盖式发布。默认复制以隔离调用方；独占快照的生产者可转移所有权以避免重复深拷贝。
         """
         if df_all is None or df_all.empty:
             return
             
         # Serialize publishers while allowing readers to access the previous snapshot.
         with self._publish_lock:
-            copies = {}
-            def freeze(frame):
-                key = id(frame)
-                if key not in copies:
-                    copies[key] = frame.copy()
-                return copies[key]
-            frozen_all = freeze(df_all)
-            frozen_filtered = freeze(df_filtered) if df_filtered is not None else frozen_all
-            frozen_res = freeze(df_all_res) if df_all_res is not None else frozen_all
-            frozen_filtered_res = freeze(df_filtered_res) if df_filtered_res is not None else frozen_filtered
+            if copy_data:
+                copies = {}
+                def freeze(frame):
+                    key = id(frame)
+                    if key not in copies:
+                        copies[key] = frame.copy()
+                    return copies[key]
+                frozen_all = freeze(df_all)
+                frozen_filtered = freeze(df_filtered) if df_filtered is not None else frozen_all
+                frozen_res = freeze(df_all_res) if df_all_res is not None else frozen_all
+                frozen_filtered_res = freeze(df_filtered_res) if df_filtered_res is not None else frozen_filtered
+            else:
+                # The caller transfers exclusive ownership. Consumers must treat these frames as read-only.
+                frozen_all = df_all
+                frozen_filtered = df_filtered if df_filtered is not None else frozen_all
+                frozen_res = df_all_res if df_all_res is not None else frozen_all
+                frozen_filtered_res = (df_filtered_res if df_filtered_res is not None
+                                       else frozen_filtered)
             with self._data_lock:
                 self._df_all, self._df_filtered = frozen_all, frozen_filtered
                 self._df_all_res, self._df_filtered_res = frozen_res, frozen_filtered_res

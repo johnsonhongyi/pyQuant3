@@ -29,31 +29,51 @@ _database_owners = {}
 
 
 @contextmanager
-def database_access(path, operation, timeout=4.0):
-    """Serialize cooperating linkage connections before SQLite acquires file locks."""
+def database_access(path, operation, timeout=4.0, read_only=False):
+    """Serialize local linkage connections; SQLite coordinates cross-process access."""
     identity = os.path.normcase(os.path.abspath(path))
+    started = time.monotonic()
+    if read_only:
+        try:
+            yield
+        finally:
+            elapsed = time.monotonic() - started
+            if elapsed >= 0.25:
+                caller = (os.getpid(), threading.current_thread().name, operation, 'read')
+                logger.warning('[LINKAGE-DB-SLOW] database=%s caller=%s gate_wait_ms=0 directory_wait_ms=0 elapsed_ms=%.1f',
+                               identity, caller, elapsed * 1000)
+        return
     with _database_gates_lock:
         gate = _database_gates.setdefault(identity, threading.Lock())
-    started = time.monotonic()
     if not gate.acquire(timeout=timeout):
-        logger.error('[LINKAGE-DB-BUSY] database=%s waiter=%s owner=%s',
-                     identity, operation, _database_owners.get(identity))
+        logger.error('[LINKAGE-DB-BUSY] database=%s waiter=%s gate_owner=%s gate_wait_ms=%.1f',
+                     identity, operation, _database_owners.get(identity),
+                     (time.monotonic() - started) * 1000)
         raise TimeoutError('linkage database access busy: ' + operation)
     acquired = time.monotonic()
     owner = (os.getpid(), threading.current_thread().name, operation)
     _database_owners[identity] = owner
+    directory_wait_ms = 0.0
+    directory_lock_acquired = False
+    directory_started = time.monotonic()
     try:
-        # Same lock order as runtime initialization, reclamation and closing archive.
-        with directory_write_lock(os.path.dirname(identity),
-                                  timeout=max(0.0, timeout - (acquired - started))):
+        # Keep cross-process writers coordinated; read-only connections bypass
+        # this exclusive directory lock and use SQLite's native read locks.
+        remaining = max(0.0, timeout - (acquired - started))
+        with directory_write_lock(os.path.dirname(identity), timeout=remaining):
+            directory_lock_acquired = True
+            directory_wait_ms = (time.monotonic() - directory_started) * 1000
             yield
     finally:
+        if not directory_lock_acquired:
+            directory_wait_ms = (time.monotonic() - directory_started) * 1000
         _database_owners.pop(identity, None)
         gate.release()
         elapsed = time.monotonic() - started
         if elapsed >= 0.25:
-            logger.warning('[LINKAGE-DB-SLOW] database=%s owner=%s wait_ms=%.1f elapsed_ms=%.1f',
-                           identity, owner, (acquired - started) * 1000, elapsed * 1000)
+            logger.warning('[LINKAGE-DB-SLOW] database=%s caller=%s gate_wait_ms=%.1f directory_wait_ms=%.1f elapsed_ms=%.1f',
+                           identity, owner, (acquired - started) * 1000,
+                           directory_wait_ms, elapsed * 1000)
 
 
 def configure(connection):

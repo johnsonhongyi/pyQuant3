@@ -3,6 +3,7 @@ import time
 import datetime
 import gc
 import traceback
+from queue import Empty, Full
 from typing import Any, Optional, Union, Dict, List, Callable
 from JohnsonUtil import johnson_cons as ct
 from JohnsonUtil import commonTips as cct
@@ -3380,6 +3381,8 @@ def fetch_and_process(
     linkage_quote_cache_at = {}
     linkage_quote_cache_revision = None
     linkage_quote_failures = {}
+    last_market_source_audit = None
+    last_queue_backpressure_log = 0.0
     while True:
         loop_counter += 1
         try:
@@ -3828,6 +3831,48 @@ def fetch_and_process(
                 top_all_res = top_all
                 df_all_res = df_all
 
+            # Capture whether the sparse fields are already missing before the frame crosses IPC.
+            # The UI-side TREE-FRAME-AUDIT then distinguishes source gaps from Treeview write gaps.
+            try:
+                source_probe_cols = ('dff', 'dff2', 'percent', 'ma5d', 'high4', 'upper')
+                source_audit = []
+                source_signature = []
+                for track_name, frame in (('full', top_all), ('ui', df_all)):
+                    if frame is None or frame.empty:
+                        source_audit.append((track_name, 0, source_probe_cols, (), ()))
+                        source_signature.append((track_name, 0, source_probe_cols, ()))
+                        continue
+                    absent = tuple(col for col in source_probe_cols if col not in frame.columns)
+                    probe = [col for col in source_probe_cols if col in frame.columns]
+                    counts = tuple((col, int(frame[col].notna().sum())) for col in probe)
+                    coverage = tuple(
+                        (col, int(round((count * 100.0 / len(frame)) / 5.0) * 5))
+                        for col, count in counts
+                    )
+                    sparse_codes = ()
+                    if probe:
+                        missing = frame[probe].isna().sum(axis=1)
+                        threshold = max(1, (len(probe) + 1) // 2)
+                        sample_positions = [
+                            i for i, count in enumerate(missing.to_numpy())
+                            if count >= threshold
+                        ][:5]
+                        if 'code' in frame.columns:
+                            sparse_codes = tuple(
+                                str(frame['code'].iloc[pos]) for pos in sample_positions
+                            )
+                        else:
+                            sparse_codes = tuple(str(frame.index[pos]) for pos in sample_positions)
+                    source_audit.append((track_name, len(frame), absent, counts, sparse_codes))
+                    source_signature.append((track_name, len(frame) // 100, absent, coverage))
+                source_audit = tuple(source_audit)
+                source_signature = tuple(source_signature)
+                if source_signature != last_market_source_audit:
+                    logger.info('[MARKET-FRAME-SOURCE] pre-IPC quality=%s', source_audit)
+                    last_market_source_audit = source_signature
+            except Exception:
+                logger.debug('[MARKET-FRAME-SOURCE] quality snapshot failed', exc_info=True)
+
             # Send dual snapshots (Full & Filtered for both daily decision track and resampled display track)
             data_packet = {
                 'full_snapshot': top_all,
@@ -3840,7 +3885,25 @@ def fetch_and_process(
                 'linkage_favorites_revision': linkage_favorites_revision,
             }
             try:
-                queue.put(data_packet, block=True, timeout=10)
+                # Snapshots are latest-value state. Never stall the market worker for
+                # seconds behind a Tk consumer that is already falling behind.
+                queue.put_nowait(data_packet)
+            except Full:
+                # Replace the stale pending snapshot with the newest one. Queue
+                # feeder delivery can lag briefly, so both drain and retry are bounded.
+                try:
+                    queue.get(timeout=0.05)
+                except Empty:
+                    pass
+                try:
+                    queue.put(data_packet, block=True, timeout=0.05)
+                except Full:
+                    now = time.monotonic()
+                    if now - last_queue_backpressure_log >= 5.0:
+                        logger.warning(
+                            "[MarketIPC] latest snapshot dropped; consumer queue remained full"
+                        )
+                        last_queue_backpressure_log = now
             except Exception as e:
                 logger.warning(f"Queue put failed: {e}")
             gc.collect(0)
