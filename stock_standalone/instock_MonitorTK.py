@@ -729,6 +729,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._tk_linkage_pending_receipts = {}
         self._tk_linkage_receipt_lock = threading.Lock()
         self._tk_linkage_receipt_running = False
+        self._linkage_context_start_lock = threading.Lock()
+        self._system_linkage_starting = False
         self.sync_version = 0          # ⭐ 数据同步序列号
         self.last_vis_var_status = None 
         self._feedback_listener_thread = None  # 🛡️ [NEW] 线程守卫：防止重复启动监听器
@@ -940,10 +942,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.df_all = pd.DataFrame()      # 保存 fetch_and_process 返回的完整原始数据
         self.current_df = pd.DataFrame()
         self._df_lock = threading.Lock()  # 🛡️ [NEW] 保护 df_all 并发读写
+        self._bus_ui_refresh_lock = threading.Lock()
+        self._bus_ui_refresh_pending = False
         self._send_df_wake_event = threading.Event()  # 🛡️ [PERF] 用于非阻塞唤醒 send_df，代替 time.sleep 循环
 
-        # 队列接收子进程数据 (Resolved mp.Queue GIL Crash)
-        self.queue = mp.Queue(maxsize=cct.multiprocessingQueue or 10)
+        # 行情包是覆盖式快照，只保留一个待处理帧；大容量队列会积压数百个宽 DataFrame。
+        self.queue = mp.Queue(maxsize=1)
         self.signal_bridge_queue = mp.Queue(maxsize=50)  # ⭐ [NEW] 跨进程信号桥接队列
         self.viz_conn = mp.Pipe()           # ⭐ [NEW] 跨进程指令 Pipe (parent_conn, child_conn)
 
@@ -6515,15 +6519,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         logger.info("📡 MarketBusWorker loop started.")
         while not getattr(self, "_is_closing", False):
             try:
-                # 1. 尽可能清空积压，只保留最新的一帧（覆盖式模型）
-                latest_p = None
-                while not self.queue.empty():
-                    try:
-                        latest_p = self.queue.get_nowait()
-                    except Empty:
-                        break
+                # 1. 按最新值语义单帧消费；Queue.empty() 不可靠，且无界反序列化积压会拖垮全进程。
+                try:
+                    latest_p = self.queue.get(timeout=0.2)
+                except Empty:
+                    continue
                 
-                if latest_p:
+                if latest_p is not None:
                     # 2. 发布到行情总线
                     full_df = None
                     df_filtered = None
@@ -6562,8 +6564,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         full_df = latest_p
                     
                     if full_df is not None:
-                        # 发布原始快照，不在接收线程等待历史缓存锁；动态列由 compute 补齐。
-                        self.market_bus.publish(full_df, df_filtered, full_df_res, df_filtered_res)
+                        # multiprocessing.Queue 已反序列化为本线程独占快照；直接移交总线，
+                        # 避免对 5k×数百列行情再做一轮深拷贝。后续消费者必须只读或先隔离拷贝。
+                        self.market_bus.publish(
+                            full_df, df_filtered, full_df_res, df_filtered_res, copy_data=False
+                        )
                         if linkage_receipt is not None:
                             self._record_system_linkage_consumer_snapshot(*linkage_receipt)
                         self._last_snapshot_recv_time = time.time()
@@ -6609,15 +6614,30 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if now - last_trigger < 1.0:
             return
         self._last_bus_trigger_ts = now
+
+        # 主线程卡顿时只保留一个 UI 拉取任务；行情总线是覆盖式快照，
+        # 排队多个 update_tree 只会重复读取旧版本并延长恢复时间。
+        with self._bus_ui_refresh_lock:
+            if self._bus_ui_refresh_pending:
+                return
+            self._bus_ui_refresh_pending = True
+
+        def refresh_latest():
+            with self._bus_ui_refresh_lock:
+                self._bus_ui_refresh_pending = False
+            if not getattr(self, '_is_closing', False):
+                self.update_tree()
         
         try:
             # 🚀 [THREAD-SAFETY] 绝对禁止子线程直接触碰 self.after，全部投递至主线程安全事件队列
             if hasattr(self, 'tk_dispatch_queue'):
-                self.tk_dispatch_queue.put(lambda: self.update_tree())
+                self.tk_dispatch_queue.put(refresh_latest)
             else:
-                self.after(0, self.update_tree)
+                self.after(0, refresh_latest)
         except Exception:
-            pass
+            with self._bus_ui_refresh_lock:
+                self._bus_ui_refresh_pending = False
+            logger.debug("Could not queue latest market snapshot refresh", exc_info=True)
 
     def _submit_latest_pump_task(self, data_packet, sync_ui=True, query="", force=False):
         """Keep at most one queued pump runner and replace stale queued snapshots."""
@@ -7028,6 +7048,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         try:
             if getattr(self, '_is_closing', False):
                 return None
+            # MarketStateBus snapshots are shared with the UI and other consumers.
+            # Isolate the DataFrame managers before this pipeline adds/replaces
+            # columns; a shallow copy keeps the large quote arrays shared while
+            # preventing compute-time column writes from racing the live views.
+            same_tracks = full_df_res is full_df
+            if full_df is not None:
+                full_df = full_df.copy(deep=False)
+            if same_tracks:
+                full_df_res = full_df
+            elif full_df_res is not None:
+                full_df_res = full_df_res.copy(deep=False)
+
             # 1. 情绪评分 (heavy)
             if hasattr(self, 'realtime_service') and self.realtime_service:
                 try:
@@ -7043,7 +7075,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 return None
 
             # 2. 信号检测 (最重的 CPU 操作)
-            same_tracks = full_df_res is full_df
             try:
                 full_df = detect_signals(full_df)
             except Exception as e:
@@ -7540,7 +7571,40 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._schedule_after(58000, self.schedule_auction_sentiment_shadow_job)
 
     def _start_system_linkage_gateway(self):
+        if (getattr(self, '_is_closing', False)
+                or getattr(self, '_system_linkage_gateway', None)
+                or getattr(self, '_system_linkage_starting', False)):
+            return
+        self._system_linkage_starting = True
+        try:
+            threading.Thread(
+                target=self._initialize_system_linkage_gateway,
+                name="SystemLinkageInit",
+                daemon=True,
+            ).start()
+        except Exception:
+            self._system_linkage_starting = False
+            logger.exception("Could not start System-linkage initialization worker")
+
+    def _ensure_system_linkage_context_client(self, config):
+        """Start/restore the local context consumer away from Tk; callbacks only enqueue UI work."""
+        with self._linkage_context_start_lock:
+            client = getattr(self, '_linkage_context_client', None)
+            if client is None:
+                from system_linkage_context import SystemLinkageContextClient
+                client = SystemLinkageContextClient(
+                    config, callback=self._queue_linkage_context_update
+                )
+                self._linkage_context_client = client
+            started = client.start()
+            cached_snapshot, cached_status = client.latest()
+        if started:
+            self._start_linkage_signal_bridge()
+        self._queue_linkage_context_update(cached_snapshot, cached_status)
+
+    def _initialize_system_linkage_gateway(self):
         if getattr(self, '_is_closing', False) or getattr(self, '_system_linkage_gateway', None):
+            self._system_linkage_starting = False
             return
         try:
             from JohnsonUtil import commonTips as cct
@@ -7549,14 +7613,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             from system_linkage_gateway import ensure_linkage_config
             ensure_linkage_config(cct)
             try:
-                from system_linkage_context import SystemLinkageContextClient
-                self._linkage_context_client = SystemLinkageContextClient(
-                    cct, callback=self._queue_linkage_context_update
-                )
-                if self._linkage_context_client.start():
-                    self._start_linkage_signal_bridge()
-                cached_snapshot, cached_status = self._linkage_context_client.latest()
-                self._queue_linkage_context_update(cached_snapshot, cached_status)
+                self._ensure_system_linkage_context_client(cct)
             except Exception:
                 self._linkage_context_client = None
                 logger.exception("TK shared context consumer could not start")
@@ -7567,18 +7624,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if getattr(self, '_is_closing', False):
                         return
                     try:
-                        client = getattr(self, '_linkage_context_client', None)
-                        if client is None:
-                            from system_linkage_context import SystemLinkageContextClient
-                            client = SystemLinkageContextClient(cct, callback=self._queue_linkage_context_update)
-                            self._linkage_context_client = client
-                        if client.start():
-                            self._start_linkage_signal_bridge()
-                        cached_snapshot, cached_status = client.latest()
-                        self._queue_linkage_context_update(cached_snapshot, cached_status)
+                        self._ensure_system_linkage_context_client(cct)
                     except Exception:
                         logger.exception("TK shared context consumer could not resume after setup")
-                self._schedule_after(0, resume_context)
+
+                def start_resume_worker():
+                    try:
+                        threading.Thread(
+                            target=resume_context, name="LinkageContextResume", daemon=True
+                        ).start()
+                    except Exception:
+                        logger.exception("Could not start system-linkage context resume worker")
+
+                self._schedule_after(0, start_resume_worker)
 
             def dispatch_to_ui(command):
                 if (getattr(self, '_is_closing', False) or not hasattr(self, 'tk_dispatch_queue')
@@ -7626,6 +7684,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._schedule_after(5000, self._system_linkage_heartbeat)
         except Exception:
             logger.exception("System-linkage gateway initialization failed")
+        finally:
+            self._system_linkage_starting = False
 
     def _start_linkage_signal_bridge(self):
         if getattr(self, "_linkage_signal_handlers", None):
@@ -8090,8 +8150,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         from market_pulse_engine import DailyPulseEngine
                         from JSONData import sina_data
                         
-                        df = self.df_all.copy() if hasattr(self, 'df_all') else None
-                        if df is None or df.empty: return
+                        source_df = getattr(self, 'df_all', None)
+                        if source_df is None or source_df.empty: return
+                        summary_columns = [
+                            'trade', 'lastp1d', 'vol', 'lastv1d', 'ratio', 'name',
+                            'dff', 'dff2', 'score',
+                        ]
+                        for column_name in getattr(cct, 'vol_up_details_col', ()) or ():
+                            if isinstance(column_name, str):
+                                summary_columns.append(column_name.lower())
+                        summary_columns = [
+                            column for column in dict.fromkeys(summary_columns)
+                            if column in source_df.columns
+                        ]
+                        # The dashboard reads only these fields; copying the 477-column
+                        # market frame every few seconds amplified memory and GIL pressure.
+                        df = source_df.loc[:, summary_columns]
                         
                         up_count = down_count = flat_count = vol_down = vol_up = 0
                         vol_up_details = []
@@ -9278,11 +9352,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self.sector_bidding_panel.show()
                 if hasattr(self, '_register_hwnd_to_mru'):
                     self._register_hwnd_to_mru(int(self.sector_bidding_panel.winId()))
-                # 推一次行情数据（仅做 queue.put，不 copy 大 DataFrame）
-                if hasattr(self, 'df_all') and not self.df_all.empty:
-                    t0 = time.time()
-                    self.sector_bidding_panel.on_realtime_data_arrived(self.df_all, force_update=True)
-                    logger.warning(f"⏱️ [SectorBidding][REOPEN] on_realtime_data_arrived cost {(time.time()-t0)*1000:.1f}ms")
+                # 已在处理/处理过同一帧时不重复入队，避免重开面板触发全市场重新注册与评分。
+                df_all = getattr(self, 'df_all', None)
+                worker = getattr(self.sector_bidding_panel, '_worker', None)
+                if df_all is not None and not df_all.empty:
+                    if worker is not None and getattr(worker, 'latest_df', None) is df_all:
+                        logger.warning("⏱️ [SectorBidding][REOPEN] 当前行情帧已送达，跳过重复评分")
+                    else:
+                        t0 = time.time()
+                        self.sector_bidding_panel.on_realtime_data_arrived(df_all, force_update=True)
+                        logger.warning(f"⏱️ [SectorBidding][REOPEN] on_realtime_data_arrived cost {(time.time()-t0)*1000:.1f}ms")
             except Exception as e:
                 logger.error(f"打开已有竞价面板失败: {e}")
                 import traceback; traceback.print_exc()
@@ -11921,8 +12000,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         data_version = getattr(self, '_data_update_version', 0)
         sort_state = self._capture_sort_state()
         prior_codes = set(getattr(self, '_linkage_ui_only_codes', set()))
-        from global_favorites import GlobalFavoriteManager
-        favorites_snapshot = set(GlobalFavoriteManager().get_favorite_stocks())
         with self._df_lock:
             source_frame_snapshot = getattr(
                 self, 'df_all_res' if context[1] != 'd' else 'df_all', None)
@@ -11952,7 +12029,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             try:
                 from global_favorites import GlobalFavoriteManager
                 from system_linkage_quotes import frame_quote_row, normalize_supported_stock_code, normalize_trade_date
-                fav_stocks = favorites_snapshot
+                # Favorites storage may contend with its writer; never read it on Tk.
+                fav_stocks = set(GlobalFavoriteManager().get_favorite_stocks())
                 normalized_favorites = {
                     str(code).strip().zfill(6) for code in fav_stocks if str(code).strip()
                 }
@@ -11974,6 +12052,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                    else linkage_frame.index)
                     for position, quote_code in enumerate(quote_codes):
                         quote_rows.setdefault(str(quote_code).strip().zfill(6), position)
+                def row_date(row):
+                    return next((date for key in ('dt', 'trade_date', 'date', 'ticktime')
+                                 if (date := normalize_trade_date(row.get(key)))), '')
                 for code in normalized_favorites:
                     if not normalize_supported_stock_code(code):
                         continue
@@ -11987,30 +12068,42 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     quote_values['code'] = code
                     if 'now' in quote_values:
                         quote_values['trade'] = quote_values['now']
-                    # Preserve computed metrics from this period's market frame.
-                    # A sparse quote must not turn a complete favorite into an empty row.
                     source_position = source_rows.get(code)
                     rich_row = (source_frame_snapshot.iloc[source_position]
                                 if source_position is not None else None)
-                    def row_date(row):
-                        return next((date for key in ('dt', 'trade_date', 'date', 'ticktime')
-                                     if (date := normalize_trade_date(row.get(key)))), '')
-                    if rich_row is not None and row_date(rich_row) and row_date(rich_row) == row_date(quote_row):
-                        merged = rich_row.to_dict()
-                        merged.update({column: value for column, value in quote_values.items()
-                                       if not pd.isna(value)})
-                        quote_values = merged
-                        quote_values['code'] = code
-                    quote_values['linkage_quote_status'] = statuses_snapshot.get(code, 'unknown')
                     if matches:
                         row_index = matches[0]
+                        # Existing market rows already contain the local 477-column
+                        # snapshot. Rebuilding and assigning that whole row here caused
+                        # hundreds of thousands of scalar writes during each quote refresh.
+                        # Only overlay same-day linkage quote fields on visible rows.
+                        if (rich_row is None or
+                                (row_date(rich_row) and row_date(quote_row)
+                                 and row_date(rich_row) == row_date(quote_row))):
+                            for column, value in quote_values.items():
+                                if pd.isna(value) and column in df.columns:
+                                    continue
+                                if column not in df.columns:
+                                    df[column] = pd.NA
+                                df.at[row_index, column] = value
+                        if 'linkage_quote_status' not in df.columns:
+                            df['linkage_quote_status'] = pd.NA
+                        df.at[row_index, 'linkage_quote_status'] = statuses_snapshot.get(code, 'unknown')
+                    else:
+                        # Linkage-only rows still use the complete local market record
+                        # when available, so the Treeview does not show sparse quote data.
+                        if rich_row is not None:
+                            merged = rich_row.to_dict()
+                            local_date, quote_date = row_date(rich_row), row_date(quote_row)
+                            if local_date and quote_date and local_date == quote_date:
+                                merged.update({column: value for column, value in quote_values.items()
+                                               if not pd.isna(value)})
+                            quote_values = merged
+                            quote_values['code'] = code
+                        quote_values['linkage_quote_status'] = statuses_snapshot.get(code, 'unknown')
                         for column, value in quote_values.items():
-                            if pd.isna(value) and column in df.columns:
-                                continue
                             if column not in df.columns:
                                 df[column] = pd.NA
-                            df.at[row_index, column] = value
-                    else:
                         added_rows.append(quote_values)
                         added_codes.append(code)
                         linkage_ui_only.add(code)
@@ -18770,10 +18863,31 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if stats.get("total_count", 0) % 10 == 0:  # ⚡ 使用total_count
                     logger.info(self.perf_monitor.report())
                 
-            except Exception as e:
-                logger.error(f"[TreeUpdater] 增量更新失败,回退到全量刷新: {e}")
-                # 回退到传统方式
-                self._refresh_tree_traditional(df, cols_to_show, scroll_to_view=scroll_to_view)
+            except Exception:
+                logger.exception("[TreeUpdater] 增量更新失败；避免在 Tk 主线程同步全量重建")
+                # A synchronous full rebuild of hundreds of rows can freeze every Tk/Qt
+                # window. Clear dirty state and make one deferred incremental retry.
+                self._last_refresh_fingerprint = None
+                self._last_tree_refresh_time = 0
+                try:
+                    self.tree_updater._values_cache.clear()
+                    self.tree_updater._tags_cache.clear()
+                except Exception:
+                    logger.debug("Could not clear Treeview dirty caches", exc_info=True)
+                retry_count = int(df.attrs.get('_tk_sync_render_retry_count', 0))
+                if retry_count < 1 and not getattr(self, '_is_closing', False):
+                    retry_frame = df.copy(deep=False)
+                    retry_frame.attrs['_tk_sync_render_retry_count'] = retry_count + 1
+                    try:
+                        self.after(
+                            25,
+                            lambda frame=retry_frame: self.refresh_tree(
+                                frame, force=True, skip_sort=True,
+                                scroll_to_view=scroll_to_view, source_version=source_version,
+                            ),
+                        )
+                    except tk.TclError:
+                        pass
         else:
             # 使用传统方式刷新
             self._refresh_tree_traditional(df, cols_to_show, scroll_to_view=scroll_to_view)

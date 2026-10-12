@@ -357,6 +357,7 @@ class SystemLinkageContextClient:
         self._stop = threading.Event()
         self._thread = None
         self._snapshot = None
+        self._snapshot_digest = None
         self._status = {"state": "stopped", "error": ""}
         self._events = []
         self._base_url = ""
@@ -376,21 +377,25 @@ class SystemLinkageContextClient:
         self._attention_wakeup = threading.Event()
         self._opener = build_opener(ProxyHandler({}), _NoRedirect())
 
-    def _connect(self):
+    def _connect(self, read_only=False):
         connection = sqlite3.connect(self.database_path, timeout=4.0)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout=4000")
-        configure_linkage_database(connection)
+        if read_only:
+            connection.execute("PRAGMA query_only=ON")
+        else:
+            configure_linkage_database(connection)
         return connection
 
     @contextmanager
-    def _connection(self):
+    def _connection(self, read_only=False):
         operation = 'context.' + sys._getframe(2).f_code.co_name
-        with database_access(self.database_path, operation):
-            connection = self._connect()
+        with database_access(self.database_path, operation, read_only=read_only):
+            connection = self._connect(read_only=read_only)
             try:
                 yield connection
-                connection.commit()
+                if not read_only:
+                    connection.commit()
             except Exception:
                 connection.rollback()
                 raise
@@ -415,14 +420,22 @@ class SystemLinkageContextClient:
                 as_of TEXT NOT NULL, payload BLOB NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
                 next_attempt REAL NOT NULL DEFAULT 0, created_at TEXT NOT NULL)""")
             connection.execute("CREATE INDEX IF NOT EXISTS idx_linkage_context_outbox_due ON linkage_context_outbox(next_attempt,created_at)")
-        with self._connection() as connection:
+            connection.execute("""CREATE TABLE IF NOT EXISTS linkage_context_dedup (
+                kind TEXT NOT NULL, digest TEXT NOT NULL, repeat_count INTEGER NOT NULL DEFAULT 1,
+                last_seen TEXT NOT NULL, PRIMARY KEY(kind,digest))""")
+        with self._connection(read_only=True) as connection:
+            row = connection.execute(
+                "SELECT digest FROM linkage_context_dedup WHERE kind='snapshot'"
+            ).fetchone()
+        self._snapshot_digest = row['digest'] if row else None
+        with self._connection(read_only=True) as connection:
             row = connection.execute("SELECT payload FROM linkage_context_snapshots ORDER BY stored_at DESC LIMIT 1").fetchone()
         if row:
             try:
                 self._snapshot = json.loads(bytes(row["payload"]).decode("utf-8"))
             except (ValueError, UnicodeDecodeError):
                 logger.warning("Cached system-linkage context is invalid and will be replaced")
-        with self._connection() as connection:
+        with self._connection(read_only=True) as connection:
             rows = connection.execute("SELECT payload FROM linkage_context_events ORDER BY occurred_at DESC,event_id DESC LIMIT 100").fetchall()
         events = []
         for row in rows:
@@ -489,7 +502,7 @@ class SystemLinkageContextClient:
         self._init_store()
         self._drain_source_events()
         self._flush_source_outbox(limit=1)
-        with self._connection() as connection:
+        with self._connection(read_only=True) as connection:
             return connection.execute("SELECT COUNT(*) FROM linkage_context_outbox").fetchone()[0] == 0
 
     def start(self):
@@ -812,27 +825,27 @@ class SystemLinkageContextClient:
                        if key not in ('snapshot_id', 'received_at', 'stored_at', 'as_of', 'generated_at')}
         digest = hashlib.sha256(json.dumps(significant, ensure_ascii=False, sort_keys=True,
                                            separators=(',', ':')).encode('utf-8')).hexdigest()
+        if self._snapshot_digest == digest:
+            return
+        # The remote context is polled periodically, but most polls return the
+        # same semantic snapshot. The in-memory digest avoids opening SQLite
+        # and taking the shared writer gate for unchanged cache contents.
         with self._connection() as connection:
-            connection.execute("CREATE TABLE IF NOT EXISTS linkage_context_dedup ("
-                               "kind TEXT NOT NULL, digest TEXT NOT NULL, repeat_count INTEGER NOT NULL DEFAULT 1, "
-                               "last_seen TEXT NOT NULL, PRIMARY KEY(kind,digest))")
             now = datetime.now(timezone.utc).isoformat()
             previous = connection.execute("SELECT digest FROM linkage_context_dedup WHERE kind='snapshot'").fetchone()
-            if previous and previous['digest'] == digest:
-                connection.execute("UPDATE linkage_context_dedup SET repeat_count=repeat_count+1,last_seen=? "
-                                   "WHERE kind='snapshot' AND digest=?", (now, digest))
-                return
-            connection.execute("DELETE FROM linkage_context_dedup WHERE kind='snapshot'")
-            connection.execute("INSERT INTO linkage_context_dedup(kind,digest,last_seen) VALUES('snapshot',?,?)", (digest, now))
-            connection.execute("DELETE FROM linkage_context_snapshots")
-            connection.execute("INSERT INTO linkage_context_snapshots(snapshot_id,trade_date,received_at,stored_at,payload) VALUES(?,?,?,?,?)",
-                               (snapshot["snapshot_id"], snapshot.get("trade_date", ""), snapshot.get("received_at", ""), now, payload))
+            if not previous or previous['digest'] != digest:
+                connection.execute("DELETE FROM linkage_context_dedup WHERE kind='snapshot'")
+                connection.execute("INSERT INTO linkage_context_dedup(kind,digest,last_seen) VALUES('snapshot',?,?)", (digest, now))
+                connection.execute("DELETE FROM linkage_context_snapshots")
+                connection.execute("INSERT INTO linkage_context_snapshots(snapshot_id,trade_date,received_at,stored_at,payload) VALUES(?,?,?,?,?)",
+                                   (snapshot["snapshot_id"], snapshot.get("trade_date", ""), snapshot.get("received_at", ""), now, payload))
             # Snapshot history was already reduced to one row above. Full trim
             # also scans/parses the event table; keep that work out of this
             # frequently shared snapshot transaction.
+        self._snapshot_digest = digest
 
     def _sync_events(self):
-        with self._connection() as connection:
+        with self._connection(read_only=True) as connection:
             row = connection.execute("SELECT cursor_value FROM linkage_context_cursor WHERE cursor_key='events'").fetchone()
         after = row["cursor_value"] if row else ""
         query = "?limit=200" + ("&after=" + after if after else "")
@@ -992,7 +1005,7 @@ class SystemLinkageContextClient:
             return
         try:
             limit = max(1, min(int(limit), 10))
-            with self._connection() as connection:
+            with self._connection(read_only=True) as connection:
                 rows = connection.execute("SELECT evidence_id,payload,attempts FROM linkage_context_outbox WHERE next_attempt<=? ORDER BY created_at,evidence_id LIMIT ?",
                                           (time.time(), limit)).fetchall()
             for row in rows:
@@ -1013,7 +1026,7 @@ class SystemLinkageContextClient:
                     with self._lock:
                         self._publisher_status = "stale: " + str(error)
                     return
-            with self._connection() as connection:
+            with self._connection(read_only=True) as connection:
                 pending = connection.execute("SELECT COUNT(*) FROM linkage_context_outbox").fetchone()[0]
             with self._lock:
                 if pending and not self._publisher_status.startswith("stale:"):

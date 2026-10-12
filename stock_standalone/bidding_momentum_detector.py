@@ -341,7 +341,7 @@ class TickSeries:
                 self.racing_start_ts = 0.0
                 self.racing_duration = 0.0
 
-    def update_meta(self, row: Any):
+    def update_meta(self, row: Any, configured_columns=None):
         """
         从 df_all 行更新元数据。
         优化：输入可以是 dict, NamedTuple 或 pd.Series。避开昂贵的 pd.Series 构造。
@@ -410,13 +410,16 @@ class TickSeries:
         # 自动提取自定义列，通过 _val 提取并写入自定义结构 custom_cols
         self.custom_cols = {}
         core_keys = {'code', 'name', 'role', 'price', 'percent', 'score', 'price_diff', 'dff', 'trend', 'hint'}
-        import JohnsonUtil.commonTips as cct
-        configured_cols = set()
-        if hasattr(cct, 'CFG'):
-            if hasattr(cct.CFG, 'bidding_window_col'):
-                configured_cols.update(cct.CFG.bidding_window_col)
-            if hasattr(cct.CFG, 'concept_top10_window_col'):
-                configured_cols.update(cct.CFG.concept_top10_window_col)
+        if configured_columns is None:
+            import JohnsonUtil.commonTips as cct
+            configured_cols = set()
+            if hasattr(cct, 'CFG'):
+                if hasattr(cct.CFG, 'bidding_window_col'):
+                    configured_cols.update(cct.CFG.bidding_window_col)
+                if hasattr(cct.CFG, 'concept_top10_window_col'):
+                    configured_cols.update(cct.CFG.concept_top10_window_col)
+        else:
+            configured_cols = configured_columns
         for col_name in configured_cols:
             if col_name not in core_keys:
                 val = _val(col_name, None)
@@ -1246,12 +1249,54 @@ class BiddingMomentumDetector:
         if self.in_history_mode or df_all is None or df_all.empty:
             return
 
-        # [NEW] 在冷启动或当 sector_map 为空时，自动仅 rebuild 一次，以保障板块聚合可用性
-        if not self.in_history_mode and (not self.sector_map or len(self.sector_map) == 0):
-            self._rebuild_sector_map(df_all)
+        # Detector 只消费元数据列。全量行情有数百列，整表复制和宽 itertuples
+        # 会在同进程后台线程持续争抢 GIL，拖慢 Tk 与 Qt 两个界面。
+        meta_columns = [
+            'code', 'name', 'category', 'lastp1d', 'lastp', 'pre_close', 'llastp',
+            'llastp1d', 'llstp', 'open', 'lasth1d', 'lasth', 'lastl1d', 'lastl',
+            'now', 'trade', 'price', 'nclose', 'high', 'low', 'ma5d', 'ma51d',
+            'ma20d', 'ma60d', 'lastdu', 'lastdu4', 'ral', 'dff', 'volume',
+            'vol_ratio', 'vol', 'volume_total', 'lvol', 'last6vol', 'top0',
+            'top15', 'cycle_stage', 'cycle_stage_vect', 'percent', 'per1d',
+            'ticktime', 'timestamp', 'time', 'datetime',
+        ]
+        configured_columns = []
+        try:
+            import JohnsonUtil.commonTips as cct
+            cfg = getattr(cct, 'CFG', None)
+            if cfg is not None:
+                for attr in ('bidding_window_col', 'concept_top10_window_col'):
+                    configured = getattr(cfg, attr, ()) or ()
+                    if isinstance(configured, str):
+                        configured = (configured,)
+                    current_configured_columns = [
+                        col for col in configured
+                        if isinstance(col, str)
+                    ]
+                    configured_columns.extend(current_configured_columns)
+                    meta_columns.extend(current_configured_columns)
+        except Exception:
+            pass
+        meta_columns = list(dict.fromkeys(
+            col for col in meta_columns if col in df_all.columns
+        ))
+        core_columns = {
+            'code', 'name', 'role', 'price', 'percent', 'score',
+            'price_diff', 'dff', 'trend', 'hint',
+        }
+        configured_custom_columns = tuple(dict.fromkeys(
+            col for col in configured_columns
+            if col in df_all.columns and col not in core_columns
+        ))
 
-        # ⚡ 轻量 copy（避免 pandas 跨线程风险）
-        df = df_all.copy()
+        # [NEW] 板块映射只需要代码、名称和分类，冷启动不再扫描 477 列宽表。
+        if not self.in_history_mode and (not self.sector_map or len(self.sector_map) == 0):
+            sector_columns = [col for col in ('code', 'name', 'category')
+                              if col in df_all.columns]
+            self._rebuild_sector_map(df_all.loc[:, sector_columns])
+
+        # 浅投影只复制列索引，不复制全市场底层数组；下游仅读取此帧。
+        df = df_all.loc[:, meta_columns].copy(deep=False)
 
         # ===============================
         # 1. 统一 code index
@@ -1318,10 +1363,10 @@ class BiddingMomentumDetector:
                     ts = TickSeries(code)
                     self._tick_series[code] = ts
                     new_codes.append(code)
-                    ts.update_meta(row_data)
+                    ts.update_meta(row_data, configured_custom_columns)
                 else:
                     # [🚀 FAST-PATH] 已注册个股直接传 row，避免每秒创建 5000+ 个 _asdict() 临时字典
-                    ts.update_meta(row)
+                    ts.update_meta(row, configured_custom_columns)
 
                 # ── 分片锁管理 ──
                 row_count += 1
