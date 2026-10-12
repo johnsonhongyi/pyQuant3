@@ -1196,12 +1196,13 @@ class DataProcessWorker(QThread):
     # Worker 停止信号
     stopped = pyqtSignal()
 
-    def __init__(self, detector):
+    def __init__(self, detector, score_in_worker=True):
         super().__init__()
 
         self.setObjectName("DataProcessWorker")
 
         self.detector = detector
+        self.score_in_worker = bool(score_in_worker)
 
         # =========================================================================
         # Queue
@@ -1456,6 +1457,12 @@ class DataProcessWorker(QThread):
         try:
 
             if df is None:
+                return
+
+            if not self.score_in_worker:
+                # The TK global DataPublisher owns this shared detector's feed
+                # and scoring. The panel only keeps its latest display source.
+                self.latest_df = df
                 return
 
             # EOD/history feeds can have a RangeIndex after reset_index().
@@ -1788,7 +1795,12 @@ class SectorBiddingPanel(QWidget, WindowMixin):
 
 
         # Async Data Processing Worker - MUST be before UI init
-        self._worker = DataProcessWorker(self.detector)
+        # A shared detector is already fed and scored by DataPublisher.update_batch.
+        # The panel worker only retains its display source; local fallback detectors
+        # keep the original worker-owned update path.
+        self._worker = DataProcessWorker(
+            self.detector, score_in_worker=not self._is_global_detector
+        )
         # try:
         #     from tk_gil_monitor import get_monitor
         #     _m = get_monitor()
