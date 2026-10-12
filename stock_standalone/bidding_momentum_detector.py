@@ -911,7 +911,12 @@ class BiddingMomentumDetector:
         else:
             logger.info("📡 [Detector] Lazy load enabled. Synchronous init skipped.")
 
-        # [NEW] 初始化 V-Reversal 预处理池状态
+        # Lazy construction is used by the GUI; disk restore belongs to its loader.
+        if not lazy_load:
+            self._load_consolidation_state()
+
+    def _load_consolidation_state(self):
+        """Restore shared kline state before publishing detector readiness."""
         if self.realtime_service and hasattr(self.realtime_service, 'kline_cache'):
             try:
                 self.realtime_service.kline_cache.load_consolidation_state()
@@ -1089,6 +1094,7 @@ class BiddingMomentumDetector:
                 import os
                 import concurrent.futures
 
+                self._load_consolidation_state()
                 logger.info("📡 Detector ProcessPool starting...")
 
                 executor = concurrent.futures.ProcessPoolExecutor(max_workers=1)

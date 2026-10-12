@@ -160,6 +160,69 @@ def test_real_renderer_formats_off_thread_and_skips_unchanged_writes(root, count
     assert moves.call_count == 1
 
 
+@pytest.mark.parametrize('dtype,values', [
+    ('Int64', [7, None]), ('Float64', [1.25, None]),
+    ('boolean', [True, None]), ('category', ['ready', None]),
+])
+def test_nullable_columns_render_values_and_blanks_without_mutating_source(root, dtype, values):
+    tree, updater, frame = renderer(root, 2)
+    frame['percent'] = pd.Series(values, dtype=dtype)
+    before = frame.copy(deep=True)
+    updater.update(frame)
+    settle(root, updater)
+    assert len(tree.get_children()) == 2
+    assert tree.set(updater._item_map['000000'], 'percent') != ''
+    assert tree.set(updater._item_map['000001'], 'percent') == ''
+    pd.testing.assert_frame_equal(frame, before)
+
+
+def test_partial_native_write_failure_invalidates_cache_and_reverted_frame_repairs_it(root, monkeypatch):
+    tree, updater, frame = renderer(root, 2)
+    updater.update(frame)
+    settle(root, updater)
+    changed = frame.copy()
+    changed.loc[0, ['name', 'percent']] = ['changed', 3.0]
+    native_set = tree.set
+
+    def failing_set(iid, column=None, value=None):
+        if column == 'percent' and value is not None:
+            raise tk.TclError('injected interrupted native write')
+        return native_set(iid, column, value)
+
+    root._last_refresh_fingerprint = ('same-source', 42)
+    root._last_tree_refresh_time = time.time()
+    monkeypatch.setattr(tree, 'set', failing_set)
+    updater.update(changed)
+    settle(root, updater)
+    assert native_set(updater._item_map['000000'], 'name') == 'changed'
+    assert updater._values_cache == {} and updater._tags_cache == {}
+    assert root._last_refresh_fingerprint is None and root._last_tree_refresh_time == 0
+    monkeypatch.setattr(tree, 'set', native_set)
+    updater.update(frame)
+    settle(root, updater)
+    assert native_set(updater._item_map['000000'], 'name') == 'stock-0'
+    assert float(native_set(updater._item_map['000000'], 'percent')) == 1.0
+
+
+def test_frame_audit_distinguishes_source_nulls_from_native_cell_mismatch(root):
+    tree, updater, frame = renderer(root, 3)
+    frame.loc[1, 'percent'] = float('nan')
+    frame.attrs['_tk_source_version'] = 42
+    updater.update(frame)
+    settle(root, updater)
+    preparer = type(updater)(None, updater.columns)
+    plan = updater._prepare_render_plan(preparer, frame, tree.get_children(), dict(updater._item_map))
+    assert plan['source_version'] == 42 and plan['non_null']['percent'] == 2
+    tree.set(updater._item_map['000000'], 'percent', 'corrupted')
+    updater._last_render_audit_ts = 0
+    audit_log = type(updater)._audit_render_plan.__globals__['logger']
+    audit_log.reset_mock()
+    updater._audit_render_plan(plan)
+    args = audit_log.info.call_args.args
+    assert args[1] == 42 and ('percent', 2) in args[4]
+    assert args[5] == [(0, 'percent')]
+
+
 def test_render_burst_finishes_then_applies_latest_and_input_defers_writes(root, monkeypatch):
     tree, updater, frame = renderer(root)
     gate = threading.Event()

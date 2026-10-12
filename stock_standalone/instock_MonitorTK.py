@@ -239,7 +239,12 @@ def dump_all():
             with open(dump_file_path, "w", encoding="utf-8") as f:
                 f.write(f"\n================ STACK DUMP AT {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')} ================\n")
                 try:
-                    faulthandler.dump_traceback(file=f, all_threads=True)
+                    frames = sys._current_frames()
+                    for thread in threading.enumerate():
+                        frame = frames.get(thread.ident)
+                        if frame is not None:
+                            f.write(f'\nThread {thread.name} ident={thread.ident} native_id={thread.native_id}:\n')
+                            f.writelines(traceback.format_stack(frame, limit=24))
                 except Exception as fe:
                     f.write(f"faulthandler failed to dump: {fe}\n")
                 f.flush()
@@ -593,6 +598,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._compute_inflight     = 0
         self._compute_max_inflight = 1
         self._pending_tree_data = None
+        self._pump_queue_lock = threading.Lock()
+        self._pending_pump_task = None
+        self._pump_runner_scheduled = False
         self._task_storage = {}
         self._pending_task_keys = set()
         self._task_storage_lock = threading.Lock()
@@ -1195,10 +1203,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._qt_event_after_id = self.after(50, self._process_qt_events)
 
 
-        self.sender = StockSender(
-            self.tdx_var, self.ths_var, self.dfcf_var,
-            callback=self.update_send_status, defer_initial_scan=True,
-        )
+        self.sender = StockSender(self.tdx_var, self.ths_var, self.dfcf_var, callback=self.update_send_status)
         self.clipboard_monitor = start_clipboard_listener(
             self.sender, 
             ignore_func=lambda code: code.strip() == str(getattr(self, 'select_code', '')).strip(),
@@ -4747,6 +4752,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                 if qt_app:
                     logger.info("Phase 5: Cleaning up Qt application windows...")
+                    # Keep wrappers alive until process exit. Forced deferred deletion
+                    # inside a Tk callback can destroy a running Qt worker or window.
+                    self._shutdown_qt_windows = tuple(qt_app.topLevelWidgets())
+                    qt_app.setQuitOnLastWindowClosed(False)
 
                     # 关闭核心业务窗口
                     for win_attr in [
@@ -4782,16 +4791,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         self._pg_windows.clear()
 
                     # 关闭所有顶级 QWidget
-                    for widget in qt_app.topLevelWidgets():
+                    for widget in self._shutdown_qt_windows:
                         try:
                             widget.close()
-                            widget.deleteLater()
                         except Exception:
                             pass
-
-                    qt_app.closeAllWindows()
-                    from PyQt6.QtCore import QCoreApplication, QEvent
-                    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
             except Exception as e:
                 logger.debug(f"Qt UI cleanup error: {e}")
@@ -4897,48 +4901,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if alive_pids:
                         print(f"alive after kill: {alive_pids}")
 
-                # 2. 强力清理同名残留进程以及处于临时解压目录下的衍生进程 (免写死，完全动态路径匹配)
-                try:
-                    my_pid = os.getpid()
-                    my_ppid = current_process.ppid()
-                    my_exe_name = os.path.basename(sys.executable).lower()
-                    
-                    # 动态解析 Nuitka / PyInstaller 临时解包文件夹路径
-                    from sys_utils import get_base_path, get_app_root
-                    base_path_lower = get_base_path().lower()
-                    app_root_lower = get_app_root().lower()
-                    
-                    # 只有解压路径与可执行文件物理所在路径不一致时，才属于单文件解压临时运行模式
-                    is_temp_run = (base_path_lower != app_root_lower)
-                    
-                    for proc in psutil.process_iter(['pid', 'name', 'exe']):
-                        try:
-                            pid = proc.info['pid']
-                            # 绝对不要强杀自身或启动器父进程
-                            if pid == my_pid or pid == my_ppid:
-                                continue
-                            proc_name = (proc.info['name'] or "").lower()
-                            proc_exe = (proc.info['exe'] or "").lower()
-                            
-                            is_target = False
-                            # 2.1 匹配同名进程（排除 python 调试器本身）
-                            if "python" not in my_exe_name and proc_name == my_exe_name:
-                                is_target = True
-                            # 2.2 匹配处于临时解压释放路径中的任何衍生进程
-                            if not is_target and is_temp_run and proc_exe:
-                                if proc_exe.startswith(base_path_lower) or base_path_lower in proc_exe:
-                                    is_target = True
-                                        
-                            if is_target:
-                                print(f"发现后台残留占用进程: PID={pid}, EXE={proc_exe}，正在实施强力清理...")
-                                p_obj = psutil.Process(pid)
-                                p_obj.kill()
-                                p_obj.wait(timeout=0.5)
-                        except Exception:
-                            pass
-                    time.sleep(0.2)
-                except Exception as e_proc_scan:
-                    print(f"扫描残留进程发生异常: {e_proc_scan}")
+                # Only descendants belong to this instance; retain independent comparison instances.
 
                 try:
                     from JohnsonUtil.LoggerFactory import stopLogger
@@ -6655,6 +6618,44 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception:
             pass
 
+    def _submit_latest_pump_task(self, data_packet, sync_ui=True, query="", force=False):
+        """Keep at most one queued pump runner and replace stale queued snapshots."""
+        submit_runner = False
+        with self._pump_queue_lock:
+            pending = self._pending_pump_task
+            force = bool(force or (pending and pending[3]))
+            self._pending_pump_task = (data_packet, sync_ui, query, force)
+            if not self._pump_runner_scheduled:
+                self._pump_runner_scheduled = True
+                submit_runner = True
+
+        if not submit_runner:
+            return
+        try:
+            self.pump_executor.submit(self._drain_latest_pump_task)
+        except RuntimeError:
+            with self._pump_queue_lock:
+                self._pump_runner_scheduled = False
+                self._pending_pump_task = None
+            if not getattr(self, '_is_closing', False):
+                logger.exception("[Pump] 无法提交最新行情快照")
+
+    def _drain_latest_pump_task(self):
+        """Drain coalesced pump work; executor backlog must not grow with market ticks."""
+        while True:
+            with self._pump_queue_lock:
+                pending = self._pending_pump_task
+                self._pending_pump_task = None
+                if pending is None:
+                    self._pump_runner_scheduled = False
+                    return
+            if getattr(self, '_is_closing', False):
+                continue
+            try:
+                self._process_tree_data_async(*pending)
+            except Exception:
+                logger.exception("[Pump] 最新行情快照处理失败")
+
     def update_tree(self):
         assert_main_thread("update_tree")
         if not hasattr(self, "tree") or not self.tree.winfo_exists():
@@ -6787,7 +6788,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     force_val = getattr(self, '_force_ui_refresh_pending', False)
                     if force_val: self._force_ui_refresh_pending = False
                     
-                    self.pump_executor.submit(self._process_tree_data_async, latest_pkg, sync_ui=True, query=combined_query, force=force_val)
+                    self._submit_latest_pump_task(
+                        latest_pkg, sync_ui=True, query=combined_query, force=force_val,
+                    )
                 else:
                     # Check if subprocess is still alive
                     if hasattr(self, 'proc') and self.proc is not None:
@@ -9252,7 +9255,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         settings_win.bind("<Escape>", lambda e: save_and_close())
 
     def open_sector_bidding_panel(self):
-        """手动打开竞价/尾盘板块联动监控面板 (异步构建版，防 Tk 主线程冻结)"""
+        """后台导入面板，Qt 控件在主线程构造；合并尚未完成的打开请求。"""
+        if getattr(self, '_bidding_panel_build_pending', False):
+            return
         # [🚀 防抖保护] 避免由于快速重复开关导致的 Qt 资源竞争与 GIL 崩溃 (2s 阈值)
         now = time.time()
         last_action = getattr(self, '_last_sector_bidding_action_t', 0)
@@ -9282,12 +9287,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 import traceback; traceback.print_exc()
             return
 
-        # [🔍 首次构建] 使用后台线程构建，防止 ProcessPoolExecutor Windows spawn 冻结 Tk 主线程
-        logger.warning("⏱️ [SectorBidding][BUILD] 首次构建面板，移至后台线程执行 (防 GIL 冻结)...")
+        # 导入可在后台执行；QWidget 构造仍由主线程完成。
+        logger.warning("⏱️ [SectorBidding][BUILD] 首次构建面板，后台导入后回投主线程...")
         t_start = time.time()
+        self._bidding_panel_build_pending = True
 
         def _build_panel_worker():
-            """后台线程：执行耗时的面板构建 (ProcessPool 启动 + 数据加载)"""
+            """后台线程仅导入模块，不创建 Qt 控件。"""
             import traceback as _tb
             try:
                 t0 = time.time()
@@ -9295,9 +9301,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 from sector_bidding_panel import SectorBiddingPanel
                 logger.warning(f"⏱️ [SectorBidding][BUILD-Worker] Step 1 Done: import cost {(time.time()-t0)*1000:.1f}ms")
 
-                # ⚠️ SectorBiddingPanel.__init__ 含 ProcessPoolExecutor 与 QWidget 构建，
-                # QWidget 必须在 Qt 主线程（即当前 Tk 主线程的 Qt 事件层）构建
-                # 因此通过 after(0) 调度回主线程安全构建
+                # QWidget 必须在 Qt 主线程（当前 Tk 主线程）构建。
                 def _create_in_main():
                     try:
                         if getattr(self, '_is_closing', False):
@@ -9333,19 +9337,29 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         self.after(200, _push_initial_data)
 
                     except Exception as e:
+                        self._auto_bidding_panel_requested = False
                         logger.exception(f"[SectorBidding][BUILD-Main] 面板构建异常: {e}")
                         _tb.print_exc()
+                    finally:
+                        self._bidding_panel_build_pending = False
 
                 # 回调至 Tk 主线程
                 self.tk_dispatch_queue.put(_create_in_main)
 
             except Exception as e:
+                self._bidding_panel_build_pending = False
+                self._auto_bidding_panel_requested = False
                 logger.error(f"[SectorBidding][BUILD-Worker] 后台线程异常: {e}")
                 _tb.print_exc()
 
         # 启动后台线程（仅负责 import + 触发回调，实际 Qt widget 创建仍在主线程）
         t = threading.Thread(target=_build_panel_worker, name="SectorBiddingBuild", daemon=True)
-        t.start()
+        try:
+            t.start()
+        except Exception:
+            self._bidding_panel_build_pending = False
+            self._auto_bidding_panel_requested = False
+            logger.exception('[SectorBidding] 无法启动面板导入线程')
         logger.warning(f"⏱️ [SectorBidding] 后台构建线程已启动，主线程立即返回 (total {(time.time()-t_start)*1000:.1f}ms)")
 
     def open_spatial_follow_hud(self, sector_name: str, signal_item: Optional[Any] = None, auto_popup: bool = False) -> None:
@@ -10890,68 +10904,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except:
                 pass
 
-    def _request_stock_sender_reload(self, flags):
-        """在后台扫描外部交易软件窗口，并合并快速切换。"""
-        self._sender_reload_requested_state = tuple(bool(flag) for flag in flags)
-        if getattr(self, '_sender_reload_pending', False):
-            return
-        self._sender_reload_pending = True
-
-        def reload_worker():
-            try:
-                while True:
-                    requested = self._sender_reload_requested_state
-                    scan_started = time.perf_counter()
-                    try:
-                        self.sender.reload(flags=requested)
-                    except Exception:
-                        logger.exception("[StockSender] 后台窗口扫描失败")
-                    elapsed_ms = (time.perf_counter() - scan_started) * 1000
-                    if elapsed_ms >= 500:
-                        logger.warning(
-                            "[StockSender] 后台窗口扫描耗时 %.1fms flags=%s",
-                            elapsed_ms, requested,
-                        )
-                    self._sender_reload_completed_state = requested
-                    if requested == self._sender_reload_requested_state:
-                        break
-            finally:
-                if getattr(self, '_is_closing', False):
-                    self._sender_reload_pending = False
-                else:
-                    try:
-                        self.tk_dispatch_queue.put(self._finish_stock_sender_reload)
-                    except Exception:
-                        self._sender_reload_pending = False
-                        logger.exception("[StockSender] 回投扫描完成事件失败")
-
-        try:
-            threading.Thread(
-                target=reload_worker, name="StockSenderWindowScan", daemon=True,
-            ).start()
-        except Exception:
-            self._sender_reload_pending = False
-            logger.exception("[StockSender] 无法启动后台窗口扫描线程")
-
-    def _finish_stock_sender_reload(self):
-        self._sender_reload_pending = False
-        requested = getattr(self, '_sender_reload_requested_state', None)
-        completed = getattr(self, '_sender_reload_completed_state', None)
-        if (requested is not None and requested != completed and any(requested)
-                and not getattr(self, '_is_closing', False)):
-            self._request_stock_sender_reload(requested)
-
     def update_linkage_status(self):
         global tip_var_status_flag
-        # 只在 TDX/同花顺/东方财富开关变化时重扫，且绝不在 Tk 回调中同步 EnumWindows。
-        sender_flags = (
-            bool(self.tdx_var.get()), bool(self.ths_var.get()), bool(self.dfcf_var.get()),
-        )
-        if sender_flags != getattr(self, '_sender_reload_requested_state', None):
-            if any(sender_flags):
-                self._request_stock_sender_reload(sender_flags)
-            else:
-                self._sender_reload_requested_state = sender_flags
+        # 此处处理 checkbuttons 状态
+        if not self.tdx_var.get() or not self.ths_var.get():
+            self.sender.reload()
         if  self.dfcf_var.get() != self.auto_adjust_column:
             logger.info(f"DC:{self.dfcf_var.get()} self.auto_adjust_column :{self.auto_adjust_column}")
             self.auto_adjust_column = self.dfcf_var.get()
@@ -11966,7 +11923,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         from global_favorites import GlobalFavoriteManager
         favorites_snapshot = set(GlobalFavoriteManager().get_favorite_stocks())
         with self._df_lock:
-            source_frame_snapshot = getattr(self, 'df_all', None)
+            source_frame_snapshot = getattr(
+                self, 'df_all_res' if context[1] != 'd' else 'df_all', None)
             quote_snapshot = getattr(self, '_linkage_quote_frame', None)
             statuses_snapshot = dict(getattr(self, '_linkage_quote_statuses', {}))
 
@@ -11992,7 +11950,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             linkage_ui_only = set()
             try:
                 from global_favorites import GlobalFavoriteManager
-                from system_linkage_quotes import frame_quote_row, normalize_supported_stock_code
+                from system_linkage_quotes import frame_quote_row, normalize_supported_stock_code, normalize_trade_date
                 fav_stocks = favorites_snapshot
                 normalized_favorites = {
                     str(code).strip().zfill(6) for code in fav_stocks if str(code).strip()
@@ -12004,6 +11962,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 added_rows = []
                 added_codes = []
                 quote_rows = {}
+                source_rows = {}
+                if source_frame_snapshot is not None and not source_frame_snapshot.empty:
+                    source_codes = (source_frame_snapshot['code'] if 'code' in source_frame_snapshot.columns
+                                    else source_frame_snapshot.index)
+                    source_rows = {str(code).strip().zfill(6): position
+                                   for position, code in enumerate(source_codes)}
                 if linkage_frame is not None and not linkage_frame.empty:
                     quote_codes = (linkage_frame['code'] if 'code' in linkage_frame.columns
                                    else linkage_frame.index)
@@ -12022,14 +11986,30 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     quote_values['code'] = code
                     if 'now' in quote_values:
                         quote_values['trade'] = quote_values['now']
+                    # Preserve computed metrics from this period's market frame.
+                    # A sparse quote must not turn a complete favorite into an empty row.
+                    source_position = source_rows.get(code)
+                    rich_row = (source_frame_snapshot.iloc[source_position]
+                                if source_position is not None else None)
+                    def row_date(row):
+                        return next((date for key in ('dt', 'trade_date', 'date', 'ticktime')
+                                     if (date := normalize_trade_date(row.get(key)))), '')
+                    if rich_row is not None and row_date(rich_row) and row_date(rich_row) == row_date(quote_row):
+                        merged = rich_row.to_dict()
+                        merged.update({column: value for column, value in quote_values.items()
+                                       if not pd.isna(value)})
+                        quote_values = merged
+                        quote_values['code'] = code
+                    quote_values['linkage_quote_status'] = statuses_snapshot.get(code, 'unknown')
                     if matches:
                         row_index = matches[0]
                         for column, value in quote_values.items():
+                            if pd.isna(value) and column in df.columns:
+                                continue
                             if column not in df.columns:
                                 df[column] = pd.NA
                             df.at[row_index, column] = value
                     else:
-                        quote_values['linkage_quote_status'] = statuses_snapshot.get(code, 'unknown')
                         added_rows.append(quote_values)
                         added_codes.append(code)
                         linkage_ui_only.add(code)
@@ -18771,8 +18751,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 update_cols = list(dict.fromkeys([
                     *cols_to_show, *(c for c in feature_cols if c in df.columns)
                 ]))
+                render_df = df.reindex(columns=update_cols)
+                render_df.attrs['_tk_source_version'] = source_version
                 added, updated, deleted = self.tree_updater.update(
-                    df.reindex(columns=update_cols), force_full=force_full)
+                    render_df, force_full=force_full)
                 
                 # 恢复选中状态
                 if self.select_code:
@@ -25531,10 +25513,6 @@ def write_to_hdf():
 
 
 def main_SIGBREAK():
-    # 动态检测是否需要开启后台监听，如果没有配置打开则直接跳过
-    if not getattr(cct, "dump_all_monitor", 0):
-        return
-
     # =========================
     # 仅主进程 + 主线程
     # =========================
@@ -25559,6 +25537,7 @@ def main_SIGBREAK():
         if (
             sys.platform.startswith("win")
             and hasattr(signal, "SIGBREAK")
+            and getattr(cct, "dump_all_monitor", 0)
         ):
             try:
                 # 1. 注册 Python 标准 SIGBREAK 信号接管，这是最安全、最平稳吞没信号且绝不闪退的手段

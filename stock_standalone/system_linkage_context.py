@@ -10,6 +10,7 @@ import math
 import os
 import secrets
 import sqlite3
+import sys
 import threading
 import time
 from collections import deque
@@ -19,7 +20,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-from linkage_storage import runtime_database, configure as configure_linkage_database, trim as trim_linkage_database
+from linkage_storage import (runtime_database, database_access,
+                             configure as configure_linkage_database, trim as trim_linkage_database)
 from sys_utils import get_app_root
 from system_linkage_gateway import _resolve_key_file
 
@@ -383,15 +385,17 @@ class SystemLinkageContextClient:
 
     @contextmanager
     def _connection(self):
-        connection = self._connect()
-        try:
-            yield connection
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
+        operation = 'context.' + sys._getframe(2).f_code.co_name
+        with database_access(self.database_path, operation):
+            connection = self._connect()
+            try:
+                yield connection
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
 
     def _init_store(self):
         os.makedirs(os.path.dirname(os.path.abspath(self.database_path)), exist_ok=True)

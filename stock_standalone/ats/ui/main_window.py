@@ -7441,7 +7441,8 @@ class ATSMainWindow(QMainWindow):
                     recovery_journal_path(get_app_root()),
                     timeout_sec=max(0.0, deadline - time.monotonic()))
 
-            tasks = [('subprocess cleanup', lambda: wait_for_threads(threads, deadline)),
+            tasks = [('voice cleanup', lambda: ATSMainWindow._drain_shutdown_voice(self)),
+                     ('subprocess cleanup', lambda: wait_for_threads(threads, deadline)),
                      ('multiprocessing cleanup', lambda: reap_multiprocessing_children(deadline)),
                      ('final config', lambda: flush_config_writer(
                          timeout_sec=max(0.0, deadline - time.monotonic()))),
@@ -7480,11 +7481,13 @@ class ATSMainWindow(QMainWindow):
         app = QApplication.instance()
         if app:
             app.quit()
-        if is_packaged_env():
-            try:
-                QTimer.singleShot(150, lambda: os._exit(0))
-            except Exception:
-                pass
+
+    def _drain_shutdown_voice(self):
+        from ats.alert_notifier import AlertNotifier
+        notifier = AlertNotifier._instance
+        if notifier is None:
+            return True
+        return notifier._stop_voice_workers(self._exit_cleanup_deadline)
 
     def closeEvent(self, event):
         """主窗口关闭退出时，自动跟随关闭所有独立的 TopLevel 子窗口、对话框、保存全量布局配置及安全回收后台线程"""

@@ -493,6 +493,10 @@ class AlertNotifier(QObject if HAS_PYQT else object):
         if getattr(self, '_initialized', False):
             return
         self._initialized = True
+        self._shutting_down = False
+        self._voice_stop_event = threading.Event()
+        self._voice_lock = threading.Lock()
+        self._voice_threads = []
         self.tray_icon = None
         self._stock_alert_state: Dict[str, dict] = {}  # 单股详细历史报警状态 (包含 ts, score, reason, source)
         self._last_alert_ts = {}  # 单股冷却时间戳
@@ -518,6 +522,8 @@ class AlertNotifier(QObject if HAS_PYQT else object):
 
     def is_voice_enabled(self) -> bool:
         """获取当前全局语音播报开关状态"""
+        if getattr(self, '_shutting_down', False):
+            return False
         global _GLOBAL_VOICE_ENABLED
         return _GLOBAL_VOICE_ENABLED
 
@@ -554,6 +560,14 @@ class AlertNotifier(QObject if HAS_PYQT else object):
 
     def shutdown(self):
         """关闭并销毁系统托盘图标与浮动 Toast 弹窗，确保主进程退出"""
+        self._shutting_down = True
+        self._voice_stop_event.set()
+        import sys
+        module = sys.modules.get('alert_manager')
+        manager = getattr(getattr(module, 'AlertManager', None), '_instance', None)
+        if manager is not None:
+            manager.stop_event.set()
+            manager.interrupt_event.set()
         try:
             if self.tray_icon:
                 self.tray_icon.hide()
@@ -568,6 +582,21 @@ class AlertNotifier(QObject if HAS_PYQT else object):
         except Exception:
             pass
         self._notify_queue.clear()
+
+    def _stop_voice_workers(self, deadline):
+        """Background shutdown drain; never create a voice singleton to stop it."""
+        with self._voice_lock:
+            workers = list(self._voice_threads)
+        for worker in workers:
+            worker.join(timeout=max(0.0, deadline - time.monotonic()))
+        import sys
+        module = sys.modules.get('alert_manager')
+        manager_class = getattr(module, 'AlertManager', None)
+        manager = getattr(manager_class, '_instance', None)
+        if manager is not None:
+            manager.stop()
+            workers.extend([manager.process, getattr(manager, '_feedback_thread', None)])
+        return not any(worker is not None and worker.is_alive() for worker in workers)
         
     def _init_tray(self):
         if not HAS_PYQT:
@@ -1041,6 +1070,8 @@ class AlertNotifier(QObject if HAS_PYQT else object):
 
     def _enqueue_notification_item(self, item: dict):
         """在 Qt 主线程中安全压入通知队列并启动串行轮播处理 (带队列内单股防重复保护)"""
+        if getattr(self, '_shutting_down', False):
+            return
         if item.get('type') == 'market_volume':
             self._notify_queue.append(item)
             self._process_queue()
@@ -1057,6 +1088,8 @@ class AlertNotifier(QObject if HAS_PYQT else object):
 
     def _process_queue(self):
         """串行轮播队列处理：前一个信号弹窗+语音播报完毕后再弹出下一个"""
+        if getattr(self, '_shutting_down', False):
+            return
         if self._is_busy:
             return
         if not self._notify_queue:
@@ -1201,6 +1234,8 @@ class AlertNotifier(QObject if HAS_PYQT else object):
 
     def _on_current_item_finished(self):
         """当前信号展示与播报完成，关闭当前 Toast，并秒级切入下一个信号"""
+        if getattr(self, '_shutting_down', False):
+            return
         if self._current_toast:
             try:
                 self._current_toast.close()
@@ -1228,6 +1263,8 @@ class AlertNotifier(QObject if HAS_PYQT else object):
             try:
                 from alert_manager import get_alert_manager
                 mgr = get_alert_manager()
+                if self._voice_stop_event.is_set():
+                    return
                 if hasattr(mgr, 'speak'):
                     mgr.speak(text)
                     return
@@ -1235,22 +1272,39 @@ class AlertNotifier(QObject if HAS_PYQT else object):
                 pass
 
             # 2. Fallback: 独立 CoInitialize() 的 Win32 SAPI.SpVoice 线程直连 (绝不上锁、不冲突 pyttsx3)
+            com_initialized = False
+            speaker = None
             try:
                 import pythoncom
                 import win32com.client
                 pythoncom.CoInitialize()
+                com_initialized = True
                 speaker = win32com.client.Dispatch("SAPI.SpVoice")
                 speaker.Rate = 1
                 speaker.Volume = 100
-                speaker.Speak(str(text), 0)
-                del speaker
-                pythoncom.CoUninitialize()
+                if self._voice_stop_event.is_set():
+                    return
+                speaker.Speak(str(text), 1)
+                while not speaker.WaitUntilDone(50):
+                    if self._voice_stop_event.is_set():
+                        speaker.Speak('', 3)
+                        speaker.WaitUntilDone(200)
+                        break
             except Exception as e:
                 logger.warning(f"Fallback SAPI.SpVoice speak error: {e}")
+            finally:
+                speaker = None
+                if com_initialized:
+                    pythoncom.CoUninitialize()
 
         import threading
-        t = threading.Thread(target=_worker, name="ATSSafeVoiceThread", daemon=True)
-        t.start()
+        with self._voice_lock:
+            if self._voice_stop_event.is_set():
+                return
+            self._voice_threads = [worker for worker in self._voice_threads if worker.is_alive()]
+            t = threading.Thread(target=_worker, name="ATSSafeVoiceThread", daemon=True)
+            t.start()
+            self._voice_threads.append(t)
 
 
 def get_alert_notifier() -> AlertNotifier:

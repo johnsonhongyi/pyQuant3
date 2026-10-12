@@ -284,6 +284,8 @@ class TreeviewIncrementalUpdater:
                         or position < len(df)):
                     self._render_after_id = self.root.after(8, render_batch)
                 else:
+                    if future is not None:
+                        self._audit_render_plan(render_plan['plan'])
                     if self._selection_request and self._pending_render is None:
                         code, scroll = self._selection_request
                         self._selection_request = None
@@ -292,7 +294,15 @@ class TreeviewIncrementalUpdater:
                             self.restore_selection(code, scroll)
                     finish()
             except Exception:
-                logger.exception('[TreeviewUpdater] 分批刷新失败')
+                logger.exception('[TreeviewUpdater] 分批刷新失败 source_version=%s rows=%d',
+                                 df.attrs.get('_tk_source_version'), len(df))
+                # A partially written row must not remain trusted by the dirty
+                # cache, or a subsequent frame reverting it can be skipped.
+                self._values_cache.clear()
+                self._tags_cache.clear()
+                self.root._last_refresh_fingerprint = None
+                self.root._last_tree_refresh_time = 0
+                self.root._last_real_refresh_ts = 0
                 finish()
             finally:
                 record = getattr(self.root, '_record_latency_sample', None)
@@ -331,6 +341,11 @@ class TreeviewIncrementalUpdater:
             [row[0] for row in rows], children, item_map_snapshot,
         )
         plan['rows'] = rows
+        plan['source_version'] = df.attrs.get('_tk_source_version')
+        plan['non_null'] = {
+            col: int(df[col].notna().sum()) if col in df.columns else 0
+            for col in preparer.columns
+        }
         return plan
 
     def _discard_stale_items(self, codes):
@@ -339,6 +354,42 @@ class TreeviewIncrementalUpdater:
             self._item_map.pop(code, None)
             self._values_cache.pop(code, None)
             self._tags_cache.pop(code, None)
+
+    def _audit_render_plan(self, plan):
+        """Bounded UI sampling against the same worker-prepared source frame."""
+        now = time.monotonic()
+        if now - getattr(self, '_last_render_audit_ts', 0) < 30:
+            return
+        self._last_render_audit_ts = now
+        try:
+            rows = plan['rows']
+            empty = [col for col, count in plan['non_null'].items() if not count]
+            partial = [(col, count) for col, count in plan['non_null'].items()
+                       if 0 < count < len(rows)]
+            check_cols = list(dict.fromkeys([
+                *(col for col in ('percent', 'dff', 'vwap', 'ma5d', 'ma20d')
+                  if col in self.columns), *self.columns,
+            ]))[:10]
+            mismatches = []
+            for position in sorted({0, len(rows) // 2, len(rows) - 1}):
+                if not rows:
+                    break
+                code, values, _ = rows[position]
+                iid = self._item_map.get(code)
+                if iid is None or not self.tree.exists(iid):
+                    mismatches.append((position, 'missing_row'))
+                    continue
+                for col in check_cols:
+                    expected = self.tree.tk.call('format', '%s', values[self.columns.index(col)])
+                    if self.tree.set(iid, col) != expected:
+                        mismatches.append((position, col))
+            logger.info(
+                '[TREE-FRAME-AUDIT] source_version=%s rows=%d empty_columns=%s '
+                'partial_columns=%s sampled_mismatches=%s',
+                plan['source_version'], len(rows), empty[:20], partial[:20], mismatches,
+            )
+        except Exception:
+            logger.warning('[TREE-FRAME-AUDIT] 抽样核查失败', exc_info=True)
 
     def _prepare_render_rows(self, df):
         """Worker-only formatting; no Tcl/Tk calls are allowed here."""
@@ -472,7 +523,9 @@ class TreeviewIncrementalUpdater:
                 elif col in co2int_cols:
                     arr = [_fmt_int(x) if pd.notna(x) else '' for x in df[col]]
                 else:
-                    arr = df[col].fillna('').tolist()
+                    # Extension/categorical dtypes reject filling numeric or
+                    # category storage with ''. Convert display values only.
+                    arr = df[col].to_numpy(dtype=object, na_value='').tolist()
             else:
                 arr = [''] * n_rows
             col_arrays.append(arr)
@@ -494,9 +547,9 @@ class TreeviewIncrementalUpdater:
                 if k in df.columns:
                     # fillna(0) 用于数值，fillna('') 用于字符串
                     if k == 'category':
-                        feature_cols[k] = df[k].fillna('').tolist()
+                        feature_cols[k] = df[k].to_numpy(dtype=object, na_value='').tolist()
                     else:
-                        feature_cols[k] = df[k].fillna(0).tolist()
+                        feature_cols[k] = df[k].to_numpy(dtype=object, na_value=0).tolist()
                 else:
                     feature_cols[k] = None
             feature_data = feature_cols
@@ -504,7 +557,7 @@ class TreeviewIncrementalUpdater:
         # name 列在 columns 中的索引
         # 预提取 grade 列
         if 'grade' in df.columns:
-            grades = df['grade'].fillna('C').astype(str).tolist()
+            grades = [str(value) for value in df['grade'].to_numpy(dtype=object, na_value='C')]
         else:
             grades = ['C'] * n_rows
 
