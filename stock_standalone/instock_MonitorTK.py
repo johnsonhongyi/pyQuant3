@@ -6880,6 +6880,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             t_unpack = time.time()
 
+            # Repeated bus delivery of the same packet may be skipped. A new
+            # publication still runs the normal time-dependent compute path.
+            source_version = data_packet.get('source_version') if isinstance(data_packet, dict) else None
+            df_hash = None if source_version is None else (
+                source_version, snap_time,
+                str(self.global_values.getkey('resample')),
+                str(getattr(self, 'sortby_col', None)),
+                bool(getattr(self, 'sortby_col_ascend', False)),
+                repr(getattr(self, 'feature_marker', None)),
+                query, bool(sync_ui),
+            )
+            if not query and not force and df_hash is not None and same_fingerprint(
+                    getattr(self, '_last_processed_df_hash', None), df_hash):
+                with self._df_lock:
+                    self._linkage_market_frame_at = time.monotonic()
+                return
+
             # 2. 代码与数据净化 (轻量)
             sanitized = {}
             def _sanitize(d):
@@ -6926,20 +6943,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             t_sanitize1 = time.time()
 
             if full_df is None or full_df.empty:
-                return
-
-            # 总线每次发布冻结双轨输入并递增版本；消费端无需再扫描全表。
-            # 旧调用没有可信版本号时保守执行，避免用采样或对象地址漏掉变化。
-            source_version = data_packet.get('source_version') if isinstance(data_packet, dict) else None
-            df_hash = None if source_version is None else (
-                source_version, snap_time,
-                str(self.global_values.getkey('resample')),
-                str(getattr(self, 'sortby_col', None)),
-                bool(getattr(self, 'sortby_col_ascend', False)),
-                repr(getattr(self, 'feature_marker', None)),
-                query, bool(sync_ui),
-            )
-            if not force and same_fingerprint(getattr(self, '_last_processed_df_hash', None), df_hash):
                 return
 
             t_hash = time.time()
@@ -7466,8 +7469,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         self._is_gui_rendering = True
                         try:
                             # 1. 刷新主 Treeview (核心任务)
-                            self.refresh_tree(ui_df, force=force, skip_sort=True,
-                                              source_version=self._data_update_version)
+                            self.refresh_tree(ui_df, force=force, skip_sort=True)
                             self._first_market_frame_shown = True
                         finally:
                             self._is_gui_rendering = False
@@ -18789,8 +18791,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return
 
         # ⚡ UI 渲染指纹防抖 (方案阶段 0: 高性能向量级 Golden 指纹防抖)
+        feature_cols = ['grade', 'percent', 'volume', 'category', 'price', 'trade',
+                        'high4', 'max5', 'max10', 'hmax', 'hmax60', 'low4', 'low10',
+                        'low60', 'lmin', 'min5', 'cmean', 'hv', 'lv', 'llowvol',
+                        'lastdu4', 'ma5d', 'ma20d', 'ma60d']
         cols_to_check = list(dict.fromkeys(
-            c for c in ['code', 'trade', 'now', 'price', 'close', 'percent', 'signal', 'name', *self.current_cols]
+            c for c in ['code', 'trade', 'now', 'price', 'close', 'percent', 'signal', 'name',
+                        *self.current_cols, *feature_cols]
             if c in df.columns
         ))
         prepared_fingerprint = df.attrs.pop('_tk_prepared_fingerprint', None)
@@ -18838,10 +18845,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 # 执行增量更新
                 # 颜色/图标依赖的业务字段不能随可见列裁剪掉。
-                feature_cols = ['grade', 'percent', 'volume', 'category', 'price', 'trade',
-                                'high4', 'max5', 'max10', 'hmax', 'hmax60', 'low4', 'low10',
-                                'low60', 'lmin', 'min5', 'cmean', 'hv', 'lv', 'llowvol',
-                                'lastdu4', 'ma5d', 'ma20d', 'ma60d']
                 update_cols = list(dict.fromkeys([
                     *cols_to_show, *(c for c in feature_cols if c in df.columns)
                 ]))
@@ -19142,9 +19145,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     else:
                         frame = frame.query(query, engine='python')
                 frame = self._sort_dataframe(frame, sort_state)
+                feature_cols = ['grade', 'percent', 'volume', 'category', 'price', 'trade',
+                                'high4', 'max5', 'max10', 'hmax', 'hmax60', 'low4', 'low10',
+                                'low60', 'lmin', 'min5', 'cmean', 'hv', 'lv', 'llowvol',
+                                'lastdu4', 'ma5d', 'ma20d', 'ma60d']
                 fingerprint_columns = list(dict.fromkeys(
                     column for column in ['code', 'trade', 'now', 'price', 'close',
-                                          'percent', 'signal', 'name', *render_columns]
+                                          'percent', 'signal', 'name', *render_columns, *feature_cols]
                     if column in frame.columns
                 ))
                 frame.attrs['_tk_prepared_fingerprint'] = (
