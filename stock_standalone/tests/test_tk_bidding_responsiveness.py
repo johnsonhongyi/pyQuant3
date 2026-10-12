@@ -72,7 +72,9 @@ def panel_owner():
     owner = GuiOwner(
         _update_lock=threading.Lock(), _force_update_requested=False,
         _has_scoring_result=True,
-        _last_refresh_ts=time.time(), _worker=SimpleNamespace(latest_df=object(), data_updated=Mock()),
+    _last_refresh_ts=time.time(), _worker=SimpleNamespace(
+        latest_df=object(), data_updated=Mock(), _score_request_count=0,
+    ),
         _is_macro_active=True, _macro_query_str='close > 0',
         _run_macro_query_internal=Mock(), _refresh_sector_list=Mock(), main_window=None,
     )
@@ -349,3 +351,207 @@ def test_live_qt_completion_burst_does_not_starve_input_timer():
     assert not worker.is_alive() and input_times and input_times[0] < 0.15
     owner._refresh_sector_list.assert_called_once()
     owner._run_macro_query_internal.assert_called_once()
+
+
+class CodeFrame:
+    """Minimal frame contract for AST-extracted worker methods."""
+
+    columns = ['code']
+    empty = False
+
+    def __init__(self, codes=('600000',)):
+        self.codes = list(codes)
+        self.index = self.codes
+
+    def __getitem__(self, column):
+        assert column == 'code'
+        return self.codes
+
+
+def worker_owner(score_in_worker=False):
+    detector = SimpleNamespace(register_codes=Mock(), update_scores=Mock())
+    owner = SimpleNamespace(
+        detector=detector, score_in_worker=score_in_worker, latest_df=None,
+        _safe_log_error=Mock(), _score_request_count=0, _is_running=True,
+    )
+    method = load_method(
+        'sector_bidding_panel.py', 'DataProcessWorker', '_process_df_chunked',
+        _RE_NON_DIGIT=__import__('re').compile(r'\D'), traceback=__import__('traceback'),
+        time=SimpleNamespace(sleep=Mock()),
+    )
+    owner._process_df_chunked = MethodType(method, owner)
+    return owner
+
+
+def shared_panel_owner(worker, work_time):
+    owner = SimpleNamespace(
+        _is_history_mode=False, _is_global_detector=True,
+        _update_lock=threading.Lock(), _force_update_requested=False,
+        _fallback_df=None, _global_detector_is_empty=lambda: False,
+        main_window=SimpleNamespace(
+            realtime_service=SimpleNamespace(is_ready=True, paused=False),
+        ),
+        _worker=worker,
+    )
+    receive = load_method(
+        'sector_bidding_panel.py', 'SectorBiddingPanel', 'on_realtime_data_arrived',
+        cct=SimpleNamespace(get_work_time_duration=lambda: work_time), logger=Mock(),
+    )
+    owner.on_realtime_data_arrived = MethodType(receive, owner)
+    worker.detector = SimpleNamespace(register_codes=Mock(), update_scores=Mock())
+    worker._safe_log_error = Mock()
+    worker.latest_df = None
+    def enqueue_and_process(df, score_requested=False, force_score=False):
+        worker._process_df_chunked(df, score_requested, force_score)
+        return True
+    worker.add_data = Mock(side_effect=enqueue_and_process)
+    return owner
+
+
+def test_shared_worker_does_not_reingest_or_rescore_normal_market_frame():
+    owner = worker_owner(score_in_worker=False)
+    panel = shared_panel_owner(owner, work_time=True)
+    frame = CodeFrame()
+    panel.on_realtime_data_arrived(frame)
+    owner.detector.register_codes.assert_not_called()
+    owner.detector.update_scores.assert_not_called()
+    owner.add_data.assert_called_once_with(
+        frame, score_requested=False, force_score=False,
+    )
+    assert owner.latest_df is frame
+
+
+def test_shared_worker_can_register_and_score_requested_after_hours_frame():
+    owner = worker_owner(score_in_worker=False)
+    panel = shared_panel_owner(owner, work_time=False)
+    frame = CodeFrame(('600000', '000001'))
+    panel.on_realtime_data_arrived(frame)
+    owner.detector.register_codes.assert_called_once_with(frame)
+    owner.detector.update_scores.assert_called_once_with(
+        active_codes=['600000', '000001'], force=False,
+    )
+    assert owner._score_request_count == 1
+    owner.add_data.assert_called_once_with(
+        frame, score_requested=True, force_score=False,
+    )
+    panel.on_realtime_data_arrived(frame)
+    owner.detector.register_codes.assert_called_once_with(frame)
+    owner.detector.update_scores.assert_called_once()
+    assert owner._score_request_count == 1
+    newer_frame = CodeFrame(('600000', '000001', '600002'))
+    panel.on_realtime_data_arrived(newer_frame)
+    assert owner.detector.register_codes.call_count == 2
+    assert owner.detector.register_codes.call_args.args == (newer_frame,)
+    assert owner.detector.update_scores.call_count == 2
+    assert owner._score_request_count == 2
+    assert owner.latest_df is newer_frame
+
+
+def test_queued_frame_merge_preserves_manual_force_request():
+    class QueueStub:
+        def __init__(self):
+            self.items = [
+                (object(), False, False),
+                (object(), False, True),
+                (object(), False, False),
+            ]
+            self.put_items = []
+
+        def qsize(self):
+            return len(self.items)
+
+        def get_nowait(self):
+            return self.items.pop(0)
+
+        def put_nowait(self, item):
+            self.put_items.append(item)
+
+    queue_stub = QueueStub()
+    add_data = load_method(
+        'sector_bidding_panel.py', 'DataProcessWorker', 'add_data',
+    )
+    worker = SimpleNamespace(df_queue=queue_stub)
+    newest = CodeFrame(('600003',))
+    assert add_data(worker, newest, score_requested=False, force_score=False)
+    assert queue_stub.put_items == [(newest, False, True)]
+
+
+def test_force_score_waits_for_active_shared_score_then_submits(monkeypatch):
+    owner = worker_owner(score_in_worker=False)
+    score_lock = threading.Lock()
+    owner.detector._score_lock = score_lock
+    owner.detector._score_active = True
+    sleep_calls = []
+
+    def release_active_score(delay):
+        sleep_calls.append(delay)
+        with score_lock:
+            owner.detector._score_active = False
+
+    process = load_method(
+        'sector_bidding_panel.py', 'DataProcessWorker', '_process_df_chunked',
+        _RE_NON_DIGIT=__import__('re').compile(r'\D'),
+        traceback=__import__('traceback'),
+        time=SimpleNamespace(sleep=release_active_score),
+    )
+    owner._process_df_chunked = MethodType(process, owner)
+    frame = CodeFrame()
+    owner._process_df_chunked(frame, score_requested=True, force_score=True)
+    assert sleep_calls[0] == 0.05
+    owner.detector.register_codes.assert_called_once_with(frame)
+    owner.detector.update_scores.assert_called_once_with(
+        active_codes=['600000'], force=True,
+    )
+    assert owner._score_request_count == 1
+
+
+def test_manual_refresh_forces_recalculation_from_existing_market_frame():
+    frame = CodeFrame()
+    worker = SimpleNamespace(add_data=Mock(), trigger_recalc=Mock())
+    owner = SimpleNamespace(
+        _is_history_mode=False, _is_global_detector=True,
+        _update_lock=threading.Lock(),
+        _force_update_requested=False, _fallback_df=frame,
+        _worker=worker,
+        main_window=SimpleNamespace(df_all=frame),
+        btn_refresh=SimpleNamespace(setEnabled=Mock(), setText=Mock()),
+        _restore_refresh_button_state=Mock(),
+    )
+    receive_frame = load_method(
+        'sector_bidding_panel.py', 'SectorBiddingPanel', 'on_realtime_data_arrived',
+        logger=Mock(),
+    )
+    owner.on_realtime_data_arrived = MethodType(receive_frame, owner)
+    manual_refresh = load_method(
+        'sector_bidding_panel.py', 'SectorBiddingPanel', 'manual_refresh',
+        QTimer=SimpleNamespace(singleShot=Mock()), logger=Mock(),
+    )
+    manual_refresh(owner)
+    worker.add_data.assert_called_once_with(
+        frame, score_requested=True, force_score=True,
+    )
+    worker.trigger_recalc.assert_not_called()
+
+
+def test_first_empty_shared_panel_requests_one_detector_seed_from_current_frame():
+    frame = CodeFrame()
+    detector = SimpleNamespace(
+        _lock=threading.RLock(), _tick_series={}, active_sectors={}, daily_watchlist={},
+    )
+    owner = SimpleNamespace(
+        sector_table=SimpleNamespace(rowCount=lambda: 0),
+        status_lbl=SimpleNamespace(setText=Mock()),
+        _is_global_detector=True, detector=detector,
+        _global_detector_is_empty=lambda: True,
+        main_window=SimpleNamespace(df_all=frame),
+        on_realtime_data_arrived=Mock(),
+    )
+    show_event = load_method(
+        'sector_bidding_panel.py', 'SectorBiddingPanel', 'showEvent',
+        QTimer=SimpleNamespace(singleShot=Mock()),
+    )
+    show_event.__globals__['super'] = lambda: SimpleNamespace(showEvent=Mock())
+    show_event(owner, object())
+    owner.on_realtime_data_arrived.assert_called_once_with(
+        frame, force_update=True, score_if_needed=True,
+    )
