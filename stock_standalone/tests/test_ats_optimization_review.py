@@ -74,7 +74,7 @@ def test_heatmap_card_reuse_and_fingerprint(qapp):
     assert cards_v2[35][0]._sector_render_state[0][1] == 9.99
     assert cards_v2[0][0]._sector_render_state[0][1] == sectors_v1[0][1]
 
-    # Structure change (add 5 items) -> cards rebuilt smoothly
+    # Structure change (add 5 items) -> keep existing cards and add only new ones
     sectors_v3 = sectors_v2 + [
         (f"板块_{i}", 1.0, f"领涨_{i}", f"600{i:03d}") for i in range(40, 45)
     ]
@@ -82,7 +82,7 @@ def test_heatmap_card_reuse_and_fingerprint(qapp):
     widget.render_grid()
     cards_v3 = list(widget._grid_cards)
     assert len(cards_v3) == 45
-    assert cards_v3[0] is not cards_v1[0]
+    assert cards_v3[0] is cards_v1[0]
 
 
 # ============================================================================

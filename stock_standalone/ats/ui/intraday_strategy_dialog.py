@@ -4941,6 +4941,11 @@ class SBCGlobalDispatcher(QObject):
                         pool._ensure_startup_codes_loaded(codes)
                     self.batch_ready.emit({code: {"modes": {mode for c, mode in subscriptions if c == code},
                                                   "is_cache_preview": True} for code in codes})
+                with self._lock:
+                    active_codes = {code for _, code, _ in self._subscribers.values()}
+                codes = [code for code in codes if code in active_codes]
+                if not codes:
+                    continue
                 snapshots = fetcher.fetch_batch_stock_snapshots(codes)
                 if perf_on:
                     print(f"[SBC PERF] snapshots {len(codes)} codes: {(time.perf_counter() - batch_start) * 1000:.0f} ms", flush=True)
@@ -4953,6 +4958,9 @@ class SBCGlobalDispatcher(QObject):
                 for code in codes:
                     if stop_event.is_set():
                         break
+                    with self._lock:
+                        if not any(c == code for _, c, _ in self._subscribers.values()):
+                            continue
                     code_start = time.perf_counter() if perf_on else 0.0
                     modes = modes_by_code[code]
                     if modes.intersection({"1m", "3d", "5d", "10d"}):
@@ -5055,22 +5063,9 @@ class SBCIntradayChartDialog(QWidget):
                 font-weight: normal;
             }
         """)
-        # 🛡️ 设置窗口级调色板与全局 QApplication 调色板，彻底防御 Windows 原生 ToolTip 浅色底渗透
-        try:
-            from PyQt6.QtGui import QPalette, QColor
-            pal = self.palette()
-            pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#14141f"))
-            pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#f1f5f9"))
-            self.setPalette(pal)
-
-            app = QApplication.instance()
-            if app:
-                app_pal = app.palette()
-                app_pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#14141f"))
-                app_pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#f1f5f9"))
-                app.setPalette(app_pal)
-        except Exception:
-            pass
+        # 同进程 SBC 不得修改应用 palette，否则会连带重绘整个 ATS。
+        from ats.ui.styles import apply_dark_tooltip_palette
+        apply_dark_tooltip_palette(self)
         self._unmaximized_size = (800, 560)  # 💡 维护未最大化前的真实标准尺寸，绝不被最大化污染
 
         layout = QVBoxLayout(self)

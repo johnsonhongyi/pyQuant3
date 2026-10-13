@@ -203,23 +203,22 @@ QToolTip {
 
 def apply_dark_tooltip_palette(widget_or_app=None):
     """
-    底层彻底固化 QToolTip 的调色板与配色，确保即便没有继承到父级 QSS，
-    系统底层调色板也能强制为深灰黑背景 (#1a1a24) + 高对比亮白前景色 (#f1f5f9)。
+    初始化暗色 ToolTip 配色；传窗口时仅修改该窗口，传 app/None 时初始化应用。
+    相同配色不重复设置，避免运行中的弹窗触发所有顶层窗口重新绘制。
     """
     try:
         from PyQt6.QtWidgets import QApplication
         from PyQt6.QtGui import QPalette, QColor
         app = widget_or_app if isinstance(widget_or_app, QApplication) else QApplication.instance()
-        if app:
-            pal = app.palette()
+        # 弹窗只改自己的 palette；全局初始化必须显式传 app 或不传参数。
+        target = app if widget_or_app is None or widget_or_app is app else widget_or_app
+        if target is not None:
+            pal = target.palette()
+            original = QPalette(pal)
             pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#1a1a24"))
             pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#f1f5f9"))
-            app.setPalette(pal)
-        if widget_or_app and hasattr(widget_or_app, "setPalette") and widget_or_app != app:
-            w_pal = widget_or_app.palette()
-            w_pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#1a1a24"))
-            w_pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#f1f5f9"))
-            widget_or_app.setPalette(w_pal)
+            if pal != original:
+                target.setPalette(pal)
     except Exception:
         pass
 
@@ -686,18 +685,9 @@ def auto_fit_columns_once(table_or_tree, config_key, max_widths=None):
 def apply_dark_theme(widget):
     """为指定 Widget/Dialog 应用与 ATS 100% 绝对一致的极致暗黑高质主题 QSS"""
     if widget:
-        widget.setStyleSheet(DARK_THEME_QSS)
-        try:
-            from PyQt6.QtWidgets import QApplication
-            from PyQt6.QtGui import QPalette, QColor
-            app = QApplication.instance()
-            if app:
-                pal = app.palette()
-                pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#1a1a24"))
-                pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#f1f5f9"))
-                app.setPalette(pal)
-        except Exception:
-            pass
+        if widget.styleSheet() != DARK_THEME_QSS:
+            widget.setStyleSheet(DARK_THEME_QSS)
+        apply_dark_tooltip_palette(widget)
 
 
 def setup_header_persistence(table_or_tree, config_key, default_widths=None, max_widths=None, storage_path=None):

@@ -20,6 +20,8 @@ from typing import List, Optional, Tuple
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
+    from ats.subprocess_stdio import ensure_sbc_stdio
+    ensure_sbc_stdio()
 
 # 确保工作区根目录在 Python 路径中
 try:
@@ -196,6 +198,10 @@ def save_launcher_holdings_windows(force: bool = False, allow_empty: bool = Fals
 
         # 💡 铁壁防冲洗守卫 (P0)：若 active_list 为空，但历史已有有效记录，且未显式允许清空，严禁覆盖写入 0 个！
         if len(active_list) == 0:
+            request_path = os.environ.get('ATS_SBC_SHUTDOWN_PATH')
+            if request_path and os.path.isfile(request_path):
+                print('[SBC Launcher] ATS 集中退出时窗口列表为空，未确认本次布局保存。')
+                return False
             if old_data.get("sbc_holdings_windows") or old_data.get("recent_history_snapshots"):
                 print(f"[SBC Launcher] 🛡 保护机制触发: 退出或落盘探测窗口数为 0，保留现有有效配置，严禁覆盖写 0！")
                 return
@@ -255,24 +261,72 @@ def save_launcher_holdings_windows(force: bool = False, allow_empty: bool = Fals
         print(f"[SBC Launcher] 成功集中持久化保存 {len(active_list)} 个持仓盯盘窗口 (保留最近 {len(recent_snapshots)} 组历史快照) 至 {cfg_path}")
     except Exception as err:
         print(f"[SBC Launcher] 保存持仓盯盘窗口异常: {err}")
+        return False
+    return True
+
+
+_sbc_shutdown_stage = 'running'
+
+
+def _trace_sbc_shutdown(stage):
+    global _sbc_shutdown_stage
+    _sbc_shutdown_stage = stage
+    print(f'[SBC Shutdown] stage={stage}', flush=True)
+
+
+def _start_sbc_shutdown_probe():
+    """退出请求探针不依赖 GUI；阻塞时记录真实线程栈，不操作 UI。"""
+    request = os.environ.get('ATS_SBC_SHUTDOWN_PATH')
+    if not request:
+        return
+    def probe():
+        observed = None
+        last_dump = 0.
+        while _sbc_shutdown_stage != 'done':
+            now = time.monotonic()
+            if os.path.isfile(request):
+                if observed is None:
+                    observed = now
+                    print('[SBC Shutdown] parent request observed by background probe', flush=True)
+                if now - observed >= 8. and now - last_dump >= 8.:
+                    print(f'[SBC Shutdown] pending stage={_sbc_shutdown_stage}; dumping threads', flush=True)
+                    try:
+                        import faulthandler
+                        faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+                    except (OSError, ValueError, RuntimeError):
+                        pass
+                    last_dump = now
+            threading.Event().wait(.2)
+    threading.Thread(target=probe, name='SBC-ShutdownProbe', daemon=True).start()
 
 
 def persist_sbc_runtime_caches():
     """Use existing services only; persist the latest minute/VWAP state on every group exit."""
+    success = True
     try:
         from ats.tdx_realtime_fetcher import TDXGlobalCachePool
         pool = TDXGlobalCachePool._instance
         if pool is not None:
-            pool.flush_to_ramdisk(force=True, history_checkpoint=True)
+            _trace_sbc_shutdown('market-cache')
+            result = pool.flush_to_ramdisk(force=True, history_checkpoint=True)
+            if result is False and getattr(pool, '_is_dirty', False):
+                print('[SBC Launcher] 行情缓存仍为 dirty，退出保存未确认。')
+                success = False
     except Exception as exc:
         print(f"[SBC Launcher] 行情缓存保存失败: {exc}")
+        success = False
     try:
         from ats.intraday_strategy_engine import IntradayStrategyEngine
         engine = IntradayStrategyEngine._instance
         if engine is not None:
-            engine.save_intraday_cache(force=True)
+            _trace_sbc_shutdown('strategy-cache')
+            if engine.save_intraday_cache(force=True) is False:
+                print('[SBC Launcher] 策略缓存返回保存失败。')
+                success = False
     except Exception as exc:
         print(f"[SBC Launcher] 策略缓存保存失败: {exc}")
+        success = False
+    return success
 
 
 def quit_and_save_all_sbc_windows():
@@ -296,18 +350,21 @@ def quit_and_save_all_sbc_windows():
         app.setProperty("_has_saved_on_quit", True)
 
     is_holdings_mode = (os.environ.get("SBC_IS_HOLDINGS_LAUNCHER") == "1")
+    saved = True
     try:
+        _trace_sbc_shutdown('layout-save')
         if is_holdings_mode:
-            save_launcher_holdings_windows(force=True)
+            saved = save_launcher_holdings_windows(force=True) is not False
         else:
             from ats.ui.intraday_strategy_dialog import save_all_open_sbc_windows
             save_all_open_sbc_windows()
     except Exception as e:
         print(f"[SBC Launcher] 退出持久化异常: {e}")
+        saved = False
 
-    persist_sbc_runtime_caches()
     if app:
         try:
+            _trace_sbc_shutdown('windows-close')
             # app.quit() 只结束事件循环，不保证派发每个窗口的 closeEvent；
             # 逐个关闭，确保后台轮询器和窗口资源都完成清理。
             for window in list(app.topLevelWidgets()):
@@ -319,12 +376,64 @@ def quit_and_save_all_sbc_windows():
                     window.close()
                 except Exception as close_exc:
                     print(f"[SBC Launcher] 关闭窗口 {getattr(window, 'code', '--')} 异常: {close_exc}")
+                    saved = False
+            # 先停止窗口轮询并注销，再保存缓存，避免保存期间继续提交行情任务。
+            saved = persist_sbc_runtime_caches() is not False and saved
+            app.setProperty('_sbc_save_complete', saved)
             app.quit()
         except Exception:
-            pass
+            app.setProperty('_sbc_save_complete', False)
+    else:
+        persist_sbc_runtime_caches()
 
 
 _win_console_ctrl_handler_ref = None
+
+
+def _sbc_archive_recovery_path(code=None):
+    """与 ATS 主进程分离；持仓组/单股各自恢复，避免共享 journal 互相覆盖。"""
+    return os.environ.get('ATS_SBC_RECOVERY_PATH') or os.path.join(
+        current_dir, 'datacsv', f'.sbc_{code or "holdings"}_archive_recovery.json.gz')
+
+
+def _finish_sbc_packaged_shutdown(app, exit_code):
+    """确认落盘后才允许打包解释器退出兜底，避免 executor atexit 长期阻塞。"""
+    if not app.property('_sbc_save_complete'):
+        print('[SBC Launcher] 退出保存未确认，不写入安全退出回执。', flush=True)
+        return False
+    try:
+        from ats.ui.styles import flush_config_writer
+        from ats.bounded_evaluation_store import evaluation_store
+        _trace_sbc_shutdown('config-drain')
+        if not flush_config_writer(timeout_sec=5.0):
+            return False
+        _trace_sbc_shutdown('archive-drain')
+        if not evaluation_store.flush(timeout_sec=5.0, require_clean=True, force=True):
+            _trace_sbc_shutdown('archive-recovery')
+            if not evaluation_store.persist_recovery(_sbc_archive_recovery_path(), timeout_sec=5.0):
+                print('[SBC Shutdown] 归档及恢复日志均未保存成功，不确认安全退出。', flush=True)
+                return False
+            print('[SBC Shutdown] 盘中归档延后，待归档记录已安全保存至 SBC 恢复日志。', flush=True)
+        _trace_sbc_shutdown('multiprocessing-drain')
+        from ats.shutdown import reap_multiprocessing_children
+        if not reap_multiprocessing_children(time.monotonic() + 5.0):
+            return False
+        receipt = os.environ.get('ATS_SBC_SAVED_PATH')
+        if receipt:
+            with open(receipt, 'w', encoding='utf-8') as handle:
+                handle.write('saved')
+                handle.flush()
+                os.fsync(handle.fileno())
+        print('[SBC Launcher] 集中保存及配置归档已确认，准备退出。', flush=True)
+        _trace_sbc_shutdown('done')
+        from sys_utils import is_packaged_env
+        if is_packaged_env() or os.environ.get('ATS_SBC_SUBPROCESS') == '1':
+            from ats.shutdown import start_exit_watchdog
+            start_exit_watchdog(timeout_seconds=1.5, exit_code=exit_code)
+        return True
+    except Exception as exc:
+        print(f'[SBC Launcher] 退出收尾失败: {exc}', flush=True)
+        return False
 
 def _setup_signal_handlers():
     """💡 信号与异常处理器：双重捕获控制台 Ctrl+C (SIGINT)、SIGTERM、sys.excepthook 与 Windows 原生控制台事件，确保 100% 自动保存"""
@@ -659,6 +768,7 @@ def restore_launcher_holdings_windows(snapshot_index: Optional[int] = None, snap
 
 
 def main():
+    _start_sbc_shutdown_probe()
     import signal
     import argparse
     parser = argparse.ArgumentParser(
@@ -694,6 +804,12 @@ def main():
         os.environ["SBC_LAYOUT_CONFIG_PATH"] = _get_launcher_layout_cfg_path()
         os.environ["SBC_IS_HOLDINGS_LAUNCHER"] = "1"
 
+    os.environ['ATS_SBC_RECOVERY_PATH'] = _sbc_archive_recovery_path(cli_code if not is_holdings_mode else None)
+    from ats.bounded_evaluation_store import evaluation_store
+    restored_archives = evaluation_store.restore_recovery(os.environ['ATS_SBC_RECOVERY_PATH'])
+    if restored_archives:
+        print(f'[SBC Shutdown] 已恢复 {restored_archives} 项上次待归档记录。', flush=True)
+
     # 行情服务检测可能涉及进程探测和启动；与首帧绘制并行进行。
     def _ensure_backend():
         try:
@@ -722,11 +838,8 @@ def main():
 
     # 💡 设置全局暗黑调色板与 QToolTip 样式，确保独立进程中所有 ToolTip 呈现高质感暗黑金融配色
     try:
-        from PyQt6.QtGui import QPalette, QColor
-        app_pal = app.palette()
-        app_pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#14141f"))
-        app_pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#f1f5f9"))
-        app.setPalette(app_pal)
+        from ats.ui.styles import apply_dark_tooltip_palette
+        apply_dark_tooltip_palette(app)
         app.setStyleSheet((app.styleSheet() or "") + """
             QToolTip {
                 background-color: #14141f;
@@ -763,6 +876,10 @@ def main():
     _parent_pid = int(parent_pid_str) if (parent_pid_str and parent_pid_str.isdigit()) else None
 
     def _on_keep_alive_and_orphan_check():
+        request_path = os.environ.get('ATS_SBC_SHUTDOWN_PATH')
+        if request_path and os.path.isfile(request_path):
+            quit_and_save_all_sbc_windows()
+            return
         if _parent_pid:
             try:
                 if sys.platform == "win32":
@@ -846,6 +963,8 @@ def main():
         except Exception:
             pass
 
+    if not _finish_sbc_packaged_shutdown(app, exit_code):
+        exit_code = 1
     sys.exit(exit_code)
 
 

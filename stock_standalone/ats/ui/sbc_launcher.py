@@ -195,6 +195,7 @@ class SBCProcessManager:
         self._in_process_holdings: List = []
         # 注册退出钩子，保证即使异常崩溃也能清理子进程
         self._close_workers = []
+        self._close_failures = []
         self._closing_processes = {}
         self._closing_holdings = None
         self._closing_holdings_proc = None
@@ -215,7 +216,7 @@ class SBCProcessManager:
 
     @staticmethod
     def _cleanup_process_files(proc):
-        for name in ("_sbc_closed_path", "_sbc_snapshot_path"):
+        for name in ("_sbc_closed_path", "_sbc_snapshot_path", "_sbc_shutdown_path", "_sbc_saved_path"):
             path = getattr(proc, name, None)
             if path:
                 try:
@@ -277,12 +278,15 @@ class SBCProcessManager:
             env.pop("_MEIPASS2", None)
             env.pop("PYINSTALLER_RESET_ENVIRONMENT", None)
             env["ATS_SBC_SUBPROCESS"] = "1"
+            env["PYTHONUNBUFFERED"] = "1"
             env["SBC_IS_HOLDINGS_LAUNCHER"] = "1"
             env.pop("SBC_RESTORE_SNAPSHOT", None)
             if snapshot_data is not None:
                 env["SBC_RESTORE_SNAPSHOT"] = json.dumps(snapshot_data, ensure_ascii=False)
             closed_path = os.path.join(tempfile.gettempdir(), f"ats_sbc_closed_{uuid.uuid4().hex}")
             env["ATS_SBC_CLOSED_PATH"] = closed_path
+            env["ATS_SBC_SHUTDOWN_PATH"] = closed_path + '.request'
+            env["ATS_SBC_SAVED_PATH"] = closed_path + '.saved'
             snapshot_path = None
             if snapshot_data is not None:
                 snapshot_path = closed_path + ".snapshot.json"
@@ -328,6 +332,8 @@ class SBCProcessManager:
                     self._procs[f"__retired_holdings_{previous.pid}__"] = previous
                 self._procs["__holdings_launcher__"] = proc
                 proc._sbc_closed_path = closed_path
+                proc._sbc_shutdown_path = env["ATS_SBC_SHUTDOWN_PATH"]
+                proc._sbc_saved_path = env["ATS_SBC_SAVED_PATH"]
                 proc._sbc_snapshot_path = snapshot_path
                 logger.info(f"[SBCLauncher] ✅ 成功调起持仓盯盘独立进程 (PID={proc.pid})，日志: {sbc_log_path}")
                 return proc
@@ -378,7 +384,14 @@ class SBCProcessManager:
                                    if p.poll() is None}
         owned = args[0].values() if isinstance(args[0], dict) else (args[0],)
         self._closing_processes.update({p.pid: p for p in owned if p is not None})
-        worker = threading.Thread(target=target, args=args, daemon=False, name="ATS-SBCClose")
+        def close_owned():
+            try:
+                if target(*args) is False:
+                    self._close_failures.append('SBC shutdown or persistence was not confirmed')
+            except Exception as exc:
+                self._close_failures.append(str(exc))
+                logger.exception('[SBCLauncher] 后台退出失败')
+        worker = threading.Thread(target=close_owned, daemon=False, name="ATS-SBCClose")
         self._close_workers.append(worker)
         if holdings:
             self._closing_holdings = worker
@@ -436,10 +449,21 @@ class SBCProcessManager:
     def _close_launcher_subprocess(self, proc) -> bool:
         logger.info(f"[SBCLauncher] 正在优雅关闭持仓盯盘独立进程 (PID={proc.pid}) 并等待持久化...")
         children = self._sbc_bootloader_children(proc)
+        forced = False
+        request_path = getattr(proc, '_sbc_shutdown_path', None)
+        if request_path:
+            try:
+                with open(request_path, 'x', encoding='utf-8') as request:
+                    request.write('save-and-close')
+            except FileExistsError:
+                pass
+            except OSError:
+                logger.exception('[SBCLauncher] 无法提交集中保存退出请求')
+                return False
         try:
             # 💡 【核心持久化】在关闭前精确捕获当前仍然处于打开显示状态的窗口列表，已经手动关闭的窗口 HWND 已消亡，绝对不会被持久化！
             active_launcher_windows = []
-            if sys.platform == "win32":
+            if sys.platform == "win32" and not request_path:
                 import win32gui
                 import win32process
                 import win32con
@@ -556,7 +580,8 @@ class SBCProcessManager:
                     return True
 
                 try:
-                    win32gui.EnumWindows(_enum_cb, None)
+                    if not request_path:
+                        win32gui.EnumWindows(_enum_cb, None)
                 except Exception:
                     pass
 
@@ -564,8 +589,9 @@ class SBCProcessManager:
             #    超时过短会导致 bootloader atexit 未执行，遗留临时目录并触发父进程报
             #    "Failed to remove temporary directory" 警告 (PYI-10032)。
             try:
-                proc.wait(timeout=10.0)
+                proc.wait(timeout=20.0 if request_path else 10.0)
             except subprocess.TimeoutExpired:
+                forced = True
                 logger.warning(f"[SBCLauncher] 持仓盯盘进程 (PID={proc.pid}) 等待超时，执行 terminate")
                 self._signal_sbc_process(proc, children)
                 try:
@@ -590,8 +616,13 @@ class SBCProcessManager:
             if proc.returncode:
                 logger.warning("[SBCLauncher] 持仓盯盘进程已回收 PID=%s returncode=%s；需核对退出保存日志",
                                proc.pid, proc.returncode)
-            else:
-                logger.info("[SBCLauncher] 持仓盯盘进程已正常退出且句柄已释放。")
+            saved_path = getattr(proc, '_sbc_saved_path', None)
+            confirmed = not saved_path or os.path.isfile(saved_path)
+            if forced or proc.returncode or not confirmed:
+                logger.error('[SBCLauncher] 非安全退出 PID=%s forced=%s saved=%s returncode=%s',
+                             proc.pid, forced, confirmed, proc.returncode)
+                return False
+            logger.info("[SBCLauncher] 持仓盯盘进程已正常退出且持久化已确认。")
             return True
         except Exception as e:
             logger.error(f"[SBCLauncher] 关闭持仓盯盘进程异常: {e}")

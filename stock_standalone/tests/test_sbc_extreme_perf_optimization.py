@@ -989,7 +989,7 @@ def test_selective_checkpoint_preserves_vwap_and_unloaded_clear_generations(monk
     assert read_cache_payload(pool._ramdisk_path)['vwap_states'] == payload['vwap_states']
     assert set(restored._history_static_bars) == {'600108'}
     # An unsubscribed symbol with generation 4 must advance to 5, not reset to 1.
-    monkeypatch.setattr(archive, 'archive_window', lambda: ('market', '2026-10-08'))
+    monkeypatch.setattr(archive, 'archive_window', lambda **kwargs: ('market', '2026-10-08'))
     restored._last_flush_ts = 0
     restored.invalidate('600109', partition='history')
     saved = read_cache_payload(pool._ramdisk_path)
@@ -1128,7 +1128,7 @@ def test_0928_checkpoint_survives_new_pool_and_reopen(monkeypatch, tmp_path):
     import ats.archive_policy as archive
     fetcher, pool, clock, rows = _phase_fetcher(monkeypatch, tmp_path)
     frame = fetcher.fetch_multi_day_intraday_bars("600108", 10)
-    monkeypatch.setattr(archive, "archive_window", lambda: (None, "2026-10-08"))
+    monkeypatch.setattr(archive, "archive_window", lambda **kwargs: (None, "2026-10-08"))
     assert not pool.flush_to_ramdisk(force=True)
     assert pool.flush_to_ramdisk(force=True, history_checkpoint=True)
     restored = type(pool)()

@@ -569,6 +569,8 @@ class TDXGlobalCachePool:
         self._mutex = threading.RLock()
         self._decode_lock = threading.Lock()
         self._flush_dispatch_lock = threading.Lock()
+        # Windows 字节锁按文件句柄竞争，同进程两个 writer 也会互相超时。
+        self._snapshot_write_lock = threading.RLock()
         self._history_request_locks = {}
         self._seed_flush_inflight = False
         self._seed_flush_tokens = {}
@@ -1323,6 +1325,19 @@ class TDXGlobalCachePool:
         return self.flush_to_ramdisk(force=True)
 
     def flush_to_ramdisk(self, force: bool = False, history_checkpoint: bool = False) -> bool:
+        """同进程先串行，再获取跨进程文件锁，避免退出与后台 checkpoint 自相竞争。"""
+        # 保持既有锁序：VWAP 快照先于 writer/file 锁，不能持写锁再等工厂锁。
+        try:
+            from ats.vwap_factory import VWAPFactory
+            vwap_states = VWAPFactory.get_instance().export_states()
+        except Exception:
+            vwap_states = {}
+        with self._snapshot_write_lock:
+            return self._flush_to_ramdisk_serial(force=force, history_checkpoint=history_checkpoint,
+                                                vwap_states=vwap_states)
+
+    def _flush_to_ramdisk_serial(self, force: bool = False, history_checkpoint: bool = False,
+                                vwap_states=None) -> bool:
         """
         【RamDisk 极限压缩原子持久化】
         采用 zlib level 1 极限极速无损压缩与原子替换 (tmp -> os.replace)，
@@ -1345,10 +1360,7 @@ class TDXGlobalCachePool:
                     return False
             except OSError:
                 pass
-        try:
-            from ats.vwap_factory import VWAPFactory
-            vwap_states = VWAPFactory.get_instance().export_states()
-        except Exception:
+        if vwap_states is None:
             vwap_states = {}
         try:
             with self._ramdisk_file_lock():

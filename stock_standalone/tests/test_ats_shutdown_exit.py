@@ -94,6 +94,8 @@ def test_late_archive_is_durable_before_final_close(qapp, monkeypatch, tmp_path,
     def failing_writer(*args):
         raise OSError('simulated archive failure')
 
+    # 固定正式归档窗口，避免测试结果依赖运行时交易时段。
+    monkeypatch.setattr(archive_cache, 'archive_window', lambda **kwargs: ('close', '2026-10-13'))
     store.put(str(path), value, write_json_gzip if outcome == 'archive' else failing_writer)
     monkeypatch.setattr(archive_cache, 'evaluation_store', store)
     monkeypatch.setattr(sys_utils, 'get_app_root', lambda: str(tmp_path))
@@ -389,7 +391,8 @@ if __name__ == '__main__':
 
 
 def test_packaged_shutdown_schedules_quick_physical_exit(qapp, monkeypatch):
-    """验证打包环境下，退出收尾完成时安排 QTimer 物理退出 os._exit(0)."""
+    """验证落盘收尾完成后启动独立 watchdog，不依赖已退出的 Qt 事件循环。"""
+    from unittest.mock import MagicMock
     from ats.ui.main_window import ATSMainWindow
     from PyQt6.QtWidgets import QMainWindow, QApplication
     from PyQt6.QtGui import QCloseEvent
@@ -406,7 +409,8 @@ def test_packaged_shutdown_schedules_quick_physical_exit(qapp, monkeypatch):
     window = BareWindow()
     window._exit_cleanup_drain = completed_drain()
     monkeypatch.setattr(sys_utils, "is_packaged_env", lambda: True)
-    monkeypatch.setattr(shutdown, "start_exit_watchdog", lambda **kwargs: None)
+    watchdog = MagicMock()
+    monkeypatch.setattr(shutdown, "start_exit_watchdog", watchdog)
     monkeypatch.setattr(LoggerFactory, "stopLogger", lambda: None)
     monkeypatch.setattr(QMainWindow, "closeEvent", lambda self, event: event.accept())
     monkeypatch.setattr(QApplication, "quit", lambda self=None: None)
@@ -415,6 +419,5 @@ def test_packaged_shutdown_schedules_quick_physical_exit(qapp, monkeypatch):
     event = QCloseEvent()
     window._complete_shutdown(event)
     assert event.isAccepted()
-    # 验证安排了 150ms 物理退出单次定时器
-    assert any(ms == 150 for ms, _ in timer_calls)
+    watchdog.assert_called_once_with()
     window.deleteLater()
