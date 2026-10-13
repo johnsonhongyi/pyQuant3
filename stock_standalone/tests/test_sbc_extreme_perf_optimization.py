@@ -344,7 +344,7 @@ def test_p1_3_empty_date_datetime_fallback_and_multi_day_signals(qapp):
     dlg.close()
 
 
-def test_p1_4_alt_period_batch_sync_updates_dispatcher(qapp):
+def test_p1_4_alt_period_batch_sync_updates_dispatcher(qapp, monkeypatch):
     """P1-4 专项回归：验证 Alt 批量切周期后 SBCGlobalDispatcher 订阅关系同步更新，后续分发不被丢弃"""
     from ats.ui.intraday_strategy_dialog import sync_all_open_sbc_period, SBCGlobalDispatcher
 
@@ -352,44 +352,48 @@ def test_p1_4_alt_period_batch_sync_updates_dispatcher(qapp):
     dlg2 = SBCIntradayChartDialog(None, code="688827", initial_period_mode="1m")
     dlg1._dispatcher_enabled = True
     dlg2._dispatcher_enabled = True
+    # 模拟已显示窗口，隐藏窗口按生产契约保持退订。
+    monkeypatch.setattr(dlg1, 'isVisible', lambda: True)
+    monkeypatch.setattr(dlg2, 'isVisible', lambda: True)
 
-    mgr = SBCWindowMemoryManager.get_instance()
-    mgr.register(dlg1)
-    mgr.register(dlg2)
+    try:
+        mgr = SBCWindowMemoryManager.get_instance()
+        mgr.register(dlg1)
+        mgr.register(dlg2)
 
-    dispatcher = SBCGlobalDispatcher.get_instance()
-    dispatcher.subscribe(dlg1)
-    dispatcher.subscribe(dlg2)
+        dispatcher = SBCGlobalDispatcher.get_instance()
+        dispatcher.subscribe(dlg1)
+        dispatcher.subscribe(dlg2)
 
-    # 验证初始订阅为 1m
-    with dispatcher._lock:
-        sub_modes = [mode for _, _, mode in dispatcher._subscribers.values()]
-    assert all(m == "1m" for m in sub_modes)
+        # 验证初始订阅为 1m
+        with dispatcher._lock:
+            sub_modes = [mode for _, _, mode in dispatcher._subscribers.values()]
+        assert all(m == "1m" for m in sub_modes)
 
-    # 触发批量切换至 day 周期
-    sync_all_open_sbc_period("day", trigger_dlg=dlg1)
+        # 触发批量切换至 day 周期
+        sync_all_open_sbc_period("day", trigger_dlg=dlg1)
 
-    assert dlg1._current_period_mode == "day"
-    assert dlg2._current_period_mode == "day"
+        assert dlg1._current_period_mode == "day"
+        assert dlg2._current_period_mode == "day"
 
-    # 核心断言：调度器内订阅必须已更新为 day
-    with dispatcher._lock:
-        updated_modes = [mode for _, _, mode in dispatcher._subscribers.values()]
-    assert all(m == "day" for m in updated_modes), f"订阅未更新为 day: {updated_modes}"
+        # 核心断言：调度器内订阅必须已更新为 day
+        with dispatcher._lock:
+            updated_modes = [mode for _, _, mode in dispatcher._subscribers.values()]
+        assert all(m == "day" for m in updated_modes), f"订阅未更新为 day: {updated_modes}"
 
-    # 模拟分发批次
-    reload_mock = MagicMock()
-    dlg1.reload_chart = reload_mock
-    dlg1.show()  # 确保 isVisible 为 True
+        # 模拟分发批次
+        reload_mock = MagicMock()
+        dlg1.reload_chart = reload_mock
+        dlg1.show()  # 确保 isVisible 为 True
 
-    batch = {
-        "688826": {"modes": ("day",), "df": pd.DataFrame()}
-    }
-    dispatcher._deliver_batch(batch)
-    assert reload_mock.call_count == 1, "day 周期实时批次未被成功接收，仍被拒收丢弃"
-
-    dlg1.close()
-    dlg2.close()
+        batch = {
+            "688826": {"modes": ("day",), "df": pd.DataFrame()}
+        }
+        dispatcher._deliver_batch(batch)
+        assert reload_mock.call_count == 1, "day 周期实时批次未被成功接收，仍被拒收丢弃"
+    finally:
+        dlg1.close()
+        dlg2.close()
 
 
 def test_p1_5_tdx_cached_kline_bars_interface():

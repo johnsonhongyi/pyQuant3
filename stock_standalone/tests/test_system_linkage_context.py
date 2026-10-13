@@ -401,7 +401,7 @@ class SystemLinkageContextTests(unittest.TestCase):
                 count = connection.execute("SELECT COUNT(*) FROM linkage_context_snapshots").fetchone()[0]
                 latest = connection.execute("SELECT snapshot_id FROM linkage_context_snapshots ORDER BY stored_at DESC,snapshot_id DESC LIMIT 1").fetchone()[0]
 
-        self.assertEqual(count, 500)
+        self.assertEqual(count, 1)
         self.assertEqual(latest, "context-0504")
 
     def test_source_evidence_outbox_is_idempotent_and_retries_until_persisted(self):

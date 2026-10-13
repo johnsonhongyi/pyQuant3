@@ -183,6 +183,12 @@ def test_partial_native_write_failure_invalidates_cache_and_reverted_frame_repai
     changed = frame.copy()
     changed.loc[0, ['name', 'percent']] = ['changed', 3.0]
     native_set = tree.set
+    native_item = tree.item
+
+    def failing_item(iid, option=None, **kwargs):
+        if 'values' in kwargs:
+            raise tk.TclError('injected failed bulk retry')
+        return native_item(iid, option, **kwargs)
 
     def failing_set(iid, column=None, value=None):
         if column == 'percent' and value is not None:
@@ -192,12 +198,14 @@ def test_partial_native_write_failure_invalidates_cache_and_reverted_frame_repai
     root._last_refresh_fingerprint = ('same-source', 42)
     root._last_tree_refresh_time = time.time()
     monkeypatch.setattr(tree, 'set', failing_set)
+    monkeypatch.setattr(tree, 'item', failing_item)
     updater.update(changed)
     settle(root, updater)
     assert native_set(updater._item_map['000000'], 'name') == 'changed'
     assert updater._values_cache == {} and updater._tags_cache == {}
     assert root._last_refresh_fingerprint is None and root._last_tree_refresh_time == 0
     monkeypatch.setattr(tree, 'set', native_set)
+    monkeypatch.setattr(tree, 'item', native_item)
     updater.update(frame)
     settle(root, updater)
     assert native_set(updater._item_map['000000'], 'name') == 'stock-0'
@@ -220,7 +228,8 @@ def test_frame_audit_distinguishes_source_nulls_from_native_cell_mismatch(root):
     updater._audit_render_plan(plan)
     args = audit_log.info.call_args.args
     assert args[1] == 42 and ('percent', 2) in args[4]
-    assert args[5] == [(0, 'percent')]
+    assert args[5] == []  # No source-to-display column conversion loss.
+    assert args[6] == [(0, 'percent')]
 
 
 def test_render_burst_finishes_then_applies_latest_and_input_defers_writes(root, monkeypatch):

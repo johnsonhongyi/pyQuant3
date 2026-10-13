@@ -2247,13 +2247,13 @@ class KlineBackupViewer(QMainWindow, WindowMixin):
             from ats.ui.favorite_actions import submit_favorite_action
             if is_fav:
                 action_fav = menu.addAction("❌ 取消重点个股")
-                action_fav.triggered.connect(lambda c=code: submit_favorite_action(
+                action_fav.triggered.connect(lambda _checked=False, c=code: submit_favorite_action(
                     self, "remove_favorite_stock_result", c,
                     success_message=f"已取消重点个股: {code}",
                 ))
             else:
                 action_fav = menu.addAction("⭐ 设为重点个股")
-                action_fav.triggered.connect(lambda c=code: submit_favorite_action(
+                action_fav.triggered.connect(lambda _checked=False, c=code: submit_favorite_action(
                     self, "add_favorite_stock_result", c,
                     success_message=f"已设为重点个股: {code}",
                 ))

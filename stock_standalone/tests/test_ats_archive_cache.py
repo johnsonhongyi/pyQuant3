@@ -17,56 +17,43 @@ from ats.storage_archive import write_json_gzip
 
 def test_cache_defers_compresses_and_obeys_closing_gate(tmp_path, monkeypatch):
     clock = [100.0]
+    wall = [datetime(2026, 9, 30, 15, 30, tzinfo=timezone(timedelta(hours=8))).timestamp()]
     window = ['market', '2026-09-30']
     monkeypatch.setattr(module.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(module.time, 'time', lambda: wall[0])
     monkeypatch.setattr(module, 'archive_window', lambda: tuple(window))
-    store = module.EvaluationStore()
-    store._started = True
-    path = str(tmp_path / 'sample.json')
-    receipts = []
+    store = module.EvaluationStore(); store._started = True
+    path = str(tmp_path / 'sample.json'); receipts = []
     store.put(path, {'value': 1}, write_json_gzip, receipts.append)
-    for _ in range(100):
-        assert store.read(path, {}) == {'value': 1}
-    store.flush()
+    for _ in range(100): assert store.read(path, {}) == {'value': 1}
+    assert store.flush(force=True) is False
     assert not Path(path + '.gz').exists() and not receipts
     clock[0] += module.WRITE_INTERVAL
-    window[0] = None  # Lunch or holiday cannot bypass the archive gate.
-    store.flush()
+    window[0] = None
+    assert store.flush(force=True) is False
     assert not Path(path + '.gz').exists()
-    window[0] = 'market'
-    store.flush()
-    with gzip.open(path + '.gz', 'rt', encoding='utf-8') as stream:
-        assert json.load(stream) == {'value': 1}
+    window[0] = 'close'; store.flush()
+    with gzip.open(path + '.gz', 'rt', encoding='utf-8') as stream: assert json.load(stream) == {'value': 1}
     assert receipts == [{'value': 1}]
-    import os
-    market = datetime(2026, 9, 30, 10, 0, tzinfo=timezone(timedelta(hours=8))).timestamp()
-    os.utime(path + '.gz', (market, market))
-    peer = module.EvaluationStore()
-    peer._started = True
+    os.utime(path + '.gz', (wall[0], wall[0]))
+    peer = module.EvaluationStore(); peer._started = True
     peer.put(path, {'value': 99}, write_json_gzip)
-    store.put(path, {'value': 2}, write_json_gzip)
-    window[0] = 'close'
-    store.flush()
-    peer.flush()  # A cache initialized before close must honor another writer's checkpoint.
-    store.put(path, {'value': 3}, write_json_gzip)
-    store.flush()
-    with gzip.open(path + '.gz', 'rt', encoding='utf-8') as stream:
-        assert json.load(stream) == {'value': 2}
+    clock[0] += module.WRITE_INTERVAL; wall[0] += module.WRITE_INTERVAL
+    store.put(path, {'value': 2}, write_json_gzip); store.flush()
+    os.utime(path + '.gz', (wall[0], wall[0]))
+    peer.flush(); store.put(path, {'value': 3}, write_json_gzip); store.flush()
+    with gzip.open(path + '.gz', 'rt', encoding='utf-8') as stream: assert json.load(stream) == {'value': 2}
     assert store.read(path, {}) == {'value': 3}
-
-    import os
-    closed = datetime(2026, 9, 30, 15, 5, tzinfo=timezone(timedelta(hours=8))).timestamp()
-    os.utime(path + '.gz', (closed, closed))
-    restarted = module.EvaluationStore()
-    restarted._started = True
-    restarted.put(path, {'value': 4}, write_json_gzip)
+    restarted = module.EvaluationStore(); restarted._started = True
+    restarted.put(path, {'value': 4}, write_json_gzip); restarted.flush()
+    with gzip.open(path + '.gz', 'rt', encoding='utf-8') as stream: assert json.load(stream) == {'value': 2}
+    clock[0] += module.WRITE_INTERVAL; wall[0] += module.WRITE_INTERVAL
     restarted.flush()
-    with gzip.open(path + '.gz', 'rt', encoding='utf-8') as stream:
-        assert json.load(stream) == {'value': 2}
+    with gzip.open(path + '.gz', 'rt', encoding='utf-8') as stream: assert json.load(stream) == {'value': 4}
 
 
 def test_coalesced_record_changed_during_checkpoint_remains_pending(tmp_path, monkeypatch):
-    monkeypatch.setattr(module, 'archive_window', lambda: ('market', '2026-09-30'))
+    monkeypatch.setattr(module, 'archive_window', lambda: ('close', '2026-09-30'))
     store = module.EvaluationStore()
     store._started = True
     path = str(tmp_path / 'trace.jsonl')
@@ -112,7 +99,7 @@ def test_checkpoint_bound_preserves_proof_and_delivery_receipts(tmp_path, monkey
     assert len(store.read(str(path), {})['candidates']['600123:s']['checkpoints']) == 4
     store.flush()
     assert not Path(str(path) + '.gz').exists()
-    window[0] = 'market'
+    window[0] = 'close'
     store._cache[str(path.resolve())]['last_write'] -= module.WRITE_INTERVAL
     store.flush()
     with gzip.open(str(path) + '.gz', 'rt', encoding='utf-8') as stream:
@@ -123,9 +110,11 @@ def test_checkpoint_bound_preserves_proof_and_delivery_receipts(tmp_path, monkey
 
 def test_real_calendar_and_trading_windows():
     from ats.archive_policy import archive_window
-    assert archive_window(datetime(2026, 9, 30, 10, 0))[0] == 'market'
+    assert archive_window(datetime(2026, 9, 30, 10, 0))[0] is None
+    assert archive_window(datetime(2026, 9, 30, 10, 0), allow_market=True)[0] == 'market'
     assert archive_window(datetime(2026, 9, 30, 12, 0))[0] is None
-    assert archive_window(datetime(2026, 9, 30, 15, 5))[0] == 'close'
+    assert archive_window(datetime(2026, 9, 30, 15, 5))[0] is None
+    assert archive_window(datetime(2026, 9, 30, 15, 30))[0] == 'close'
     assert archive_window(datetime(2026, 10, 1, 10, 0))[0] is None
 
 
@@ -412,7 +401,7 @@ def test_peer_checkpoint_defers_dirty_data(tmp_path, monkeypatch):
     wall = [10000.0]
     monkeypatch.setattr(cache.time, 'monotonic', lambda: clock[0])
     monkeypatch.setattr(cache.time, 'time', lambda: wall[0])
-    monkeypatch.setattr(cache, 'archive_window', lambda: ('market', '2026-09-30'))
+    monkeypatch.setattr(cache, 'archive_window', lambda: ('close', '2026-09-30'))
     path = str(tmp_path / 'peer.json')
     store = cache.EvaluationStore()
     store._started = True

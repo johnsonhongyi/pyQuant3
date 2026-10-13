@@ -305,6 +305,8 @@ def test_startup_delisted_repair_writes_a_source_aware_removal_tombstone(tmp_pat
     }
     favorite_path.write_text(json.dumps(payload), encoding="utf-8")
     sys_utils = global_favorites.sys_utils
+    monkeypatch.setattr(global_favorites, "FAVORITE_STOCKS_FILE", str(favorite_path))
+    monkeypatch.setattr(global_favorites, "_favorite_storage_error", None)
     monkeypatch.setattr(sys_utils, "get_app_root", lambda: str(tmp_path))
     monkeypatch.setattr(
         sys_utils, "get_conf_path",

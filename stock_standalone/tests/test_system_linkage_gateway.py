@@ -750,7 +750,7 @@ def test_concurrent_consumer_acks_preserve_both_results(tmp_path, monkeypatch):
             return cursor
         def __getattr__(self, name):
             return getattr(self.connection, name)
-    monkeypatch.setattr(gateway, "_connect", lambda: PausedConnection(original()))
+    monkeypatch.setattr(gateway, "_connect", lambda **kwargs: PausedConnection(original(**kwargs)))
     def second_ack():
         try:
             return gateway.report_consumer("ack-op", "ATS", "synced", 1, "market_closed")

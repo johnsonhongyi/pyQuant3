@@ -329,7 +329,7 @@ chown 10001:10001 "$SMOKE_ROOT/api/tmp" "$SMOKE_ROOT/api/run"
 chmod 0700 "$SMOKE_ROOT/api/tmp" "$SMOKE_ROOT/api/run"
 SMOKE_CREATED=1
 docker run -d --name "$API_CHECK" --network none --read-only --mount "type=bind,source=$SMOKE_ROOT/api/tmp,target=/tmp" --mount "type=bind,source=$SMOKE_ROOT/api/run,target=/run" --memory=112m --memory-swap=112m --cpus=0.25 --pids-limit=32 --log-opt max-size=1m --log-opt max-file=1 \
-    -e A_STOCK_ADDR=127.0.0.1:20081 -e A_STOCK_APP_VERSION="$RELEASE-check" \
+    -e A_STOCK_ADDR=127.0.0.1:20081 -e A_STOCK_APP_VERSION="$RELEASE-check" -e A_STOCK_BOOTSTRAP_PASSWORD=isolated-smoke-only-password \
     -e A_STOCK_DATA_ROOT=/tmp/easy-stock-check -e A_STOCK_TRADING_CALENDAR=/config/trading-calendar.json \
     -e A_STOCK_DATA_DB=/tmp/easy-stock-check/stock-data.db -e A_STOCK_LOG_DIR=/tmp/easy-stock-check/logs \
     -e A_STOCK_SETTINGS_PATH=/tmp/easy-stock-check/settings.json -e A_STOCK_MASTERY_CACHE=/tmp/easy-stock-check/mastery \
