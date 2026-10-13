@@ -470,6 +470,17 @@ def _safe_set_cell_item(
 _set_or_update_table_item = _safe_set_cell_item
 
 
+def _chart_signal_snapshot(signal):
+    """统一显示层信号格式，保留引擎对象与回测成交记录各自的语义。"""
+    from signal_types import SignalPoint
+    if isinstance(signal, SignalPoint):
+        snapshot = vars(signal).copy()
+        snapshot["action"] = signal.signal_type.value
+        snapshot["bar_idx"] = signal.bar_index
+        return snapshot
+    return shallow_copy(signal)
+
+
 class SBCChartCanvas(QWidget):
     """
     SBC 多功能走势图画布控件 (支持 1日/2日/3日分时走势图 以及 5分/30分/60分/日K 线的 GG 通道图)
@@ -2038,7 +2049,7 @@ class SBCChartCanvas(QWidget):
             volumes = self._extract_intraday_bar_volumes(self.df_intraday)
             if len(volumes) == len(self.df_intraday):
                 self.df_intraday["_bar_vol_computed"] = volumes
-        self.signals = [shallow_copy(sig) for sig in (signals or [])]
+        self.signals = [_chart_signal_snapshot(sig) for sig in (signals or [])]
         self._data_revision = getattr(self, "_data_revision", 0) + 1
         self._cached_times_token = None
         self._cached_kline_extremes_token = None
@@ -7821,7 +7832,7 @@ class SBCIntradayChartDialog(QWidget):
         if hasattr(self, 'canvas') and self.canvas:
             self.canvas.auction_samples = payload.get("auction_samples", [])
             self.canvas._amplitude_history_df = payload.get("amplitude_history_df")
-        sigs = payload.get("sigs", [])
+        sigs = [_chart_signal_snapshot(sig) for sig in (payload.get("sigs") or [])]
         multi_vwap_snapshot = payload.get("multi_vwap_snapshot")
         channel_info = payload.get("channel_info")
 

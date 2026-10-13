@@ -731,6 +731,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._tk_linkage_receipt_lock = threading.Lock()
         self._tk_linkage_receipt_running = False
         self._linkage_context_start_lock = threading.Lock()
+        self._linkage_context_ui_lock = threading.Lock()
+        self._pending_linkage_context_update = None
+        self._linkage_context_ui_scheduled = False
         self._system_linkage_starting = False
         self.sync_version = 0          # ⭐ 数据同步序列号
         self.last_vis_var_status = None 
@@ -1224,6 +1227,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"Failed to register link callback: {e}")
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.bind("<Control-Shift-F12>", self.open_runtime_data_viewer)
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)  
         # self.tree.bind("<Button-1>", self.on_single_click)
         # ✅ 绑定单击事件用于显示股票信息提示框
@@ -4362,15 +4366,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     # --- DPI and Window management moved to Mixins ---
     @with_log_level(LoggerFactory.INFO)
+    def open_runtime_data_viewer(self, event=None):
+        from runtime_data_viewer import open_viewer
+        open_viewer(self)
+        return "break"
+
     def on_close(self):
         if getattr(self, '_is_closing', False):
             return
         self._is_closing = True
         if hasattr(self, '_app_exiting'):
             self._app_exiting.set()
+        self._runtime_shutdown_workers = []
         gateway = getattr(self, '_system_linkage_gateway', None)
         if gateway:
-            threading.Thread(target=gateway.stop, name="SystemLinkageShutdown", daemon=True).start()
+            worker = threading.Thread(target=gateway.stop, name="SystemLinkageShutdown", daemon=True)
+            self._runtime_shutdown_workers.append(worker)
+            worker.start()
         for bus, event_type, handler in getattr(self, "_linkage_signal_handlers", []):
             try:
                 bus.unsubscribe(event_type, handler)
@@ -4379,7 +4391,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._linkage_signal_handlers = []
         context_client = getattr(self, '_linkage_context_client', None)
         if context_client:
-            threading.Thread(target=context_client.stop, name="LinkageContextShutdown", daemon=True).start()
+            worker = threading.Thread(target=context_client.stop, name="LinkageContextShutdown", daemon=True)
+            self._runtime_shutdown_workers.append(worker)
+            worker.start()
         qt_event_job = getattr(self, '_qt_event_after_id', None)
         if qt_event_job is not None:
             try:
@@ -4850,6 +4864,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 except Exception as e:
                     logger.warning("退出数据归档异常: %s", e)
                 finally:
+                    try:
+                        for worker in self._runtime_shutdown_workers:
+                            worker.join(timeout=3.0)
+                            if worker.is_alive():
+                                logger.error("RAMDisk 落盘前联动线程未停止: %s", worker.name)
+                        from linkage_storage import persist_registered_runtime
+                        result = persist_registered_runtime(timeout=20.0)
+                        if result['failed']:
+                            logger.error("RAMDisk 退出落盘失败（原数据保留）: %s", result['failed'])
+                        else:
+                            logger.info("RAMDisk 退出落盘完成: %s", result['saved'])
+                    except Exception:
+                        logger.exception("RAMDisk 退出落盘异常，原数据保留")
                     archive_done.set()
             self._shutdown_archive_thread = threading.Thread(
                 target=save_shutdown_archives, name="TkShutdownArchive", daemon=True)
@@ -7777,11 +7804,29 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return
         try:
             queue_obj = getattr(self, 'tk_dispatch_queue', None)
-            if queue_obj is None or queue_obj.qsize() > 500:
+            if queue_obj is None:
                 return
-            queue_obj.put_nowait(lambda snap=snapshot, state=dict(status or {}): self._apply_linkage_context_update(snap, state))
+            with self._linkage_context_ui_lock:
+                self._pending_linkage_context_update = (snapshot, dict(status or {}))
+                if self._linkage_context_ui_scheduled:
+                    return
+                if queue_obj.qsize() > 500:
+                    return
+                self._linkage_context_ui_scheduled = True
+                try:
+                    queue_obj.put_nowait(self._consume_linkage_context_update)
+                except Exception:
+                    self._linkage_context_ui_scheduled = False
+                    raise
         except Exception:
             logger.debug("TK shared context update could not be queued", exc_info=True)
+
+    def _consume_linkage_context_update(self):
+        with self._linkage_context_ui_lock:
+            pending, self._pending_linkage_context_update = self._pending_linkage_context_update, None
+            self._linkage_context_ui_scheduled = False
+        if pending is not None:
+            self._apply_linkage_context_update(*pending)
 
     def _apply_linkage_context_update(self, snapshot, status):
         if getattr(self, '_is_closing', False) or not hasattr(self, 'linkage_context_var'):
@@ -7794,6 +7839,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def _update_linkage_context_status(self, code, status=None):
         if not hasattr(self, 'linkage_context_var'):
             return
+        code = str(code if code is not None else '').strip()
+        if code.isdigit() and len(code) <= 6:
+            code = code.zfill(6)
         client = getattr(self, '_linkage_context_client', None)
         if not client:
             self.linkage_context_var.set("共享题材/热度上下文：未连接")
@@ -8899,9 +8947,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             item_id = selected_item[0]
             item = self.tree.item(selected_item[0])
             values = item.get("values")
+            selected_code = str(values[0]).strip().zfill(6)
             # 假设你的 tree 列是 (code, name, price, …)
             stock_info = {
-                "code": values[0],
+                "code": selected_code,
                 "name": values[1] if len(values) > 1 else "",
                 "extra": values  # 保留整行
             }
@@ -8910,7 +8959,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             if selected_item:
                 stock_info = self.tree.item(selected_item[0], 'values')
-                stock_code = stock_info[0]
+                stock_code = selected_code
                 stock_name = stock_info[1]
 
                 send_tdx_Key = (self.select_code != stock_code)

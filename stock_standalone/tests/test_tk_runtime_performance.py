@@ -269,6 +269,50 @@ def test_voice_worker_concurrent_start_uses_one_worker():
     assert created[0].is_alive()
 
 
+def test_linkage_poll_keeps_attention_and_context_deadlines_separate():
+    clock = SimpleNamespace(monotonic=lambda: 100.0)
+    wait = method('system_linkage_context.py', 'SystemLinkageContextClient',
+                  '_wait_for_next_poll', time=clock)
+    owner = SimpleNamespace(poll_interval=60, _next_context_poll=160.0,
+        _next_attention_poll=105.0, _attention_enabled=True, _attention_wakeup=Mock())
+    wait(owner)
+    owner._attention_wakeup.wait.assert_called_with(5.0)
+    owner._attention_enabled = False
+    wait(owner)
+    owner._attention_wakeup.wait.assert_called_with(60.0)
+
+
+def test_linkage_ui_callbacks_coalesce_to_latest_snapshot():
+    import queue
+    enqueue = method('instock_MonitorTK.py', 'StockMonitorApp', '_queue_linkage_context_update')
+    consume = method('instock_MonitorTK.py', 'StockMonitorApp', '_consume_linkage_context_update')
+    owner = SimpleNamespace(_is_closing=False, tk_dispatch_queue=queue.Queue(),
+        _linkage_context_ui_lock=threading.Lock(), _pending_linkage_context_update=None,
+        _linkage_context_ui_scheduled=False, _apply_linkage_context_update=Mock())
+    owner._consume_linkage_context_update = MethodType(consume, owner)
+    for revision in range(100):
+        enqueue(owner, {'revision': revision}, {'state': 'online'})
+    assert owner.tk_dispatch_queue.qsize() == 1
+    owner.tk_dispatch_queue.get_nowait()()
+    owner._apply_linkage_context_update.assert_called_once_with({'revision': 99}, {'state': 'online'})
+    assert owner._pending_linkage_context_update is None
+    assert not owner._linkage_context_ui_scheduled
+
+
+def test_linkage_stop_retains_running_thread_and_rejects_restart():
+    stop = method('system_linkage_context.py', 'SystemLinkageContextClient', 'stop')
+    start = method('system_linkage_context.py', 'SystemLinkageContextClient', 'start')
+    worker = Mock()
+    worker.is_alive.return_value = True
+    owner = SimpleNamespace(_thread=worker, _stop=threading.Event(),
+        _attention_wakeup=threading.Event(), _drain_source_events=Mock(),
+        _favorite_manager=None, _favorite_listener=None)
+    stop(owner)
+    assert owner._thread is worker
+    assert start(owner) is False
+    worker.join.assert_called_once_with(timeout=1.0)
+
+
 def test_history_fetch_is_single_flight_and_submit_failure_allows_retry():
     owner = SimpleNamespace(daily_pattern_detector=object(), _daily_hist_cache_status=True,
         daily_history_cache={}, _pending_hist_fetches=set(), _lock=threading.Lock(),

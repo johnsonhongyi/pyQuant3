@@ -67,7 +67,8 @@ class _MemoryFavorites:
 
 class _MemoryAttentionClient(SystemLinkageContextClient):
     def __init__(self, manager, snapshot):
-        super().__init__(SimpleNamespace(linkage_enabled=True, ipc_workspace_id="desk", ipc_node_id="tk-1"))
+        super().__init__(SimpleNamespace(linkage_enabled=True, ipc_workspace_id="desk", ipc_node_id="tk-1"),
+                         database_path=":memory:")
         self._workspace_id = "desk"
         self._node_id = "tk-1"
         self._attention_enabled = True
@@ -691,7 +692,7 @@ class SystemLinkageContextTests(unittest.TestCase):
         client = _MemoryAttentionClient(_MemoryFavorites({}), {})
         calls = []
         client._drain_source_events = lambda: None
-        client._flush_source_outbox = lambda: None
+        client._flush_source_outbox = lambda **kwargs: None
         client._sync_attention = lambda: calls.append("attention")
         client._notify = lambda: None
         client.poll_interval = 0.001

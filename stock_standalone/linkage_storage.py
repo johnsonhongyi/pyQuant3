@@ -21,6 +21,7 @@ RECLAIM_PAGES = 256
 MAX_EVENTS = 1000
 MAX_EVENT_BYTES = 4 * 1024 * 1024
 _workers = set()
+_archive_targets = {}
 _workers_lock = threading.Lock()
 logger = logging.getLogger(__name__)
 _database_gates = {}
@@ -155,6 +156,7 @@ def _start_archive(runtime, local, file_limit=None):
     with _workers_lock:
         if str(runtime) not in _workers:
             _workers.add(str(runtime))
+            _archive_targets[str(runtime)] = (runtime, local, file_limit)
             threading.Thread(target=_archive_loop, args=(runtime, local, file_limit),
                              name='ClosingArchive', daemon=True).start()
 
@@ -223,6 +225,113 @@ def runtime_database(local_path):
     return str(runtime)
 
 
+def _archive_one(runtime, local, file_limit=None, force=False, timeout=0.25):
+    """Atomically save one registered store; force is reserved for shutdown."""
+    with directory_write_lock(str(runtime.parent), timeout=timeout):
+        if not runtime.exists():
+            raise FileNotFoundError(str(runtime))
+        marker = runtime.parent / (runtime.name + '.archived_day')
+        stat = runtime.stat()
+        revision = '%s:%s:%s' % (datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d'),
+                                 stat.st_mtime_ns, stat.st_size)
+        if not force and marker.exists():
+            if marker.read_text(encoding='utf-8') == revision:
+                return
+            if time.time() - marker.stat().st_mtime < ARCHIVE_INTERVAL:
+                return
+        local.parent.mkdir(parents=True, exist_ok=True)
+        temporary = local.with_name(local.name + '.closing.tmp')
+        if file_limit is not None:
+            if not runtime.exists():
+                return
+            if runtime.stat().st_size > file_limit:
+                raise RuntimeError('runtime_file_size_limit: ' + runtime.name)
+            content = runtime.read_bytes()
+            if len(content) > file_limit:
+                raise RuntimeError('runtime_file_size_limit: ' + runtime.name)
+            current = runtime.stat()
+            if (current.st_mtime_ns, current.st_size) != (stat.st_mtime_ns, stat.st_size):
+                raise RuntimeError('runtime_changed_during_archive')
+            if not local.exists() or local.stat().st_size != len(content) or local.read_bytes() != content:
+                with open(temporary, 'wb') as stream:
+                    stream.write(content)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, local)
+            marker.write_text(revision, encoding='utf-8')
+            return
+        source = sqlite3.connect(str(runtime), timeout=1)
+        try:
+            if not force:
+                configure(source)
+                trim(source)
+                source.commit()
+                if source.execute('PRAGMA auto_vacuum').fetchone()[0] != 2:
+                    source.execute('PRAGMA auto_vacuum=INCREMENTAL')
+                    source.execute('VACUUM')
+                stat = runtime.stat()
+                revision = '%s:%s:%s' % (revision.split(':')[0], stat.st_mtime_ns, stat.st_size)
+            backup_deadline = time.monotonic() + max(0.1, timeout)
+            def check_backup(status, remaining, total):
+                if time.monotonic() > backup_deadline:
+                    raise TimeoutError('runtime_database_backup_deadline')
+            with closing(sqlite3.connect(str(temporary))) as target:
+                source.backup(target, pages=128, progress=check_backup, sleep=0.01)
+                if not force:
+                    target.execute('VACUUM')
+                if target.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+                    raise RuntimeError('linkage_archive_integrity_failed')
+        finally:
+            source.close()
+        if temporary.stat().st_size > MAX_DATABASE_BYTES:
+            raise RuntimeError('linkage_archive_size_limit')
+        # Old application versions must be stopped before deployment:
+        # replacing a DB still held open by an old writer is not safe.
+        if any(Path(str(local) + suffix).exists() for suffix in ('-wal', '-shm')):
+            raise RuntimeError('linkage_legacy_writer_or_wal_present')
+        os.replace(temporary, local)
+        marker.write_text(revision, encoding='utf-8')
+
+def persist_registered_runtime(timeout=20.0):
+    """Flush log batches and save this process's stores, including before close."""
+    failures = {}
+    saved = []
+    deadline = time.monotonic() + timeout
+    # Drain already queued favorite mutations before snapshotting their file.
+    # Do not import/initialize a manager during shutdown.
+    import sys
+    favorites = sys.modules.get('global_favorites')
+    executor = getattr(favorites, '_favorite_write_executor', None)
+    if executor is not None:
+        try:
+            executor.submit(lambda: None).result(timeout=min(4.0, max(0.0, deadline - time.monotonic())))
+        except Exception as exc:
+            failures['favorite_write_queue'] = str(exc)
+    handlers = set(logging.getLogger().handlers)
+    for item in list(logging.Logger.manager.loggerDict.values()):
+        if isinstance(item, logging.Logger):
+            handlers.update(item.handlers)
+    for handler in handlers:
+        if hasattr(handler, '_archive_target'):
+            try:
+                handler.flush()
+            except Exception as exc:
+                failures[str(handler._archive_target)] = str(exc)
+    with _workers_lock:
+        targets = list(_archive_targets.values())
+    for runtime, local, file_limit in targets:
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('runtime_shutdown_archive_deadline')
+            _archive_one(runtime, local, file_limit, force=True, timeout=min(4.0, remaining))
+            saved.append(str(local))
+        except Exception as exc:
+            failures[str(local)] = str(exc)
+            logger.exception('Runtime shutdown archive failed: %s; RAMDisk retained', local)
+    return {'saved': saved, 'failed': failures}
+
+
 def _archive_loop(runtime, local, file_limit=None):
     last_error = 0.0
     closing_since = None
@@ -240,61 +349,7 @@ def _archive_loop(runtime, local, file_limit=None):
                 closing_since = time.monotonic()
             if time.monotonic() - closing_since < ARCHIVE_SETTLE_SECONDS:
                 continue
-            # Lock is on RAMDisk and shared by cooperating TK/ATS processes.
-            with directory_write_lock(str(runtime.parent), timeout=0.25):
-                marker = runtime.parent / (runtime.name + '.archived_day')
-                stat = runtime.stat()
-                revision = '%s:%s:%s' % (day, stat.st_mtime_ns, stat.st_size)
-                if marker.exists():
-                    if marker.read_text(encoding='utf-8') == revision:
-                        continue
-                    if time.time() - marker.stat().st_mtime < ARCHIVE_INTERVAL:
-                        continue
-                temporary = local.with_name(local.name + '.closing.tmp')
-                if file_limit is not None:
-                    if not runtime.exists():
-                        continue
-                    if runtime.stat().st_size > file_limit:
-                        raise RuntimeError('runtime_file_size_limit: ' + runtime.name)
-                    content = runtime.read_bytes()
-                    if len(content) > file_limit:
-                        raise RuntimeError('runtime_file_size_limit: ' + runtime.name)
-                    current = runtime.stat()
-                    if (current.st_mtime_ns, current.st_size) != (stat.st_mtime_ns, stat.st_size):
-                        continue
-                    if not local.exists() or local.stat().st_size != len(content) or local.read_bytes() != content:
-                        with open(temporary, 'wb') as stream:
-                            stream.write(content)
-                            stream.flush()
-                            os.fsync(stream.fileno())
-                        os.replace(temporary, local)
-                    marker.write_text(revision, encoding='utf-8')
-                    continue
-                source = sqlite3.connect(str(runtime), timeout=1)
-                try:
-                    configure(source)
-                    trim(source)
-                    source.commit()
-                    if source.execute('PRAGMA auto_vacuum').fetchone()[0] != 2:
-                        source.execute('PRAGMA auto_vacuum=INCREMENTAL')
-                        source.execute('VACUUM')
-                    stat = runtime.stat()
-                    revision = '%s:%s:%s' % (day, stat.st_mtime_ns, stat.st_size)
-                    with closing(sqlite3.connect(str(temporary))) as target:
-                        source.backup(target, pages=128)
-                        target.execute('VACUUM')
-                        if target.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
-                            raise RuntimeError('linkage_archive_integrity_failed')
-                finally:
-                    source.close()
-                if temporary.stat().st_size > MAX_DATABASE_BYTES:
-                    raise RuntimeError('linkage_archive_size_limit')
-                # Old application versions must be stopped before deployment:
-                # replacing a DB still held open by an old writer is not safe.
-                if any(Path(str(local) + suffix).exists() for suffix in ('-wal', '-shm')):
-                    raise RuntimeError('linkage_legacy_writer_or_wal_present')
-                os.replace(temporary, local)
-                marker.write_text(revision, encoding='utf-8')
+            _archive_one(runtime, local, file_limit)
         except Exception:
             if time.monotonic() - last_error >= 300:
                 last_error = time.monotonic()

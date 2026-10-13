@@ -363,12 +363,13 @@ def _setup_signal_handlers():
                     app.quit()
                 return  # 直接返回，绝不 raise / sys.exit()，彻底杜绝 "Error in sys.excepthook"
             else:
-                try:
-                    quit_and_save_all_sbc_windows()
-                except Exception:
-                    pass
                 if sys.__excepthook__:
                     sys.__excepthook__(exc_type, exc_val, exc_tb)
+                if sys.stderr is not None:
+                    sys.stderr.flush()
+                # Qt 回调异常只记录，不把单窗口故障升级为全部盯盘退出。
+                if not issubclass(exc_type, Exception):
+                    quit_and_save_all_sbc_windows()
         except Exception:
             pass
 

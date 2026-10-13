@@ -787,7 +787,9 @@ class SystemLinkageGateway:
                             self._dispatch_pending_notification(row["operation_id"], command, result)
                     except Exception:
                         logger.exception("Linkage notification recovery failed")
-                if len(rows) >= 8 or len(completed) >= 128:
+                # Pending UI receipts are retried on the next timed pass;
+                # a full batch must not spin while the consumer is unavailable.
+                if len(rows) >= 8:
                     self._inbox_wakeup.set()
             except Exception:
                 logger.exception("Linkage worker could not read its inbox")
