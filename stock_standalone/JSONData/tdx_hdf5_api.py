@@ -443,6 +443,8 @@ class SafeHDFStore(pd.HDFStore):
                     break
                 except (tables.exceptions.HDF5ExtError, OSError, ValueError, PermissionError) as e:
                     last_exception = e
+                    if time.monotonic() >= self._open_deadline:
+                        raise TimeoutError(f"HDF open retries timed out: {self.fname}") from e
                     self.log.error(f"[HDF] open failed (attempt {attempt+1}/{retry_count}): {e}")
                     if attempt < retry_count - 1 and time.monotonic() < self._open_deadline:
                         self.log.warning(f"[HDF] Retrying in 3s... Releasing lock first.")

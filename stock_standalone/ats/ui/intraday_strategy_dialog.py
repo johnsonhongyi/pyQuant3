@@ -5617,7 +5617,7 @@ class SBCIntradayChartDialog(QWidget):
             SBCWindowMemoryManager.get_instance().update_period(self.code, mode_clean)
         except Exception:
             pass
-        if getattr(self, '_dispatcher_enabled', False):
+        if getattr(self, '_dispatcher_enabled', False) and self.isVisible():
             SBCGlobalDispatcher.get_instance().subscribe(self)
 
         # 同步更新顶部按钮组的 checked 高亮状态并使当前按钮获得焦点

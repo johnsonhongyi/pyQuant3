@@ -515,7 +515,7 @@ def test_evaluation_store_atomic_snapshot_and_lock_scope(monkeypatch):
     assert len(store.peek(dummy_path)) == 2  # Internal store untouched
 
     # Mock archive_window so pending() evaluates as DUE and returns non-empty snapshot
-    monkeypatch.setattr("ats.bounded_evaluation_store.archive_window", lambda: ("market", "2026-10-01"))
+    monkeypatch.setattr("ats.bounded_evaluation_store.archive_window", lambda: ("close", "2026-10-01"))
     monkeypatch.setattr("time.monotonic", lambda: 1000000.0)
 
     pending_items = store.pending()
@@ -777,7 +777,7 @@ def test_evaluation_store_concurrent_committed_cas(tmp_path, monkeypatch):
     # 初始建项
     store.append(dummy_file, {"id": 1}, lambda p, v: True)
 
-    monkeypatch.setattr("ats.bounded_evaluation_store.archive_window", lambda: ("market", "2026-10-01"))
+    monkeypatch.setattr("ats.bounded_evaluation_store.archive_window", lambda: ("close", "2026-10-01"))
     monkeypatch.setattr("time.monotonic", lambda: 1000000.0)
 
     # 模拟在 committed 处理期间，外部并发追加新的记录

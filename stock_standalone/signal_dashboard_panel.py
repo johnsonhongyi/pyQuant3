@@ -5103,14 +5103,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             is_fav_stock = code in fav_mgr.favorite_stocks
             if is_fav_stock:
                 fav_action = menu.addAction(f"❌ 取消重点个股: {name} ({code})")
-                fav_action.triggered.connect(lambda c=code: submit_favorite_action(
+                fav_action.triggered.connect(lambda _checked=False, c=code: submit_favorite_action(
                     self, "remove_favorite_stock_result", c,
                     on_complete=lambda owner, result, error: owner._refresh_ui_for_favorites()
                     if error is None else None,
                 ))
             else:
                 fav_action = menu.addAction(f"⭐ 设为重点个股: {name} ({code})")
-                fav_action.triggered.connect(lambda c=code: submit_favorite_action(
+                fav_action.triggered.connect(lambda _checked=False, c=code: submit_favorite_action(
                     self, "add_favorite_stock_result", c,
                     on_complete=lambda owner, result, error: owner._refresh_ui_for_favorites()
                     if error is None else None,
@@ -5124,14 +5124,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             is_fav_sec = sector in fav_mgr.favorite_sectors
             if is_fav_sec:
                 sec_fav_action = menu.addAction(f"❌ 取消重点板块: {sector}")
-                sec_fav_action.triggered.connect(lambda s=sector: submit_favorite_action(
+                sec_fav_action.triggered.connect(lambda _checked=False, s=sector: submit_favorite_action(
                     self, "remove_favorite_sector_result", s,
                     on_complete=lambda owner, result, error: owner._refresh_ui_for_favorites()
                     if error is None else None,
                 ))
             else:
                 sec_fav_action = menu.addAction(f"⭐ 设为重点板块: {sector}")
-                sec_fav_action.triggered.connect(lambda s=sector: submit_favorite_action(
+                sec_fav_action.triggered.connect(lambda _checked=False, s=sector: submit_favorite_action(
                     self, "add_favorite_sector_result", s,
                     on_complete=lambda owner, result, error: owner._refresh_ui_for_favorites()
                     if error is None else None,
