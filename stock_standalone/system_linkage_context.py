@@ -507,7 +507,7 @@ class SystemLinkageContextClient:
 
     def start(self):
         if self._thread and self._thread.is_alive():
-            return True
+            return not self._stop.is_set()
         try:
             self._resolve_config()
             self._init_store()
@@ -536,7 +536,8 @@ class SystemLinkageContextClient:
         thread = self._thread
         if thread and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=1.0)
-        self._thread = None
+        if thread is None or not thread.is_alive():
+            self._thread = None
         self._drain_source_events()
         if self._favorite_manager is not None and self._favorite_listener is not None:
             try:
@@ -733,7 +734,9 @@ class SystemLinkageContextClient:
             try:
                 self._drain_source_events()
                 try:
-                    self._flush_source_outbox()
+                    # One slow upload must not be multiplied by ten before
+                    # attention reconciliation gets its next turn.
+                    self._flush_source_outbox(limit=1)
                 except Exception as error:
                     self._publisher_status = "stale: " + str(error)
                     logger.debug("System-linkage evidence publish failed: %s", error)
@@ -745,9 +748,15 @@ class SystemLinkageContextClient:
                         if str(error) in ("attention_revision_conflict", "favorites_revision_conflict"):
                             self._attention_wakeup.set()
                         logger.debug("System-linkage attention sync failed: %s", error)
+                with self._lock:
+                    sync_status = {"attention": self._attention_status, "publish": self._publisher_status}
+                    sync_changed = any(self._status.get(key) != value for key, value in sync_status.items())
+                    self._status.update(sync_status)
+                if sync_changed:
+                    self._notify()
                 next_context_poll = getattr(self, '_next_context_poll', 0.0)
                 if time.monotonic() < next_context_poll:
-                    self._attention_wakeup.wait(min(self.poll_interval, next_context_poll - time.monotonic()))
+                    self._wait_for_next_poll()
                     self._attention_wakeup.clear()
                     continue
                 self._next_context_poll = time.monotonic() + self.poll_interval
@@ -763,11 +772,19 @@ class SystemLinkageContextClient:
                 self._notify()
             except Exception as error:
                 with self._lock:
-                    self._status = {"state": "stale" if self._snapshot else "unavailable", "error": str(error)}
+                    self._status = {"state": "stale" if self._snapshot else "unavailable", "error": str(error),
+                                    "attention": self._attention_status, "publish": self._publisher_status}
                 logger.debug("System-linkage context poll failed: %s", error)
                 self._notify()
-            self._attention_wakeup.wait(self.poll_interval)
+            self._wait_for_next_poll()
             self._attention_wakeup.clear()
+
+    def _wait_for_next_poll(self):
+        now = time.monotonic()
+        deadline = getattr(self, '_next_context_poll', now + self.poll_interval)
+        if self._attention_enabled:
+            deadline = min(deadline, getattr(self, '_next_attention_poll', now + 5.0))
+        self._attention_wakeup.wait(max(0.0, min(self.poll_interval, deadline - now)))
 
     def _on_favorites_changed(self, event):
         if not isinstance(event, dict) or event.get("origin") == "remote_sync":

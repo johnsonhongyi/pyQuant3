@@ -210,3 +210,4 @@ stock_standalone/config/new_stock_lift_calendar.json.*
 stock_standalone/config/intraday_strategy_state_cache.json.*
 stock_standalone/stock-strategy/AGENTS.md
 stock_standalone/stock-strategy/.pytest_*
+stock_standalone/system_linkage.sqlite3*
