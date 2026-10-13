@@ -5,6 +5,26 @@
 // ==============================================================================
 
 function main(config, profileName) {
+  // Keep ChatGPT, Codex, authentication, challenge and asset requests on one egress.
+  const protectedAiRules = [
+    "DOMAIN-SUFFIX,chatgpt.com,Research + AI",
+    "DOMAIN-SUFFIX,openai.com,Research + AI",
+    "DOMAIN-SUFFIX,oaistatic.com,Research + AI",
+    "DOMAIN-SUFFIX,oaiusercontent.com,Research + AI",
+    "DOMAIN-SUFFIX,oaistatsig.com,Research + AI",
+    "DOMAIN-SUFFIX,openaimerge.com,Research + AI",
+    "DOMAIN-SUFFIX,workos.com,Research + AI",
+    "DOMAIN-SUFFIX,workoscdn.com,Research + AI",
+    "DOMAIN,workos.imgix.net,Research + AI",
+    "DOMAIN-SUFFIX,ct.sendgrid.net,Research + AI",
+    "DOMAIN,challenges.cloudflare.com,Research + AI"
+  ];
+  const protectedAiDomains = new Set([
+    "chatgpt.com", "openai.com", "oaistatic.com", "oaiusercontent.com",
+    "oaistatsig.com", "openaimerge.com", "workos.com", "workoscdn.com",
+    "workos.imgix.net", "ct.sendgrid.net", "challenges.cloudflare.com"
+  ]);
+
   // ----------------------------------------------------------------------------
   // 1. 策略组默认项调优: 将 Microsoft, Apple, Download 的首选设为 DIRECT
   // ----------------------------------------------------------------------------
@@ -74,7 +94,6 @@ function main(config, profileName) {
     "PROCESS-NAME,MpDefenderCoreService.exe,DIRECT",
     "PROCESS-NAME,SDXHelper.exe,DIRECT",
     "PROCESS-NAME,onedrive.exe,DIRECT",
-    "PROCESS-NAME,msedge.exe,DIRECT",
     "PROCESS-NAME,NVDisplay.Container.exe,DIRECT",
     "PROCESS-NAME,LogiOptionsMgr.exe,DIRECT",
 
@@ -156,8 +175,19 @@ function main(config, profileName) {
   if (!config.rules) {
     config.rules = [];
   }
-  // 置顶前置直连规则
-  config.rules.unshift(...customDirectRules);
+  // Rebuild the managed AI routes first on every profile render so updates cannot
+  // place a broad DIRECT rule ahead of authentication or Codex traffic.
+  const existingRules = config.rules.filter(rule => {
+    const normalizedRule = String(rule).trim().replace(/^-\s*/, "");
+    const parts = normalizedRule.split(",");
+    const type = (parts[0] || "").trim().toUpperCase();
+    const domain = (parts[1] || "").trim().toLowerCase();
+    if ((type === "DOMAIN" || type === "DOMAIN-SUFFIX") && protectedAiDomains.has(domain)) {
+      return false;
+    }
+    return !/^PROCESS-NAME\s*,\s*msedge\.exe\s*,\s*DIRECT\s*$/i.test(normalizedRule);
+  });
+  config.rules = [...protectedAiRules, ...customDirectRules, ...existingRules];
 
   // ----------------------------------------------------------------------------
   // 3. 核心分流重构: 白名单直连模式 (末尾兜底彻底改为 MATCH,DIRECT)
