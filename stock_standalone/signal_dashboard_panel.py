@@ -1818,6 +1818,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                         table.setColumnWidth(col_idx, int(width))
 
             self._reapply_table_stretch_mode(name, table)
+            if table.horizontalHeaderItem(0) and table.horizontalHeaderItem(0).text() == '日期时间':
+                table.setColumnWidth(0, max(170, table.columnWidth(0)))
         except Exception:
             logger.exception("[Dashboard] Failed to restore table layout: %s", name)
 
@@ -2125,6 +2127,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self.type_filter.currentTextChanged.connect(lambda: self._on_search_text_changed(self.search_input.text()))
         
         # 搜索与过滤容器
+        self.date_filter = QComboBox()
+        self.date_filter.addItem("今日", "TODAY")
+        self.date_filter.addItem("全部日期", "ALL")
+        self.date_filter.setToolTip("按信号发生日期查询；仅影响信号列表，不改变累计计数。")
+        self.date_filter.currentIndexChanged.connect(self._refresh_signal_query)
+        self.all_details_btn = QPushButton("全部明细")
+        self.all_details_btn.setToolTip("查看全部日期的所有保留信号，取消搜索、类型过滤与折叠。")
+        self.all_details_btn.clicked.connect(self._show_all_signal_details)
         search_lay = QHBoxLayout()
         search_lay.setContentsMargins(5, 5, 5, 5)
         search_lay.addWidget(self.type_filter)
@@ -2192,8 +2202,12 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self.fold_check = QCheckBox("折叠重复")
         self.fold_check.setStyleSheet("QCheckBox { color: #aaa; font-weight: bold; font-size: 8.5pt; } QCheckBox:hover { color: #fff; }")
         self.fold_check.setChecked(True) # 默认开启折叠
+        self.fold_check.setText("按日同股汇总")
+        self.fold_check.setToolTip("每个日期、每只股票保留最新匹配信号；取消勾选查看逐条明细，次数仍为原累计值。")
         self.fold_check.stateChanged.connect(self._on_fold_check_changed)
         
+        corner_lay.addWidget(self.date_filter)
+        corner_lay.addWidget(self.all_details_btn)
         corner_lay.addWidget(self.type_filter)
         corner_lay.addWidget(self.search_input)
         corner_lay.addWidget(self.btn_dna_audit_signal)
@@ -2265,29 +2279,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # 提取分类名称 (不含括号)
         current_cat = current_text.split(' (')[0] if ' (' in current_text else current_text
         
-        # [FIX] 下拉框中的数量统计，必须扫描实际可视表以保证所点即所得 (消除因多重覆写去重引发的 Phantom空项)
-        table = getattr(self, "tables", {}).get("全部信号")
-        counts = {k: 0 for k in SIGNAL_TYPE_MAP.keys()}
-        pattern_types = {}
-        if table is not None:
-            counts["ALL"] = table.rowCount()
-            for r in range(table.rowCount()):
-                pattern_item = table.item(r, 4)
-                if pattern_item:
-                    raw_pattern = str(pattern_item.data(Qt.ItemDataRole.UserRole) or pattern_item.text())
-                    matched_type = pattern_types.get(raw_pattern)
-                    if matched_type is None:
-                        matched_type = "ALERT"
-                        normalized_pattern = raw_pattern.lower()
-                        for eng_key, keywords in SIGNAL_TYPE_KEYWORDS.items():
-                            if any(kw.lower() in normalized_pattern for kw in keywords):
-                                matched_type = eng_key
-                                break
-                        pattern_types[raw_pattern] = matched_type
-                    if matched_type in counts:
-                        counts[matched_type] += 1
-                    else:
-                        counts[matched_type] = 1
+        # 统计来自原始计数器，日期/搜索/折叠不能反向改变信号总量。
+        counts = dict(self._signal_type_counts)
 
         if counts == self._last_type_filter_counts:
             return
@@ -2352,7 +2345,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def _create_signal_table(self) -> QTableWidget:
         table = QTableWidget(0, 8)
-        table.setHorizontalHeaderLabels(["时间", "评级", "代码", "名称", "形态/信号", "详情", "次数", "得分"])
+        table.setHorizontalHeaderLabels(["日期时间", "评级", "代码", "名称", "形态/信号", "详情", "次数", "得分"])
+        table.setColumnWidth(0, 170)
         self._align_table_headers_left(table)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -2727,6 +2721,10 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
     def _on_render_timer_timeout(self):
         """[GUI THREAD] 渲染调度器：以固定频率消费脏位，确保在大规模数据或心跳洪水时 UI 依然流畅"""
+        today = datetime.now().date().isoformat()
+        if getattr(self, '_query_today', today) != today:
+            self._refresh_signal_query()
+        self._query_today = today
         # 1. 处理引擎视图刷新
         if self._engine_dirty:
             self._engine_dirty = False
@@ -2769,6 +2767,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             self._visible_sort_timer.start(50)
 
     def _flush_visible_sort(self):
+        if getattr(self, '_dashboard_refresh_running', False):
+            self._visible_sort_timer.start(50)
+            return
         table = self._pending_visible_sort
         self._pending_visible_sort = None
         if table is None or table is not self.tables.get(self.tabs.tabText(self.tabs.currentIndex())):
@@ -4166,6 +4167,9 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             self._dashboard_refresh_pending = True
             return
 
+        self._refresh_signal_dates(event.timestamp.date().isoformat())
+        if not self._signal_matches_query(event):
+            return
         payload = event.payload
         code = payload.get('code', '')
         name = payload.get('name', '')
@@ -4183,7 +4187,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             score = 0.0
             
         grade = str(payload.get('grade', '') or '')
-        time_str = event.timestamp.strftime("%H:%M:%S")
+        time_str = event.timestamp.strftime("%Y-%m-%d %H:%M:%S")
         count = self._stock_stats.get(code, {}).get("count", 1)
         
         # 1. 全部信号
@@ -4231,9 +4235,10 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         try:
             # 🔍 [PERF] O(1) 查找现有行索引
             table_cache = self._row_cache.setdefault(table, {})
+            cache_key = (time_str[:10], code)
             existing_row = -1
             if self.fold_check.isChecked():
-                old_meta = table_cache.get(code)
+                old_meta = table_cache.get(cache_key)
                 if old_meta:
                     try:
                         # 兼容旧版本直接存 Item 的情况
@@ -4241,6 +4246,10 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                         existing_row = table.row(old_item)
                     except (RuntimeError, Exception): 
                         pass 
+            if existing_row >= 0:
+                previous_time = table.item(existing_row, 0)
+                if previous_time and previous_time.text() > time_str:
+                    return
             
             # [A1] insertRow(0) → appendRow (O(1) 尾部追加)
             new_row = existing_row
@@ -4255,7 +4264,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 rem_row_idx = 0
                 rem_item = table.item(rem_row_idx, 2)
                 if rem_item:
-                    table_cache.pop(rem_item.text(), None)
+                    rem_time = table.item(rem_row_idx, 0)
+                    table_cache.pop((rem_time.text()[:10] if rem_time else '', rem_item.text()), None)
                 table.removeRow(rem_row_idx)
                 new_row = table.rowCount() - 1 
 
@@ -4292,10 +4302,10 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             
             # [A2] search_blob 预计算并存入 item
             sector = payload.get('sector', '') if payload else ''
-            search_blob = f"{code} {name} {display_pattern} {detail} {sector}".lower()
+            search_blob = f"{code} {name} {pattern} {display_pattern} {detail} {sector}".lower()
             code_item.setData(self._ROLE_SEARCH_BLOB, search_blob)
             
-            table_cache[code] = {
+            table_cache[cache_key] = {
                 'item': code_item, 
                 'search_blob': search_blob,
                 'pattern_raw': pattern
@@ -4413,7 +4423,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         try:
             table_events = {name: [] for name in self.tables.keys()}
             fold_duplicates = self.fold_check.isChecked() if hasattr(self, 'fold_check') else False
-            source_events = tuple(self._all_events)
+            self._refresh_signal_dates()
+            source_events = tuple(event for event in self._all_events if self._signal_matches_query(event))
 
             if fold_duplicates:
                 table_events_map = {name: OrderedDict() for name in self.tables.keys()}
@@ -4423,8 +4434,11 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                     if not code or event.event_type not in [SignalBus.EVENT_PATTERN, SignalBus.EVENT_ALERT, SignalBus.EVENT_RISK]:
                         continue
 
-                    table_events_map["全部信号"].pop(code, None)
-                    table_events_map["全部信号"][code] = event
+                    group_key = (event.timestamp.date().isoformat(), code)
+                    previous = table_events_map["全部信号"].get(group_key)
+                    if previous is None or previous.timestamp <= event.timestamp:
+                        table_events_map["全部信号"].pop(group_key, None)
+                        table_events_map["全部信号"][group_key] = event
 
                     pattern = str(payload.get('pattern', payload.get('subtype', 'ALERT')) or '').lower()
                     detail = str(payload.get('detail', payload.get('message', '')) or '').lower()
@@ -4433,13 +4447,17 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                         if not keywords or cat not in table_events_map:
                             continue
                         if any(kw.lower() in pattern or kw.lower() in detail for kw in keywords):
-                            table_events_map[cat].pop(code, None)
-                            table_events_map[cat][code] = event
+                            previous = table_events_map[cat].get(group_key)
+                            if previous is None or previous.timestamp <= event.timestamp:
+                                table_events_map[cat].pop(group_key, None)
+                                table_events_map[cat][group_key] = event
                             matched_cats += 1
 
                     if matched_cats == 0 and "其它信号" in table_events_map:
-                        table_events_map["其它信号"].pop(code, None)
-                        table_events_map["其它信号"][code] = event
+                        previous = table_events_map["其它信号"].get(group_key)
+                        if previous is None or previous.timestamp <= event.timestamp:
+                            table_events_map["其它信号"].pop(group_key, None)
+                            table_events_map["其它信号"][group_key] = event
 
                 for name in table_events:
                     if name in table_events_map:
@@ -4465,7 +4483,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                         table_events["其它信号"].append(event)
 
             # 先准备行数与任务队列；实际创建 QTableWidgetItem 的工作留给短时分片。
-            engine_tables = ["🌟 决策队列", "🐉 龙头追踪", "🔥 板块热力", "🌐 战略趋势", "📡 市场预警"]
+            engine_tables = ["📋 每日操作指南", "🌟 决策队列", "🐉 龙头追踪", "🔥 板块热力", "🌐 战略趋势", "📡 市场预警"]
             for name, table in self.tables.items():
                 active_sortings[name] = table.isSortingEnabled()
                 table.setUpdatesEnabled(False)
@@ -4475,7 +4493,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                     continue
 
                 self._row_cache[table] = {}
-                events = table_events.get(name, [])[-500:]
+                events = table_events.get(name, [])
+                table._chunked_rendering = True
                 table.setRowCount(len(events))
                 self._dashboard_refresh_state['jobs'].append([name, table, events, 0])
 
@@ -4528,6 +4547,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             try:
                 table.blockSignals(False)
                 table.setUpdatesEnabled(True)
+                table._chunked_rendering = False
                 if active_sortings.get(name, False) and name not in engine_tables:
                     table.setSortingEnabled(True)
                     if table.isVisible():
@@ -4535,23 +4555,29 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                         sort_order = getattr(table, '_sort_order', Qt.SortOrder.DescendingOrder)
                         self._sort_table_python(table, sort_col, sort_order)
                 self._limit_table_column_widths(table)
+                if name not in engine_tables and name not in ("📋 每日操作指南", "📡 市场预警"):
+                    table._needs_sort = True
+                    if table is self.tabs.currentWidget():
+                        self._queue_visible_sort(table)
                 table.viewport().update()
             except Exception:
                 logger.exception("[Dashboard] Failed to restore table state: %s", name)
 
         self._dashboard_refresh_state = None
         self._dashboard_refresh_running = False
+        self._apply_filter()
+        self._update_stats_display()
         refresh_again = self._dashboard_refresh_pending
         self._dashboard_refresh_pending = False
         if refresh_again:
-            self._dashboard_refresh_timer.start(0)
+            QTimer.singleShot(0, self._refresh_all_tables)
         elif self._table_update_buffer and getattr(self, '_batch_timer', None):
             self._batch_timer.start(16)
 
     def _fill_row_data(self, table, row_idx, p, timestamp=None):
         """纯粹的数据填充逻辑，不触发任何布局改变信号"""
         if timestamp:
-            time_str = timestamp.strftime('%H:%M:%S')
+            time_str = timestamp.strftime('%Y-%m-%d %H:%M:%S')
         else:
             time_str = p.get('time', datetime.now().strftime('%H:%M:%S'))
         code = p.get('code', '')
@@ -4607,7 +4633,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
         # 2. 代码 (预计算 search_blob)
         sector = p.get('sector', '')
-        search_blob = f"{code} {name} {display_pattern} {detail} {sector}".lower()
+        search_blob = f"{code} {name} {pattern} {display_pattern} {detail} {sector}".lower()
         
         self._fast_update_cell(table, row_idx, 2, code, bold=True, color_key=cur_color_key, bg_key=cur_bg_key)
         it2 = table.item(row_idx, 2)
@@ -4616,7 +4642,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             
             # 更新缓存
             table_cache = self._row_cache.setdefault(table, {})
-            table_cache[code] = {
+            table_cache[(time_str[:10], code)] = {
                 'item': it2,
                 'search_blob': search_blob,
                 'pattern_raw': pattern
@@ -4828,7 +4854,11 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         total_cnt = self.tables["全部信号"].rowCount() if "全部信号" in self.tables else 0
         
         # [FIX] 使用清晰文案说明卡片展示的是历史信号流总数，而底部展示的是去重排版后的界面数据，消除数据理解误区。
-        self.stats_info_label.setText(f"跟单:{follow_cnt} 突破:{breakout_cnt} 风险:{risk_cnt} 破位:{breakdown_cnt} | 总表可视数: {total_cnt}")
+        matched = [event for event in self._all_events if self._signal_matches_query(event)]
+        stocks = len({event.payload.get('code') for event in matched})
+        self.stats_info_label.setText(
+            f"查询:{len(matched)}条/{stocks}股 显示:{total_cnt}行 | "
+            f"保留信号:{len(self._all_events)}/5000条（卡片/次数保持原口径）")
 
     def update_market_stats(self, stats: dict):
         try:
@@ -5062,6 +5092,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
 
         # 1. 复制代码与股票重点关注
         if code:
+            detail_action = menu.addAction(f"查看 {code} 信号明细（当前日期范围）")
+            detail_action.triggered.connect(lambda: self._show_stock_signal_details(code))
             copy_action = menu.addAction(f"📋 复制代码: {code}")
             copy_action.triggered.connect(lambda: QApplication.clipboard().setText(code))
             from ats.ui.favorite_actions import submit_favorite_action
@@ -5336,11 +5368,103 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             
         return None
 
+    def _refresh_signal_dates(self, new_date=None):
+        combo = getattr(self, 'date_filter', None)
+        if combo is None:
+            return
+        if new_date is not None:
+            dates = set(getattr(self, '_query_dates', ()))
+            dates.add(new_date)
+        else:
+            dates = {event.timestamp.date().isoformat() for event in self._all_events}
+        if dates == getattr(self, '_query_dates', None):
+            return
+        selected = combo.currentData() or 'TODAY'
+        # 即使该日记录已被保留上限淘汰，也保持用户选择，显示空结果而非跳到今日。
+        if selected not in ('TODAY', 'ALL'):
+            dates.add(selected)
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItem('今日', 'TODAY')
+            combo.addItem('全部日期', 'ALL')
+            for day in sorted(dates, reverse=True):
+                combo.addItem(day, day)
+            combo.setCurrentIndex(max(0, combo.findData(selected)))
+        finally:
+            combo.blockSignals(False)
+        self._query_dates = dates
+
+    def _signal_matches_query(self, event):
+        date_filter = getattr(self, 'date_filter', None)
+        selected = date_filter.currentData() if date_filter is not None else 'ALL'
+        day = event.timestamp.date().isoformat()
+        if selected == 'TODAY':
+            selected = datetime.now().date().isoformat()
+        if selected and selected != 'ALL' and day != selected:
+            return False
+        payload = event.payload
+        pattern = str(payload.get('pattern', payload.get('subtype', 'ALERT')) or '')
+        detail = str(payload.get('detail', payload.get('message', '')) or '')
+        type_filter = getattr(self, 'type_filter', None)
+        target = type_filter.currentData() if type_filter is not None else 'ALL'
+        if target and target != 'ALL':
+            matched = 'ALERT'
+            for key, keywords in SIGNAL_TYPE_KEYWORDS.items():
+                if any(kw.lower() in pattern.lower() for kw in keywords):
+                    matched = key
+                    break
+            if matched != target:
+                return False
+        search = getattr(self, 'search_input', None)
+        text = search.text().strip().lower() if search is not None else ''
+        display_pattern = pattern
+        for key, keywords in SIGNAL_TYPE_KEYWORDS.items():
+            if any(kw.lower() in pattern.lower() for kw in keywords):
+                display_pattern = SIGNAL_TYPE_MAP.get(key, pattern)
+                break
+        blob = f"{payload.get('code', '')} {payload.get('name', '')} {pattern} {display_pattern} {detail} {payload.get('sector', '')}"
+        return not text or text in blob.lower()
+
+    def _refresh_signal_query(self, *_):
+        if not hasattr(self, 'tables'):
+            return
+        self._refresh_all_tables()
+
+    def _show_all_signal_details(self):
+        for widget in (self.date_filter, self.type_filter, self.search_input, self.fold_check):
+            widget.blockSignals(True)
+        try:
+            self.date_filter.setCurrentIndex(self.date_filter.findData('ALL'))
+            self.type_filter.setCurrentIndex(self.type_filter.findData('ALL'))
+            self.search_input.clear()
+            self.fold_check.setChecked(False)
+        finally:
+            for widget in (self.date_filter, self.type_filter, self.search_input, self.fold_check):
+                widget.blockSignals(False)
+        self.tabs.setCurrentWidget(self.tables['全部信号'])
+        self._refresh_signal_query()
+        self._save_ui_timer.start()
+
+    def _show_stock_signal_details(self, code):
+        for widget in (self.type_filter, self.search_input, self.fold_check):
+            widget.blockSignals(True)
+        try:
+            self.type_filter.setCurrentIndex(self.type_filter.findData('ALL'))
+            self.search_input.setText(code)
+            self.fold_check.setChecked(False)
+        finally:
+            for widget in (self.type_filter, self.search_input, self.fold_check):
+                widget.blockSignals(False)
+        self.tabs.setCurrentWidget(self.tables['全部信号'])
+        self._refresh_signal_query()
+        self._save_ui_timer.start()
+
     def _on_search_text_changed(self, text):
         if not hasattr(self, '_search_timer'):
             self._search_timer = QTimer(self)
             self._search_timer.setSingleShot(True)
-            self._search_timer.timeout.connect(self._apply_filter)
+            self._search_timer.timeout.connect(self._refresh_signal_query)
         self._search_timer.start(200)
 
     def _apply_filter(self):
@@ -5415,6 +5539,8 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             # [PERF] 恢复渲染
             table.viewport().setUpdatesEnabled(True)
             table.setUpdatesEnabled(True)
+        if getattr(table, '_needs_sort', False) and not getattr(self, '_dashboard_refresh_running', False):
+            self._queue_visible_sort(table)
 
     def _on_tab_changed(self, index):
         """[MANUAL] 手动切换 Tab 时，应用搜索并回到顶部，同时检查是否需要补做延迟排序"""
@@ -5488,7 +5614,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # 4. 对非 Stretch 列施加合理上限（防止长文本列撑得过宽）
         MAX_COL_WIDTHS = {
             "代码": 70, "名称": 80, "成本": 65, "数量": 65,
-            "时间": 75, "评级": 50, "次数": 55, "得分": 55,
+            "时间": 75, "日期时间": 180, "评级": 50, "次数": 55, "得分": 55,
             "级别": 60, "类型": 110, "活跃度": 90,
             "状态": 70, "Kernel": 80, "仓位": 60, "置信": 60, "风控": 60,
             "优先级": 65, "现价": 65, "建议价": 70, "周期涨变": 75, "DFF动量": 75,
