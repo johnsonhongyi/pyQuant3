@@ -6351,7 +6351,8 @@ class ATSMainWindow(QMainWindow):
                 result = service.request("poll", manifest=getattr(self, '_next_day_watch_manifest', None),
                     sector_snapshot=getattr(self, 'current_sector_snapshot', None))
                 if result.get("error"):
-                    logger.warning("[NextDayWatch] worker failed: %s", result["error"])
+                    log = logger.debug if getattr(self, '_close_requested', False) else logger.warning
+                    log("[NextDayWatch] worker failed: %s", result["error"])
                     return
                 events_to_dispatch = result.get("events", [])
                 endpoint = result.get("endpoint", ("OUTBOX", "local", ""))
@@ -6432,13 +6433,8 @@ class ATSMainWindow(QMainWindow):
             qss = re.sub(r'font-size:\s*\d+(\.\d+)?pt;', f'font-size: {size}pt;', qss)
             self.setStyleSheet(qss)
             
-            # 🛡️【全局 ToolTip 色彩保真】同步确保全局 QApplication 的 ToolTip 调色板为高对比冰白字与暗黑底
-            if app:
-                from PyQt6.QtGui import QPalette, QColor
-                pal = app.palette()
-                pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#1a1a24"))
-                pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#f1f5f9"))
-                app.setPalette(pal)
+            from ats.ui.styles import apply_dark_tooltip_palette
+            apply_dark_tooltip_palette(self)
             
             # Force restore column widths for all tables/trees with persistent headers
             for table in self.findChildren(QTableView):
@@ -7441,8 +7437,19 @@ class ATSMainWindow(QMainWindow):
                     recovery_journal_path(get_app_root()),
                     timeout_sec=max(0.0, deadline - time.monotonic()))
 
+            def wait_for_child_cleanup():
+                if not wait_for_threads(threads, deadline):
+                    return False
+                manager = SBCProcessManager.get_instance()
+                failures = getattr(manager, '_close_failures', [])
+                if failures:
+                    logger.error('SBC safe shutdown not confirmed: %s', failures)
+                    failures.clear()
+                    return False
+                return True
+
             tasks = [('voice cleanup', lambda: ATSMainWindow._drain_shutdown_voice(self)),
-                     ('subprocess cleanup', lambda: wait_for_threads(threads, deadline)),
+                     ('subprocess cleanup', wait_for_child_cleanup),
                      ('multiprocessing cleanup', lambda: reap_multiprocessing_children(deadline)),
                      ('final config', lambda: flush_config_writer(
                          timeout_sec=max(0.0, deadline - time.monotonic()))),

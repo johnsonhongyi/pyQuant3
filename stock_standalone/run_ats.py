@@ -165,6 +165,8 @@ def main():
         group_console_and_windows()
 
     app = QApplication(sys.argv)
+    from ats.ui.styles import apply_dark_tooltip_palette
+    apply_dark_tooltip_palette(app)
     window = ATSMainWindow()
     from ats.qt_interrupt import install_qt_keyboard_interrupt_handler
     keyboard_interrupt_guard = install_qt_keyboard_interrupt_handler(app, window)

@@ -596,17 +596,21 @@ class SectorHeatmapWidget(QWidget):
         if not force and getattr(self, '_last_rendered_fingerprint', None) == grid_fingerprint:
             return
         structure = (cols, tuple(item[0] for item in display_items))
-        reuse = getattr(self, '_grid_structure', None) == structure
-        if not reuse:
-            while self.grid_layout.count() > 0:
-                layout_item = self.grid_layout.takeAt(0)
-                if layout_item and layout_item.widget() is not None:
-                    layout_item.widget().deleteLater()
-            self._grid_cards = []
+        previous_structure = getattr(self, '_grid_structure', (cols, ()))
+        previous_cards = dict(zip(previous_structure[1], getattr(self, '_grid_cards', ())))
+        active_names = set(structure[1])
+        for name, widgets in previous_cards.items():
+            if name not in active_names:
+                card = widgets[0]
+                self.grid_layout.removeWidget(card)
+                card.hide()
+                card.deleteLater()
+        self._grid_cards = []
 
         rows = max(1, (len(display_items) + cols - 1) // cols)
         needed_h = rows * (68 + 6) + 16
-        self.grid_container.setMinimumHeight(needed_h)
+        if self.grid_container.minimumHeight() != needed_h:
+            self.grid_container.setMinimumHeight(needed_h)
 
         import re
         for idx, item in enumerate(display_items):
@@ -620,13 +624,19 @@ class SectorHeatmapWidget(QWidget):
             is_highlight = (name in fav_sectors) or (clean_name in fav_sectors)
 
             card_state = (tuple(item[:4]), is_highlight)
-            if reuse:
-                card, name_lbl, info_lbl, count_lbl = self._grid_cards[idx]
+            existing = previous_cards.get(name)
+            if existing:
+                card, name_lbl, info_lbl, count_lbl = existing
+                if previous_structure != structure:
+                    self.grid_layout.removeWidget(card)
+                    self.grid_layout.addWidget(card, row, col)
+                self._grid_cards.append(existing)
                 if getattr(card, '_sector_render_state', None) == card_state:
                     continue
-                name_lbl.setText(f"⭐ {name}" if is_highlight else str(name))
-                info_lbl.setText(f"{score} | {pct}")
-                count_lbl.setText(f"成员: {count}")
+                for label, text in ((name_lbl, f"⭐ {name}" if is_highlight else str(name)),
+                                    (info_lbl, f"{score} | {pct}"), (count_lbl, f"成员: {count}")):
+                    if label.text() != text:
+                        label.setText(text)
             else:
                 card = None
 
@@ -648,7 +658,7 @@ class SectorHeatmapWidget(QWidget):
                 display_name = name
             
             # Premium card stylesheet with glowing borders and smooth scale/hover transition
-            card.setStyleSheet(f"""
+            card_qss = f"""
                 QPushButton {{
                     {bg_style}
                     {border_style}
@@ -660,10 +670,12 @@ class SectorHeatmapWidget(QWidget):
                     background-color: rgba(255, 255, 255, 0.08);
                     border: 1.5px solid #ffffff;
                 }}
-            """)
+            """
+            if card.styleSheet() != card_qss:
+                card.setStyleSheet(card_qss)
             
             card._sector_render_state = card_state
-            if reuse:
+            if existing:
                 continue
 
             # Enable custom context menu for favorites management
