@@ -166,3 +166,17 @@
 - 生产只读验收：Web 代理及 LAN 入口 `/api/health` 正常；无令牌同源 targets/context/events/attention 均返回 200；跨源 targets/import/commands 返回 401；同源 malformed import/commands 分别返回 400，malformed attention identity 返回 403，均未写数据。targets 读回已有节点 `tk-eac80a9aa66a462795557e68`/workspace `ws-b33bb748186a4bbc8e69ab72`，API 标记 `configured` 仅证明持久注册，不代表本次在线握手。测试包括配置令牌时错误 Bearer/X-A-Stock-Token 拒绝、无令牌来源边界、Web 同主机跨端口经同源代理；Go `go test ./...`、Web 34 文件/183 测试及 `tsc -b && vite build` 通过。
 - 回滚快照 `/mnt/4TB/dockerf/stockstrategy/rollback/20261012003209` 的 `COMPLETE` 存在且全部 `SHA256SUMS` 校验通过。回滚命令：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261012003209`。
 - 这次部署证明鉴权路径已修复。Windows 剪贴板未包含 TK 配置行，所以本次未重新导入/更新已有目标，也未修改 TK 或执行交易；本次发布不能据此宣称新的 HMAC configure/connected 现场验收。取得安全配置输入后，可按现有页面重新握手，并验证关注命令回执与幂等。
+
+## 2026-10-13 14:52 页面用户认证部署与验收
+
+- 按手册第9节从干净隔离副本发布20261013144813；审核源码SHA=e316aaa900ab55104b99e2368cdff381a539a945，本次12个变更文件与生产源码逐项SHA256一致，未推送远程。固定base、锁、隔离smoke、健康及回滚门禁全部执行。
+- API镜像stockstrategy/backend:20261013144813，ID=sha256:48c92a4e0b858df7d767a459f8f9cf501cc78efbb01d7c6e7558ca58b41d0143，2层、119406052字节。固定base仍为flatbase-20261010171545 / sha256:ed8cbe9544efbcd5f4a50039b79884d43d1d2b662dc9ee6715325c1525d52d6d（1层）。
+- Web复用stockstrategy/web:20261011114424，ID=sha256:ce15ecc17364a415c3a4e609a2858b046af4f3bc9f1058c33bdfaf13b1bb07e9，11层、62396647字节。两个镜像RepoDigests均为空。API/Web app-version均为20261013144813，healthy、always、ReadonlyRootfs=true、SizeRw=0，SizeRootFs分别119406052/62396647。
+- API8个/Web5个bind挂载，保留既有数据、日志、只读InStock行情、日历及cron路径；runtime及Web静态目录切换至本release，资源index-B9egOyWT.js。API健康、Web代理健康、容器Web→API健康、nginx -t通过。
+- 新增认证库/data/easy-stock/web-users.db，外置路径/mnt/4TB/dockerf/stockstrategy/data/easy-stock/web-users.db，权限600、20480字节。默认管理员johnson按用户提供密码首次初始化；未添加测试用户、未修改已有密码、未触发交易。
+- 当前Windows网络通过真实域名http://johnsonhongyi.asuscomm.com:29988验收：匿名lan=false、业务接口401；登录200、管理员用户列表200、业务接口200；退出后业务接口401。内网http://192.168.50.60:20073匿名lan=true、业务接口200。Cookie核验HttpOnly、SameSite=Strict。
+- 外网共享Token不再绕过登录，Web启动/发布脚本不再注入VITE_A_STOCK_TOKEN；线上没有非空A_STOCK_TOKEN，无当前令牌需轮换。HMAC桌面协议独立保留。
+- 回滚快照/mnt/4TB/dockerf/stockstrategy/rollback/20261013144813：COMPLETE存在，全部SHA256SUMS通过。回滚：bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261013144813。恢复原API20261012003209及旧Web运行配置，保留外置数据库；回滚到旧版会恢复旧版外网访问策略，应先限制公网入口。
+- 首次20261013144422在切换容器前被发布说明标签门禁拦截；旧容器一直健康，源码自动恢复、快照校验通过。统一镜像标签写入使用RELEASE_NOTE后，从同一SHA完整重跑成功。
+- 脚本SHA256：build-and-deploy.ps1=027e37dc038222ab04b12a21f91cd606293f0fe92198182aee51053f9718628d；deploy-prebuilt.sh=d106077d7ff659eb8d411be72cc9582d6f847a10058f09fbb0b34d2987dc5062；rollback-prebuilt.sh=3042d53d5a7040efb670e3e944c1c76c3ede3a19b19b6b685262844785315c37。
+- 未验范围：用户指定入口为HTTP，密码传输未加密；公网独立设备未专项验证。浏览器工具内核因EISDIR启动失败，未将浏览器点击/视觉布局记为已验收。

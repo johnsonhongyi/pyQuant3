@@ -160,7 +160,7 @@ try {
 
     $env:NODE_OPTIONS = '--max-old-space-size=4096'
     $env:NPM_CONFIG_CACHE = Join-Path $cacheRoot 'npm-cache'
-    $env:VITE_A_STOCK_TOKEN = $apiToken
+    [Environment]::SetEnvironmentVariable('VITE_A_STOCK_TOKEN', $null, 'Process')
     $null = New-Item -ItemType Directory -Path $env:NPM_CONFIG_CACHE -Force
     Push-Location $webRoot
     try {

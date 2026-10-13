@@ -24,7 +24,7 @@ UNPACK="$STAGE/unpacked"
 API_IMAGE="stockstrategy/backend:$RELEASE"
 API_BASE_IMAGE="stockstrategy/backend:flatbase-20261010171545"
 API_BASE_IMAGE_ID="sha256:ed8cbe9544efbcd5f4a50039b79884d43d1d2b662dc9ee6715325c1525d52d6d"
-RELEASE_NOTE='Full-system linkage trial.'
+RELEASE_NOTE='Web user authentication and LAN access.'
 API_BACKUP="stockstrategy-api-rollback-$RELEASE"
 WEB_BACKUP="stockstrategy-web-rollback-$RELEASE"
 IMAGE_BUILDER="stockstrategy-image-stage-$RELEASE"
@@ -316,7 +316,7 @@ docker exec "$IMAGE_BUILDER" /bin/sh -ec 'cp /tmp/easy-stock-backend /app/easy-s
 docker stop -t 1 "$IMAGE_BUILDER" >/dev/null
 docker commit --change 'USER 10001:10001' --change 'ENTRYPOINT ["/app/easy-stock-backend"]' --change 'CMD []' \
     --change "LABEL $MANAGED_LABEL=stockstrategy" --change "LABEL io.easy-stock.app-version=$RELEASE" \
-    --change 'LABEL io.easy-stock.release-note="Full-system linkage trial."' "$IMAGE_BUILDER" "$API_IMAGE" >/dev/null
+    --change "LABEL io.easy-stock.release-note=\"$RELEASE_NOTE\"" "$IMAGE_BUILDER" "$API_IMAGE" >/dev/null
 api_layers=$(docker image inspect --format '{{len .RootFS.Layers}}' "$API_IMAGE")
 expected_api_layers=$((api_base_layers + 1))
 [ "$api_layers" = "$expected_api_layers" ] || fail "Backend release image has $api_layers layers; expected $expected_api_layers from the pinned flat base."
