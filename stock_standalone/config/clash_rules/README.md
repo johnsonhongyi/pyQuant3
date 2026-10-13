@@ -8,10 +8,12 @@
 2. **`clash_custom_direct_script.js`**：
    * 适用于 Clash Verge Rev 的 **Script 扩展脚本**。
    * 采用 JavaScript 自动置顶注入直连规则，并注入 DNS 白名单。
+   * 每次生成配置时都会把 ChatGPT/Codex 登录、验证和连接域名置于最前，并统一走 `Research + AI`；Edge 不再有进程级直连覆盖。
 3. **`clash_dns_fakeip_filter.yaml`**：
    * DNS Fake-IP 过滤白名单，彻底防止 TUN 虚拟网卡把行情域名伪装为 `198.18.0.x`。
 4. **`apply_clash_rules.py`**：
    * 一键将本目录备份规则自动覆盖并部署至系统的 Clash Verge Rev 配置文件中。
+   * 同步对运行时配置做幂等补丁，确保上述同出口规则位于 `MATCH` 兜底之前。
 5. **`一键恢复Clash直连规则.bat`**：
    * 位于 `stock_standalone` 根目录下，双击即可全自动恢复。
 

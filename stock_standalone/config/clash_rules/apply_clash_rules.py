@@ -20,6 +20,68 @@ import requests
 CLASH_VERGE_REV_DIR = os.path.expandvars(r"%APPDATA%\io.github.clash-verge-rev.clash-verge-rev")
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# GPT/ChatGPT authentication and Codex requests must share one proxy group.
+PROTECTED_AI_RULES = (
+    "DOMAIN-SUFFIX,chatgpt.com,Research + AI",
+    "DOMAIN-SUFFIX,openai.com,Research + AI",
+    "DOMAIN-SUFFIX,oaistatic.com,Research + AI",
+    "DOMAIN-SUFFIX,oaiusercontent.com,Research + AI",
+    "DOMAIN-SUFFIX,oaistatsig.com,Research + AI",
+    "DOMAIN-SUFFIX,openaimerge.com,Research + AI",
+    "DOMAIN-SUFFIX,workos.com,Research + AI",
+    "DOMAIN-SUFFIX,workoscdn.com,Research + AI",
+    "DOMAIN,workos.imgix.net,Research + AI",
+    "DOMAIN-SUFFIX,ct.sendgrid.net,Research + AI",
+    "DOMAIN,challenges.cloudflare.com,Research + AI",
+)
+PROTECTED_AI_DOMAINS = {rule.split(",", 2)[1].lower() for rule in PROTECTED_AI_RULES}
+
+
+def patch_protected_ai_rules(content):
+    """Place managed ChatGPT/Codex routes before all generated profile rules."""
+    lines = content.splitlines()
+    rules_index = next(
+        (index for index, line in enumerate(lines) if re.match(r"^rules\s*:\s*(?:#.*)?$", line)),
+        None,
+    )
+    if rules_index is None:
+        return content, False
+
+    end_index = len(lines)
+    for index in range(rules_index + 1, len(lines)):
+        line = lines[index]
+        if line.strip() and not line[0].isspace() and not line.lstrip().startswith("#"):
+            end_index = index
+            break
+
+    rule_indent = "  "
+    for line in lines[rules_index + 1:end_index]:
+        indent_match = re.match(r"^(\s*)-\s+", line)
+        if indent_match:
+            rule_indent = indent_match.group(1)
+            break
+    kept_rules = []
+    for line in lines[rules_index + 1:end_index]:
+        raw = line.strip()
+        if raw.startswith("-"):
+            raw = raw[1:].strip()
+        raw = raw.split("#", 1)[0].strip().strip("\"'")
+        fields = [field.strip().strip("\"'") for field in raw.split(",")]
+        if (
+            len(fields) >= 2
+            and fields[0].upper() in ("DOMAIN", "DOMAIN-SUFFIX")
+            and fields[1].lower() in PROTECTED_AI_DOMAINS
+        ):
+            continue
+        if raw.lower() == "process-name,msedge.exe,direct":
+            continue
+        kept_rules.append(line)
+
+    managed_rules = [f"{rule_indent}- {rule}" for rule in PROTECTED_AI_RULES]
+    lines = lines[:rules_index + 1] + managed_rules + kept_rules + lines[end_index:]
+    return "\n".join(lines) + "\n", True
+
+
 def get_rule_backup_paths():
     base = CURRENT_DIR
     return {
@@ -60,13 +122,18 @@ def update_profiles_yaml(profiles_yaml_path):
         print(f"  [-] Warning on updating profiles.yaml: {e}")
 
 def patch_clash_runtime_yaml(clash_verge_yaml_path):
-    """直接对当前运行的 clash-verge.yaml 与 clash-verge-check.yaml 进行白名单与直连加固"""
+    """Patch generated runtime configs with stable AI egress rules and direct fallback."""
     for ypath in [clash_verge_yaml_path, clash_verge_yaml_path.replace("clash-verge.yaml", "clash-verge-check.yaml")]:
         if not os.path.exists(ypath):
             continue
         try:
             with open(ypath, 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
+
+            content, route_rules_patched = patch_protected_ai_rules(content)
+            if not route_rules_patched:
+                print(f"  [-] Warning: no top-level rules section found in {ypath}; skipped runtime patch")
+                continue
             
             # 1. 确保 proxy-groups 中 Microsoft, Apple, Download 的首选项为 DIRECT
             # 替换 Microsoft 代理组里的第一个项为 DIRECT

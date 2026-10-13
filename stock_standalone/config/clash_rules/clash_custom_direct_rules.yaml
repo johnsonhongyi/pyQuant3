@@ -17,11 +17,17 @@ prepend-rules:
   - DOMAIN-SUFFIX,local,DIRECT
   - DOMAIN-SUFFIX,lan,DIRECT
 
-  # Keep ChatGPT, authentication, challenges and assets on the same egress.
+  # Keep ChatGPT, Codex, authentication, challenges and assets on the same egress.
   - DOMAIN-SUFFIX,chatgpt.com,Research + AI
   - DOMAIN-SUFFIX,openai.com,Research + AI
   - DOMAIN-SUFFIX,oaistatic.com,Research + AI
   - DOMAIN-SUFFIX,oaiusercontent.com,Research + AI
+  - DOMAIN-SUFFIX,oaistatsig.com,Research + AI
+  - DOMAIN-SUFFIX,openaimerge.com,Research + AI
+  - DOMAIN-SUFFIX,workos.com,Research + AI
+  - DOMAIN-SUFFIX,workoscdn.com,Research + AI
+  - DOMAIN,workos.imgix.net,Research + AI
+  - DOMAIN-SUFFIX,ct.sendgrid.net,Research + AI
   - DOMAIN,challenges.cloudflare.com,Research + AI
 
   # ----------------------------------------------------------------------------
@@ -63,7 +69,6 @@ prepend-rules:
   - PROCESS-NAME,MpDefenderCoreService.exe,DIRECT # Windows Defender 病毒库与云保护
   - PROCESS-NAME,SDXHelper.exe,DIRECT           # Office 遥测与同步
   - PROCESS-NAME,onedrive.exe,DIRECT            # OneDrive 同步
-  - PROCESS-NAME,msedge.exe,DIRECT              # Edge 浏览器下载更新
   - PROCESS-NAME,NVDisplay.Container.exe,DIRECT # NVIDIA 显卡驱动更新
   - PROCESS-NAME,LogiOptionsMgr.exe,DIRECT      # 罗技鼠标外设驱动
 
