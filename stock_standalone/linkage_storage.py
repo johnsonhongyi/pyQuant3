@@ -27,6 +27,20 @@ logger = logging.getLogger(__name__)
 _database_gates = {}
 _database_gates_lock = threading.Lock()
 _database_owners = {}
+_SLOW_LOG_INTERVAL_SECONDS = 10 * 60
+_slow_log_times = {}
+_slow_log_lock = threading.Lock()
+
+
+def _should_log_slow_access(caller):
+    thread_name = caller[1]
+    now = time.monotonic()
+    with _slow_log_lock:
+        last_logged = _slow_log_times.get(thread_name)
+        if last_logged is not None and now - last_logged < _SLOW_LOG_INTERVAL_SECONDS:
+            return False
+        _slow_log_times[thread_name] = now
+        return True
 
 
 @contextmanager
@@ -41,8 +55,9 @@ def database_access(path, operation, timeout=4.0, read_only=False):
             elapsed = time.monotonic() - started
             if elapsed >= 0.25:
                 caller = (os.getpid(), threading.current_thread().name, operation, 'read')
-                logger.warning('[LINKAGE-DB-SLOW] database=%s caller=%s gate_wait_ms=0 directory_wait_ms=0 elapsed_ms=%.1f',
-                               identity, caller, elapsed * 1000)
+                if _should_log_slow_access(caller):
+                    logger.warning('[LINKAGE-DB-SLOW] database=%s caller=%s gate_wait_ms=0 directory_wait_ms=0 elapsed_ms=%.1f',
+                                   identity, caller, elapsed * 1000)
         return
     with _database_gates_lock:
         gate = _database_gates.setdefault(identity, threading.Lock())
@@ -72,9 +87,10 @@ def database_access(path, operation, timeout=4.0, read_only=False):
         gate.release()
         elapsed = time.monotonic() - started
         if elapsed >= 0.25:
-            logger.warning('[LINKAGE-DB-SLOW] database=%s caller=%s gate_wait_ms=%.1f directory_wait_ms=%.1f elapsed_ms=%.1f',
-                           identity, owner, (acquired - started) * 1000,
-                           directory_wait_ms, elapsed * 1000)
+            if _should_log_slow_access(owner):
+                logger.warning('[LINKAGE-DB-SLOW] database=%s caller=%s gate_wait_ms=%.1f directory_wait_ms=%.1f elapsed_ms=%.1f',
+                               identity, owner, (acquired - started) * 1000,
+                               directory_wait_ms, elapsed * 1000)
 
 
 def configure(connection):
