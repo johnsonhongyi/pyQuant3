@@ -2608,7 +2608,7 @@ DAY_DTYPE = np.dtype([
     ('high', np.uint32),
     ('low', np.uint32),
     ('close', np.uint32),
-    ('amount', np.uint32),
+    ('amount', np.float32),
     ('vol', np.uint32),
     ('_skip', np.uint32)
 ])

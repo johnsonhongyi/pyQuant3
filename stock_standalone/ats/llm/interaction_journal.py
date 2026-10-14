@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sys_utils import safe_resolve_path
+
 import hashlib
 import json
 import logging
@@ -437,7 +439,7 @@ def record_agent_interaction(
             "provider_id": provider_id,
             "fallback_error_code": fallback_error_code,
         }
-        key = str(Path(root).resolve())
+        key = str(safe_resolve_path(Path(root)))
         with _writers_lock:
             writer = _writers.get(key)
             if writer is None:
@@ -453,7 +455,7 @@ def record_agent_interaction(
 
 
 def interaction_journal_status(root: str | Path) -> Dict[str, Any]:
-    key = str(Path(root).resolve())
+    key = str(safe_resolve_path(Path(root)))
     with _writers_lock:
         writer = _writers.get(key)
     status = writer.snapshot() if writer is not None else {
@@ -469,7 +471,7 @@ def interaction_journal_status(root: str | Path) -> Dict[str, Any]:
 def recent_agent_interactions(root: str | Path, limit: int = 100) -> list[Dict[str, Any]]:
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
         return []
-    path = _database_path(Path(root).resolve())
+    path = _database_path(safe_resolve_path(Path(root)))
     if not path.is_file():
         return []
     try:
@@ -504,13 +506,75 @@ def recent_agent_interactions(root: str | Path, limit: int = 100) -> list[Dict[s
         return []
 
 
+def read_verified_shadow_interactions(root: str | Path, limit: int = 100) -> Dict[str, Any]:
+    """Read bounded full responses under one consistent, once-verified journal snapshot."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+        raise ValueError("shadow interaction limit must be between 1 and 100")
+    base = safe_resolve_path(Path(root))
+    path = _database_path(base)
+    empty = {"status": "EMPTY", "integrity": "EMPTY", "total_count": 0, "interactions": []}
+    with _writers_lock:
+        writer = _writers.get(str(base))
+    if writer is not None:
+        health = writer.snapshot()
+        if health.get("queued") or health.get("failed") or health.get("dropped"):
+            return {**empty, "status": "UNAVAILABLE", "integrity": "JOURNAL_PENDING_OR_FAILED"}
+    if not path.is_file():
+        return empty
+    connection = None
+    try:
+        connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0.2)
+        connection.execute("BEGIN")
+        valid, reason = _verify_journal_chain(connection)
+        if not valid:
+            return {**empty, "status": "UNAVAILABLE", "integrity": reason}
+        provenance = '%"provenance_status":"VALIDATED_AT_INGESTION"%'
+        total = connection.execute(
+            "SELECT COUNT(*) FROM agent_interactions i JOIN interaction_chain c ON c.request_id=i.request_id "
+            "WHERE c.record_json LIKE ?", (provenance,),
+        ).fetchone()[0]
+        rows = connection.execute(
+            "SELECT i.request_id, i.status, i.ticker, i.agent_type, i.as_of_time, i.model_id, "
+            "i.prompt_version, i.evidence_ids_json, i.error_code, i.provider_id, i.result_json, i.result_sha256 "
+            "FROM agent_interactions i JOIN interaction_chain c ON c.request_id=i.request_id "
+            "WHERE c.record_json LIKE ? ORDER BY i.completed_at DESC LIMIT ?", (provenance, limit),
+        ).fetchall()
+        interactions = []
+        for row in rows:
+            result = json.loads(row[10]) if row[10] else None
+            if result is not None:
+                result = validate_agent_envelope(result)
+                if hashlib.sha256(_canonical(result)).hexdigest() != row[11]:
+                    raise ValueError("JOURNAL_RESULT_HASH_MISMATCH")
+                metadata = result["metadata"]
+                if (metadata["request_id"] != row[0] or metadata["ticker"] != row[2]
+                        or result["agent_type"] != row[3] or metadata["as_of_time"] != row[4]
+                        or metadata["model_id"] != row[5] or metadata["prompt_version"] != row[6]
+                        or metadata["evidence_ids"] != json.loads(row[7])):
+                    raise ValueError("JOURNAL_RESULT_IDENTITY_MISMATCH")
+            interactions.append({
+                "request_id": str(row[0]), "status": str(row[1]), "ticker": str(row[2]),
+                "agent_type": str(row[3]), "as_of_time": str(row[4]), "model_id": str(row[5]),
+                "prompt_version": str(row[6]), "evidence_ids": json.loads(row[7]),
+                "error_code": str(row[8]), "provider_id": str(row[9]), "result": result,
+                "result_sha256": str(row[11]),
+            })
+        return {"status": "READY", "integrity": reason, "total_count": int(total), "interactions": interactions}
+    except (OSError, sqlite3.Error, ValueError, TypeError, RecursionError, UnicodeError):
+        logger.exception("Shadow journal batch read failed; returning no unverified responses")
+        return {**empty, "status": "UNAVAILABLE", "integrity": "JOURNAL_BATCH_READ_FAILED"}
+    finally:
+        if connection is not None:
+            connection.close()
+
+
 def get_agent_interaction_detail(root: str | Path, request_id: str) -> Optional[Dict[str, Any]]:
     if (
         not isinstance(request_id, str) or not request_id.strip()
         or len(request_id) > 128 or "\x00" in request_id
     ):
         return None
-    path = _database_path(Path(root).resolve())
+    path = _database_path(safe_resolve_path(Path(root)))
     if not path.is_file():
         return None
     try:

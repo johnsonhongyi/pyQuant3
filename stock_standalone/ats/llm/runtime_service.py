@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sys_utils import safe_resolve_path
+
 import json
 from pathlib import Path
 from typing import Any, Dict
@@ -96,8 +98,11 @@ def stage0_to_2_accepted(root: Path) -> bool:
 
 def create_runtime_control_thread(root: str | Path) -> LLMControlThread:
     """Create the status publisher; every execution gate remains independently enforced."""
-    resolved_root = Path(root).resolve()
+    resolved_root = safe_resolve_path(Path(root))
     config_path = resolved_root / "config" / "llm_config.yaml"
+    from sys_utils import get_app_root, get_conf_path
+    if resolved_root == safe_resolve_path(get_app_root()):
+        config_path = Path(get_conf_path("config/llm_config.yaml", base_dir=str(resolved_root)))
     authorization = _load_authorization(
         resolved_root / "config" / "llm_runtime_acceptance.json"
     )

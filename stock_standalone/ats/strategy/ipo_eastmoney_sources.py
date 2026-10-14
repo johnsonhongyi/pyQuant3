@@ -6,6 +6,8 @@ availability time, source identity and timezone; unsupported inputs stay UNREADY
 
 from __future__ import annotations
 
+from sys_utils import safe_resolve_path
+
 import json
 import math
 import statistics
@@ -197,7 +199,7 @@ def collect_ipo_facts(root: str | Path, ticker: str) -> Dict[str, Any]:
     """Acquire only fields with unambiguous meanings in the IPO issuance record."""
     try:
         config = IPODecisionConfigSnapshot.from_yaml(
-            str(Path(root).resolve() / "config" / "ipo_sentiment.yaml")
+            str(safe_resolve_path(Path(root)) / "config" / "ipo_sentiment.yaml")
         )
         row = fetch_ipo_row(ticker)
         as_of = _source_time(row.get("UP_DATE")) if row else None
@@ -278,7 +280,7 @@ def collect_financing_balance_change(root: str | Path) -> Dict[str, Any]:
     """Acquire exchange-reported aggregate margin-financing balances and persist the daily change."""
     try:
         config = IPODecisionConfigSnapshot.from_yaml(
-            str(Path(root).resolve() / "config" / "ipo_sentiment.yaml")
+            str(safe_resolve_path(Path(root)) / "config" / "ipo_sentiment.yaml")
         )
         payload = _request_json(_DATA_URL, {
             "reportName": "RPTA_RZRQ_LSHJ", "columns": "ALL", "source": "WEB",
@@ -317,7 +319,7 @@ def collect_listing_supply_pace(root: str | Path, lookahead_days: int = 20) -> D
     """Count source-dated IPO listings in the trailing calendar window."""
     try:
         config = IPODecisionConfigSnapshot.from_yaml(
-            str(Path(root).resolve() / "config" / "ipo_sentiment.yaml")
+            str(safe_resolve_path(Path(root)) / "config" / "ipo_sentiment.yaml")
         )
         rows = fetch_issue_calendar_rows(page_size=500)
         today = datetime.now(ZoneInfo(_TZ)).date()
@@ -438,7 +440,7 @@ def collect_listing_day_anchors(root: str | Path, ticker: str) -> Dict[str, Any]
     now = datetime.now(ZoneInfo(_TZ))
     try:
         config = IPODecisionConfigSnapshot.from_yaml(
-            str(Path(root).resolve() / "config" / "ipo_sentiment.yaml")
+            str(safe_resolve_path(Path(root)) / "config" / "ipo_sentiment.yaml")
         )
         if not config.verify_integrity():
             return {"status": "UNREADY", "reason": "IPO配置哈希校验失败"}
@@ -446,7 +448,7 @@ def collect_listing_day_anchors(root: str | Path, ticker: str) -> Dict[str, Any]
         listing_date = str(row.get("LISTING_DATE") or "")[:10]
         if not listing_date:
             return {"status": "UNREADY", "reason": "发行日历缺少上市日期"}
-        store = ListingAnchorStore(Path(root).resolve() / "config" / "listing_anchors.json")
+        store = ListingAnchorStore(safe_resolve_path(Path(root)) / "config" / "listing_anchors.json")
         existing = store.get(ticker, listing_date)
         if existing is not None:
             return {"status": "ALREADY_FROZEN", "ticker": ticker, "listing_date": listing_date}
@@ -604,7 +606,7 @@ def collect_market_breadth_and_industry(
     """Scrape paged A-share quotes; persist verified breadth and same-day industry PE median."""
     try:
         config = IPODecisionConfigSnapshot.from_yaml(
-            str(Path(root).resolve() / "config" / "ipo_sentiment.yaml")
+            str(safe_resolve_path(Path(root)) / "config" / "ipo_sentiment.yaml")
         )
         rows, as_of = _fetch_market_rows()
         if not as_of:
@@ -743,7 +745,7 @@ def collect_limit_up_break_rate(root: str | Path) -> Dict[str, Any]:
             }
         rate = zb_count / (zt_count + zb_count) * 100.0
         config = IPODecisionConfigSnapshot.from_yaml(
-            str(Path(root).resolve() / "config" / "ipo_sentiment.yaml")
+            str(safe_resolve_path(Path(root)) / "config" / "ipo_sentiment.yaml")
         )
         as_of = now.isoformat(timespec="seconds")
         saved = store_observation(
@@ -789,7 +791,7 @@ def collect_tdx_market_history_fields(root: str | Path, ticker: str) -> Dict[str
     """Derive broad-market turnover percentiles from dated SH/SZ index history."""
     try:
         config = IPODecisionConfigSnapshot.from_yaml(
-            str(Path(root).resolve() / "config" / "ipo_sentiment.yaml")
+            str(safe_resolve_path(Path(root)) / "config" / "ipo_sentiment.yaml")
         )
         from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
 
@@ -1049,7 +1051,7 @@ def collect_live_metrics(root: str | Path, ticker: str, ipo_row: Mapping[str, An
     """Collect timestamped quote and minute metrics outside the trading loop."""
     try:
         config = IPODecisionConfigSnapshot.from_yaml(
-            str(Path(root).resolve() / "config" / "ipo_sentiment.yaml")
+            str(safe_resolve_path(Path(root)) / "config" / "ipo_sentiment.yaml")
         )
         try:
             quote = fetch_tencent_stock_quote(ticker)

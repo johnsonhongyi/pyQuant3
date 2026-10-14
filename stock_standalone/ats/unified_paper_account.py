@@ -424,11 +424,13 @@ def pair_closed_trades(orders: Optional[Iterable[Dict[str, Any]]] = None) -> Lis
         price = _number(order.get("price"))
         volume = _number(order.get("volume"))
         timestamp = str(order.get("timestamp") or "")
+        fee = _number(order.get("fee"))
         if not code or price <= 0 or volume <= 0:
             continue
         if action in {"BUY", "ADD"}:
             lots.setdefault(code, []).append(
-                {"price": price, "remaining": volume, "timestamp": timestamp}
+                {"price": price, "remaining": volume, "timestamp": timestamp,
+                 "fee_per_share": fee / volume}
             )
             continue
         if action not in {"SELL", "REDUCE"}:
@@ -443,7 +445,7 @@ def pair_closed_trades(orders: Optional[Iterable[Dict[str, Any]]] = None) -> Lis
             if matched <= 0 or entry_price <= 0:
                 code_lots.pop(0)
                 continue
-            profit = (price - entry_price) * matched
+            profit = ((price - entry_price) - _number(lot.get("fee_per_share")) - fee / volume) * matched
             closed.append(
                 ClosedPaperTrade(
                     code=code,
@@ -453,7 +455,7 @@ def pair_closed_trades(orders: Optional[Iterable[Dict[str, Any]]] = None) -> Lis
                     exit_price=price,
                     volume=matched,
                     profit=profit,
-                    pnl_pct=(price - entry_price) / entry_price * 100.0,
+                    pnl_pct=profit / (entry_price * matched) * 100.0,
                 )
             )
             lot["remaining"] = _number(lot.get("remaining")) - matched

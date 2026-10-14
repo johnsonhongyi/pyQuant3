@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sys_utils import safe_resolve_path
+
 import json
 import os
 from pathlib import Path
@@ -17,6 +19,7 @@ from ats.llm.offline_learning import (
     OfflineLearningError,
     _hash,
     _hash_records,
+    _validate_time_forward_splits,
 )
 
 
@@ -109,6 +112,7 @@ def _verify_split(split: Any) -> Dict[str, Any]:
             all_rows.append(copied)
         normalized[split_name] = normalized_rows
 
+    _validate_time_forward_splits(normalized)
     ordered_rows = sorted(
         all_rows,
         key=lambda row: (row["listing_date"], row["ticker"], row["event_id"], row["candidate_id"]),
@@ -286,7 +290,7 @@ class SealedDatasetRepository:
                 "integrity": "逐批读取时复核内容哈希",
             }
         try:
-            with sqlite3.connect(str(self.index_path), timeout=0.2) as connection:
+            with sqlite3.connect(safe_resolve_path(self.index_path).as_uri() + "?mode=ro", uri=True, timeout=0.2) as connection:
                 row = connection.execute(
                     """SELECT COUNT(*), COALESCE(SUM(sample_count), 0),
                         COALESCE(SUM(event_group_count), 0), MAX(sealed_at)

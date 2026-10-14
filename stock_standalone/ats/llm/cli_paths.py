@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sys_utils import safe_resolve_path
+
 import os
 import shutil
 from pathlib import Path
@@ -15,11 +17,11 @@ def resolve_cli_path(value: Any, executable_name: str) -> str:
         expanded = os.path.expandvars(configured)
         candidate = Path(expanded).expanduser()
         if candidate.is_file():
-            return str(candidate.resolve())
+            return str(safe_resolve_path(candidate))
         if not any(separator in configured for separator in ("/", "\\")) and not candidate.suffix:
             found = shutil.which(configured)
             if found:
-                return str(Path(found).resolve())
+                return str(safe_resolve_path(Path(found)))
         else:
             return ""
 
@@ -29,20 +31,20 @@ def resolve_cli_path(value: Any, executable_name: str) -> str:
             agy_bin = Path(local_app_data) / "agy" / "bin"
             for candidate in (agy_bin / "agy.exe", agy_bin / "agy.ps1"):
                 if candidate.is_file():
-                    return str(candidate.resolve())
+                    return str(safe_resolve_path(candidate))
     if executable_name == "codex":
         local_app_data = os.environ.get("LOCALAPPDATA")
         if local_app_data:
             base = Path(local_app_data) / "OpenAI" / "Codex" / "bin"
             direct = base / "codex.exe"
             if direct.is_file():
-                return str(direct.resolve())
+                return str(safe_resolve_path(direct))
             try:
                 candidates = [path for path in base.glob("*\\codex.exe") if path.is_file()]
                 if candidates:
                     newest = max(candidates, key=lambda path: path.stat().st_mtime_ns)
-                    return str(newest.resolve())
+                    return str(safe_resolve_path(newest))
             except OSError:
                 pass
     found = shutil.which(executable_name)
-    return str(Path(found).resolve()) if found else ""
+    return str(safe_resolve_path(Path(found))) if found else ""

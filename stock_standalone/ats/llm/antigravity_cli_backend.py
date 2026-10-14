@@ -8,6 +8,8 @@ OS-enforced process/tool isolation have been accepted outside this module.
 
 from __future__ import annotations
 
+from sys_utils import safe_resolve_path
+
 import json
 import tempfile
 import time
@@ -135,7 +137,7 @@ class AntigravityCLIBackend:
         self.tool_access_isolation_accepted = tool_access_isolation_accepted is True
         self.remote_egress_isolation_accepted = remote_egress_isolation_accepted is True
         self.remote_policy = dict(remote_policy) if isinstance(remote_policy, Mapping) else {}
-        self.working_directory = str(Path(working_directory).resolve()) if working_directory else ""
+        self.working_directory = str(safe_resolve_path(Path(working_directory))) if working_directory else ""
 
     @staticmethod
     def _resolve_cli_path(explicit_path: Optional[str] = None) -> str:

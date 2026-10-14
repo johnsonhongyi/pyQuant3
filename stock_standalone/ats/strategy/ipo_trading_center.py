@@ -34,6 +34,7 @@ import copy
 import datetime
 import inspect
 import hashlib
+from sys_utils import get_app_root, safe_resolve_path
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Any, Tuple, Union, Mapping
 
@@ -61,7 +62,7 @@ from ats.strategy.subnew_deployment_gate import (
 
 logger = logging.getLogger("IPOTradingCenter")
 
-TRADING_LEDGER_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "config", "ipo_trading_ledger.json")
+TRADING_LEDGER_FILE = os.path.join(get_app_root(), "ats", "config", "ipo_trading_ledger.json")
 S5_MIN_RR_THRESHOLD = 2.5
 S5_MAX_TTL_TRADING_MINUTES = 15.0
 
@@ -361,7 +362,10 @@ class IPOTradingCenter:
                  exit_engine: Optional[ProactiveExitEngine] = None,
                  deployment_gate: Optional[SubnewDeploymentGate] = None,
                  directive_executor: Optional[Callable[[Any], Any]] = None,
-                 r9_gate_context_provider: Optional[Callable[[IPOOrderDirective], Mapping[str, Any]]] = None):
+                 r9_gate_context_provider: Optional[Callable[[IPOOrderDirective], Mapping[str, Any]]] = None,
+                 learning_root: Optional[str] = None):
+        self._learning_root = safe_resolve_path(learning_root if learning_root is not None else get_app_root())
+        self._default_ledger_file = str(self._learning_root / "ats/config/ipo_trading_ledger.json")
         self.total_capital = total_capital       # 虚拟/实盘总资金池 (默认 100 万基准)
         self.available_cash = total_capital
         self._ledger_file = ledger_file
@@ -1494,7 +1498,6 @@ class IPOTradingCenter:
         if not isinstance(causal_chain, list):
             causal_chain = list(getattr(passport, "causal_chain", ()) or ())
         try:
-            from pathlib import Path
             from ats.llm.learning_snapshot_store import record_decision_snapshot
 
             configuration_version = str(
@@ -1511,7 +1514,7 @@ class IPOTradingCenter:
                 "trade_plan": plan_serializer() if callable(plan_serializer) else None,
             }
             saved = record_decision_snapshot(
-                Path(__file__).resolve().parents[2],
+                self._learning_root,
                 ticker=str(directive.code or "").strip().zfill(6),
                 event_id=event_id,
                 decision=str(gate_passport.get("decision") or getattr(passport, "final_decision", "BLOCK")),
@@ -2124,7 +2127,7 @@ class IPOTradingCenter:
         """【💾 持久化账本加载】冷启动瞬间恢复历史持仓、平仓记录、指令历史与信号迭代日志"""
         target_file = getattr(self, "_ledger_file", None)
         if not target_file and getattr(self, "_auto_load_ledger", False):
-            target_file = TRADING_LEDGER_FILE
+            target_file = getattr(self, "_default_ledger_file", TRADING_LEDGER_FILE)
         if not target_file or not os.path.exists(target_file):
             return
         try:
@@ -2206,7 +2209,7 @@ class IPOTradingCenter:
         """【💾 原子写盘】将活跃持仓、已平仓战绩、指令历史与信号迭代日志持久化落盘"""
         target_file = getattr(self, "_ledger_file", None)
         if not target_file and getattr(self, "_auto_load_ledger", False):
-            target_file = TRADING_LEDGER_FILE
+            target_file = getattr(self, "_default_ledger_file", TRADING_LEDGER_FILE)
         if not target_file:
             return
         try:

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from sys_utils import safe_resolve_path
+
 import os
 import signal
 import subprocess
@@ -130,7 +132,7 @@ def run_bounded_cli(
                 "stdin": input_file,
                 "stdout": subprocess.PIPE,
                 "stderr": subprocess.PIPE,
-                "cwd": str(Path(cwd).resolve()),
+                "cwd": str(safe_resolve_path(Path(cwd))),
                 "shell": False,
                 "bufsize": 0,
             }

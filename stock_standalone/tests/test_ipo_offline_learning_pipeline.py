@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -45,7 +45,8 @@ def config_snapshot():
 def _candidate(config_snapshot, index: int) -> dict:
     from tools.run_ipo_llm_simulation import _synthetic_value
 
-    cutoff = CUTOFF
+    point = datetime.fromisoformat("2026-09-20T01:00:00+00:00") + timedelta(days=index * 3)
+    cutoff = point.isoformat()
     features = {}
     for field_id, contract in config_snapshot.data_contract.fields.items():
         features[field_id] = {
@@ -78,13 +79,13 @@ def _candidate(config_snapshot, index: int) -> dict:
         "event_id": f"ipo-event-{index}",
         "listing_date": (date(2026, 9, 20) + timedelta(days=index)).isoformat(),
         "cutoff": cutoff,
-        "matured_at": MATURED_AT,
+        "matured_at": (point + timedelta(days=1, hours=6)).isoformat(),
         "labels_mature": True,
         "label_source": "fixture:reviewed-outcome.v1",
         "review_decision": "ACCEPTED",
         "outcome_evidence_ids": [f"outcome:{index + 1:048x}"],
         "reviewed_by": "offline-fixture-reviewer",
-        "reviewed_at": REVIEWED_AT,
+        "reviewed_at": (point + timedelta(days=1, hours=7)).isoformat(),
         "review_draft_hash": f"{index + 1:064x}",
         "input_snapshot": snapshot,
         "input_snapshot_hash": compute_input_snapshot_hash(snapshot),
@@ -182,6 +183,138 @@ def test_training_dataset_fails_closed_without_matching_human_review(tmp_path, c
             generated_at=GENERATED_AT,
             review_db_path=review_db,
         )
+
+
+@pytest.mark.parametrize("late_field", ["matured_at", "reviewed_at"])
+def test_time_forward_split_rejects_labels_unavailable_at_holdout(tmp_path, config_snapshot, late_field):
+    candidates = [_candidate(config_snapshot, index) for index in range(3)]
+    candidates[0][late_field] = candidates[1]["cutoff"]
+    if late_field == "matured_at":
+        candidates[0]["reviewed_at"] = candidates[1]["cutoff"]
+    review_db = tmp_path / "review-ledger.sqlite"
+    _write_review_ledger(review_db, candidates)
+    with pytest.raises(OfflineLearningError, match="time-forward leakage"):
+        build_offline_datasets(candidates, config_snapshot=config_snapshot,
+                               generated_at=GENERATED_AT, review_db_path=review_db)
+
+
+def test_offline_command_seals_reviewed_batch_and_blocks_missing_audit(tmp_path, config_snapshot):
+    from tools.run_ipo_offline_learning import build_reviewed_dataset
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "ipo_sentiment.yaml").write_bytes((APP_ROOT / "config/ipo_sentiment.yaml").read_bytes())
+    candidates = [_candidate(config_snapshot, index) for index in range(3)]
+    candidates_path = tmp_path / "candidates.json"
+    candidates_path.write_text(json.dumps(candidates), encoding="utf-8")
+    blocked = build_reviewed_dataset(tmp_path, candidates_path, seal=True)
+    assert blocked["status"] == "BLOCKED"
+    assert not (tmp_path / "data/ipo_learning/sealed_datasets").exists()
+    reviews = tmp_path / "logs/ipo_learning_reviews.sqlite"
+    reviews.parent.mkdir()
+    _write_review_ledger(reviews, candidates)
+    report = build_reviewed_dataset(tmp_path, candidates_path, seal=True)
+    assert report["status"] == "SEALED_AND_VERIFIED"
+    assert report["training_performed"] is False
+    assert report["order_submitted"] is False
+    assert report["model_promoted"] is False
+    sealed = SealedDatasetRepository(tmp_path / "data/ipo_learning/sealed_datasets", create=False)
+    assert sealed.load(report["dataset_hash"])["sft"]["sample_count"] == 3
+
+
+def test_sealed_load_rechecks_time_boundary(tmp_path, config_snapshot):
+    candidates = [_candidate(config_snapshot, index) for index in range(3)]
+    review_db = tmp_path / "review-ledger.sqlite"
+    _write_review_ledger(review_db, candidates)
+    dataset = build_offline_datasets(candidates, config_snapshot=config_snapshot,
+                                     generated_at=GENERATED_AT, review_db_path=review_db)
+    dataset["sft"]["splits"]["train"][0]["reviewed_at"] = dataset["sft"]["splits"]["test"][0]["cutoff"]
+    with pytest.raises(OfflineLearningError, match="time-forward leakage"):
+        SealedDatasetRepository(tmp_path / "sealed").seal(dataset)
+
+
+def test_inventory_of_missing_root_is_read_only_and_explicitly_blocked(tmp_path):
+    from ats.llm.learning_progress import collect_learning_progress
+
+    root = tmp_path / "not-created"
+    report = collect_learning_progress(root)
+    assert not root.exists()
+    assert report["read_only"] is True
+    assert report["status"] == "BLOCKED"
+    assert report["components"]["sources"]["status"] == "UNAVAILABLE"
+    assert report["components"]["sealed_datasets"]["status"] == "EMPTY"
+    assert report["training_performed"] is False
+    assert report["model_promoted"] is False
+    assert report["order_submitted"] is False
+
+
+def test_inventory_reports_corrupt_review_database_as_unavailable(tmp_path):
+    from ats.llm.learning_progress import collect_learning_progress
+
+    database = tmp_path / "data/ipo_learning/outcome_reviews.sqlite"
+    database.parent.mkdir(parents=True)
+    database.write_bytes(b"invalid database")
+    report = collect_learning_progress(tmp_path)
+    assert report["components"]["outcome_reviews"]["status"] == "UNAVAILABLE"
+    assert "verified_count" not in report["components"]["outcome_reviews"]
+
+
+def test_learning_inventory_does_not_count_malformed_outcome_review(tmp_path):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from ats.llm.learning_progress import _outcome_inventory
+    from ats.strategy.ipo_outcome_labels import build_matured_outcome
+
+    sessions = ["2026-09-01", "2026-09-02", "2026-09-03"]
+    evidence = build_matured_outcome(
+        ticker="000001", listing_date="2026-08-31", issue_price=10.0,
+        daily_bars=[{"date": day, "open": 10.0, "high": 11.0, "low": 9.5, "close": 10.5}
+                    for day in sessions],
+        source_id="fixture.daily", source_version="fixture.v1", source_timezone="Asia/Shanghai",
+        as_of_time=datetime(2026, 9, 3, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+        available_at=datetime(2026, 9, 3, 15, 1, tzinfo=ZoneInfo("Asia/Shanghai")),
+        trading_sessions=sessions,
+    )
+    evidence_dir = tmp_path / "data/ipo_learning/outcome_evidence"
+    evidence_dir.mkdir(parents=True)
+    (evidence_dir / "fixture.json").write_text(json.dumps(evidence), encoding="utf-8")
+    reviews = tmp_path / "data/ipo_learning/outcome_reviews.sqlite"
+    with sqlite3.connect(reviews) as connection:
+        connection.execute("CREATE TABLE outcome_reviews (review_id TEXT, evidence_id TEXT, evidence_hash TEXT, decision TEXT, reviewer TEXT, reason TEXT, reviewed_at_utc TEXT)")
+        connection.execute("INSERT INTO outcome_reviews VALUES ('review-1', ?, ?, 'ACCEPTED', '', '', 'bad-time')",
+                           (evidence["evidence_id"], evidence["evidence_hash"]))
+
+    inventory = _outcome_inventory(tmp_path)
+    assert inventory["status"] == "DEGRADED"
+    assert inventory["invalid_review_count"] == 1
+    assert inventory["review_counts"]["ACCEPTED"] == 0
+    assert inventory["review_counts"]["PENDING_HUMAN_REVIEW"] == 1
+
+
+def test_acquisition_report_concurrent_writers_use_separate_temp_files(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from tools.run_ipo_data_acquisition import _write_latest_report
+
+    reports = [{"ticker": str(index)} for index in range(4)]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(lambda report: _write_latest_report(report, tmp_path), reports))
+    assert all(report["report_persistence"]["status"] == "SAVED" for report in reports), reports
+    path = tmp_path / "data/ipo_learning/acquisition.latest.json"
+    assert json.loads(path.read_text(encoding="utf-8"))["ticker"] in {str(i) for i in range(4)}
+    assert not list(path.parent.glob("*.tmp"))
+
+
+def test_acquisition_report_rejects_nan_without_replacing_last_good_report(tmp_path):
+    from tools.run_ipo_data_acquisition import _write_latest_report
+
+    _write_latest_report({"ticker": "301689"}, tmp_path)
+    report = {"value": float("nan")}
+    _write_latest_report(report, tmp_path)
+    assert report["report_persistence"]["status"] == "FAILED"
+    path = tmp_path / "data/ipo_learning/acquisition.latest.json"
+    assert json.loads(path.read_text(encoding="utf-8"))["ticker"] == "301689"
+    assert not list(path.parent.glob("*.tmp"))
 
 
 def test_training_input_rejects_future_outcomes_and_unreviewed_candidates(config_snapshot):

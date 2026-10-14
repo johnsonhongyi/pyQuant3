@@ -6,7 +6,6 @@ from __future__ import annotations
 from importlib import metadata
 from pathlib import Path
 from typing import Any, Dict, List, Mapping
-from urllib.parse import urlsplit
 
 from ats.llm.cli_paths import resolve_cli_path
 
@@ -35,13 +34,11 @@ def _distribution_status(distribution: str) -> str:
 
 
 def _is_loopback_url(value: Any) -> bool:
-    if not isinstance(value, str):
-        return False
     try:
-        parsed = urlsplit(value)
-        host = (parsed.hostname or "").lower()
-        return parsed.scheme == "http" and host in {"127.0.0.1", "localhost", "::1"}
-    except ValueError:
+        from ats.llm.ollama_backend import local_ollama_url
+        local_ollama_url(value)
+        return True
+    except (TypeError, ValueError):
         return False
 
 
@@ -347,17 +344,26 @@ def inspect_provider_preflight(
     elif backend_name == "ollama_http":
         result["mode"] = "loopback HTTP"
         result["locality"] = "本机候选（未探测服务）"
-        remote_closed = settings.get("allow_remote") is False
+        remote_closed = settings.get("allow_remote") is False and settings.get("fallback_backend") in (None, "")
         checks.append(_check(
             "远端回退", "通过" if remote_closed else "阻断",
             "显式关闭" if remote_closed else "本机候选必须显式关闭远端回退",
         ))
         url_ok = _is_loopback_url(backend.get("base_url"))
-        model_ok = isinstance(backend.get("model"), str) and bool(backend.get("model", "").strip())
+        model_ok = (isinstance(backend.get("model"), str)
+                    and bool(backend.get("model", "").strip()) and len(backend["model"]) <= 160)
         checks.append(_check("服务地址", "通过" if url_ok else "阻断", "HTTP loopback" if url_ok else "仅允许明确的 loopback HTTP 地址"))
         checks.append(_check("模型标识", "通过" if model_ok else "未就绪", "已配置" if model_ok else "缺少模型标识"))
-        checks.append(_check("服务探活", "未探测", "不会在 UI 轮询中发起网络请求"))
-        checks.append(_check("服务资源/结构化输出", "待验收", "缺少运行位置、取消/关闭与原生 Schema 验收证据"))
+        from ats.llm.ollama_backend import ollama_acceptance_matches
+        local_accepted = (_runtime_authorization_ready(authorization)
+                          and ollama_acceptance_matches(config_path, backend, authorization))
+        checks.append(_check("本机模型/Schema 验收绑定", "通过" if local_accepted else "待验收",
+                             "验收与当前 URL/模型/Schema 及探针内容哈希一致" if local_accepted
+                             else "缺少匹配的 ollama_provider_acceptance.json；通用布尔授权不足以启用模型"))
+        checks.append(_check("服务探活", "通过" if local_accepted else "待验收",
+                             "复用独立本机 Provider 验收；UI 不发网络请求" if local_accepted else "先执行本机结构化接口探针并独立验收"))
+        checks.append(_check("服务资源/结构化输出", "通过" if local_accepted else "待验收",
+                             "已记录本机 Provider/Worker 隔离验收" if local_accepted else "原生 Schema 适配已接入；资源与 Worker 仍需验收"))
     else:
         checks.append(_check("Provider", "阻断", "未知 Provider 必须失败关闭；禁止自动回退"))
 
@@ -378,9 +384,10 @@ def inspect_provider_preflight(
     else:
         result["state"] = "READY"
     result["execution_allowed"] = (
-        result["state"] == "READY" and backend_name in {"antigravity_cli", "codex_cli"}
+        result["state"] == "READY" and backend_name in {"antigravity_cli", "codex_cli", "ollama_http"}
         and _runtime_authorization_ready(
-            authorization, approval.get("approval_id"), remote_required=True
+            authorization, approval.get("approval_id") if backend_name != "ollama_http" else None,
+            remote_required=backend_name != "ollama_http",
         )
     )
     return result

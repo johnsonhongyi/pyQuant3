@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from sys_utils import safe_resolve_path
+
 import json
 import html
 import math
@@ -717,7 +719,7 @@ def _collect_market_pulse_field_observations(root: Path) -> Dict[str, Dict[str, 
 
         database_path = Path(market_pulse_db.DB_PATH)
         if not database_path.is_absolute():
-            database_path = (root / database_path).resolve()
+            database_path = safe_resolve_path(root / database_path)
         if not database_path.is_file():
             return {}
         connection = sqlite3.connect(
@@ -807,7 +809,7 @@ def _configured_turnover_tracker(root: Path) -> Any:
         max_gap = settings["max_sample_gap_trading_minutes"]
         if isinstance(max_gap, bool) or not isinstance(max_gap, (int, float)):
             return None
-        key = (str(root.resolve()), snapshot.config_hash)
+        key = (str(safe_resolve_path(root)), snapshot.config_hash)
         with _DISPLAY_TURNOVER_TRACKERS_LOCK:
             tracker = _DISPLAY_TURNOVER_TRACKERS.get(key)
             if tracker is None:
@@ -1083,7 +1085,7 @@ def _collect_local_source_health(root: Path) -> List[Dict[str, str]]:
         import market_pulse_db
         database_path = Path(market_pulse_db.DB_PATH)
         if not database_path.is_absolute():
-            database_path = (root / database_path).resolve()
+            database_path = safe_resolve_path(root / database_path)
         if not database_path.is_file():
             rows.append({
                 "source": "Market Pulse 日情绪", "status": "数据库不存在",
@@ -1367,6 +1369,15 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
             )
         else:
             dataset_status = "封存仓库已接入，当前 0 批"
+        offline_batch = _read_json(
+            root / "data/ipo_learning/offline_pipeline.latest.json", max_bytes=64 * 1024,
+        ) or {}
+        if offline_batch:
+            dataset_status += (
+                f"；最近离线操作 {_safe_text(offline_batch.get('status'), 64)}"
+                f" / {_safe_text(offline_batch.get('generated_at'), 80)}"
+                f" / {_safe_text(offline_batch.get('reason'), 180)}"
+            )
         if replay_summary["status"] != "AVAILABLE":
             shadow_status = "等待全量回放报告"
         elif (
@@ -1379,6 +1390,14 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
             shadow_status = (
                 f"回放存在 {replay_summary.get('unready_cutoff_count', 0)} 个未就绪时点，影子评估阻断"
             )
+        shadow_evaluation_report = _read_json(
+            root / "data/ipo_learning/shadow_evaluation.latest.json", max_bytes=512 * 1024,
+        ) or {}
+        shadow_status += (
+            f"；LLM 影子 {_safe_text(shadow_evaluation_report.get('state') or 'NOT_STARTED', 64)}"
+            f" / 已评估分组 {_nonnegative_count(shadow_evaluation_report.get('evaluated_group_count'))}"
+            f" / {_safe_text(shadow_evaluation_report.get('generated_at'), 80)}"
+        )
         shadow_learning = _read_json(
             root / "data" / "ipo_learning" / "shadow_learning.latest.json"
         ) or {}
@@ -1410,7 +1429,9 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
             f"Gate 完整输入快照 {snapshot_summary['snapshot_count']} 条，待结果标签 {snapshot_summary['waiting_outcome_count']} 条；"
             f"封存仓库 {dataset_status}；回放：{shadow_status}；"
             f"只读情绪候选训练 {local_training} / 已审核样本 {local_training_count}；"
-            "Gate 决策快照保存规则 Proposal；D1-D3 成熟标签采集已接入并待人工复核；LLM SFT/DPO 训练执行器和模型晋级仍未接入"
+            "Gate 决策快照保存规则 Proposal；D1-D3 成熟标签待人工复核；"
+            "离线构建/封存入口 tools/run_ipo_offline_learning.py，报告 offline_pipeline.latest.json；"
+            "LLM SFT/DPO 训练执行器和模型晋级仍未接入"
         )
         effect_metrics = replay_summary.get("effect_metrics", {})
         measured_metric_count = sum(
@@ -2118,7 +2139,7 @@ def _collect_outcome_label_rows(root: Path) -> List[Dict[str, str]]:
                 "review": review_status if item.get("review_status") == "PENDING_HUMAN_REVIEW" else "待检查",
                 "evidence_id": evidence_id,
                 "evidence_hash": evidence_hash,
-                "evidence_path": str(path.resolve()),
+                "evidence_path": str(safe_resolve_path(path)),
             })
         except (OSError, UnicodeError, ValueError, TypeError):
             continue
@@ -2388,7 +2409,13 @@ class _LearningMonitorWorker(QThread):
             or result.get("evidence_hash") != payload.get("evidence_hash")
         ):
             return False, _safe_text(result.get("reason"), 160) or "标签证据复核校验失败。"
-        return True, "决定已写入追加式审计库；原始证据未修改，训练授权仍关闭。"
+        try:
+            from ats.llm.shadow_evaluation import save_shadow_evaluation
+            evaluation = save_shadow_evaluation(self._root)
+            detail = _safe_text(evaluation.get("state"), 80)
+        except Exception as exc:
+            detail = f"重算失败:{type(exc).__name__}"
+        return True, f"决定已写入追加式审计库；影子评估 {detail}；训练与交易授权仍关闭。"
 
     def _append_review(self, review: Dict[str, str]) -> Tuple[bool, str]:
         path = self._root / "logs" / "ipo_learning_events.jsonl"
@@ -2753,6 +2780,11 @@ class _SourceAcquisitionWorker(QThread):
                     result["shadow_training"] = train_shadow_candidate(self._root)
             except Exception as exc:
                 result["gate_reader_refresh"] = f"UNREADY:{type(exc).__name__}"
+            try:
+                from ats.llm.shadow_evaluation import save_shadow_evaluation
+                result["shadow_evaluation"] = save_shadow_evaluation(self._root)
+            except Exception as exc:
+                result["shadow_evaluation"] = {"state": "UNREADY", "reason": type(exc).__name__}
         except Exception as exc:
             detail = f"{type(exc).__name__}: {_safe_text(exc, 260)}"
             result = {"status": "UNREADY", "reason": detail}

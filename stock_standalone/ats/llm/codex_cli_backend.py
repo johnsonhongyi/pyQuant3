@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from sys_utils import safe_resolve_path
+
 import json
 import shutil
 import tempfile
@@ -32,7 +34,7 @@ class CodexCLIBackend:
     ) -> None:
         self.cli_path = cli_path
         self.model_id = model_id
-        self.working_directory = str(Path(working_directory).resolve())
+        self.working_directory = str(safe_resolve_path(Path(working_directory)))
         self.remote_policy = dict(remote_policy)
         self._allow_remote = allow_remote_invocation is True
         self._process_isolation = process_tree_isolation_accepted is True

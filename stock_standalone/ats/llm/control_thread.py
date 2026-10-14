@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sys_utils import safe_resolve_path
+
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
@@ -56,7 +58,7 @@ class LLMControlThread(threading.Thread):
             raise ValueError("worker must be an LLMWorkerProcess")
         if not isinstance(provider_preflight, Mapping) or not isinstance(authorization, Mapping):
             raise ValueError("preflight and authorization must be mappings")
-        self._root = Path(root).resolve()
+        self._root = safe_resolve_path(Path(root))
         self._worker = worker
         self._preflight = dict(provider_preflight)
         self._authorization = dict(authorization)

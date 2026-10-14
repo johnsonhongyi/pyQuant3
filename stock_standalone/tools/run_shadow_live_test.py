@@ -16,10 +16,12 @@ import sys
 import time
 from typing import Any, Dict, Optional
 
-_CUR_DIR = os.path.dirname(os.path.abspath(__file__))
-_PROJECT_ROOT = os.path.dirname(_CUR_DIR)
-if _PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, _PROJECT_ROOT)
+if not getattr(sys, "frozen", False) and "__compiled__" not in globals():
+    _source_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _source_root not in sys.path:
+        sys.path.insert(0, _source_root)
+from sys_utils import get_app_root, safe_resolve_path
+_PROJECT_ROOT = str(safe_resolve_path(get_app_root()))
 
 
 class ShadowTestHealthMonitor:
@@ -137,6 +139,8 @@ def run_shadow_test(
     candidate_codes: Optional[list[str]] = None,
     log_dir: str = "logs/shadow_reports",
     isolated_paper_state_dir: Optional[str] = None,
+    configured_fees: bool = False,
+    require_fresh_market: bool = False,
 ) -> Dict[str, Any]:
     setup_shadow_environment()
     monitor = ShadowTestHealthMonitor(
@@ -211,7 +215,9 @@ def run_shadow_test(
             except (ValueError, OSError) as exc:
                 raise ValueError(f"shadow output path escapes its isolated root: {path}") from exc
         adapter = PaperExecutionAdapter(
-            state_file_path=os.path.join(state_root, "paper_account_state.json")
+            state_file_path=os.path.join(state_root, "paper_account_state.json"),
+            **({"commission_rate": 0.0000754, "sell_extra_fee": 5.0,
+                "register_reentry": False} if configured_fees else {}),
         )
         tk_service = TradingKernelService(
             journal_path=os.path.join(state_root, "kernel_trace.jsonl"),
@@ -222,6 +228,14 @@ def run_shadow_test(
         if tk_service.mode != "PAPER" or tk_service.executor is not adapter:
             raise RuntimeError("isolated TK service did not remain in PAPER mode")
         gateway = KernelGateway(service=tk_service)
+        if require_fresh_market:
+            codes = sorted(set(codes) | set(gateway.get_positions()))
+            if not adapter.get_restore_status()["ready"]:
+                raise RuntimeError(adapter.get_restore_status()["block_reason"])
+            adapter._last_saved_fingerprint = ""
+            adapter._save_state()
+            if not os.path.exists(adapter._state_file):
+                raise RuntimeError("INITIAL_PAPER_STATE_NOT_PERSISTED")
         paper_execution = "CONNECTED"
 
     executor = (
@@ -232,19 +246,39 @@ def run_shadow_test(
         auto_load_ledger=False,
         ledger_file=os.path.join(state_root, "ats_shadow_ledger.json") if gateway is not None else None,
         directive_executor=executor,
+        **({"learning_root": report_root} if require_fresh_market else {}),
     ) if codes else None
 
     for round_idx in range(1, target_rounds + 1):
+        if require_fresh_market:
+            from sys_utils import is_active_trading_hours
+            if os.path.exists(os.path.join(log_dir, "STOP")):
+                break
+            if not is_active_trading_hours(bypass=False):
+                _write_auto_status(log_dir, {"status": "WAITING_MARKET_SESSION", "mode": "PAPER",
+                                            "account": gateway.get_account_snapshot()})
+                time.sleep(min(interval_seconds, 60.0))
+                continue
         signals = []
         directives = []
         positions = {}
         paper_results = []
         directive_audit = []
+        stale_count = 0
         try:
             if detector is not None and center is not None:
                 for code in codes:
+                    if require_fresh_market:
+                        if os.path.exists(os.path.join(log_dir, "STOP")):
+                            return last_metrics
+                        _write_auto_status(log_dir, {"status": "SCANNING", "mode": "PAPER", "code": code,
+                                                    "candidate_count": len(codes), "fresh_count": len(signals),
+                                                    "stale_count": stale_count})
                     signal = detector.analyze_stock(code, force_refresh=True)
                     if signal is None or float(getattr(signal, "price", 0.0) or 0.0) <= 0:
+                        continue
+                    if require_fresh_market and not _fresh_signal(signal):
+                        stale_count += 1
                         continue
                     signals.append(signal)
                     candidate_service.update_candidate(
@@ -252,12 +286,24 @@ def run_shadow_test(
                         pct=signal.change_pct, deviation=signal.vwap_diff_pct,
                         source="ATS_SHADOW", observed_at=datetime.datetime.now().isoformat(),
                     )
+                if require_fresh_market:
+                    signals = [signal for signal in signals if _fresh_signal(signal)]
                 center.submit_batch_reports(signals)
+                if require_fresh_market:
+                    for signal in signals:
+                        adapter.update_market_price(signal.code, signal.price)
                 directives = center.get_pending_directives()
                 paper_results = []
                 directive_audit = []
                 if gateway is not None:
                     for directive in directives:
+                        if require_fresh_market:
+                            from sys_utils import is_active_trading_hours
+                            source = next((signal for signal in signals
+                                           if signal.code == getattr(directive, "code", "")), None)
+                            if (not is_active_trading_hours(bypass=False) or source is None
+                                    or not _fresh_signal(source)):
+                                continue
                         executed = bool(center.execute_directive(directive))
                         paper_results.append(executed)
                         envelope = getattr(directive, "audit_envelope", None) or {}
@@ -292,6 +338,8 @@ def run_shadow_test(
                 "paper_executed_count": sum(1 for item in paper_results if item),
                 "paper_order_count": len(gateway.get_order_history()) if gateway is not None else 0,
                 "directive_audit": directive_audit,
+                "stale_signal_count": stale_count,
+                "account": gateway.get_account_snapshot() if gateway is not None and require_fresh_market else {},
                 "pipeline_status": (
                     "ATS_ARBITRATED_ISOLATED_TK_PAPER" if gateway is not None
                     else "ATS_ARBITRATED_PAPER_NOT_CONNECTED"
@@ -306,6 +354,21 @@ def run_shadow_test(
                 paper_execution=paper_execution,
                 paper_execution_scope="ISOLATED",
             )
+            if require_fresh_market:
+                if not signals:
+                    last_metrics["status"] = "WAITING_FRESH_MARKET_DATA"
+                from ats.unified_paper_account import reconcile_account
+                last_metrics["account_reconciliation"] = reconcile_account(gateway.get_account_read_model())
+                replayed, replay_cash, issues = adapter._replay_order_ledger(
+                    adapter.orders, adapter.initial_capital, adapter.ledger_baseline)
+                issues = adapter._compare_snapshot_to_ledger(
+                    adapter.account.positions, adapter.account.cash, replayed, replay_cash, issues)
+                last_metrics["cash_position_reconciliation"] = {"status": "PASS" if not issues else "FAIL",
+                                                                 "issues": issues, "replayed_cash": replay_cash}
+                if issues:
+                    adapter._execution_block_reason = "AUTO_ACCOUNT_RECONCILIATION_FAILED"
+                    last_metrics["status"] = "BLOCKED_ACCOUNT_RECONCILIATION"
+                _write_auto_status(log_dir, last_metrics)
 
             if dry_run:
                 print(f"[ShadowRunner][DryRun] 轮次 {round_idx}/{target_rounds} 成功完成: {last_metrics['status']}")
@@ -342,9 +405,34 @@ def run_shadow_test(
             )
             if dry_run:
                 break
+            if require_fresh_market:
+                _write_auto_status(log_dir, last_metrics)
+                time.sleep(min(interval_seconds, 60.0))
 
     print("[ShadowRunner] 影子压测执行完毕，体检报告已生成。")
     return last_metrics
+
+
+def _fresh_signal(signal, now=None):
+    """Only today's source bars no older than five minutes can drive auto PAPER."""
+    try:
+        stamp = (signal.extra_data or {}).get("ipo_source_bar_as_of", "")
+        observed = datetime.datetime.fromisoformat(stamp)
+        current = now or datetime.datetime.now()
+        age = (current - observed).total_seconds()
+        return observed.date() == current.date() and 0 <= age <= 300
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+def _write_auto_status(log_dir, status):
+    payload = dict(status, heartbeat_at=datetime.datetime.now().isoformat(), pid=os.getpid())
+    path = os.path.join(log_dir, "auto_status.json")
+    with open(path + ".tmp", "w", encoding="utf-8") as stream:
+        json.dump(payload, stream, ensure_ascii=False, allow_nan=False, default=str)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(path + ".tmp", path)
 
 
 def main() -> None:

@@ -15,9 +15,15 @@ from types import SimpleNamespace
 from typing import Any, Dict, Mapping
 from zoneinfo import ZoneInfo
 
-APP_ROOT = Path(__file__).resolve().parents[1]
-if str(APP_ROOT) not in sys.path:
-    sys.path.insert(0, str(APP_ROOT))
+# Source bootstrap is only for imports; persistent data uses the system root.
+if not getattr(sys, "frozen", False) and "__compiled__" not in globals():
+    _source_root = str(Path(__file__).absolute().parents[1])
+    if _source_root not in sys.path:
+        sys.path.insert(0, _source_root)
+
+from sys_utils import get_app_root, safe_resolve_path
+
+APP_ROOT = safe_resolve_path(get_app_root())
 SIMULATION_ROOT = APP_ROOT / "data" / "ipo_learning_simulation"
 SIMULATED_TICKER = "999999"
 SIMULATION_PROVIDER = "offline_simulation"

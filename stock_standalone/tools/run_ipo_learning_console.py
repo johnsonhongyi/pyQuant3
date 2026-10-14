@@ -15,16 +15,19 @@ import multiprocessing
 import argparse
 import socket
 import threading
+from pathlib import Path
+
+if not getattr(sys, "frozen", False) and "__compiled__" not in globals():
+    _source_root = str(Path(__file__).absolute().parents[1])
+    if _source_root not in sys.path:
+        sys.path.insert(0, _source_root)
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
 
-try:
-    from sys_utils import get_app_root, setup_qt_clean_environment
-    app_dir = get_app_root()
-    setup_qt_clean_environment()
-except Exception:
-    app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from sys_utils import get_app_root, setup_qt_clean_environment, safe_resolve_path
+app_dir = str(safe_resolve_path(get_app_root()))
+setup_qt_clean_environment()
 
 if app_dir not in sys.path:
     sys.path.insert(0, app_dir)
@@ -194,7 +197,7 @@ def main():
             flush=True,
         )
     from sys_utils import get_app_root
-    resolved_root = args.project_root or get_app_root()
+    resolved_root = str(safe_resolve_path(args.project_root or get_app_root()))
     os.environ["INSTOCK_APP_ROOT"] = resolved_root
 
     gate_provider = None
