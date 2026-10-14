@@ -16,7 +16,7 @@ def qapp():
 
 
 class QueryHarness:
-    for _name in ('_signal_matches_query', '_refresh_signal_dates', '_refresh_all_tables',
+    for _name in ('_signal_query_counts', '_signal_matches_query', '_refresh_signal_dates', '_refresh_all_tables',
                   '_show_all_signal_details', '_refresh_signal_query', '_on_render_timer_timeout',
                   '_refresh_type_filter_items', '_show_stock_signal_details'):
         locals()[_name] = getattr(SignalDashboardPanel, _name)
@@ -67,6 +67,40 @@ def test_date_query_and_day_stock_summary(qapp):
     assert state._stock_stats['600000']['count'] == 99
     assert state._stats_counters['breakout'] == 99
     assert state._signal_type_counts['ALL'] == 99
+
+
+def test_card_counts_follow_fold_and_preserve_trigger_counts(qapp):
+    state = QueryHarness()
+    state._all_events = [event(pattern='breakout'), event(pattern='breakout'),
+                         event(code='600001', pattern='breakout'), event(pattern='top_signal')]
+    counts = state._signal_query_counts()
+    assert counts['counts']['突破加速'] == 2
+    assert counts['raw']['突破加速'] == 3
+    assert counts['counts']['卖点预警'] == 1
+    assert counts['counts']['全部信号'] == counts['stocks'] == 2
+    assert counts['unit'] == '股'
+    state.fold_check.setChecked(False)
+    counts = state._signal_query_counts()
+    assert counts['counts']['全部信号'] == 4
+    assert counts['counts']['突破加速'] == 3
+    assert counts['unit'] == '条'
+    assert state._stock_stats['600000']['count'] == 99
+
+
+def test_card_counts_respect_dates_search_and_cross_day_groups(qapp):
+    state = QueryHarness()
+    state._all_events = [event(-1, pattern='breakout'), event(pattern='breakout'),
+                         event(code='600001', pattern='top_signal')]
+    assert state._signal_query_counts()['counts']['突破加速'] == 1
+    state.date_filter.setCurrentIndex(1)
+    state.search_input.setText('breakout')
+    counts = state._signal_query_counts()
+    assert counts['counts']['全部信号'] == 2
+    assert counts['stocks'] == 1
+    assert counts['unit'] == '股次'
+    assert counts['counts']['卖点预警'] == 0
+    state.search_input.setText('不存在')
+    assert state._signal_query_counts()['counts']['全部信号'] == 0
 
 
 def test_filter_before_fold_preserves_older_matching_signal(qapp):
