@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from sys_utils import safe_resolve_path
+
 import hashlib
 import json
 import math
@@ -342,6 +344,30 @@ def validate_learning_candidate(
     }
 
 
+def _validate_time_forward_splits(splits: Mapping[str, Sequence[Mapping[str, Any]]]) -> None:
+    """Require decisions and reviewed labels to precede the next held-out period."""
+    previous_available = None
+    for name in ("train", "validation", "test"):
+        rows = splits[name]
+        if not rows:
+            raise OfflineLearningError("time-forward split has no samples")
+        cutoffs = []
+        available = []
+        for row in rows:
+            cutoff = _time(row.get("cutoff"), "split.cutoff")
+            matured = _time(row.get("matured_at"), "split.matured_at")
+            reviewed = _time(row.get("reviewed_at"), "split.reviewed_at")
+            if matured < cutoff or reviewed < matured:
+                raise OfflineLearningError("time-forward label/review predates its decision")
+            cutoffs.append(cutoff)
+            available.append(reviewed)
+        if previous_available is not None and previous_available >= min(cutoffs):
+            raise OfflineLearningError(
+                "time-forward leakage: earlier labels/reviews overlap held-out decisions"
+            )
+        previous_available = max(available)
+
+
 def _split_dataset(rows: Sequence[Dict[str, Any]], train_fraction: float, validation_fraction: float) -> Dict[str, Any]:
     train_fraction_value = _finite_float(train_fraction)
     validation_fraction_value = _finite_float(validation_fraction)
@@ -358,7 +384,10 @@ def _split_dataset(rows: Sequence[Dict[str, Any]], train_fraction: float, valida
         if group["date"] != row["listing_date"]:
             raise OfflineLearningError("one event group contains multiple listing dates")
         group["rows"].append(row)
-    ordered_groups = sorted(groups.items(), key=lambda item: (item[1]["date"], item[0]))
+    ordered_groups = sorted(
+        groups.items(),
+        key=lambda item: (min(_time(row["cutoff"], "cutoff") for row in item[1]["rows"]), item[0]),
+    )
     group_count = len(ordered_groups)
     ordered_rows = sorted(
         (dict(row) for row in rows),
@@ -394,6 +423,7 @@ def _split_dataset(rows: Sequence[Dict[str, Any]], train_fraction: float, valida
         splits[group_split[group_id]].append(dict(row))
     for split_rows in splits.values():
         split_rows.sort(key=lambda row: (row["listing_date"], row["ticker"], row["event_id"], row["candidate_id"]))
+    _validate_time_forward_splits(splits)
     split_records = (
         {"split": split_name, "row": row}
         for split_name in ("train", "validation", "test")
@@ -439,7 +469,7 @@ def _verify_manual_review_audit(
     connection: Optional[sqlite3.Connection] = None
     try:
         connection = sqlite3.connect(
-            path.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.25
+            safe_resolve_path(path).as_uri() + "?mode=ro", uri=True, timeout=0.25
         )
         connection.execute("PRAGMA query_only=ON")
         columns = {

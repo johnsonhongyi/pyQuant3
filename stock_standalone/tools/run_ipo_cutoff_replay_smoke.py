@@ -12,9 +12,15 @@ from typing import Any, Dict, Mapping
 
 import pandas as pd
 
-APP_ROOT = Path(__file__).resolve().parents[1]
-if str(APP_ROOT) not in sys.path:
-    sys.path.insert(0, str(APP_ROOT))
+# Source bootstrap is only for imports; persistent data uses the system root.
+if not getattr(sys, "frozen", False) and "__compiled__" not in globals():
+    _source_root = str(Path(__file__).absolute().parents[1])
+    if _source_root not in sys.path:
+        sys.path.insert(0, _source_root)
+
+from sys_utils import get_app_root, safe_resolve_path
+
+APP_ROOT = safe_resolve_path(get_app_root())
 
 SYNTHETIC_TICKER = "999999"
 _AUXILIARY_INPUTS = (
@@ -109,7 +115,7 @@ def run_smoke(root: Path | None = None) -> Dict[str, Any]:
     )
 
     run_id = f"{datetime.now(timezone.utc):%Y%m%dT%H%M%S}-{uuid.uuid4().hex[:6]}"
-    run_root = (root or APP_ROOT / "data" / "ipo_replay_smoke" / run_id).resolve()
+    run_root = safe_resolve_path(root or APP_ROOT / "data" / "ipo_replay_smoke" / run_id)
     run_root.mkdir(parents=True, exist_ok=False)
     _write_run_configuration(run_root, SIMULATION_PROVIDER, _default_model(SIMULATION_PROVIDER))
     config = IPODecisionConfigSnapshot.from_yaml(

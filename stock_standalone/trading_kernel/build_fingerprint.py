@@ -26,6 +26,8 @@ def _git_value(repo_root: Path, *args: str) -> str:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
         )
         return proc.stdout.strip()

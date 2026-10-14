@@ -7,6 +7,8 @@ poller directly; incomplete coverage or stale server timestamps stay UNREADY.
 
 from __future__ import annotations
 
+from sys_utils import safe_resolve_path
+
 import json
 import math
 import os
@@ -295,7 +297,7 @@ def collect_tdx_market_snapshot_fields(
     local_now = local_now.astimezone(_TZ)
     if not _in_continuous_session(local_now):
         return {"status": "NOT_SESSION", "saved_fields": [], "reason": "仅在A股连续竞价时采集全市场快照"}
-    root_path = Path(root).resolve()
+    root_path = safe_resolve_path(root)
     try:
         config = IPODecisionConfigSnapshot.from_yaml(
             str(root_path / "config" / "ipo_sentiment.yaml")

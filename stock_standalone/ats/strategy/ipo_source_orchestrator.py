@@ -7,6 +7,8 @@ without a tested source stay UNREADY.
 
 from __future__ import annotations
 
+from sys_utils import safe_resolve_path
+
 import hashlib
 import json
 import sqlite3
@@ -75,7 +77,7 @@ def source_route(field_id: str) -> Dict[str, str]:
 
 
 def _database_path(root: str | Path) -> Path:
-    return Path(root).resolve() / SOURCE_DB_RELATIVE_PATH
+    return safe_resolve_path(Path(root)) / SOURCE_DB_RELATIVE_PATH
 
 
 def _observation_fingerprint(
@@ -531,7 +533,7 @@ def _domain(field_id: str) -> str:
 
 def collect_issue_prices_from_eastmoney(root: str | Path) -> Dict[str, Any]:
     """Refresh the IPO calendar once and persist every confirmed issue price."""
-    config_path = Path(root).resolve() / "config" / "ipo_sentiment.yaml"
+    config_path = safe_resolve_path(Path(root)) / "config" / "ipo_sentiment.yaml"
     try:
         config = IPODecisionConfigSnapshot.from_yaml(str(config_path))
         from ats.strategy.ipo_eastmoney_sources import _observation, _source_time, fetch_issue_calendar_rows
@@ -571,7 +573,7 @@ def collect_issue_prices_from_eastmoney(root: str | Path) -> Dict[str, Any]:
 
 def collect_issue_prices_from_ats_cache(root: str | Path, ticker: str | None = None) -> Dict[str, Any]:
     """Reuse ATS's persisted IPO calendar when its per-price provenance is valid."""
-    path = Path(root).resolve() / "config" / "new_stock_ipo_calendar.json"
+    path = safe_resolve_path(Path(root)) / "config" / "new_stock_ipo_calendar.json"
     try:
         if path.stat().st_size > 4 * 1024 * 1024:
             raise ValueError("ATS 日历超过读取上限")
@@ -580,7 +582,7 @@ def collect_issue_prices_from_ats_cache(root: str | Path, ticker: str | None = N
         if not isinstance(items, dict):
             raise ValueError("ATS 日历结构无效")
         config = IPODecisionConfigSnapshot.from_yaml(
-            str(Path(root).resolve() / "config" / "ipo_sentiment.yaml")
+            str(safe_resolve_path(Path(root)) / "config" / "ipo_sentiment.yaml")
         )
         saved = []
         for code, row in items.items():
@@ -629,8 +631,8 @@ def collect_issue_price_from_eastmoney(root: str | Path, ticker: str) -> Dict[st
 
 def collect_market_pulse_fields(root: str | Path) -> Dict[str, Any]:
     """Promote two persisted daily breadth metrics after exact provenance/TTL checks."""
-    config_path = Path(root).resolve() / "config" / "ipo_sentiment.yaml"
-    database_path = Path(root).resolve() / "market_pulse.db"
+    config_path = safe_resolve_path(Path(root)) / "config" / "ipo_sentiment.yaml"
+    database_path = safe_resolve_path(Path(root)) / "market_pulse.db"
     try:
         config = IPODecisionConfigSnapshot.from_yaml(str(config_path))
         if not database_path.is_file():

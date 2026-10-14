@@ -150,7 +150,12 @@ def payload_schema(
         ):
             raise AgentContractError("Provider evidence IDs are invalid")
         for field in ("catalysts", "risk_warnings"):
-            schema["properties"][field]["items"]["properties"]["evidence_ids"]["items"]["enum"] = list(evidence_ids)
+            if evidence_ids:
+                schema["properties"][field]["items"]["properties"]["evidence_ids"]["items"]["enum"] = list(evidence_ids)
+            else:
+                # Empty enum is rejected by native grammar compilers. With no
+                # evidence, these lists must be empty under local validation too.
+                schema["properties"][field]["maxItems"] = 0
     return schema
 
 

@@ -119,7 +119,10 @@ class ListingAnchorStore:
     STORE_PATH = Path("config/listing_anchors.json")
 
     def __init__(self, store_path: Optional[os.PathLike[str] | str] = None) -> None:
-        self.store_path = Path(store_path) if store_path is not None else self.STORE_PATH
+        from sys_utils import get_app_root, safe_resolve_path
+        default_path = Path(self.STORE_PATH)
+        self.store_path = (Path(store_path) if store_path is not None else
+                           safe_resolve_path(Path(get_app_root()) / default_path))
         self._lock = RLock()
 
     @contextmanager

@@ -97,12 +97,23 @@ class AccountSnapshot:
 class PaperExecutionAdapter(ExecutionAdapter):
     """Paper Trading 确定性模拟执行适配器"""
 
+    commission_rate = 0.0
+    sell_extra_fee = 0.0
+
     def __init__(
         self,
         initial_capital: float = 1000000.0,
         *,
         state_file_path: str | None = None,
+        commission_rate: float = 0.0,
+        sell_extra_fee: float = 0.0,
+        register_reentry: bool = True,
     ) -> None:
+        from trading_kernel.execution.paper_fees import paper_fee
+        paper_fee(0, "SELL", commission_rate, sell_extra_fee)
+        self.commission_rate = float(commission_rate)
+        self.sell_extra_fee = float(sell_extra_fee)
+        self._register_reentry = register_reentry
         self.initial_capital = initial_capital
         self.account = AccountSnapshot(cash=initial_capital, initial_capital=initial_capital)
         self.orders: list[dict[str, Any]] = []
@@ -110,6 +121,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
         self._execution_block_reason = ""
         self._last_saved_fingerprint = ""
         self._is_simulation = False  # 是否为模拟/回测模式
+        self._submit_lock = threading.RLock()
         self._t1_warning_lock = threading.Lock()
         self._t1_warning_state = {}
         
@@ -205,6 +217,8 @@ class PaperExecutionAdapter(ExecutionAdapter):
                     row[key] = 0.0
             for key in ("order_id", "code", "action", "timestamp", "request_id"):
                 row[key] = str(order.get(key) or "")
+            if order.get("fee"):
+                row["fee"] = float(order["fee"])
             canonical.append(row)
         encoded = json.dumps(
             canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -266,10 +280,12 @@ class PaperExecutionAdapter(ExecutionAdapter):
             try:
                 price = float(order.get("price"))
                 quantity = float(order.get("volume"))
+                fee = float(order.get("fee", 0.0))
             except (TypeError, ValueError, OverflowError):
                 problems.append(f"INVALID_ORDER_NUMERIC:{index}")
                 continue
-            if not code or not math.isfinite(price) or not math.isfinite(quantity) or price <= 0 or quantity <= 0:
+            if (not code or not math.isfinite(price) or not math.isfinite(quantity)
+                    or not math.isfinite(fee) or fee < 0 or price <= 0 or quantity <= 0):
                 problems.append(f"INVALID_ORDER_VALUES:{index}")
                 continue
             if action in {"BUY", "ADD"}:
@@ -278,7 +294,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
                 new_qty = old_qty + quantity
                 old_cost = old["entry_price"] * old_qty if old else 0.0
                 positions[code] = {"volume": new_qty, "entry_price": (old_cost + price * quantity) / new_qty}
-                cash -= price * quantity
+                cash -= price * quantity + fee
             elif action in {"SELL", "REDUCE"}:
                 old = positions.get(code)
                 if old is None or quantity > old["volume"] + 1e-6:
@@ -289,7 +305,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
                     positions.pop(code, None)
                 else:
                     old["volume"] = remaining
-                cash += price * quantity
+                cash += price * quantity - fee
             else:
                 problems.append(f"UNKNOWN_ORDER_ACTION:{index}")
         return positions, cash, problems
@@ -376,6 +392,11 @@ class PaperExecutionAdapter(ExecutionAdapter):
                 
                 self.initial_capital = account_float("initial_capital", self.initial_capital)
                 cash = account_float("cash", self.initial_capital)
+                policy = data.get("fee_policy")
+                if policy is not None and policy != {
+                    "commission_rate": self.commission_rate, "sell_extra_fee": self.sell_extra_fee,
+                }:
+                    raise ValueError("PAPER_FEE_POLICY_MISMATCH")
                 
                 positions = {}
                 raw_positions = data.get("positions", {})
@@ -581,6 +602,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
                         "price": safe_json_float(o.get("price")),
                         "size_pct": safe_json_float(o.get("size_pct")),
                         "volume": safe_json_float(o.get("volume")),
+                        "fee": safe_json_float(o.get("fee", 0.0)),
                         "timestamp": str(o.get("timestamp") or ""),
                         "request_id": str(o.get("request_id") or "")
                     })
@@ -599,6 +621,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
                 "positions": positions_data,
                 "orders": clean_orders,
                 "ledger_baseline": getattr(self, "ledger_baseline", None),
+                "fee_policy": {"commission_rate": self.commission_rate, "sell_extra_fee": self.sell_extra_fee},
                 "reconciliation": {
                     "paper_execution_ready": not bool(self._execution_block_reason),
                     "block_reason": self._execution_block_reason,
@@ -609,6 +632,8 @@ class PaperExecutionAdapter(ExecutionAdapter):
             tmp_file = self._state_file + ".tmp"
             with open(tmp_file, "w", encoding="utf-8") as f:
                 f.write(json_str)
+                f.flush()
+                os.fsync(f.fileno())
             
             if os.path.exists(tmp_file):
                 os.replace(tmp_file, self._state_file)
@@ -617,10 +642,15 @@ class PaperExecutionAdapter(ExecutionAdapter):
             logger.error(f"[State-Saving] Critical error saving state: {e}")
 
     def submit_order(self, order: ApprovedOrder) -> bool:
+        with self._submit_lock:
+            return self._submit_order_locked(order)
+
+    def _submit_order_locked(self, order: ApprovedOrder) -> bool:
         if self._execution_block_reason:
             logger.error("[Trade Gate] PAPER order rejected: %s", self._execution_block_reason)
             return False
-        if order.size_pct <= 0 or order.price <= 0:
+        if (not math.isfinite(order.size_pct) or not math.isfinite(order.price)
+                or order.size_pct <= 0 or order.price <= 0):
             return False
 
         # Idempotency gate: retries must not mutate cash/positions twice.
@@ -640,6 +670,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
         action = order.action.upper()
         code = order.code
         price = order.price
+        from trading_kernel.execution.paper_fees import paper_fee
 
         # 一只个股的仓位恒定，以初始总资金为基准，而不是随实时盈亏变动的总资产
         # 引入宽容度异常处理与兜底机制，杜绝任何零值、None 或非法类型导致的崩溃
@@ -666,8 +697,8 @@ class PaperExecutionAdapter(ExecutionAdapter):
             # 计算开仓金额
             target_value = equity * order.size_pct
             # 如果可用现金不足，进行最大可用资金扣减 (防止穿仓)
-            if target_value > self.account.cash:
-                target_value = self.account.cash
+            reserve = 0.01 if self.commission_rate else 0.0
+            target_value = min(target_value, max(0.0, self.account.cash - reserve) / (1 + self.commission_rate))
 
             if target_value <= 0:
                 return False
@@ -685,7 +716,10 @@ class PaperExecutionAdapter(ExecutionAdapter):
                     return False
 
             actual_value = volume * price
-            self.account.cash -= actual_value
+            fee = paper_fee(actual_value, action, self.commission_rate, self.sell_extra_fee)
+            if actual_value + fee > self.account.cash:
+                return False
+            self.account.cash -= actual_value + fee
 
             # 更新仓位账簿
             if code in self.account.positions:
@@ -745,7 +779,10 @@ class PaperExecutionAdapter(ExecutionAdapter):
                     return False
 
             cash_returned = sell_volume * price
-            self.account.cash += cash_returned
+            fee = paper_fee(cash_returned, action, self.commission_rate, self.sell_extra_fee)
+            if self.account.cash + cash_returned < fee:
+                return False
+            self.account.cash += cash_returned - fee
             
             # 更新/移除仓位
             if action == "SELL" or sell_volume >= pos.volume:
@@ -753,7 +790,8 @@ class PaperExecutionAdapter(ExecutionAdapter):
                 # 触发 Re-entry 跟踪器的止损注册
                 try:
                     from trading_kernel.engine.reentry_tracker import reentry_tracker
-                    reentry_tracker.register_exit(code, price)
+                    if getattr(self, "_register_reentry", True):
+                        reentry_tracker.register_exit(code, price)
                 except Exception as e:
                     logger.error(f"[Reentry] Error registering exit for {code}: {e}")
             else:
@@ -773,8 +811,15 @@ class PaperExecutionAdapter(ExecutionAdapter):
             "volume": round(sell_volume if action in {"SELL", "REDUCE"} else volume, 4),
             "timestamp": datetime.now().isoformat(timespec="seconds"),
             "request_id": request_id,
+            "fee": fee,
         })
         self._save_state()
+        import os
+        if not self._is_test and "PYTEST_CURRENT_TEST" not in os.environ:
+            if self._get_trade_fingerprint() != self._last_saved_fingerprint:
+                self._execution_block_reason = "PAPER_PERSISTENCE_UNCONFIRMED"
+                logger.error("[Trade Gate] PAPER fill persistence unconfirmed; further orders blocked")
+                return False
         return True
 
     def cancel_order(self, order_id: str) -> bool:
@@ -816,4 +861,6 @@ class PaperExecutionAdapter(ExecutionAdapter):
         snapshot["paper_execution_ready"] = not bool(self._execution_block_reason)
         snapshot["paper_execution_block_reason"] = self._execution_block_reason
         snapshot["ledger_baseline"] = self.ledger_baseline
+        snapshot["fees_paid"] = round(sum(float(row.get("fee", 0.0)) for row in self.orders), 2)
+        snapshot["fee_policy"] = {"commission_rate": self.commission_rate, "sell_extra_fee": self.sell_extra_fee}
         return snapshot

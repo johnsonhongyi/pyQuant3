@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sys_utils import safe_resolve_path
+
 import json
 import os
 import sqlite3
@@ -28,22 +30,9 @@ from ats.strategy.ipo_source_orchestrator import SOURCE_DB_RELATIVE_PATH
 
 
 def _resolve_project_root() -> Path:
-    """
-    在打包（PyInstaller onefile）与开发环境下均正确定位项目根目录。
-    - 打包模式：__file__ 在 _MEIPASS 临时目录，parents[2] = _MEIPASS，
-      必须使用 sys_utils.get_app_root() 获取 EXE 所在物理目录的 config/。
-    - 开发模式：fallback 到 parents[2]（工程源码根）。
-    """
-    try:
-        from sys_utils import get_app_root, is_packaged_env, safe_resolve_path
-        if is_packaged_env():
-            return safe_resolve_path(get_app_root())
-    except Exception:
-        pass
-    try:
-        return Path(__file__).resolve().parents[2]
-    except OSError:
-        return Path(__file__).absolute().parents[2]
+    """Use the same physical runtime root in source and packaged processes."""
+    from sys_utils import get_app_root
+    return safe_resolve_path(get_app_root())
 
 
 DEFAULT_ROOT = _resolve_project_root()
@@ -61,7 +50,7 @@ def _ensure_yaml_config(yaml_path: Path) -> Path:
         return yaml_path   # 文件存在：开发环境/已释放，直接返回，绝不覆盖
     try:
         from sys_utils import get_conf_path
-        released = get_conf_path(str(yaml_path))
+        released = get_conf_path(str(yaml_path), base_dir=str(yaml_path.parent.parent))
         if released:
             return Path(released)
     except Exception:
@@ -81,8 +70,8 @@ def _is_market_session_active() -> bool:
 class IPOGateContextProvider:
     """Serve a validated, immutable data snapshot without I/O on the Gate path."""
 
-    def __init__(self, root: str | Path = DEFAULT_ROOT) -> None:
-        self._root = Path(root).resolve()
+    def __init__(self, root: str | Path | None = None) -> None:
+        self._root = safe_resolve_path(root if root is not None else _resolve_project_root())
         self._lock = threading.RLock()
         self._config_fields: Dict[str, Any] = {}
         self._observations_by_ticker: Dict[str, Dict[str, Dict[str, Any]]] = {}
@@ -613,10 +602,10 @@ _PROVIDERS_LOCK = threading.RLock()
 
 
 def get_default_ipo_gate_context_provider(
-    root: str | Path = DEFAULT_ROOT,
+    root: str | Path | None = None,
 ) -> IPOGateContextProvider:
     from sys_utils import safe_resolve_path
-    resolved = str(safe_resolve_path(root))
+    resolved = str(safe_resolve_path(root if root is not None else _resolve_project_root()))
     with _PROVIDERS_LOCK:
         provider = _PROVIDERS.get(resolved)
         if provider is None:

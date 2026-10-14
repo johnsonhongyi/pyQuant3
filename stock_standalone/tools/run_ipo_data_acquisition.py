@@ -14,16 +14,15 @@ from pathlib import Path
 from uuid import uuid4
 from typing import Any, Callable, Dict, Optional
 
-try:
-    from sys_utils import get_app_root, safe_resolve_path
-    APP_ROOT = safe_resolve_path(get_app_root())
-except Exception:
-    try:
-        APP_ROOT = Path(__file__).resolve().parents[1]
-    except OSError:
-        APP_ROOT = Path(__file__).absolute().parents[1]
-if str(APP_ROOT) not in sys.path:
-    sys.path.insert(0, str(APP_ROOT))
+# Source bootstrap is only for imports; persistent data uses the system root.
+if not getattr(sys, "frozen", False) and "__compiled__" not in globals():
+    _source_root = str(Path(__file__).absolute().parents[1])
+    if _source_root not in sys.path:
+        sys.path.insert(0, _source_root)
+
+from sys_utils import get_app_root, safe_resolve_path
+
+APP_ROOT = safe_resolve_path(get_app_root())
 
 from ats.strategy.ipo_data_contracts import IPODecisionConfigSnapshot  # noqa: E402
 from ats.strategy.ipo_source_orchestrator import (  # noqa: E402
@@ -51,17 +50,30 @@ _SOURCE_BOOTSTRAP_SCHEMA = "ipo.source-bootstrap.v1"
 
 def _write_latest_report(report: Dict[str, Any], root: Path) -> None:
     path = root / "data" / "ipo_learning" / "acquisition.latest.json"
-    temporary = path.with_suffix(".json.tmp")
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     report["report_persistence"] = {"status": "SAVED", "path": str(path)}
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary.write_text(
-            json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        os.replace(temporary, path)
-    except OSError as exc:
+        with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+            json.dump(report, stream, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        for attempt in range(4):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if attempt == 3:
+                    raise
+                time.sleep(0.02 * (attempt + 1))
+    except (OSError, ValueError, TypeError) as exc:
         report["report_persistence"] = {"status": "FAILED", "reason": type(exc).__name__}
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError as exc:
+            report["report_persistence"]["cleanup_error"] = type(exc).__name__
 
 
 def _static_history_frame(code: str) -> tuple[Any, str, str]:
@@ -558,7 +570,7 @@ def run_cycle(
     force_labels: bool = False,
 ) -> Dict[str, Any]:
     """Refresh supported upstream data and report all remaining unmet fields."""
-    project_root = Path(root).resolve()
+    project_root = safe_resolve_path(Path(root))
     acquisition = collect_issue_prices_from_ats_cache(project_root, ticker=code)
     ipo_facts = collect_ipo_facts(project_root, code)
     listing_anchors = collect_listing_day_anchors(project_root, code)
@@ -877,7 +889,7 @@ def run_ats_learning_cycle(
 ) -> Dict[str, Any]:
     """Read ATS's IPO module and detector for shadow learning; never run an order path."""
     try:
-        project_root = Path(root).resolve()
+        project_root = safe_resolve_path(Path(root))
     except OSError:
         project_root = Path(root).absolute()
 

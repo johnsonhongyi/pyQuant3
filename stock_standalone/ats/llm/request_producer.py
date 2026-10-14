@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sys_utils import safe_resolve_path
+
 import hashlib
 import json
 from collections import deque
@@ -29,7 +31,7 @@ class LiveSnapshotRequestProducer:
     """Poll recent, frozen decision inputs; all missing acceptance evidence blocks output."""
 
     def __init__(self, root: str | Path) -> None:
-        self._root = Path(root).resolve()
+        self._root = safe_resolve_path(Path(root))
         self._seen: set[str] = set()
         self._seen_order: deque[str] = deque()
         self._pending: Dict[str, str] = {}
@@ -166,10 +168,10 @@ class LiveSnapshotRequestProducer:
             document = yaml.safe_load(stream)
         backend_name = document["llm_settings"].get("active_backend")
         backend = document["backends"].get(backend_name)
-        model_id = backend.get("model_id") if isinstance(backend, Mapping) else None
+        model_id = backend.get("model" if backend_name == "ollama_http" else "model_id") if isinstance(backend, Mapping) else None
         if not isinstance(model_id, str) or not model_id.strip():
             raise ValueError("当前 Provider 缺少固定 model_id")
-        return {"model_id": model_id}
+        return {"model_id": model_id.strip()}
 
     def _request(
         self, record: Mapping[str, Any], snapshot: Mapping[str, Any],
@@ -178,7 +180,7 @@ class LiveSnapshotRequestProducer:
         ticker = str(record["ticker"])
         cutoff = str(record["cutoff"])
         request_id = hashlib.sha256(
-            f"MARKET_REGIME|{ticker}|{cutoff}|{snapshot_hash}".encode("utf-8")
+            f"MARKET_REGIME|{ticker}|{cutoff}|{snapshot_hash}|{model_id}|{_PROMPT_VERSION}".encode("utf-8")
         ).hexdigest()
         evidence_id = snapshot_hash
         context = {

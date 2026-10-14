@@ -207,13 +207,11 @@ def load_deployment_config() -> dict:
     """读取部署配置，解析失败时安全回退为空字典"""
     candidates = []
     try:
-        from sys_utils import get_app_root
-        candidates.append(os.path.join(get_app_root(), "config", "subnew_real_market_deployment.json"))
-    except Exception:
-        pass
-    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    candidates.append(os.path.join(root, "config", "subnew_real_market_deployment.json"))
-    candidates.append(os.path.join(os.getcwd(), "config", "subnew_real_market_deployment.json"))
+        from sys_utils import get_app_root, get_conf_path
+        candidates.append(get_conf_path("config/subnew_real_market_deployment.json", base_dir=get_app_root()))
+    except (OSError, ValueError) as exc:
+        logger.warning("部署配置路径不可用: %s", exc)
+        return {}
 
     for path in candidates:
         if os.path.exists(path):

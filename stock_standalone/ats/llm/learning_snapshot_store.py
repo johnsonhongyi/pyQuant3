@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from sys_utils import safe_resolve_path
+
 import json
 import hashlib
 import math
@@ -306,7 +308,7 @@ def record_decision_snapshot(
             "decision": record["decision"],
             "gate_causal_chain": gate_causal_chain,
         })).hexdigest()
-        resolved_root = Path(root).resolve()
+        resolved_root = safe_resolve_path(Path(root))
         key = str(resolved_root).casefold()
         with _writers_lock:
             writer = _writers.get(key)
@@ -442,7 +444,7 @@ def get_snapshot_record(root: str | Path, snapshot_id: str) -> Optional[Dict[str
 
 
 def snapshot_writer_status(root: str | Path) -> Dict[str, Any]:
-    resolved_root = Path(root).resolve()
+    resolved_root = safe_resolve_path(Path(root))
     key = str(resolved_root).casefold()
     with _writers_lock:
         writer = _writers.get(key)

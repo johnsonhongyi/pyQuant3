@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sys_utils import safe_resolve_path
+
 import hashlib
 import json
 import os
@@ -14,6 +16,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 
 _STATUS = Path("data/ipo_learning/local_llm_observation.latest.json")
@@ -49,12 +52,15 @@ def _ensure_local_model(model: str) -> bool:
 def _save(root: Path, status: dict[str, Any]) -> dict[str, Any]:
     path = root / _STATUS
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".json.tmp")
-    temporary.write_text(
-        json.dumps(status, ensure_ascii=False, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+            stream.write(json.dumps(status, ensure_ascii=False, sort_keys=True, allow_nan=False) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
     return status
 
 
@@ -63,7 +69,7 @@ def analyze_latest_observation(
     observation_hash: str | None = None,
 ) -> dict[str, Any]:
     """Generate a bounded local explanation from a verified, immutable observation."""
-    base = Path(root).resolve()
+    base = safe_resolve_path(Path(root))
     status: dict[str, Any] = {
         "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "state": "UNREADY", "model": model, "order_submitted": False,
@@ -71,9 +77,6 @@ def analyze_latest_observation(
     }
     if model != "qwen3.5:4b":
         status["reason"] = "MODEL_NOT_ALLOWED"
-        return _save(base, status)
-    if not _ensure_local_model(model):
-        status["reason"] = "OLLAMA_OR_MODEL_UNAVAILABLE"
         return _save(base, status)
     database = base / _DB
     if not database.is_file():
@@ -108,6 +111,9 @@ def analyze_latest_observation(
         prior = base / _STATUS
         if prior.is_file():
             saved = json.loads(prior.read_text(encoding="utf-8"))
+            if (saved.get("state") == "INSUFFICIENT_DATA" and saved.get("observation_hash") == digest
+                    and saved.get("model") == model and saved.get("model_executed") is True):
+                return saved
             if (saved.get("state") == "COMPLETED" and saved.get("observation_hash") == digest
                     and saved.get("model") == model and len(fields) < 41):
                 status.update({
@@ -122,6 +128,9 @@ def analyze_latest_observation(
                     and saved.get("model") == model
                     and str(saved.get("analysis", "")).endswith(("。", "！", "？", ".", "!", "?"))):
                 return saved
+        if not _ensure_local_model(model):
+            status["reason"] = "OLLAMA_OR_MODEL_UNAVAILABLE"
+            return _save(base, status)
         status["state"] = "RUNNING"
         _save(base, status)
         input_fields = {

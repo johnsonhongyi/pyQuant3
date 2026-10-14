@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from sys_utils import safe_resolve_path
+
 import hashlib
 import json
 import sqlite3
@@ -46,7 +48,7 @@ def _verified_evidence(document: Any) -> bool:
 
 
 def load_latest_outcome_reviews(root: str | Path) -> Dict[str, Dict[str, str]]:
-    path = Path(root).resolve() / _REVIEW_DB
+    path = safe_resolve_path(Path(root)) / _REVIEW_DB
     if not path.is_file():
         return {}
     try:
@@ -86,9 +88,9 @@ def record_outcome_review(
         or any(ord(char) < 32 and char not in "\t\n\r" for char in reviewer + reason)
     ):
         return {"status": "INVALID", "reason": "复核人或理由为空/超长/含控制字符"}
-    root_path = Path(root).resolve()
-    evidence_dir = (root_path / "data" / "ipo_learning" / "outcome_evidence").resolve()
+    root_path = safe_resolve_path(Path(root))
     try:
+        evidence_dir = (root_path / "data" / "ipo_learning" / "outcome_evidence").resolve()
         source_path = Path(evidence_path).resolve(strict=True)
         source_path.relative_to(evidence_dir)
         if not source_path.is_file() or source_path.stat().st_size > _EVIDENCE_LIMIT:

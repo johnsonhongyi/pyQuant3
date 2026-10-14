@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from sys_utils import safe_resolve_path
+
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -247,7 +249,7 @@ def _build_remote_cli_factory(
     validate_remote_policy(policy)
     return RemoteCLIBackendFactory(
         provider_name=backend_name, cli_path=cli_path,
-        model_id=model_id.strip(), working_directory=str(scratch_path.resolve()),
+        model_id=model_id.strip(), working_directory=str(safe_resolve_path(scratch_path)),
         remote_policy=policy,
         authorization=dict(authorization),
     )
@@ -285,6 +287,23 @@ def build_backend_factory(
 
     backend_name = settings.get("active_backend")
     backend: Any = backends.get(backend_name)
+    if backend_name == "ollama_http":
+        from ats.llm.ollama_backend import OllamaBackendFactory, local_ollama_url, ollama_acceptance_matches
+
+        if (request_timeout != 30.0 or settings.get("allow_remote") is not False
+                or settings.get("fallback_backend") not in (None, "")
+                or not isinstance(backend, Mapping)):
+            raise ValueError("local Ollama must use a 30-second deadline without remote fallback")
+        url = local_ollama_url(backend.get("base_url"))
+        model = backend.get("model")
+        if not isinstance(model, str) or not model.strip() or len(model) > 160:
+            raise ValueError("a fixed local Ollama model is required")
+        if (not isinstance(authorization, Mapping)
+                or any(authorization.get(key) is not True for key in (
+                    "stage0_accepted", "provider_accepted", "process_tree_isolation_accepted"))
+                or not ollama_acceptance_matches(path, backend, authorization)):
+            raise ValueError("current local Provider/model/schema acceptance is required")
+        return OllamaBackendFactory(url, model.strip())
     if backend_name in {"antigravity_cli", "codex_cli"}:
         primary = _build_remote_cli_factory(
             backend_name, settings, backends, path, authorization,

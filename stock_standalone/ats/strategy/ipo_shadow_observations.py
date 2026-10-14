@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sys_utils import safe_resolve_path
+
 import hashlib
 import json
 import math
@@ -27,7 +29,7 @@ def ats_signal_paper_outcomes(root: str | Path) -> dict[str, Any]:
                               "closed_count": 0, "pending_count": 0,
                               "commission_rate": _COMMISSION_RATE,
                               "sell_fixed_fee": _SELL_FIXED_FEE, "training_eligible": False}
-    root_path = Path(root).resolve()
+    root_path = safe_resolve_path(Path(root))
     database = root_path / _DB
     ledger = root_path / "ats/config/ipo_trading_ledger.json"
     if not database.is_file():
@@ -199,7 +201,7 @@ def learn_ats_signal_quality(
         result["state"] = "SHADOW_CANDIDATES" if any(
             row["state"] != "INSUFFICIENT_SAMPLES" for row in result["groups"]
         ) else "WAITING_MORE_PAPER_OUTCOMES"
-    path = Path(root).resolve() / "data/ipo_learning/ats_signal_quality.latest.json"
+    path = safe_resolve_path(Path(root)) / "data/ipo_learning/ats_signal_quality.latest.json"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
@@ -265,7 +267,7 @@ def capture_ats_signal_observation(
     encoded = json.dumps(record, ensure_ascii=False, sort_keys=True,
                          separators=(",", ":"), allow_nan=False)
     digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-    path = Path(root).resolve() / _DB
+    path = safe_resolve_path(Path(root)) / _DB
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(path, timeout=2.0) as connection:
@@ -315,7 +317,7 @@ def capture_shadow_observation(
     cutoff: datetime | None = None,
 ) -> dict[str, Any]:
     """Freeze only contract-validated facts available by cutoff; never submit orders."""
-    root_path = Path(root).resolve()
+    root_path = safe_resolve_path(Path(root))
     now = cutoff or datetime.now(timezone.utc)
     status: dict[str, Any] = {
         "updated_at": now.isoformat(timespec="seconds"),
@@ -408,7 +410,7 @@ def train_shadow_candidate(root: str | Path) -> dict[str, Any]:
     from ats.strategy.ipo_data_contracts import IPODecisionConfigSnapshot
     from ats.strategy.ipo_outcome_review import _verified_evidence, load_latest_outcome_reviews
 
-    root_path = Path(root).resolve()
+    root_path = safe_resolve_path(Path(root))
     status: dict[str, Any] = {
         "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "state": "WAITING_REVIEWED_LABELS", "sample_count": 0,

@@ -14,9 +14,13 @@ from pathlib import Path
 from typing import Any, Dict, List
 from zoneinfo import ZoneInfo
 
-APP_ROOT = Path(__file__).resolve().parents[1]
-if str(APP_ROOT) not in sys.path:
-    sys.path.insert(0, str(APP_ROOT))
+# Source bootstrap is only for imports; persistent data uses the system root.
+if not getattr(sys, "frozen", False) and "__compiled__" not in globals():
+    _source_root = str(Path(__file__).absolute().parents[1])
+    if _source_root not in sys.path:
+        sys.path.insert(0, _source_root)
+from sys_utils import get_app_root, safe_resolve_path
+APP_ROOT = safe_resolve_path(get_app_root())
 
 from ats.strategy.ipo_outcome_labels import build_matured_outcome  # noqa: E402
 from ats.strategy.listing_anchor_store import ListingAnchorStore  # noqa: E402
@@ -31,7 +35,7 @@ TDX_SOURCE_VERSION = "pytdx.daily_bars.v1"
 
 def _ats_calendar(root: str | Path) -> Dict[str, Dict[str, Any]]:
     """Read ATS's persisted calendar without starting a second network collector."""
-    path = Path(root).resolve() / "config" / "new_stock_ipo_calendar.json"
+    path = safe_resolve_path(root) / "config" / "new_stock_ipo_calendar.json"
     try:
         if path.stat().st_size > 4 * 1024 * 1024:
             return {}
@@ -137,7 +141,7 @@ def collect_for_ticker(ticker: str, calendar: Any = None, root: str | Path = APP
     try:
         from ats.strategy.ipo_data_contracts import IPODecisionConfigSnapshot
 
-        config = IPODecisionConfigSnapshot.from_yaml(str(Path(root).resolve() / "config" / "ipo_sentiment.yaml"))
+        config = IPODecisionConfigSnapshot.from_yaml(str(safe_resolve_path(root) / "config" / "ipo_sentiment.yaml"))
         issue_check = config.data_contract.validate_observation("issue_price", {
             "status": "OBSERVED", "value": float(issue_price),
             "source_id": source_meta.get("source_id"),
@@ -173,7 +177,7 @@ def collect_for_ticker(ticker: str, calendar: Any = None, root: str | Path = APP
     as_of_time = datetime.combine(date.fromisoformat(latest_day), time(15, 0), SHANGHAI)
     anchors = None
     try:
-        frozen = ListingAnchorStore(Path(root).resolve() / "config" / "listing_anchors.json").get(ticker, listing_date)
+        frozen = ListingAnchorStore(safe_resolve_path(root) / "config" / "listing_anchors.json").get(ticker, listing_date)
         if (
             frozen is not None
             and frozen.source_timezone == "Asia/Shanghai"
@@ -194,7 +198,7 @@ def collect_for_ticker(ticker: str, calendar: Any = None, root: str | Path = APP
         trading_sessions=calendar_days,
     )
     if evidence.get("status") == "MATURED_PENDING_REVIEW":
-        output = Path(root).resolve() / "data" / "ipo_learning" / "outcome_evidence" / f"{ticker}.json"
+        output = safe_resolve_path(root) / "data" / "ipo_learning" / "outcome_evidence" / f"{ticker}.json"
         output.parent.mkdir(parents=True, exist_ok=True)
         temp = output.with_suffix(".json.tmp")
         with temp.open("w", encoding="utf-8", newline="\n") as stream:
@@ -209,7 +213,7 @@ def collect_for_waiting_snapshots(root: str | Path = APP_ROOT, force: bool = Fal
     """Scan bounded WAITING_OUTCOME snapshots and collect one label per distinct ticker."""
     import time as time_module
 
-    root_path = Path(root).resolve()
+    root_path = safe_resolve_path(root)
     now = datetime.now(SHANGHAI)
     if not force and now.time() < time(15, 30):
         return [{"status": "NOT_DUE", "reason": "D1-D3 盘后标签从 15:30 起采集"}]
@@ -253,7 +257,7 @@ def collect_recent_ipo_cohort(
 
     if isinstance(batch_size, bool) or not isinstance(batch_size, int) or not 1 <= batch_size <= 50:
         return [{"status": "UNREADY", "reason": "队列批量大小必须在1至50之间"}]
-    root_path = Path(root).resolve()
+    root_path = safe_resolve_path(root)
     now = datetime.now(SHANGHAI)
     if not force and now.time() < time(15, 30):
         return [{"status": "NOT_DUE", "reason": "全体新股D1-D3标签从15:30起采集"}]

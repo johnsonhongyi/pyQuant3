@@ -51,3 +51,18 @@ def test_local_observer_uses_persisted_fields_only(tmp_path, monkeypatch):
     assert sent[0][0] == "http://127.0.0.1:11434/api/generate"
     assert "advance_decline_ratio" in sent[0][1]["prompt"]
     assert "买卖" in sent[0][1]["prompt"]
+    monkeypatch.setattr(observer, "_ensure_local_model", lambda _model: (_ for _ in ()).throw(AssertionError("cached observation must not start Ollama")))
+    assert observer.analyze_latest_observation(tmp_path) == result
+    assert len(sent) == 1
+
+
+def test_local_observer_verifies_hash_before_starting_model(tmp_path, monkeypatch):
+    database = tmp_path / observer._DB
+    database.parent.mkdir(parents=True)
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE shadow_observations (observation_hash TEXT, payload_json TEXT, cutoff TEXT)")
+        connection.execute("INSERT INTO shadow_observations VALUES (?, ?, ?)", ("bad-hash", "{}", "2026-09-29"))
+    monkeypatch.setattr(observer, "_ensure_local_model", lambda _model: (_ for _ in ()).throw(AssertionError("unverified observation must not start Ollama")))
+    result = observer.analyze_latest_observation(tmp_path)
+    assert result["reason"] == "OBSERVATION_HASH_MISMATCH"
+    assert not list((tmp_path / observer._STATUS).parent.glob("*.tmp"))
