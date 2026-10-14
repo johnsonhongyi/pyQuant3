@@ -2203,7 +2203,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         self.fold_check.setStyleSheet("QCheckBox { color: #aaa; font-weight: bold; font-size: 8.5pt; } QCheckBox:hover { color: #fff; }")
         self.fold_check.setChecked(True) # 默认开启折叠
         self.fold_check.setText("按日同股汇总")
-        self.fold_check.setToolTip("每个日期、每只股票保留最新匹配信号；取消勾选查看逐条明细，次数仍为原累计值。")
+        self.fold_check.setToolTip("列表和信号分类卡片按日期＋个股去重；取消勾选显示全部触发记录。跨日同股按股次统计，次数仍为原累计值。")
         self.fold_check.stateChanged.connect(self._on_fold_check_changed)
         
         corner_lay.addWidget(self.date_filter)
@@ -4669,6 +4669,37 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # 7. 得分
         self._fast_update_cell(table, row_idx, 7, str(int(score)), color_key=cur_color_key, bg_key=cur_bg_key, numeric_val=int(score))
 
+    def _signal_query_counts(self):
+        """从查询结果统计，避免分片渲染或增量插入造成卡片计数失真。"""
+        raw = {name: 0 for name in ('全部信号', *CATEGORY_MAP)}
+        groups = {name: set() for name in raw}
+        stocks = set()
+        days = set()
+        for index, event in enumerate(self._all_events):
+            if event.event_type not in (SignalBus.EVENT_PATTERN, SignalBus.EVENT_ALERT, SignalBus.EVENT_RISK):
+                continue
+            if not self._signal_matches_query(event):
+                continue
+            payload = event.payload
+            code = payload.get('code', '')
+            day = event.timestamp.date().isoformat()
+            # 无代码记录不应被错误归并为同一只股票。
+            group = (day, code) if code else (day, None, index)
+            if code:
+                stocks.add(code)
+            days.add(day)
+            pattern = str(payload.get('pattern', payload.get('subtype', 'ALERT')) or '').lower()
+            detail = str(payload.get('detail', payload.get('message', '')) or '').lower()
+            categories = [name for name, keywords in CATEGORY_MAP.items()
+                          if keywords and any(kw.lower() in pattern or kw.lower() in detail for kw in keywords)]
+            for name in ['全部信号', *(categories or ['其它信号'])]:
+                raw[name] += 1
+                groups[name].add(group)
+        folded = self.fold_check.isChecked()
+        return {'raw': raw, 'counts': {name: len(groups[name]) if folded else count
+                                      for name, count in raw.items()},
+                'stocks': len(stocks), 'unit': ('股次' if len(days) > 1 else '股') if folded else '条'}
+
     def _update_stats_display(self):
         total = len(self._all_events)
         
@@ -4689,8 +4720,10 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         # [FIX] 不要因为没有信号就退出！市场温度和指数需要更新
         # [FIX] 无论当前窗口是否有新信号，都必须更新统计（确保清空或低频时 UI 准确）
         with self._data_lock: # ⭐ [FIX] 使用锁保护统计刷新
-            # [UPGRADE] 顶部卡片现在直接读取表格行数，确保与状态栏和实际展示 100% 对齐，消除“窗口统计”与“持久化表格”的理解歧义
+            query_counts = self._signal_query_counts()
             def get_row_count(tab_name):
+                if tab_name in query_counts['counts']:
+                    return query_counts['counts'][tab_name]
                 tbl = self.tables.get(tab_name)
                 return tbl.rowCount() if tbl else 0
 
@@ -4700,6 +4733,14 @@ class SignalDashboardPanel(QWidget, WindowMixin):
             self.cards["breakdown"].setText(str(get_row_count("结构破位")))
             self.cards["v_reversal"].setText(str(get_row_count("V型反转")))
             self.cards["other"].setText(str(get_row_count("其它信号")))
+            for key, name in {'follow': '跟单信号', 'breakout': '突破加速',
+                              'risk': '卖点预警', 'breakdown': '结构破位',
+                              'v_reversal': 'V型反转', 'other': '其它信号'}.items():
+                self.cards[key].setToolTip(
+                    f"当前查询：{get_row_count(name)}{query_counts['unit']}；"
+                    f"原始触发：{query_counts['raw'][name]}条。各分类可交叉，同股跨日分别统计。")
+            if hasattr(self, 'total_stat_label'):
+                self.total_stat_label.setText(f"全部: {get_row_count('全部信号')}{query_counts['unit']}")
 
             
             # [NEW] 更新聚合预警统计 (展示全量预警条数以便观察系统活性)
@@ -4742,7 +4783,7 @@ class SignalDashboardPanel(QWidget, WindowMixin):
                 
                 self.stats_info_label.setText(" | ".join(counts_parts))
                 if hasattr(self, 'total_stat_label'):
-                    self.total_stat_label.setText(f"全部: {get_row_count('全部信号')}")
+                    self.total_stat_label.setText(f"全部: {get_row_count('全部信号')}{query_counts['unit']}")
 
         # 1. 通用计算多空比
         total_bull = self._stats_counters.get("bull", 0)
@@ -4853,12 +4894,10 @@ class SignalDashboardPanel(QWidget, WindowMixin):
         other_cnt = self.tables["其它信号"].rowCount() if "其它信号" in self.tables else 0
         total_cnt = self.tables["全部信号"].rowCount() if "全部信号" in self.tables else 0
         
-        # [FIX] 使用清晰文案说明卡片展示的是历史信号流总数，而底部展示的是去重排版后的界面数据，消除数据理解误区。
-        matched = [event for event in self._all_events if self._signal_matches_query(event)]
-        stocks = len({event.payload.get('code') for event in matched})
         self.stats_info_label.setText(
-            f"查询:{len(matched)}条/{stocks}股 显示:{total_cnt}行 | "
-            f"保留信号:{len(self._all_events)}/5000条（卡片/次数保持原口径）")
+            f"查询:{query_counts['raw']['全部信号']}条/{query_counts['stocks']}股 "
+            f"卡片:{query_counts['counts']['全部信号']}{query_counts['unit']} 显示:{total_cnt}行 | "
+            f"保留:{len(self._all_events)}/5000条（次数为累计触发）")
 
     def update_market_stats(self, stats: dict):
         try:
