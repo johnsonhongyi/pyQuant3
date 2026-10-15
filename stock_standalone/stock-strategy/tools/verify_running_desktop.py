@@ -31,7 +31,7 @@ def main():
     request=urllib.request.Request(base+'/api/v1/linkage/commands',data=json.dumps(payload).encode(),headers={'Content-Type':'application/json','Origin':base})
     result=json.load(opener.open(request,timeout=20))
     print(json.dumps({'runtime':runtime,'operation_id':operation,'symbol':symbol,'accepted':result},ensure_ascii=True),flush=True)
-    for _ in range(18):
+    for _ in range(60):
         time.sleep(3)
         result=json.load(opener.open(base+'/api/v1/linkage/operations/'+operation,timeout=20))
         Path(__file__).resolve().parents[1].joinpath('.build-cache/running-desktop-acceptance.json').write_text(json.dumps({'runtime':runtime,'operation_id':operation,'result':result}),encoding='utf-8')
@@ -40,6 +40,7 @@ def main():
         if consumers and all(all(c.get(k,{}).get('status')=='synced' for k in ('TK','ATS')) for c in consumers):
             print(json.dumps(result,ensure_ascii=True),flush=True);return
     print(json.dumps(result,ensure_ascii=True),flush=True)
+    raise SystemExit('TK/ATS consumer acknowledgement timeout; persistence alone is not success')
 
 
 if __name__=='__main__':main()
