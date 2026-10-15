@@ -34,7 +34,7 @@ def main():
                 try:opener.open('http://127.0.0.1:20084/api/health',timeout=1).close();break
                 except OSError:time.sleep(.1)
             reports=[]
-            for model,effort in [('gpt-6-luna','low'),('gpt-6-sol','low')]:
+            for model,effort in [('gpt-6-luna','low'),('gpt-6.1-sol','low')]:
                 state['ai_settings']={**ai.DEFAULT_AI,'enabled':True,'mode':'enforce','node_id':'live-verify','workspace_id':'isolated','model':model,'reasoning_effort':effort}
                 now=datetime.now(af.BJ)
                 job=ai.enqueue(control,state,now,question='验收真实运行的 TK/ATS：必须调用 get_ats_evidence 与 get_stock_evidence，核验来源目录、运行进程、当日信号和历史信号区别。只给条件计划，不能为验收强行交易。',force=True)

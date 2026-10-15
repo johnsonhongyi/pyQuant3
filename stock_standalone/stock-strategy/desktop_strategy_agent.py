@@ -272,8 +272,8 @@ def main():
     parser.add_argument("--probe", action="store_true", help="local protocol handshake only; no model request")
     args = parser.parse_args()
     sys.path.insert(0, str(args.desktop_root))
-    from ats.llm.cli_paths import resolve_cli_path
-    cli = resolve_cli_path("", "codex")
+    from desktop_runtime import desktop_cli
+    cli = desktop_cli()
     if not cli:
         raise SystemExit("Codex CLI not found")
     runtime = args.runtime_root or Path(__file__).resolve().parent / "logs" / "desktop-strategy"
@@ -296,7 +296,7 @@ def main():
     from desktop_runtime import discover_runtime
     models, catalog_at, desktop, desktop_at = [], 0, {}, 0
     def heartbeat(status, detail):
-        peer.post("heartbeat", {"status": status, "detail": {"provider":"codex-app-server", "transport":args.transport, "models":models, "catalog_at":catalog_at, "desktop_runtime":desktop, **detail}})
+        peer.post("heartbeat", {"status": status, "detail": {"provider":"codex-app-server", "transport":args.transport, "engine_path":cli, "models":models, "catalog_at":catalog_at, "desktop_runtime":desktop, **detail}})
     ledger = sqlite3.connect(runtime / "agent.db", timeout=3)
     ledger.execute("CREATE TABLE IF NOT EXISTS results(id TEXT PRIMARY KEY,result TEXT,thread_id TEXT,session TEXT)")
     ledger.execute("CREATE TABLE IF NOT EXISTS runtime(key TEXT PRIMARY KEY,value TEXT)")

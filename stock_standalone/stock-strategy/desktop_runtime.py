@@ -10,6 +10,15 @@ import time
 from contextlib import closing
 
 
+def desktop_cli():
+    """Prefer an already-installed desktop engine over the standalone CLI shim."""
+    base=Path(os.environ.get('LOCALAPPDATA',''))/'OpenAI'/'Codex'/'bin'
+    candidates=[p for p in base.glob('*/codex.exe') if p.is_file()]
+    if candidates:return str(max(candidates,key=lambda p:p.stat().st_mtime_ns))
+    from ats.llm.cli_paths import resolve_cli_path
+    return resolve_cli_path('','codex')
+
+
 def live_store(root,name):
     """Resolve the existing RAMDisk contract without initializing or copying stores."""
     local=Path(os.path.abspath(Path(root)/name))
