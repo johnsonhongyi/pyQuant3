@@ -153,6 +153,9 @@ class FollowTests(unittest.TestCase):
                     "leader_stocks": [{"symbol": "000001.SZ", "name": "趋势样本"}]}]}
         pool = af.candidates(ladder, overview, NOW, "2026-10-13")
         self.assertEqual({c["route"] for c in pool}, {"limit_up", "theme_trend"})
+        overview['data'][0]['leader_stocks'].append({'symbol':'600001.SH','name':'连板样本'})
+        attributed=af.candidates(ladder,overview,NOW,'2026-10-13')
+        self.assertEqual(next(c for c in attributed if c['symbol']=='600001.SH')['theme'],'test')
         ladder["current"]["trade_date"] = "2026-10-13"
         with self.assertRaisesRegex(ValueError, "today"):
             af.candidates(ladder, overview, NOW, "2026-10-13")
