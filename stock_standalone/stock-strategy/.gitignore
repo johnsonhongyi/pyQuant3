@@ -3,6 +3,8 @@
 /.build-cache/
 /__pycache__/
 /.pytest_cache/
+/muse-research/reports/
+/muse-research/INDEX.md
 .env
 .env.*
 !.env.example
