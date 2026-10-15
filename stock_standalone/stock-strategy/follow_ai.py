@@ -40,27 +40,38 @@ def evidence_context(state, now):
         rows = snap.get("rows", [])
         rotation[dim] = {"meta": snap.get("meta"), "error": snap.get("error"), "coverage": snap.get("coverage"),
                          "rows": rows[:8] + rows[-8:] if len(rows) > 16 else rows}
+    closed = state.get("closed", [])
     return {"schema_version": 1, "trade_date": now.date().isoformat(), "as_of": now.isoformat(),
             "mode": "paper", "market": state.get("market", {}), "rotation": rotation, "stocks": stocks,
             "account": {"cash": state["cash"], "positions": [{k: p[k] for k in
                 ("symbol", "name", "theme", "shares", "buy_price", "buy_date", "last_price", "last_price_at") if k in p}
-                for p in state["positions"]]}, "risk": state.get("risk_config", {}),
+                for p in state["positions"]], "closed_count": len(closed),
+                "realized_pnl": sum(p.get("pnl", 0) for p in closed), "recent_closed": closed[-20:]},
+            "recent_decisions": state.get("events", [])[-30:], "risk": state.get("risk_config", {}),
+            "validation_scope": state.get("validation_scope", "production_paper"),
             "scope": "CN main-board paper; reference snapshots are not realtime; p22_l2 remains disconnected"}
 
 
-def enqueue(db, state, now, question="", force=False):
+def enqueue(db, state, now, question="", force=False, stage=None):
     import auto_follow as af
     policy = state.get("ai_settings", DEFAULT_AI)
     if not policy.get("enabled") or not policy.get("node_id") or not policy.get("workspace_id"):
         return None
-    pending = db.execute("SELECT id FROM ai_jobs WHERE node_id=? AND workspace_id=? AND status IN ('queued','running') AND expires_at>? LIMIT 1",
+    pending = db.execute("SELECT id,context FROM ai_jobs WHERE node_id=? AND workspace_id=? AND status IN ('queued','running') AND expires_at>? LIMIT 1",
                          (policy["node_id"], policy["workspace_id"], now.isoformat())).fetchone()
     if pending and not force:
+        if stage and json.loads(pending[1]).get("workflow_stage") != stage:
+            return None
         return pending[0]
     prior = state.get("ai_last_requested_at")
     if not force and prior and (now - af.stamp(prior)).total_seconds() < policy.get("interval_seconds", 900):
         return None
     context = evidence_context(state, now)
+    phase = stage or ("interactive" if question else "post_close_review" if now.strftime("%H:%M") >= "15:35" else
+                      "premarket" if now.strftime("%H:%M") < "09:30" else "intraday")
+    context["workflow_stage"] = phase
+    if not force and phase != "intraday" and state.get("ai_phase_requested") == phase + ":" + context["trade_date"]:
+        return None
     if db.execute("SELECT COUNT(*) FROM ai_jobs WHERE node_id=? AND workspace_id=? AND status IN ('queued','running') AND expires_at>?",
                   (policy["node_id"], policy["workspace_id"], now.isoformat())).fetchone()[0] >= 8:
         raise ValueError("AI queue full")
@@ -72,6 +83,7 @@ def enqueue(db, state, now, question="", force=False):
                (identity, context["trade_date"], digest(context), policy["node_id"], policy["workspace_id"], raw,
                 question[:4000], now.isoformat(), (now + timedelta(minutes=10)).isoformat()))
     state["ai_last_requested_at"] = now.isoformat()
+    state["ai_phase_requested"] = phase + ":" + context["trade_date"]
     return identity
 
 
@@ -135,13 +147,21 @@ def sync_ai(db, state, now):
         item = {"id": job_id, "status": status, "question": question, "created_at": created, "finished_at": finished,
                 "evidence_hash": evidence_hash, "trade_date": trade_date}
         if raw:
-            result = json.loads(raw)
+            try:
+                result = json.loads(raw)
+            except (ValueError, TypeError):
+                item["status"] = "invalid_result"
+                jobs.append(item)
+                continue
             item["result"] = result
             if status == "completed":
                 try:
                     validate_result(result["proposal"], json.loads(context_raw))
-                    if not state.get("ai_latest") or created > state["ai_latest"].get("created_at", ""):
-                        state["ai_latest"] = {**item, "as_of": json.loads(context_raw)["as_of"]}
+                    context = json.loads(context_raw)
+                    destination = "ai_review" if context.get("workflow_stage") in ("post_close_review", "execution_review") else "ai_latest"
+                    if not state.get(destination) or created > state[destination].get("created_at", ""):
+                        state[destination] = {**item, "as_of": context["as_of"], "workflow_stage": context.get("workflow_stage"),
+                                              "basis_context": {"account": context.get("account"), "risk": context.get("risk")}}
                 except (KeyError, ValueError, TypeError):
                     item["status"] = "invalid_result"
         jobs.append(item)
@@ -155,9 +175,16 @@ def sync_ai(db, state, now):
 def ai_entry_gate(state, code, price, now):
     import auto_follow as af
     policy = state.get("ai_settings", DEFAULT_AI)
-    if not policy.get("enabled") or policy.get("mode") == "shadow":
-        return {"mode": "shadow", "status": "not_enforced"}
     latest = state.get("ai_latest", {})
+    if not policy.get("enabled"):
+        return {"mode": "shadow", "status": "not_enforced", "reason": "AI_disabled"}
+    if policy.get("mode") == "shadow":
+        comparison = {**state, "ai_settings": {**policy, "mode": "enforce"}}
+        try:
+            decision = ai_entry_gate(comparison, code, price, now)
+            return {**decision, "mode": "shadow", "status": "not_enforced", "would_admit": True}
+        except ValueError as exc:
+            return {"mode": "shadow", "status": "not_enforced", "would_admit": False, "reason": str(exc), "job_id": latest.get("id")}
     if latest.get("trade_date") != now.date().isoformat() or not latest.get("as_of") or not 0 <= (now - af.stamp(latest["as_of"])).total_seconds() <= 300:
         raise ValueError("AI proposal missing or expired")
     result = latest.get("result", {})
@@ -169,3 +196,35 @@ def ai_entry_gate(state, code, price, now):
         raise ValueError("AI conditional range not reached")
     return {"mode": "enforce", "status": "admitted", "job_id": latest["id"], "evidence_hash": latest["evidence_hash"],
             "thread_id": result.get("thread_id"), "action": plan["action"]}
+
+
+def schedule_workflow(db, state, now, calendar):
+    """Existing worker owns scheduling; no feed-pulse/heartbeat cron is cloned."""
+    if not calendar.is_trading_day(now.date().isoformat(), "CN"):
+        return
+    if not "08:30" <= now.strftime("%H:%M") <= "17:30":
+        return
+    closed_count = len(state.get("closed", []))
+    if closed_count > state.get("ai_review_requested_closed_count", 0):
+        job = enqueue(db, state, now, question="复盘已实际发生的模拟成交、拒绝和退出，核对AI提案与风控执行差异，提出下一轮观察重点，不修改参数。",
+                      stage="execution_review", force=True)
+        if job:
+            requested = json.loads(db.execute("SELECT context FROM ai_jobs WHERE id=?", (job,)).fetchone()[0])
+            state["ai_review_requested_closed_count"] = requested["account"]["closed_count"]
+        return
+    import auto_follow as af
+    # A newly valid entry blocked only by stale AI evidence requests a fresh
+    # analysis; it never reuses an old narrative as a current trading decision.
+    last_requested=state.get("ai_last_requested_at")
+    waiting=any(e.get("action")=="AI_DECISION" and e.get("decision",{}).get("reason")=="AI proposal missing or expired" and
+                0 <= (now-af.stamp(e["at"])).total_seconds() <= 120 for e in state.get("events",[])[-40:])
+    if waiting and (not last_requested or (now-af.stamp(last_requested)).total_seconds() >= 120):
+        policy=state.get("ai_settings",DEFAULT_AI)
+        pending=db.execute("SELECT 1 FROM ai_jobs WHERE node_id=? AND workspace_id=? AND status IN ('queued','running') AND expires_at>? LIMIT 1",
+                           (policy.get('node_id',''),policy.get('workspace_id',''),now.isoformat())).fetchone()
+        if not pending:
+            enqueue(db,state,now,force=True,stage="intraday_refresh")
+        # One pending research job at a time; event-triggered refreshes are
+        # throttled separately from the normal 15-minute research cadence.
+        return
+    enqueue(db, state, now)

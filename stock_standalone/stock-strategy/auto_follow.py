@@ -173,6 +173,10 @@ def candidates(ladder, overview, now, previous_day, settings=None):
                 continue
             result.setdefault(code, {"symbol": code, "name": stock["name"], "route": "theme_trend",
                                      "theme": theme["theme"], "streak": 0})
+            if not result[code].get("theme"):
+                # The same stock can be both a ladder candidate and a verified
+                # leader in today's eligible theme; preserve that attribution.
+                result[code]["theme"] = theme["theme"]
     return sorted(result.values(), key=lambda s: (-s["streak"], s["symbol"]))[:20]
 
 
@@ -335,6 +339,10 @@ def cycle(state, cfg, api, now, calendar, sentiment, external_kill, clock=None, 
             p["last_price"] = price
             p["last_price_at"] = q["trade_time"]
             if p["buy_date"] >= day:
+                if p.get("t1_notice_day") != day:
+                    event(state, now, "T1_LOCK", p["symbol"], reason="CN_T1_same_day_position_locked",
+                          trade_id=p.get("trade_id"), buy_date=p["buy_date"], ai_job_id=p.get("ai_decision", {}).get("job_id"))
+                    p["t1_notice_day"] = day
                 continue
             if change <= -9.5:
                 event(state, now, "SKIP_SELL", p["symbol"], reason="limit-down liquidity unverified")
@@ -421,7 +429,13 @@ def cycle(state, cfg, api, now, calendar, sentiment, external_kill, clock=None, 
             anchors = entry_ok(q, minute, daily, cfg, checked_at, previous_day)
             price = number(q["price"])
             from follow_ai import ai_entry_gate
-            ai_decision = ai_entry_gate(state, code, price, checked_at)
+            try:
+                ai_decision = ai_entry_gate(state, code, price, checked_at)
+                event(state, checked_at, "AI_DECISION", code, decision=ai_decision)
+            except ValueError as exc:
+                event(state, checked_at, "AI_DECISION", code, decision={"status": "blocked", "reason": str(exc),
+                      "job_id": state.get("ai_latest", {}).get("id"), "evidence_hash": state.get("ai_latest", {}).get("evidence_hash")})
+                raise
             c.update(price=price, change_percent=q["change_percent"], source=q["meta"]["source"], trade_time=q["trade_time"])
             amount = min(bcfg["amount_per_trade"], state["cash"])
             shares = int(amount / price / 100) * 100
@@ -455,6 +469,7 @@ def main():
     parser.add_argument("--watch", action="store_true", help="run every 60 seconds during CN sessions")
     parser.add_argument("--status", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="rollback account changes; upstream caches may still write")
+    parser.add_argument("--preflight", action="store_true", help="validate local runtime/config only; never requests market data")
     parser.add_argument("--kill", choices=("on", "off"))
     args = parser.parse_args()
     sys.path.insert(0, str(SERVICE))
@@ -470,6 +485,13 @@ def main():
         print(json.dumps({"status": "startup_error", "error": str(exc)}, ensure_ascii=False))
         raise SystemExit(1)
     try:
+        if args.preflight:
+            cfg=load_config()
+            for value in (cfg['buy']['max_positions'],cfg['buy']['amount_per_trade'],cfg['buy']['max_day_chg']):
+                if number(value)<=0:raise ValueError('invalid paper risk configuration')
+            calendar.is_trading_day(datetime.now(BJ).date().isoformat(),'CN')
+            print(json.dumps({'status':'preflight_ok','mode':'paper','config_version':cfg['version'],'network_used':False}),flush=True)
+            return
         while True:
             try:
                 db.execute("BEGIN IMMEDIATE")
@@ -482,9 +504,12 @@ def main():
                 now = datetime.now(BJ)
                 receipts = apply_commands(control, state, now)
                 from follow_ai import sync_ai
-                sync_ai(control, state, now)
+                try:
+                    sync_ai(control, state, now)
+                except (sqlite3.Error, ValueError, KeyError, TypeError) as exc:
+                    event(state, now, "AI_ERROR", reason=type(exc).__name__)
                 state["last_heartbeat"] = now.isoformat()
-                state["engine_revision"] = "paper-follow-plans-v3"
+                state["engine_revision"] = "paper-follow-ai-v4"
                 cfg = load_config()
                 def beat(phase):
                     control.execute("INSERT OR REPLACE INTO runtime VALUES(1,?,?)", (datetime.now(BJ).isoformat(), phase))
@@ -539,9 +564,13 @@ def main():
                                          should_stop=lambda: bool(control.execute("SELECT 1 FROM commands WHERE status='pending' AND action IN ('pause','kill') LIMIT 1").fetchone()))
                     except (KeyError, ValueError, TypeError, OSError) as exc:
                         state["research"] = {"checked_at": datetime.now(BJ).isoformat(), "errors": [str(exc)]}
-                from follow_ai import enqueue
-                enqueue(control, state, datetime.now(BJ))
-                sync_ai(control, state, datetime.now(BJ))
+                from follow_ai import schedule_workflow
+                try:
+                    schedule_workflow(control, state, datetime.now(BJ), calendar)
+                    sync_ai(control, state, datetime.now(BJ))
+                except (sqlite3.Error, ValueError, KeyError, TypeError) as exc:
+                    # AI transport cannot undo already completed exits or paper fills.
+                    event(state, datetime.now(BJ), "AI_ERROR", reason=type(exc).__name__)
                 state["cycle_status"] = result
                 state["cycle_finished_at"] = datetime.now(BJ).isoformat()
                 beat("waiting")

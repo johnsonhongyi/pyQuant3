@@ -34,7 +34,7 @@ export TRADING_CALENDAR_PATH="$DATA/config/trading-calendar.json"
 export PYTHONDONTWRITEBYTECODE=1
 ln -s "$DATA/logs/service" "$TARGET/source/easy-stock-service/logs"
 # Smoke uses a separate account, never the running account.
-/usr/bin/python3 "$TARGET/auto_follow.py" --dry-run --db "$DATA/data/auto-follow/preflight-$release/account.db"
+/usr/bin/python3 "$TARGET/auto_follow.py" --preflight --db "$DATA/data/auto-follow/preflight-$release/account.db"
 /usr/bin/python3 -m unittest test_auto_follow test_follow_research test_follow_ai -q
 systemd-analyze verify "$TARGET/stockstrategy-auto-follow.service"
 previous=$(readlink "$BASE/current" 2>/dev/null || true)

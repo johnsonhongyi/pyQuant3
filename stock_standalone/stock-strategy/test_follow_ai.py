@@ -7,7 +7,7 @@ from datetime import timedelta
 
 import auto_follow as af
 import follow_ai as ai
-from test_auto_follow import NOW
+from test_auto_follow import NOW, Calendar
 
 
 class AIFollowTests(unittest.TestCase):
@@ -69,6 +69,39 @@ class AIFollowTests(unittest.TestCase):
         another = ai.enqueue(self.db, self.state, NOW, question="synthetic", force=True)
         ai.sync_ai(self.db, self.state, NOW + timedelta(minutes=11))
         self.assertEqual(self.db.execute("SELECT status FROM ai_jobs WHERE id=?", (another,)).fetchone()[0], "expired")
+
+    def test_execution_automatically_enqueues_one_review_without_interval_delay(self):
+        self.state['ai_last_requested_at'] = NOW.isoformat()
+        self.state['closed'] = [{'symbol':'600001.SH','pnl':10}]
+        ai.schedule_workflow(self.db,self.state,NOW,Calendar)
+        rows=self.db.execute('SELECT context FROM ai_jobs').fetchall()
+        self.assertEqual(len(rows),1)
+        self.assertEqual(json.loads(rows[0][0])['workflow_stage'],'execution_review')
+        ai.schedule_workflow(self.db,self.state,NOW+timedelta(seconds=60),Calendar)
+        self.assertEqual(self.db.execute('SELECT COUNT(*) FROM ai_jobs').fetchone()[0],1)
+
+    def test_completed_review_never_overwrites_entry_admission(self):
+        self.state['ai_latest']={'id':'entry-job','created_at':NOW.isoformat()}
+        identity=ai.enqueue(self.db,self.state,NOW,force=True,stage='execution_review')
+        self.db.execute('UPDATE ai_jobs SET status=?,result=? WHERE id=?',('completed',json.dumps({'proposal':self.proposal,'thread_id':'fixture'}),identity))
+        ai.sync_ai(self.db,self.state,NOW)
+        self.assertEqual(self.state['ai_latest']['id'],'entry-job')
+        self.assertEqual(self.state['ai_review']['id'],identity)
+
+    def test_corrupt_completed_result_is_observable_and_does_not_crash(self):
+        identity=ai.enqueue(self.db,self.state,NOW)
+        self.db.execute('UPDATE ai_jobs SET status=?,result=? WHERE id=?',('completed','not-json',identity))
+        ai.sync_ai(self.db,self.state,NOW)
+        self.assertEqual(self.state['ai']['jobs'][0]['status'],'invalid_result')
+
+    def test_valid_entry_waiting_for_ai_triggers_one_fresh_research_job(self):
+        self.state['ai_last_requested_at']=(NOW-timedelta(minutes=5)).isoformat()
+        self.state['events']=[{'at':NOW.isoformat(),'action':'AI_DECISION','decision':{'reason':'AI proposal missing or expired'}}]
+        ai.schedule_workflow(self.db,self.state,NOW,Calendar)
+        row=self.db.execute('SELECT context FROM ai_jobs').fetchone()
+        self.assertEqual(json.loads(row[0])['workflow_stage'],'intraday_refresh')
+        ai.schedule_workflow(self.db,self.state,NOW+timedelta(seconds=120),Calendar)
+        self.assertEqual(self.db.execute('SELECT COUNT(*) FROM ai_jobs').fetchone()[0],1)
 
 
 if __name__ == "__main__":
