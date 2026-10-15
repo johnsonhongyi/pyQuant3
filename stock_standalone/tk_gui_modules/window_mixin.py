@@ -299,6 +299,14 @@ class WindowMixin:
                         except Exception:
                             pass
 
+        dashboard = getattr(self, '_signal_dashboard_win', None)
+        if dashboard is not None:
+            try:
+                if dashboard.isVisible():
+                    windows['signal_dashboard_panel'] = dashboard
+            except RuntimeError:
+                logger.debug('[collect_all_open_windows] 信号面板已销毁')
+
         return windows
 
     def get_snapshot_slots_info(self, file_path: Optional[str] = None) -> dict[int, dict[str, Any]]:
@@ -386,17 +394,17 @@ class WindowMixin:
                 if hasattr(win, 'winfo_geometry') or (hasattr(win, 'geometry') and not hasattr(win, 'windowHandle')):
                     if hasattr(win, 'update_idletasks'):
                         win.update_idletasks()
-                    geom = win.geometry().split('+')
-                    size = geom[0].split('x')
-                    w = int(int(size[0]) / scale)
-                    h = int(int(size[1]) / scale)
-                    x = int(int(geom[1]) / scale)
-                    y = int(int(geom[2]) / scale)
+                    w = int(win.winfo_width() / scale)
+                    h = int(win.winfo_height() / scale)
+                    x = int(win.winfo_x() / scale)
+                    y = int(win.winfo_y() / scale)
                     snapshot_windows_pos[win_name] = {
                         "x": x, "y": y, "width": w, "height": h, "type": "tk"
                     }
                 elif hasattr(win, 'geometry'):
                     geom = win.geometry()
+                    if getattr(win, 'anchor_edge', None) and getattr(win, 'normal_geometry', None) is not None:
+                        geom = win.normal_geometry
                     w = int(geom.width() / scale)
                     h = int(geom.height() / scale)
                     x = int(geom.x() / scale)
@@ -404,6 +412,8 @@ class WindowMixin:
                     snapshot_windows_pos[win_name] = {
                         "x": x, "y": y, "width": w, "height": h, "type": "qt"
                     }
+                    if hasattr(win, 'anchor_edge'):
+                        snapshot_windows_pos[win_name]['anchor_edge'] = win.anchor_edge
             except Exception as ex:
                 logger.warning(f"[save_all_windows_snapshot] 提取窗口 {win_name} 位置异常: {ex}")
 
@@ -602,7 +612,36 @@ class WindowMixin:
                         if hasattr(win, 'update_idletasks'):
                             win.update_idletasks()
                     elif hasattr(win, 'setGeometry'):
-                        win.setGeometry(x, y, w, h)
+                        if hasattr(win, 'anchor_edge') and hasattr(win, 'normal_geometry'):
+                            hover_timer = getattr(win, 'hover_timer', None)
+                            hover_was_active = hover_timer is not None and hover_timer.isActive()
+                            for timer_name in ('snap_timer', 'hover_timer'):
+                                timer = getattr(win, timer_name, None)
+                                if timer is not None:
+                                    timer.stop()
+                            animation = getattr(win, 'anim_group', None)
+                            if animation is not None:
+                                animation.stop()
+                            win._in_snap_action = True
+                            win._is_dragging = False
+                            win.anchor_edge = pos.get('anchor_edge', win.anchor_edge)
+                            win.is_hidden_state = False
+                            win.normal_geometry = type(win.geometry())(x, y, w, h)
+                            try:
+                                win.setGeometry(x, y, w, h)
+                            finally:
+                                win._in_snap_action = False
+                            win.setWindowOpacity(1.0)
+                            win.hover_ticks = 0
+                            win.leave_ticks = 0
+                            import time
+                            win._last_show_time = time.time()
+                            win._has_hovered_since_show = True
+                            hover_timer = getattr(win, 'hover_timer', None)
+                            if hover_timer is not None and (win.anchor_edge or hover_was_active):
+                                hover_timer.start()
+                        else:
+                            win.setGeometry(x, y, w, h)
 
                     restored_names.append(win_name)
                     logger.debug(f"[restore_all_windows_snapshot] 窗口 {win_name} 已恢复: {w}x{h}+{x}+{y}")

@@ -192,8 +192,45 @@ def runtime_file(local_path, max_bytes=4 * 1024 * 1024, archive=True):
     return str(runtime)
 
 
+@contextmanager
+def _legacy_read_guard(local):
+    handles = []
+    if os.name != 'nt':
+        raise RuntimeError('linkage_legacy_activity_check_unavailable')
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    create = kernel.CreateFileW
+    create.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                       wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    create.restype = wintypes.HANDLE
+    close = kernel.CloseHandle
+    close.argtypes = [wintypes.HANDLE]
+    close.restype = wintypes.BOOL
+    try:
+        for suffix in ('', '-wal', '-shm'):
+            handle = create(str(local) + suffix, 0x80000000, 1, None, 3, 0x80, None)
+            if handle == ctypes.c_void_p(-1).value:
+                error = ctypes.get_last_error()
+                if suffix and error == 2:
+                    continue
+                if error in (32, 33):
+                    raise RuntimeError('linkage_legacy_writer_active: stop old version before migration')
+                raise ctypes.WinError(error)
+            handles.append(handle)
+        yield
+    finally:
+        for handle in reversed(handles):
+            close(handle)
+
+
 def runtime_database(local_path):
+    from sys_utils import is_packaged_env
+    environment = 'packaged' if is_packaged_env() else 'development'
+    if environment == 'development':
+        local_path = str(Path(local_path).parent / '.development' / Path(local_path).name)
     runtime, local = _runtime_location(local_path)
+    logger.info('Linkage database environment=%s runtime=%s archive=%s', environment, runtime, local)
     directory = runtime.parent
     with directory_write_lock(str(directory), timeout=10):
         if not runtime.exists():
@@ -205,10 +242,24 @@ def runtime_database(local_path):
                     target.execute('PRAGMA auto_vacuum=INCREMENTAL')
                     configure(target)
                     if local.exists():
-                        if any(Path(str(local) + suffix).exists() for suffix in ('-wal', '-shm')):
-                            raise RuntimeError('linkage_legacy_writer_or_wal_present: stop old version before migration')
-                        source = sqlite3.connect(local.as_uri() + '?mode=ro', uri=True, timeout=1)
+                        guard = _legacy_read_guard(local)
+                        guard.__enter__()
                         try:
+                            source = sqlite3.connect(local.as_uri() + '?mode=ro', uri=True, timeout=1)
+                            source.execute('BEGIN')
+                            source.execute('SELECT count(*) FROM sqlite_master').fetchone()
+                            backup = local.with_name(local.name + f'.migration-backup-{time.time_ns()}.sqlite3')
+                            backup_temporary = backup.with_name(backup.name + '.initializing')
+                            try:
+                                with closing(sqlite3.connect(str(backup_temporary))) as backup_db:
+                                    source.backup(backup_db)
+                                    if backup_db.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
+                                        raise RuntimeError('linkage_migration_backup_integrity_failed')
+                                os.replace(backup_temporary, backup)
+                            finally:
+                                if backup_temporary.exists():
+                                    backup_temporary.unlink()
+                            logger.info('Legacy linkage recovery backup saved: %s', backup)
                             # Migrate only bounded live context, retaining reliable
                             # operations/outbox. Do not copy the 100MB snapshot history.
                             schema = source.execute("SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL "
@@ -231,7 +282,11 @@ def runtime_database(local_path):
                                     target.execute(sql)
                             trim(target)
                         finally:
-                            source.close()
+                            try:
+                                if 'source' in locals():
+                                    source.close()
+                            finally:
+                                guard.__exit__(None, None, None)
                     target.commit()
                 os.replace(temporary, runtime)
             finally:
