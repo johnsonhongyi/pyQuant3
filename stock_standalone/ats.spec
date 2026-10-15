@@ -71,6 +71,8 @@ a = Analysis(
                     'ats.archive_policy', 'ats.storage_archive',
                     'ats.llm.antigravity_cli_backend', 'ats.llm.codex_cli_backend',
                     'ats.llm.offline_learning', 'ats.ui.ipo_learning_console',
+                    'ats.llm.ipo_codex_chat', 'ats.ui.ipo_codex_dialogue',
+                    'ats.ui.responsive_flow',
                     ] + tk_hiddenimports + yaml_hiddenimports,
     hookspath=[],
     hooksconfig={},

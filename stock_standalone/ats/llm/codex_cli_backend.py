@@ -127,6 +127,18 @@ class CodexCLIBackend:
         """Map common local CLI failures to stable codes without retaining diagnostics."""
         text = stderr.decode("utf-8", errors="replace").lower()
         if any(marker in text for marker in (
+            "usage limit", "usage_limit", "quota exceeded", "insufficient_quota",
+            "limit reached", "5-hour limit", "5 hour limit",
+        )):
+            return "CLI_USAGE_LIMIT"
+        if any(marker in text for marker in ("rate limit", "rate_limit", "too many requests", "429")):
+            return "CLI_RATE_LIMIT"
+        if any(marker in text for marker in (
+            "connection refused", "connection reset", "error sending request",
+            "failed to connect", "timed out", "dns error", "network is unreachable",
+        )):
+            return "CLI_NETWORK_ERROR"
+        if any(marker in text for marker in (
             "access is denied", "permission denied", "os error 5", "winerror 5",
         )):
             return "CLI_LOCAL_PERMISSION_BLOCKED"

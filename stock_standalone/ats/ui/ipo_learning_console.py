@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from sys_utils import safe_resolve_path
+from ats.ui.responsive_flow import ResponsiveFlow
 
 import json
 import html
@@ -21,12 +22,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from PyQt6.QtCore import QThread, QTimer, pyqtSignal, Qt
+from PyQt6.QtCore import QThread, QTimer, QSignalBlocker, QSettings, pyqtSignal, Qt
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView, QHBoxLayout, QInputDialog, QLabel, QMessageBox,
     QPushButton, QPlainTextEdit, QTableWidget, QTableWidgetItem, QVBoxLayout, QLineEdit,
-    QWidget, QHeaderView, QTabWidget, QSizePolicy,
+    QWidget, QHeaderView, QTabWidget, QSizePolicy, QSplitter, QScrollArea,
 )
 from ats.ui.base_table import BaseATSTableWidget
 
@@ -1192,6 +1193,7 @@ def _collect_local_source_health(root: Path) -> List[Dict[str, str]]:
 
 
 def _collect_snapshot(root: Path) -> Dict[str, Any]:
+    now_utc = datetime.now(timezone.utc)
     config_path = root / "config" / "ipo_sentiment.yaml"
     llm_config_path = root / "config" / "llm_config.yaml"
     acceptance_path = root / "config" / "ipo_stage_acceptance.json"
@@ -1463,6 +1465,8 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
             "latest_sealed_at": "", "integrity": "仓库不可用",
         }
         dataset_status = "封存仓库不可用"
+        shadow_observations = {"state": "UNAVAILABLE", "count": 0, "ticker": "", "cutoff": "", "fields": 0}
+        local_llm_observation = {"state": "UNAVAILABLE"}
         snapshot_summary = {
             "status": "UNAVAILABLE", "snapshot_count": 0,
             "waiting_outcome_count": 0, "latest_captured_at": "",
@@ -1483,9 +1487,6 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
     raw_worker = raw_worker if isinstance(raw_worker, dict) else {}
     raw_interaction = runtime.get("interaction", {})
     raw_interaction = raw_interaction if isinstance(raw_interaction, dict) else {}
-
-    def _nonnegative_count(value: Any) -> int:
-        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
     def _nonnegative_age(value: Any) -> Optional[float]:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -1634,7 +1635,6 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
         observations.setdefault(field_id, observation)
     for field_id, observation in _collect_tdx_live_heat_observations(root).items():
         observations.setdefault(field_id, observation)
-    now_utc = datetime.now(timezone.utc)
     try:
         from ats.strategy.ipo_data_contracts import IPODataContractSet
 
@@ -2885,7 +2885,7 @@ class IPOLearningConsole(QWidget):
         header_container = QVBoxLayout()
         header_container.setSpacing(4)
 
-        status_row = QHBoxLayout()
+        status_row = ResponsiveFlow()
         status_row.setSpacing(6)
         self.lbl_runtime = QLabel("LLM 旁路：读取中")
         self.lbl_provider = QLabel("Provider：读取中")
@@ -2900,8 +2900,20 @@ class IPOLearningConsole(QWidget):
             label.setWordWrap(True)
             label.setMinimumWidth(0)
             label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-            status_row.addWidget(label, 1)
-        header_container.addLayout(status_row)
+            label.setMaximumWidth(220)
+            label.setMaximumHeight(84)
+            status_row.addWidget(label)
+        status_and_log = QHBoxLayout()
+        status_and_log.addLayout(status_row, 3)
+        self.runtime_log = QPlainTextEdit()
+        self.runtime_log.setReadOnly(True)
+        self.runtime_log.setMinimumWidth(0)
+        self.runtime_log.setMaximumHeight(130)
+        self.runtime_log.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.runtime_log.document().setMaximumBlockCount(200)
+        self.runtime_log.setPlaceholderText("运行日志：等待后台状态…")
+        status_and_log.addWidget(self.runtime_log, 2)
+        header_container.addLayout(status_and_log)
 
         self.lbl_pipeline = QLabel("IPO 实际运行：正在读取采集、观察、标签和 LLM 状态…")
         self.lbl_pipeline.setWordWrap(True)
@@ -2916,9 +2928,8 @@ class IPOLearningConsole(QWidget):
         )
         header_container.addWidget(self.lbl_local_llm)
 
-        action_row = QHBoxLayout()
+        action_row = ResponsiveFlow()
         action_row.setSpacing(6)
-        action_row.addStretch(1)
 
         self.btn_refresh = QPushButton("刷新状态")
         self.btn_refresh.clicked.connect(self._worker.request_refresh)
@@ -2930,6 +2941,8 @@ class IPOLearningConsole(QWidget):
         self.btn_collect_now.clicked.connect(self._collect_matured_labels)
         self.btn_llm_diagnostics = QPushButton("查看 LLM 阻断原因")
         self.btn_llm_diagnostics.clicked.connect(self._show_provider_preflight)
+        self.btn_codex_chat = QPushButton("Codex CLI 对话")
+        self.btn_codex_chat.clicked.connect(lambda: self._select_console_tab("Codex CLI 互动 / 对账"))
         self.btn_review_selected_outcome = QPushButton("确认选中 D1-D3 标签")
         self.btn_review_selected_outcome.setToolTip(
             "先在“D1-D3 成熟标签”页选中一条待复核记录，再点此按钮保存人工结论；不会启动训练。"
@@ -2950,15 +2963,31 @@ class IPOLearningConsole(QWidget):
         self.btn_reject.clicked.connect(lambda: self._review_candidate("REJECTED"))
 
         for btn in (self.btn_collect_now, self.btn_review_selected_outcome,
-                    self.btn_llm_diagnostics,
+                    self.btn_llm_diagnostics, self.btn_codex_chat,
                     self.btn_refresh, self.btn_note, self.btn_accept, self.btn_reject):
             btn.setStyleSheet("padding: 4px 10px; font-weight: bold;")
             action_row.addWidget(btn)
 
         header_container.addLayout(action_row)
-        layout.addLayout(header_container)
+        header_widget = QWidget()
+        header_widget.setLayout(header_container)
+        header_scroll = QScrollArea()
+        header_scroll.setWidgetResizable(True)
+        header_scroll.setWidget(header_widget)
+        header_scroll.setMinimumSize(0, 45)
+        self.main_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.addWidget(header_scroll)
 
         self.content_tabs = QTabWidget()
+        self.content_tabs.setMinimumWidth(0)
+        self.content_tabs.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+        self.content_tabs.setUsesScrollButtons(True)
+        self.content_tabs.tabBar().setExpanding(False)
+        self.content_tabs.tabBar().setElideMode(Qt.TextElideMode.ElideRight)
+        from ats.ui.ipo_codex_dialogue import CodexIPODialogue
+        self.codex_dialogue = CodexIPODialogue(self._root, self.content_tabs)
+        self.content_tabs.addTab(self.codex_dialogue, "Codex CLI 互动 / 对账")
         overview = QWidget()
         overview_layout = QVBoxLayout(overview)
         self.lbl_rule = QLabel("规则路径：读取中")
@@ -3049,8 +3078,20 @@ class IPOLearningConsole(QWidget):
             self.acquisition_queue_table.horizontalHeader().setSectionResizeMode(index, mode)
         self.acquisition_queue_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.acquisition_queue_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        acquisition_layout.addWidget(self.acquisition_queue_table, 2)
-        acquisition_layout.addWidget(QLabel("最近 100 条采集阶段日志（持久化到 logs/ipo_learning_events.jsonl）"))
+        self.acquisition_queue_table.currentCellChanged.connect(
+            lambda row, _column, _old_row, _old_column: self._link_acquisition_row(row)
+        )
+        self.acquisition_queue_table.cellClicked.connect(
+            lambda row, _column: self._link_acquisition_row(row)
+        )
+        self.acquisition_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.acquisition_splitter.setChildrenCollapsible(False)
+        self.acquisition_queue_table.setMinimumHeight(60)
+        self.acquisition_splitter.addWidget(self.acquisition_queue_table)
+        pipeline_log_widget = QWidget()
+        pipeline_log_layout = QVBoxLayout(pipeline_log_widget)
+        pipeline_log_layout.setContentsMargins(0, 0, 0, 0)
+        pipeline_log_layout.addWidget(QLabel("最近100条采集阶段日志（logs/ipo_learning_events.jsonl）"))
         self.acquisition_pipeline_log_table = QTableWidget(0, 5)
         self.acquisition_pipeline_log_table.setHorizontalHeaderLabels(
             ["时间", "队列位置", "代码", "阶段 / 状态", "正在做什么 / 诊断"]
@@ -3065,7 +3106,11 @@ class IPOLearningConsole(QWidget):
             self.acquisition_pipeline_log_table.horizontalHeader().setSectionResizeMode(index, mode)
         self.acquisition_pipeline_log_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.acquisition_pipeline_log_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        acquisition_layout.addWidget(self.acquisition_pipeline_log_table, 1)
+        pipeline_log_layout.addWidget(self.acquisition_pipeline_log_table, 1)
+        pipeline_log_widget.setMinimumHeight(60)
+        self.acquisition_splitter.addWidget(pipeline_log_widget)
+        self.acquisition_splitter.setSizes([400, 180])
+        acquisition_layout.addWidget(self.acquisition_splitter, 1)
         self.content_tabs.addTab(acquisition_page, "采集队列与流水")
 
         replay_metrics_page = QWidget()
@@ -3384,7 +3429,25 @@ class IPOLearningConsole(QWidget):
         self.interaction_detail.setPlaceholderText("选中一条交互后查看校验结果、输入证据和内容哈希。")
         interactions_layout.addWidget(self.interaction_detail)
         self.content_tabs.addTab(interactions_page, "LLM 实时交互")
-        layout.addWidget(self.content_tabs, 1)
+        self.content_tabs.setMinimumHeight(100)
+        self.content_tabs.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self.main_splitter.addWidget(self.content_tabs)
+        self.main_splitter.setStretchFactor(0, 0)
+        self.main_splitter.setStretchFactor(1, 1)
+        self.main_splitter.setSizes([230, 600])
+        layout.addWidget(self.main_splitter, 1)
+        settings_dir = self._root / "data" / "ipo_learning"
+        settings_dir.mkdir(parents=True, exist_ok=True)
+        self.layout_settings = QSettings(str(settings_dir / "ui_layout.ini"), QSettings.Format.IniFormat)
+        for key, splitter in (("console/header", self.main_splitter),
+                              ("console/acquisition", self.acquisition_splitter),
+                              ("console/codex", self.codex_dialogue.splitter)):
+            state = self.layout_settings.value(key)
+            if state is not None:
+                splitter.restoreState(state)
+            splitter.splitterMoved.connect(
+                lambda _pos, _index, key=key, splitter=splitter: self._save_splitter(key, splitter)
+            )
         self.setStyleSheet("""
             QWidget {
                 color: #e5e7eb;
@@ -3494,6 +3557,7 @@ class IPOLearningConsole(QWidget):
 
     def _monitor_failed(self, message: str) -> None:
         self.lbl_monitor_updated_at.setText(message + "；保留上次结果，稍后重试")
+        self.runtime_log.appendPlainText(f"监控错误：{message}")
 
     def _table_changed(self, key: str, payload: Any) -> bool:
         if key in self._table_payloads and self._table_payloads[key] == payload:
@@ -3502,6 +3566,8 @@ class IPOLearningConsole(QWidget):
         return True
 
     def _render_snapshot(self, snapshot: Dict[str, Any]) -> None:
+        if self._closing:
+            return
         self.setUpdatesEnabled(False)
         try:
             self._apply_snapshot(snapshot)
@@ -3510,6 +3576,18 @@ class IPOLearningConsole(QWidget):
             self._worker.snapshot_consumed()
 
     def _apply_snapshot(self, snapshot: Dict[str, Any]) -> None:
+        events = snapshot.get("pipeline_events", [])
+        lines = [
+            f"{event.get('timestamp', event.get('time', ''))} {event.get('ticker', '')} "
+            f"{event.get('step', event.get('event', ''))} {event.get('status', '')} "
+            f"{event.get('message', event.get('reason', ''))}"
+            for event in events[-80:] if isinstance(event, dict)
+        ]
+        text = "\n".join(lines)
+        if text and text != getattr(self, "_runtime_log_text", ""):
+            self._runtime_log_text = text
+            self.runtime_log.setPlainText(text)
+            self.runtime_log.verticalScrollBar().setValue(self.runtime_log.verticalScrollBar().maximum())
         status = snapshot.get("runtime_status", "未知")
         simulation_only = snapshot.get("simulation_only") is True
         refreshed_at = snapshot.get("monitor_updated_at", "未知")
@@ -3672,6 +3750,9 @@ class IPOLearningConsole(QWidget):
         )
         self.lbl_worker.setToolTip(worker.get("last_error", "Worker 健康状态由独立控制线程发布"))
         self.lbl_learning.setText(f"自学习：{snapshot.get('learning_status', '未知')}")
+        for label in (self.lbl_runtime, self.lbl_provider, self.lbl_worker,
+                      self.lbl_learning, self.lbl_monitor_updated_at):
+            label.setToolTip(label.text())
         interaction = snapshot.get("interaction_summary", {})
         interaction = interaction if isinstance(interaction, dict) else {}
         recent_results = interaction.get("recent_results", [])
@@ -4166,6 +4247,7 @@ class IPOLearningConsole(QWidget):
                 "WAITING": "等待采集", "RUNNING": "正在采集",
                 "PROCESSED": "本轮已采集", "FAILED": "本轮失败",
             }
+            linkage_blocker = QSignalBlocker(self.acquisition_queue_table)
             self.acquisition_queue_table.setRowCount(len(items))
             for row, record in enumerate(items):
                 if not isinstance(record, dict):
@@ -4209,6 +4291,7 @@ class IPOLearningConsole(QWidget):
                     if column == 7:
                         cell.setToolTip(_safe_text(record.get("last_reason"), 1000))
                     self.acquisition_queue_table.setItem(row, column, cell)
+            del linkage_blocker
             events = events if isinstance(events, list) else []
             events = [event for event in events if isinstance(event, dict)][-100:]
             self.acquisition_pipeline_log_table.setRowCount(len(events))
@@ -4343,6 +4426,18 @@ class IPOLearningConsole(QWidget):
             name = ""
         self._outcome_stock_names[code] = name
         return name
+
+    def _save_splitter(self, key, splitter):
+        self.layout_settings.setValue(key, splitter.saveState())
+        self.layout_settings.sync()
+
+    def _link_acquisition_row(self, row: int) -> None:
+        if self._closing or row < 0:
+            return
+        code = self.acquisition_queue_table.item(row, 1)
+        name = self.acquisition_queue_table.item(row, 2)
+        if code is not None:
+            self._link_outcome_stock(code.text(), name.text() if name else "")
 
     def _link_outcome_stock(self, code: str, name: str) -> None:
         node = self
@@ -4889,6 +4984,8 @@ class IPOLearningConsole(QWidget):
 
     def stop_monitor(self, timeout_ms: int = 1500) -> None:
         self._closing = True
+        if hasattr(self, "codex_dialogue"):
+            self.codex_dialogue.shutdown(timeout_ms=max(0, int(timeout_ms)))
         if hasattr(self, "_source_auto_timer"):
             self._source_auto_timer.stop()
         control = self._runtime_control

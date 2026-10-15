@@ -15,6 +15,8 @@ import multiprocessing
 import argparse
 import socket
 import threading
+import logging
+import time
 from pathlib import Path
 
 if not getattr(sys, "frozen", False) and "__compiled__" not in globals():
@@ -37,7 +39,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout, QPushButton, QLabel, QStatusBar,
     QScrollArea, QFrame,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from ats.ui.ipo_learning_console import IPOLearningConsole
 from ats.ui.ipo_arbitration_detail_dialog import IPOArbitrationDetailDialog
 
@@ -73,16 +75,21 @@ class StandaloneLearningWindow(QMainWindow):
         main_layout.setSpacing(6)
 
         # 3. 快捷工具条
-        toolbar_layout = QHBoxLayout()
+        from ats.ui.responsive_flow import ResponsiveFlow
+        toolbar_layout = ResponsiveFlow()
         toolbar_layout.setSpacing(10)
 
-        title_lbl = QLabel("<b>新股情绪感知与本地自学习系统 (IPO Learning Console)</b>")
+        title_lbl = QLabel("<b>IPO 情绪感知与自学习</b>")
+        title_lbl.setToolTip("新股情绪感知与本地自学习系统 (IPO Learning Console)")
+        title_lbl.setMinimumWidth(0)
+        title_lbl.setMaximumWidth(500)
         title_lbl.setStyleSheet("font-size: 13px; color: #3388ff;")
         toolbar_layout.addWidget(title_lbl)
 
-        toolbar_layout.addStretch()
 
         self.btn_open_dialog = QPushButton("🔍 打开单股仲裁因果透视 (Arbitration Dialog)")
+        self.btn_open_dialog.setToolTip(self.btn_open_dialog.text())
+        self.btn_open_dialog.setText("打开单股仲裁透视")
         self.btn_open_dialog.setStyleSheet("""
             QPushButton {
                 background-color: #1e3a5f;
@@ -126,13 +133,38 @@ class StandaloneLearningWindow(QMainWindow):
         self.current_selected_code = ""
         self.current_selected_name = ""
 
-        main_layout.addWidget(scroll_area, 1)
+        # Keep the page at viewport height; scroll inside individual panes only.
+        scroll_area.takeWidget()
+        scroll_area.deleteLater()
+        main_layout.addWidget(self.console, 1)
+        self._geometry_timer = QTimer(self)
+        self._geometry_timer.setSingleShot(True)
+        self._geometry_timer.setInterval(400)
+        self._geometry_timer.timeout.connect(self._save_geometry)
+        saved = self.console.layout_settings.value("window/geometry")
+        if saved is not None:
+            self.restoreGeometry(saved)
 
         # 5. 状态栏
         status_bar = QStatusBar(self)
         status_bar.setStyleSheet("QStatusBar { color: #9ca3af; background-color: #17191f; border-top: 1px solid #353a45; } QStatusBar::item { border: none; }")
         self.setStatusBar(status_bar)
         status_bar.showMessage("已就绪 [自适应模式]。窗口已根据当前显示器尺寸自动缩放，支持自由拖拽或最大化。")
+
+    def _save_geometry(self):
+        if not self.isMinimized():
+            self.console.layout_settings.setValue("window/geometry", self.saveGeometry())
+            self.console.layout_settings.sync()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "_geometry_timer"):
+            self._geometry_timer.start()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        if hasattr(self, "_geometry_timer"):
+            self._geometry_timer.start()
 
     def _open_arbitration_dialog(self):
         """弹出单例仲裁因果透视对话框"""
@@ -149,6 +181,7 @@ class StandaloneLearningWindow(QMainWindow):
         self.current_selected_code = clean_code
         self.current_selected_name = str(name or "")
         self.console._active_ticker = clean_code
+        self.console.codex_dialogue.ticker.setText(clean_code)
         self.statusBar().showMessage(f"联动标的：{clean_code} {self.current_selected_name}")
         dialog = IPOArbitrationDetailDialog._shared_instance
         if dialog is not None and dialog.isVisible():
@@ -166,25 +199,72 @@ class StandaloneLearningWindow(QMainWindow):
                     clean_code, flags={"tdx": True, "ths": True, "dfcf": False}, auto=False,
                 )
             except Exception:
-                pass
+                logging.getLogger(__name__).exception("IPO外部联动失败：%s", clean_code)
 
         threading.Thread(target=push_read_only_linkage, daemon=True).start()
 
     def closeEvent(self, event):
-        try:
-            self.console.stop_monitor()
-        except Exception:
-            pass
-        super().closeEvent(event)
+        if getattr(self, "_close_ready", False):
+            return super().closeEvent(event)
+        event.ignore()
+        if getattr(self, "_close_pending", False):
+            return
+        self._close_pending = True
+        self._geometry_timer.stop()
+        self._save_geometry()
+        self._close_started = time.monotonic()
+        log_dir = self.console._root / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        self._shutdown_logger = logging.getLogger(f"ipo.shutdown.{id(self)}")
+        handler = logging.FileHandler(log_dir / "ipo_console_lifecycle.log", encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        self._shutdown_logger.addHandler(handler)
+        self._shutdown_logger.setLevel(logging.INFO)
+        self._shutdown_logger.info("关闭请求：停止定时器，取消CLI、监控及采集任务")
+        self.console.runtime_log.appendPlainText("正在关闭：取消后台任务，等待资源释放…")
+        self.statusBar().showMessage("正在关闭；窗口保持响应，详细进度见右侧日志及logs/ipo_console_lifecycle.log")
+        self.console.stop_monitor(timeout_ms=0)
+        self._close_timer = QTimer(self)
+        self._close_timer.setInterval(200)
+        self._close_timer.timeout.connect(self._poll_close)
+        self._close_timer.start()
+
+    def _poll_close(self):
+        pending = []
+        for name, worker in (("监控", self.console._worker),
+                             ("采集", self.console._source_worker),
+                             ("Codex", self.console.codex_dialogue.worker)):
+            if worker is not None and worker.isRunning():
+                pending.append(name)
+        control = self.console._runtime_control
+        if control is not None and control.is_alive():
+            pending.append("运行控制")
+        state = ", ".join(pending) or "全部后台任务已结束"
+        if state != getattr(self, "_close_state", None):
+            self._close_state = state
+            self._shutdown_logger.info("关闭进度：%s", state)
+            self.console.runtime_log.appendPlainText(f"关闭进度：{state}")
+        self.statusBar().showMessage(f"正在关闭（{time.monotonic()-self._close_started:.1f}秒）：{state}")
+        if not pending:
+            self._close_timer.stop()
+            self._shutdown_logger.info("关闭完成")
+            for handler in list(self._shutdown_logger.handlers):
+                handler.close()
+                self._shutdown_logger.removeHandler(handler)
+            self._close_ready = True
+            self.close()
 
 
 def main():
     parser = argparse.ArgumentParser(description="启动 IPO 自学习监控控制台")
     parser.add_argument("--project-root", help="指定运行数据根目录")
+    parser.add_argument("--codex-chat", action="store_true", help="直接打开Codex CLI互动与模拟对账页")
     parser.add_argument("--simulation-read-only", action="store_true", help="只读展示仿真结果，不采集、不启 Worker")
     args = parser.parse_args()
     if args.simulation_read_only:
         print("[IPO Console] 仿真只读展示：不采集、不启动 Worker、不调用模型或交易。", flush=True)
+    elif args.codex_chat:
+        print("[IPO Console] Codex CLI互动与对账：仅手动发送，不启动自动采集或策略Worker。", flush=True)
     else:
         print(
             "[IPO Console] ATS 只读监控已启动：约 2.5 秒后执行一次冷启动读取；"
@@ -199,6 +279,17 @@ def main():
     from sys_utils import get_app_root
     resolved_root = str(safe_resolve_path(args.project_root or get_app_root()))
     os.environ["INSTOCK_APP_ROOT"] = resolved_root
+    if args.codex_chat and not args.simulation_read_only:
+        from ats.ui.ipo_codex_dialogue import CodexIPODialogue
+        app = QApplication.instance() or QApplication([sys.argv[0]])
+        window = QMainWindow()
+        window.setWindowTitle("IPO · Codex CLI 互动 / 对账")
+        dialogue = CodexIPODialogue(resolved_root, window)
+        window.setCentralWidget(dialogue)
+        window.resize(1100, 800)
+        app.aboutToQuit.connect(dialogue.shutdown)
+        window.show()
+        return app.exec()
 
     gate_provider = None
     if not args.simulation_read_only:
@@ -219,6 +310,8 @@ def main():
         simulation_read_only=args.simulation_read_only,
     )
     window.show()
+    if args.codex_chat:
+        window.console._select_console_tab("Codex CLI 互动 / 对账")
 
     try:
         return app.exec()

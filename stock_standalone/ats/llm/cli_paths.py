@@ -35,6 +35,9 @@ def resolve_cli_path(value: Any, executable_name: str) -> str:
     if executable_name == "codex":
         local_app_data = os.environ.get("LOCALAPPDATA")
         if local_app_data:
+            installed = Path(local_app_data) / "Programs" / "OpenAI" / "Codex" / "bin" / "codex.exe"
+            if installed.is_file():
+                return str(safe_resolve_path(installed))
             base = Path(local_app_data) / "OpenAI" / "Codex" / "bin"
             direct = base / "codex.exe"
             if direct.is_file():
