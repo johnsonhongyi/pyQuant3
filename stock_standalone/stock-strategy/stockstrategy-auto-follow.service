@@ -1,0 +1,38 @@
+[Unit]
+Description=Easy Stock independent CN paper follower
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/4TB/dockerf/stockstrategy/auto-follow/current
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=EASY_STOCK_API_URL=http://192.168.50.60:20073
+Environment=EASY_STOCK_FOLLOW_CONFIG=/mnt/4TB/dockerf/stockstrategy/auto-follow/current/config.json
+Environment=EASY_STOCK_FOLLOW_SERVICE_DIR=/mnt/4TB/dockerf/stockstrategy/auto-follow/current/source/easy-stock-service
+Environment=EASY_STOCK_FOLLOW_MARKET_SOURCE=backend
+Environment=EASY_STOCK_FOLLOW_RESEARCH=1
+Environment=EASY_STOCK_FOLLOW_SHARED=1
+Environment=EASY_STOCK_FOLLOW_DB=/mnt/4TB/dockerf/stockstrategy/data/auto-follow/account.db
+Environment=EASY_STOCK_DATA_DB=/mnt/4TB/dockerf/stockstrategy/data/auto-follow/http-cache.db
+Environment=TRADING_CALENDAR_PATH=/mnt/4TB/dockerf/stockstrategy/config/trading-calendar.json
+ExecStart=/usr/bin/python3 /mnt/4TB/dockerf/stockstrategy/auto-follow/current/auto_follow.py --watch
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=30
+KillSignal=SIGINT
+UMask=0007
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/mnt/4TB/dockerf/stockstrategy/data/auto-follow /mnt/4TB/dockerf/stockstrategy/logs/service
+StandardOutput=append:/mnt/4TB/dockerf/stockstrategy/logs/service/auto-follow.log
+StandardError=append:/mnt/4TB/dockerf/stockstrategy/logs/service/auto-follow.log
+
+[Install]
+WantedBy=multi-user.target

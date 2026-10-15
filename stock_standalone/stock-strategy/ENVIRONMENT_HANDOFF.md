@@ -1,5 +1,19 @@
 # Easy Stock 环境交接
 
+## 2026-10-15 12:43 本会话代码提交分界
+
+- 已部署版本仍为 API `20261015013333`、Web 外置补丁 `20261015021500`、worker `20261015021700`。本次版本提交不表示重新部署。
+- 工作区新增 Codex/ATS AI 协同草案（任务队列、HMAC IPC、app-server 代理、结构化提案与前台互动），尚未部署或完成真实 AI 联调，不应将本次提交 HEAD 视为线上已验收源码。默认 AI 关闭，shadow/enforce 未在线启用。
+- 功能清单、版本与包哈希、验证边界、AI 草案状态及后续优先级见 [完整中文交接](docs/tasks/2026-10-15_1243_本会话版本提交与完整交接.md)。
+
+## 2026-10-15 02:15 资金观察与逐股条件计划
+
+- LXC 102 独立模拟 worker 更新为 `20261015021700`（包 SHA256 `2979edc7cb74b0656817a14624efa336fce41b389cdc79d8ad8517fa1aeb4f80`）；外置 Web 补丁 `20261015021500`。沿用部署锁、校验、健康检查与回滚，没有新建镜像、重建 API/Web 容器或改挂载。
+- 自动跟单新增“资金轮动 / 计划”：资金覆盖/来源/日期、账户资金分布、逐股 VWAP/MA20/量价及条件应对。只读研究与开仓门禁分离，非交易时段也展示明确标记的参考池。
+- 观察到行业 48、题材 181、参考个股 10，10 份日线指标已计算；现金 500000、持仓零。新浪资金缺 trade_date，只作参考，未接入自动资金轮换。Python 24 项在 Windows/Linux 通过，前端相关 10 项通过；浏览器入口/展开/820px 布局及零运行异常通过，尚未盘中连续验证。
+- 修复 Go 纳秒时间戳在 Python 3.9 的兼容，并核实/适配本地日线成交量为股的契约，增加成交额/股数价格合理性检查。没有放松行情过期、交易时段、T+1 或风险阈值。
+- 部署、哈希、回滚与未完成边界详见 `docs/tasks/2026-10-15_0215_资金观察与逐股条件计划.md`。
+
 生产部署背景与上次线上核验见 [source/docs/项目交接说明.md](source/docs/项目交接说明.md)。其中生产快照有日期，部署前必须重新核验容器、镜像、挂载与部署脚本预期基础镜像。
 
 ## 2026-10-11 总控统一发布规则（当前有效）
@@ -180,3 +194,25 @@
 - 首次20261013144422在切换容器前被发布说明标签门禁拦截；旧容器一直健康，源码自动恢复、快照校验通过。统一镜像标签写入使用RELEASE_NOTE后，从同一SHA完整重跑成功。
 - 脚本SHA256：build-and-deploy.ps1=027e37dc038222ab04b12a21f91cd606293f0fe92198182aee51053f9718628d；deploy-prebuilt.sh=d106077d7ff659eb8d411be72cc9582d6f847a10058f09fbb0b34d2987dc5062；rollback-prebuilt.sh=3042d53d5a7040efb670e3e944c1c76c3ede3a19b19b6b685262844785315c37。
 - 未验范围：用户指定入口为HTTP，密码传输未加密；公网独立设备未专项验证。浏览器工具内核因EISDIR启动失败，未将浏览器点击/视觉布局记为已验收。
+
+## 2026-10-15 独立 A 股自动跟单模拟 worker
+
+- 用户明确授权在 LXC 102 与 Muse 并行独立模拟。新增 systemd `stockstrategy-auto-follow.service`，发布 `20261015000500`，active/running、enabled，复核 NRestarts=0；非交易时段等待，无实盘接口、无模拟成交验收。
+- 代码 `/mnt/4TB/dockerf/stockstrategy/auto-follow/releases/20261015000500`，current 链接指向该版；包 SHA256 `033d4235c22faae8fd23341d680ad3439c0855c653deb6bcf74a07cbb745ccbd`，9 项文件 SHA256 校验通过，COMPLETE 存在。线上 source 不含 Git 元数据，本次不宣称核验到应用 Git SHA。
+- 独立账本 `/mnt/4TB/dockerf/stockstrategy/data/auto-follow/account.db`（SQLite integrity_check=ok，paper，50 万现金，持仓/平仓 0），HTTP 缓存同目录 http-cache.db，日志为外置 logs/service/auto-follow.log；不覆盖 Muse 原账本或共享行情库。
+- LXC Python 3.9.2 未装 PyYAML；采用本地 v1.9 无密钥参数快照和必要标准库模块，不升级环境。盘中情绪走 Go emotion-history 原生状态/风险门，不将其伪装为 Muse 分数；行情仍需 P8/P25 确认。共享交易日日历读取原外置 config。
+- 内网 API 经 `http://192.168.50.60:20073`；端口只绑定该 LAN 地址，127.0.0.1 不可达。健康、情绪与报价字段只读探针通过；已验证行情有 trade_time/source/stale 等字段，盘中新鲜度与成交须交易时段继续验收。
+- 本地及线上 13 项隔离测试通过。API 仍为 backend:20261013144813、Web 为 web:20261011114424，均 healthy、根文件系统只读；没有新建镜像、重启原容器或修改 cron。发布文件权限已收紧为 0644，账户目录 0700。
+- 首版停用/回撤：`systemctl disable --now stockstrategy-auto-follow.service`，保留独立账户与原生产数据。后续更新使用 deploy-auto-follow.sh 的部署锁、SHA256、隔离测试、健康检查与失败恢复，不回滚账本。
+- 实施与限制见 [任务记录](docs/tasks/2026-10-14_2355_自动跟单模拟盘规划与实施.md)；最新版 Muse 来源手册保留，本地差异见 [审核记录](docs/engineering/muse-2026-10-14-local-audit.md)。
+
+## 2026-10-15 自动跟单控制台完整发布
+
+- 用户明确授权部署及本次镜像例外。按 build-and-deploy.ps1 -AllowLayeredImageBuild 发布 `20261015013333`，API 从已核验固定 flat base 构建，2 层、119426532 字节，ID `sha256:3004cb440dd5b0285a7741a93ead8ad9c581824f201289fd3aba18f0fafd2100`；Web 复用 web:20261011114424。API/Web healthy、ReadonlyRootfs=true，8/5 个原 bind mounts 保持。
+- 新增侧栏“自动跟单”，入口 `http://192.168.50.60:20073/#auto-follow`；状态 API 与控制队列经过原鉴权，支持跟随范围、强势股原因、模拟持仓/成交、日志、暂停/恢复及回执。worker 更新为 `20261015012500` / paper-follow-console-v2，active、NRestarts=0。
+- 独立账户目录 root:10001、2770，account.db/control.db 等 0660；Go 只写独立控制库，worker 单写账户。模拟现金 500000、持仓/平仓 0、enabled=true、kill=false，两库 integrity_check=ok；备份 `/mnt/4TB/dockerf/stockstrategy/auto-follow/backups/20261015013214/account.db`。没有接实盘、覆盖 Muse 原账本或改变行情/风控参数。
+- 线上 17 项 worker 隔离测试通过；本地 API/原鉴权回归与前端测试通过。真实浏览器验收发现并修复 HTTP crypto.randomUUID 不可用问题，补测后前端共 8 项通过。Web 修补 `20261015014500` 使用原有外置静态挂载、部署锁与原子入口切换，无二次镜像构建或容器重启，旧资源保留。
+- 最终 Edge 无头浏览器实际点击五个视图、暂停→回执→恢复通过，820px 宽度检查通过，捕获运行异常 0。API 幂等、非法指令 400、跨源拒绝和匿名公网来源 401 通过；现金/持仓未变。IAB/Chrome 工具内核仍有 EISDIR，改用独立临时 Edge 配置完成验收，不读取个人浏览器资料。
+- 程序 SHA256 `2e1ef4159939f2c24cc03429803a993eaeeccde30360aa2441a3fa486fdec7b9`；Web 最终 index SHA256 `f659273f1faba3337de9a138ce774184b2b6bedbfb4e464cd794764f095043bf`，资源 `index-DbLS3fwf.js`。镜像标签表示构建时状态，Web 外置修补以文件哈希/补丁记录识别，不能用镜像标签冒充当前 Web 代码 SHA。
+- 主回滚快照 rollback/20261015013333 COMPLETE 存在且 SHA256SUMS 通过；整体回撤先停止模拟 worker，再运行 `bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261015013333`，不回滚账户数据。Web 补丁备份在 auto-follow/web-hotfix/20261015014500；详细包哈希、回撤限制与验收见 [任务记录](docs/tasks/2026-10-15_0105_自动跟单控制台闭环.md)。
+- 当前夜间无候选/成交，不代表盘中已验收；仍需盘中核验信号、行情新鲜度、跨日退出与长期稳定性。公网独立设备未专项验证。未提交/推送代码。
