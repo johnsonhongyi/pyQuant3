@@ -71,14 +71,14 @@ class DesktopPeer:
         return json.loads(raw)
 
 
-def ats_evidence(root, symbols):
+def ats_evidence(root, symbols, ipc_db=None):
     """Reuse the same read-only signal_history and shared-context IPC storage contracts."""
     result = {"source": "ATS IPC persisted evidence", "status": "missing", "signals": [], "shared_context": None}
     for file, query, params, key in (
         ("trading_signals.db", "SELECT date,code,name,price,action,reason,resample FROM signal_history WHERE code IN (" +
-         ",".join("?" for _ in symbols) + ") ORDER BY date DESC LIMIT 30", tuple(s[:6] for s in symbols), "signals"),
+         ",".join("?" for _ in symbols) + ") ORDER BY date DESC,rowid DESC LIMIT 30", tuple(s[:6] for s in symbols), "signals"),
         ("system_linkage.sqlite3", "SELECT payload FROM linkage_context_snapshots ORDER BY stored_at DESC LIMIT 1", (), "shared_context")):
-        path = Path(root) / file
+        path = Path(ipc_db) if file == "system_linkage.sqlite3" and ipc_db else Path(root) / file
         if not path.is_file() or not symbols:
             continue
         try:
@@ -174,7 +174,9 @@ class AppServer:
                 self.backlog.append(message)
         raise TimeoutError(method)
 
-    def analyze(self, job, thread_id=None, model="gpt-6-luna", progress=None):
+    def analyze(self, job, thread_id=None, model="gpt-6-luna", progress=None, effort="medium"):
+        # A bounded evidence snapshot per job avoids repeatedly replaying full market history.
+        thread_id = None
         context = job["context"]
         tool_schema = {"type": "object", "properties": {"symbol": {"type": "string"}}, "additionalProperties": False}
         tools = [{"type": "function", "name": name, "description": desc, "inputSchema": tool_schema} for name, desc in (
@@ -182,7 +184,7 @@ class AppServer:
             ("get_stock_evidence", "Read one allowed pool stock's quantitative evidence; symbol required"),
             ("get_ats_evidence", "Read ATS IPC evidence with original dates; never assume historical signals are realtime"))]
         params = {"cwd": self.scratch, "model": model, "approvalPolicy": "never", "sandbox": "read-only",
-            "config": {"project_doc_max_bytes": 0}, "dynamicTools": tools,
+            "config": {"project_doc_max_bytes": 0, "model_reasoning_effort": effort}, "dynamicTools": tools,
             "developerInstructions": "你是A股模拟盘策略研究员。仅调用指定只读证据工具，不执行命令、不读写文件、不下单。"
                 "按市场情绪、资金轮动、板块地位、个股走势分析，提出逐股条件计划。"
                 "区分事实、推断、缺口；无交易日资金仅作参考，ATS历史信号不是实时数据。"
@@ -195,15 +197,18 @@ class AppServer:
             resumed = self.request("thread/resume", {**{k: v for k, v in params.items() if k != "dynamicTools"}, "threadId": thread_id, "excludeTurns": True})
             thread_id = resumed["thread"]["id"]
         else:
-            thread_id = self.request("thread/start", params)["thread"]["id"]
+            started = self.request("thread/start", params)
+            if started.get("model") != model or started.get("reasoningEffort") != effort:
+                raise ValueError("CLI_MODEL_CONFIGURATION_MISMATCH")
+            thread_id = started["thread"]["id"]
             self.request("thread/name/set", {"threadId": thread_id, "name": "Muse模拟策略研究 " + context["trade_date"]})
         self.active_thread = thread_id
         prompt = {"task": job.get("question") or "分析全市场资金与题材相对强弱，逐股给出应对计划，解释优先观察、跟随或回避的原因。",
                   "evidence_hash": job["evidence_hash"], "evidence": context}
         turn = self.request("turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": json.dumps(prompt, ensure_ascii=False)}],
-            "outputSchema": RESPONSE_SCHEMA, "effort": "medium", "approvalPolicy": "never",
+            "outputSchema": RESPONSE_SCHEMA, "effort": effort, "model": model, "approvalPolicy": "never",
             "sandboxPolicy": {"type": "readOnly", "networkAccess": False}})["turn"]
-        deadline, chunks, answer = time.monotonic() + 180, [], None
+        deadline, chunks, answer = time.monotonic() + 300, [], None
         completed = False
         try:
             while time.monotonic() < deadline:
@@ -230,7 +235,8 @@ class AppServer:
                     validated = validate_result(proposal, context)
                     completed = True
                     return {"proposal": validated, "thread_id": thread_id,
-                            "provider": "codex-app-server", "model": model, "tool_audit": self.tool_audit[-30:]}
+                            "provider": "codex-app-server", "model": started["model"], "reasoning_effort": started["reasoningEffort"],
+                            "configuration_confirmed": True, "tool_audit": self.tool_audit[-30:]}
         finally:
             if not completed:
                 try:
@@ -286,19 +292,33 @@ def main():
         import msvcrt
         try:msvcrt.locking(runtime_lock.fileno(),msvcrt.LK_NBLCK,1)
         except OSError:raise SystemExit('desktop agent already owns this runtime')
+    from desktop_model_policy import latest_models, resolve_selection
+    from desktop_runtime import discover_runtime
+    models, catalog_at, desktop, desktop_at = [], 0, {}, 0
+    def heartbeat(status, detail):
+        peer.post("heartbeat", {"status": status, "detail": {"provider":"codex-app-server", "transport":args.transport, "models":models, "catalog_at":catalog_at, "desktop_runtime":desktop, **detail}})
     ledger = sqlite3.connect(runtime / "agent.db", timeout=3)
     ledger.execute("CREATE TABLE IF NOT EXISTS results(id TEXT PRIMARY KEY,result TEXT,thread_id TEXT,session TEXT)")
     ledger.execute("CREATE TABLE IF NOT EXISTS runtime(key TEXT PRIMARY KEY,value TEXT)")
     while True:
         app, job, result_ready = None, None, False
         try:
+            if time.time()-catalog_at>900:
+                probe=AppServer(cli,runtime/"scratch",args.transport)
+                try: models=latest_models(probe.request("model/list",{"limit":100,"includeHidden":False},timeout=30)["data"]);catalog_at=time.time()
+                finally: probe.close()
+            if time.time()-desktop_at>60:
+                desktop=discover_runtime();desktop_at=time.time()
+                if args.ats_data_root:desktop={**desktop,"data_root":str(args.ats_data_root.resolve()),"root_source":"explicit"}
             paused=ledger.execute("SELECT value FROM runtime WHERE key='cooldown_until'").fetchone()
             if paused and float(paused[0])>time.time():
-                peer.post("heartbeat", {"status":"degraded","detail":{"error_code":"provider_cooldown","retry_after_seconds":int(float(paused[0])-time.time())}})
+                heartbeat("degraded", {"error_code":"provider_cooldown","retry_after_seconds":int(float(paused[0])-time.time())})
                 if args.once:break
                 time.sleep(20)
                 continue
-            peer.post("heartbeat", {"status": "ready", "detail": {"provider": "codex-app-server", "transport": args.transport, "model": args.model}})
+            last=ledger.execute("SELECT result FROM results ORDER BY rowid DESC LIMIT 1").fetchone()
+            effective=json.loads(last[0]) if last else {}
+            heartbeat("ready", {"default_model":args.model,"effective_model":effective.get("model"),"effective_effort":effective.get("reasoning_effort")})
             job = peer.post("claim", {}).get("job")
             if job:
                 context = job["context"]
@@ -309,32 +329,43 @@ def main():
                     result = json.loads(cached[0])
                 else:
                     symbols = [s["symbol"] for s in context.get("stocks", [])]
+                    selection=context.get("ai_runtime",{})
+                    model,effort=resolve_selection(models,selection.get("model",args.model),selection.get("reasoning_effort","medium"))
+                    ats_summary={}
                     def tool(name, arguments):
                         if name == "get_market_context":
                             return context
                         if name == "get_stock_evidence":
                             return next((s for s in context["stocks"] if s["symbol"] == arguments.get("symbol")), {"error": "symbol not in evidence pool"})
                         if name == "get_ats_evidence":
-                            return ats_evidence(args.ats_data_root or args.desktop_root, symbols)
+                            root=args.ats_data_root or desktop.get("data_root")
+                            if not root:return {"status":"missing","runtime":desktop,"error":"running desktop data root unavailable"}
+                            value={**ats_evidence(Path(root), symbols,desktop.get("linkage_db")), "runtime":desktop}
+                            ats_summary.update({'source':value['source'],'signal_count':len(value['signals']),
+                                                'signal_dates':sorted({s['date'] for s in value['signals']}),
+                                                'read_at':datetime.now(timezone.utc).isoformat()})
+                            return value
                         return {"error": "tool not allowed"}
                     app = AppServer(cli, runtime / "scratch", args.transport, tool=tool)
                     session = peer.workspace + ":" + context["trade_date"]
-                    previous = ledger.execute("SELECT thread_id FROM results WHERE session=? ORDER BY rowid DESC LIMIT 1", (session,)).fetchone()
                     last_heartbeat = [0]
                     def progress(thread_id):
                         if time.monotonic() - last_heartbeat[0] > 20:
-                            peer.post("heartbeat", {"status": "analyzing", "detail": {"thread_id": thread_id, "job_id": job["id"]}})
+                            heartbeat("analyzing", {"thread_id": thread_id, "job_id": job["id"],"effective_model":model,"effective_effort":effort,"elapsed_seconds":int(time.monotonic()-analysis_started)})
                             last_heartbeat[0] = time.monotonic()
-                    result = app.analyze(job, thread_id=previous[0] if previous else None, model=args.model, progress=progress)
+                    analysis_started=time.monotonic()
+                    result = app.analyze(job, model=model, progress=progress, effort=effort)
+                    result.update(desktop_runtime=desktop,ats_evidence_summary=ats_summary)
                     ledger.execute("INSERT INTO results VALUES(?,?,?,?)", (job["id"], json.dumps(result, ensure_ascii=False), result["thread_id"], session))
                     ledger.commit()
                 result_ready = True
                 peer.post("result", {"id": job["id"], "lease_token": job["lease_token"], "status": "completed", "result": result})
+                heartbeat("ready", {"last_job_id":job["id"],"effective_model":result.get("model"),"effective_effort":result.get("reasoning_effort")})
                 print(json.dumps({"status": "completed", "job_id": job["id"], "thread_id": result.get("thread_id")}), flush=True)
         except (OSError, ValueError, KeyError, TypeError, sqlite3.Error, queue.Empty, TimeoutError) as exc:
-            code=str(exc) if re.fullmatch(r"CLI_[A-Z0-9_]+",str(exc)) else type(exc).__name__
+            code=("MODEL_TIMEOUT" if isinstance(exc,TimeoutError) else "RPC_TIMEOUT" if isinstance(exc,queue.Empty) else str(exc) if re.fullmatch(r"CLI_[A-Z0-9_]+",str(exc)) else type(exc).__name__)
             if job and not result_ready:
-                ledger.execute("INSERT OR REPLACE INTO runtime VALUES('cooldown_until',?)",(str(time.time()+300),));ledger.commit()
+                ledger.execute("INSERT OR REPLACE INTO runtime VALUES('cooldown_until',?)",(str(time.time()+(30 if isinstance(exc,TimeoutError) else 300)),));ledger.commit()
             if job and not result_ready:
                 try:
                     peer.post("result", {"id": job["id"], "lease_token": job["lease_token"], "status": "failed",

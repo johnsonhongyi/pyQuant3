@@ -241,10 +241,14 @@ def apply_commands(db, state, now):
                 import re
                 from follow_ai import DEFAULT_AI
                 data = json.loads(payload)
-                if set(data) != {"enabled", "mode", "node_id", "workspace_id"} or not isinstance(data["enabled"], bool) or data["mode"] not in ("shadow", "enforce"):
+                if not {"enabled", "mode", "node_id", "workspace_id"} <= set(data) or set(data) - {"enabled", "mode", "node_id", "workspace_id", "model", "reasoning_effort"} or not isinstance(data["enabled"], bool) or data["mode"] not in ("shadow", "enforce"):
                     raise ValueError("invalid AI settings")
                 if any(not isinstance(data[k], str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,96}", data[k]) for k in ("node_id", "workspace_id")):
                     raise ValueError("invalid AI desktop identity")
+                if "model" in data and not re.fullmatch(r"[A-Za-z0-9_.-]{1,96}", data["model"]):
+                    raise ValueError("invalid AI model")
+                if data.get("reasoning_effort", "medium") not in ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"):
+                    raise ValueError("invalid reasoning effort")
                 state["ai_settings"] = {**DEFAULT_AI, **data}
                 state.pop("ai_latest", None)
             elif action == "ai_ask":
