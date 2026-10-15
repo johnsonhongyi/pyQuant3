@@ -3,6 +3,7 @@ import argparse
 from collections import deque
 from contextlib import closing
 import configparser
+import copy
 import hashlib
 import hmac
 import ipaddress
@@ -22,6 +23,15 @@ from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHand
 
 from follow_ai import RESPONSE_SCHEMA, validate_result, digest
 from datetime import datetime, timezone
+
+
+def research_schema(context):
+    schema=copy.deepcopy(RESPONSE_SCHEMA)
+    symbols=[s['symbol'] for s in context.get('stocks',[])]
+    if symbols:
+        schema['properties']['plans']['items']['properties']['symbol']['enum']=symbols
+        schema['properties']['plans']['items']['properties']['evidence_refs']['items']['enum']=['market','rotation:industry','rotation:theme','ats:ipc']+['stock:'+s for s in symbols]
+    return schema
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -182,6 +192,8 @@ class AppServer:
         self.project_id=ensure_project(self)
         from muse_research_threads import PROJECT_ROOT
         tool_schema = {"type": "object", "properties": {"symbol": {"type": "string"}}, "additionalProperties": False}
+        symbols=[s['symbol'] for s in context.get('stocks',[])]
+        if symbols:tool_schema['properties']['symbol']['enum']=symbols
         tools = [{"type": "function", "name": name, "description": desc, "inputSchema": tool_schema} for name, desc in (
             ("get_market_context", "Read the dated market/capital-rotation evidence for this research job"),
             ("get_stock_evidence", "Read one allowed pool stock's quantitative evidence; symbol required"),
@@ -199,11 +211,13 @@ class AppServer:
         started = self.request("thread/start", params)
         thread_id = started["thread"]["id"]
         self.active_thread = thread_id
+        observer=getattr(self,'thread_observer',None)
+        if observer:observer(thread_id,job['id'])
         self.request("thread/name/set", {"threadId": thread_id, "name": thread_title(job)})
         if started.get("model") != model or started.get("reasoningEffort") != effort:
             raise ValueError("CLI_MODEL_CONFIGURATION_MISMATCH")
         turn = self.request("turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": research_prompt(job)}],
-            "outputSchema": RESPONSE_SCHEMA, "effort": effort, "model": model, "approvalPolicy": "never",
+            "outputSchema": research_schema(context), "effort": effort, "model": model, "approvalPolicy": "never",
             "sandboxPolicy": {"type": "readOnly", "networkAccess": False}})["turn"]
         deadline, chunks, answer = time.monotonic() + 300, [], None
         completed = False
@@ -302,6 +316,8 @@ def main():
     ledger = sqlite3.connect(runtime / "agent.db", timeout=3)
     ledger.execute("CREATE TABLE IF NOT EXISTS results(id TEXT PRIMARY KEY,result TEXT,thread_id TEXT,session TEXT)")
     ledger.execute("CREATE TABLE IF NOT EXISTS runtime(key TEXT PRIMARY KEY,value TEXT)")
+    from desktop_sidebar import SidebarOrganizer
+    sidebar=SidebarOrganizer(ledger)
     def probe_catalog(candidate):
         probe=AppServer(candidate,runtime/"scratch",args.transport)
         try:return latest_models(probe.request("model/list",{"limit":100,"includeHidden":False},timeout=30)["data"])
@@ -310,6 +326,7 @@ def main():
     while True:
         app, job, result_ready = None, None, False
         try:
+            sidebar.drain()
             catalog.refresh_idle(time.time())
             cli,models,catalog_at=catalog.engine,catalog.models,catalog.fetched_at
             if not models or not Path(cli).is_file():
@@ -328,7 +345,7 @@ def main():
                 continue
             last=ledger.execute("SELECT result FROM results ORDER BY rowid DESC LIMIT 1").fetchone()
             effective=json.loads(last[0]) if last else {}
-            heartbeat("ready", {"default_model":args.model,"effective_model":effective.get("model"),"effective_effort":effective.get("reasoning_effort")})
+            heartbeat("ready", {"default_model":args.model,"effective_model":effective.get("model"),"effective_effort":effective.get("reasoning_effort"),**sidebar.status()})
             job = peer.post("claim", {}).get("job")
             if job:
                 context = job["context"]
@@ -357,6 +374,7 @@ def main():
                             return value
                         return {"error": "tool not allowed"}
                     app = AppServer(cli, runtime / "scratch", args.transport, tool=tool)
+                    app.thread_observer=sidebar.enqueue
                     session = peer.workspace + ":" + context["trade_date"]
                     last_heartbeat = [0]
                     def progress(thread_id):
@@ -392,6 +410,7 @@ def main():
         finally:
             if app:
                 app.close()
+            sidebar.drain()
         if args.once:
             break
         time.sleep(5)
