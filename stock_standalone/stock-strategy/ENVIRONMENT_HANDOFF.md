@@ -1,3 +1,9 @@
+## 2026-10-15 Web 补丁 20261015211435 已上线
+
+- 用户明确授权“部署本次补丁”后，已执行此前待批的 Web 外置资源补丁，源码 74dbefb；包哈希校验、发布锁、原子 index 替换、HTTP 入口一致性和 API/Web 健康检查完成，脚本返回 healthy。
+- 图表底部联动布局与 Codex 首次切换修复已上线；API 镜像和容器未重建，持久化挂载与账本未改。AI 对话默认仍为桌面 Codex / gpt-6-luna / low，Hermes 保留可选。
+- 回滚备份及 COMPLETE 位于 /mnt/4TB/dockerf/stockstrategy/auto-follow/web-hotfix/20261015211435；原入口 previous-index.html，所改源码 source-before。未触发用户取消的真实对话、研究、关注或 UI 功能测试，由用户手动验收。
+
 ## 2026-10-15 21:18 Codex 默认已配置，布局修复待上线
 
 - 已按用户要求，通过原生产配置 API 将 AI 对话默认持久化为桌面 Codex / gpt-6-luna / low，节点 codex-bf952db5fd9f615f2a8fff37。Hermes 保留可选；该设置已经生效。
