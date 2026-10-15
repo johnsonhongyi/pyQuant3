@@ -36,7 +36,8 @@ _sbc_flags = ("--sbc", "--sbc-hold", "--hold-sbc", "--hold")
 _shadow_flags = ("--shadow-live",)
 _learning_flags = ("--ipo-learning", "--ipo-console", "--learning-console", "--ipo-learning-console")
 
-if __name__ == "__main__" and any(arg in sys.argv[1:] for arg in _learning_flags):
+if __name__ == "__main__" and (any(arg in sys.argv[1:] for arg in _learning_flags)
+                               or "--codex-chat" in sys.argv[1:]):
     import tools.run_ipo_learning_console as _learning_runner
     sys.argv = [sys.argv[0]] + [arg for arg in sys.argv[1:] if arg not in _learning_flags]
     sys.exit(_learning_runner.main())
@@ -53,11 +54,24 @@ if __name__ == "__main__" and any(arg in sys.argv[1:] for arg in ("-h", "--help"
     wants_shadow = any(arg in sys.argv for arg in _shadow_flags)
     wants_learning = any(arg in sys.argv for arg in _learning_flags)
     if not wants_ipo and not wants_sbc and not wants_shadow and not wants_learning:
-        parser = argparse.ArgumentParser(description="ATS 主程序与独立工具启动器")
+        parser = argparse.ArgumentParser(
+            description="ATS 主程序与独立工具启动器",
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog=("常用示例：\n"
+                    "  python run_ats.py --codex-chat              Codex CLI 互动 / IPO 分析 / 模拟对账\n"
+                    "  python run_ats.py --ipo-learning            完整 IPO 自学习控制台\n"
+                    "  python run_ats.py --ipo-learning --help     IPO 控制台详细参数\n"
+                    "  python run_ats.py --shadow-live --help      隔离 PAPER 运行器详细参数\n"
+                    "  python run_ats.py --codex-chat --project-root D:\\ATS  指定运行数据目录"))
         parser.add_argument("--ipo-detector", "--subnew-detector", "--ipo", "--subnew",
                             action="store_true", help="只启动新股次新股检测器")
-        parser.add_argument("--ipo-learning", "--ipo-console", "--learning-console",
+        parser.add_argument("--ipo-learning", "--ipo-console", "--learning-console", "--ipo-learning-console",
                             action="store_true", help="只启动 IPO 情绪感知与自学习监控控制台")
+        parser.add_argument("--codex-chat", action="store_true",
+                            help="直接打开 Codex CLI 互动窗口：IPO 分析、历史会话、模拟账户对账；也可配合 --ipo-learning")
+        parser.add_argument("--project-root", metavar="DIR", help="IPO 模式运行数据根目录，默认使用系统路径")
+        parser.add_argument("--simulation-read-only", action="store_true",
+                            help="IPO 模式只读展示仿真结果，不采集、不调用模型")
         parser.add_argument("--sbc-hold", "--hold-sbc", "--hold",
                             action="store_true", help="只启动 SBC 持仓独立看板")
         parser.add_argument("--sbc", metavar="CODE", help="只启动 SBC 指定股票窗口（可接周期参数）")

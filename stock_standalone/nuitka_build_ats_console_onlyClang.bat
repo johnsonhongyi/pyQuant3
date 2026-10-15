@@ -360,6 +360,9 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --include-module=ats.llm.codex_cli_backend ^
     --include-module=ats.llm.offline_learning ^
     --include-module=ats.ui.ipo_learning_console ^
+    --include-module=ats.llm.ipo_codex_chat ^
+    --include-module=ats.ui.ipo_codex_dialogue ^
+    --include-module=ats.ui.responsive_flow ^
     --include-package=trading_kernel ^
     --include-package=yaml
 

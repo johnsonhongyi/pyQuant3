@@ -75,6 +75,8 @@ def run_bounded_cli(
     max_stdout_bytes: int = MAX_STDOUT_BYTES,
     max_stderr_bytes: int = MAX_STDERR_BYTES,
     completion_predicate: Callable[[bytes], bool] | None = None,
+    timeout_limit_seconds: float = 30.0,
+    cancel_event: threading.Event | None = None,
 ) -> BoundedCLIResult:
     """Run a no-shell CLI while bounding captured output and wall time."""
     if (
@@ -89,7 +91,10 @@ def run_bounded_cli(
     if (
         isinstance(timeout_seconds, bool)
         or not isinstance(timeout_seconds, (int, float))
-        or not 0 < float(timeout_seconds) <= 30.0
+        or isinstance(timeout_limit_seconds, bool)
+        or not isinstance(timeout_limit_seconds, (int, float))
+        or not 0 < float(timeout_limit_seconds) <= 180.0
+        or not 0 < float(timeout_seconds) <= float(timeout_limit_seconds)
     ):
         raise BoundedCLIError("CLI_TIMEOUT_INVALID")
     if (
@@ -137,7 +142,8 @@ def run_bounded_cli(
                 "bufsize": 0,
             }
             if os.name == "nt":
-                kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                kwargs["creationflags"] = (getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                                           | getattr(subprocess, "CREATE_NO_WINDOW", 0))
             else:
                 kwargs["start_new_session"] = True
             process = subprocess.Popen(list(command), **kwargs)
@@ -155,6 +161,10 @@ def run_bounded_cli(
             failure_code = ""
             completed_by_predicate = False
             while process.poll() is None:
+                if cancel_event is not None and cancel_event.is_set():
+                    failure_code = "CLI_CANCELLED"
+                    _terminate_process_tree(process)
+                    break
                 if exceeded.is_set():
                     failure_code = "CLI_OUTPUT_LIMIT"
                     _terminate_process_tree(process)
