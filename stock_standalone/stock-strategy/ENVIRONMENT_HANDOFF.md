@@ -1,5 +1,16 @@
 # Easy Stock 环境交接
 
+## 2026-10-15 14:14 Codex / ATS AI 模拟闭环已部署
+
+- 用户明确批准本次固定 flat base 的 API 功能层例外。最终 API/Web 发布 `20261015140855`，API 源码 `97de300`（闭环功能 `22510f1`）；独立模拟 worker `20261015140000`，桌面/worker 实现提交 `472d583c`。以下旧日期的“尚未部署”是历史状态。
+- API 镜像 `stockstrategy/backend:20261015140855`，ID `sha256:76b5571ea6bfcb72953640830c1bcbc229355a466c76f6911756bae73d5e9380`；固定 base ID `sha256:ed8cbe9544efbcd5f4a50039b79884d43d1d2b662dc9ee6715325c1525d52d6d`。线上二进制 SHA256 `e254d0cf6ae50b2255dd7cf9b1f77d9a414ad9eb7457eda0d121078157e25e41`。
+- Web 复用 `stockstrategy/web:20261011114424`，外置资源发布 `20261015140855`。API/Web 均 healthy、readonly=true，原持久化挂载结构与 8/5 个挂载保留；worker active/running、NRestarts=0，包 SHA256 `2d0176ab19d7601028796b181240a6d36ef4a92d802c896c52f4a75132c90580`。
+- 当前用户计划任务 `StockStrategy-CodexATSBridge` Running，独立端口 26776；节点 `codex-bf952db5fd9f615f2a8fff37`、工作区 `ws-c1f09cc351724da6946658c4`。原 JohnsonTriton 节点保留，密钥仅在被忽略的运行目录。已启用 paper AI Enforce，无券商连接。
+- 真实生产分析任务 `38b31a865192445cbce2c20071e30e18` completed，Codex 会话 `01a13e30-3cc7-7150-bd08-3db089f5543a`；实际调用市场、逐股和 ATS 工具，10 只提案为 3 observe/7 avoid。桌面 HMAC ready，账户现金 500000、持仓零；市场门禁与过期资金证据阻止新开仓，未制造生产成交或复盘。
+- 已修复 Web 登录中间件重复消耗同一 HMAC nonce 导致的 401；认证/linkage 回归、Python 36 项、Linux worker 34 项、实际生产浏览器 AI 展示/820px/零异常通过。合成行情下的真实模型买入→T+1→次日退出→自动复盘验收另见任务文档。
+- 最终回滚点 `/mnt/4TB/dockerf/stockstrategy/rollback/20261015140855/COMPLETE` 已观察；该点回到中间候选 `20261015135845`（存在 HMAC 401），完整回退应使用已验证的原稳定点 `20261015013333` 并先停 worker，或将 AI 关闭后按层回退。worker 前版本 `20261015021700`。回退代码不回滚/覆盖账本。
+- 仍需真实盘中连续/跨日对账；当前池匹配的 ATS 信号为历史证据，资金源存在日期/时效缺口。详细实现、发布轨迹、操作和后续见 [闭环验收与发布记录](docs/tasks/2026-10-15_1348_CodexATS策略闭环端到端验收与发布.md)。
+
 ## 2026-10-15 12:43 本会话代码提交分界
 
 - 已部署版本仍为 API `20261015013333`、Web 外置补丁 `20261015021500`、worker `20261015021700`。本次版本提交不表示重新部署。
