@@ -294,19 +294,28 @@ def main():
         except OSError:raise SystemExit('desktop agent already owns this runtime')
     from desktop_model_policy import latest_models, resolve_selection
     from desktop_runtime import discover_runtime
+    from desktop_engine_policy import EngineCatalog
     models, catalog_at, desktop, desktop_at = [], 0, {}, 0
     def heartbeat(status, detail):
-        peer.post("heartbeat", {"status": status, "detail": {"provider":"codex-app-server", "transport":args.transport, "engine_path":cli, "models":models, "catalog_at":catalog_at, "desktop_runtime":desktop, **detail}})
+        peer.post("heartbeat", {"status": status, "detail": {"provider":"codex-app-server", "transport":args.transport, "engine_path":cli, "models":models, "catalog_at":catalog_at, **catalog.status(), "desktop_runtime":desktop, **detail}})
     ledger = sqlite3.connect(runtime / "agent.db", timeout=3)
     ledger.execute("CREATE TABLE IF NOT EXISTS results(id TEXT PRIMARY KEY,result TEXT,thread_id TEXT,session TEXT)")
     ledger.execute("CREATE TABLE IF NOT EXISTS runtime(key TEXT PRIMARY KEY,value TEXT)")
+    def probe_catalog(candidate):
+        probe=AppServer(candidate,runtime/"scratch",args.transport)
+        try:return latest_models(probe.request("model/list",{"limit":100,"includeHidden":False},timeout=30)["data"])
+        finally:probe.close()
+    catalog=EngineCatalog(ledger,cli,desktop_cli,probe_catalog)
     while True:
         app, job, result_ready = None, None, False
         try:
-            if time.time()-catalog_at>900:
-                probe=AppServer(cli,runtime/"scratch",args.transport)
-                try: models=latest_models(probe.request("model/list",{"limit":100,"includeHidden":False},timeout=30)["data"]);catalog_at=time.time()
-                finally: probe.close()
+            catalog.refresh_idle(time.time())
+            cli,models,catalog_at=catalog.engine,catalog.models,catalog.fetched_at
+            if not models or not Path(cli).is_file():
+                heartbeat("degraded", {"error_code":"model_catalog_unavailable" if not models else "engine_unavailable", "retry_after_seconds":max(0,int(catalog.retry_at-time.time()))})
+                if args.once:break
+                time.sleep(20)
+                continue
             if time.time()-desktop_at>60:
                 desktop=discover_runtime();desktop_at=time.time()
                 if args.ats_data_root:desktop={**desktop,"data_root":str(args.ats_data_root.resolve()),"root_source":"explicit"}
