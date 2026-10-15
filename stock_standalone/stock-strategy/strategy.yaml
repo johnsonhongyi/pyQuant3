@@ -231,10 +231,17 @@ perception_rules:
     desc: 不破趋势(P25)才做T:run_grid_t内趋势门未通过->T_SKIP记决策,不做T(弱势等清仓/止损逻辑,不给弱势做T)。无区间信号不硬做T。操作节奏以周为节点(周一复盘),日级只执行策略信号(P8/P24/网格区间),无信号不操作。仓位"借"=打满不留余(P27 1.5倍已体现;模拟仓无杠杆)。
     impl: paper_trade.run_grid_t P28门禁
     status: 已实现(2026-09-30)
+  - id: P29_上轨运行
     from: 用户2026-09-30口述("重点在upper上轨,大部分冲一波回落,能在上轨运行就是强势特征")
     desc: boll_ride()=近5个已收盘日收盘>=BOLL(20,2)UPPER×0.98的天数;ride>=4=沿上轨运行(强势特征)。并入P22 L3并列条件(异动高点抬升 或 上轨运行)。冲一波回落(碰上轨后3日跌回MID下)=走弱;偏离上轨>=8%=加速警惕(接P19)。
     impl: sector_leader.boll_ride()->leader_strength L3
     status: 已实现(2026-09-30);江淮09-30视角ride=4(09-23起连续沿上轨),北汽ride=0(从没碰到上轨)
+
+  - id: P10_异动流转
+    from: 用户2026-09-29
+    desc: 昨日VWAP ride命中标的加入次日关注池候选，不直接产生买入指令。
+    impl: watchpool.py P10流转
+    status: 已实现；2026-10-14补登记，交易参数不变
 
 # P9 预开仓(TK对齐)
 preopen:
