@@ -5,7 +5,7 @@ import math
 import uuid
 from datetime import timedelta
 
-DEFAULT_AI = {"enabled": False, "mode": "shadow", "node_id": "", "workspace_id": "", "interval_seconds": 900}
+DEFAULT_AI = {"enabled": False, "mode": "shadow", "node_id": "", "workspace_id": "", "interval_seconds": 900, "model": "gpt-6-luna", "reasoning_effort": "medium"}
 
 
 def init_ai(db):
@@ -70,6 +70,7 @@ def enqueue(db, state, now, question="", force=False, stage=None):
     phase = stage or ("interactive" if question else "post_close_review" if now.strftime("%H:%M") >= "15:35" else
                       "premarket" if now.strftime("%H:%M") < "09:30" else "intraday")
     context["workflow_stage"] = phase
+    context["ai_runtime"] = {"model": policy.get("model", "gpt-6-luna"), "reasoning_effort": policy.get("reasoning_effort", "medium")}
     if not force and phase != "intraday" and state.get("ai_phase_requested") == phase + ":" + context["trade_date"]:
         return None
     if db.execute("SELECT COUNT(*) FROM ai_jobs WHERE node_id=? AND workspace_id=? AND status IN ('queued','running') AND expires_at>?",

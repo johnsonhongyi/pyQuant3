@@ -30,6 +30,13 @@ class AIFollowTests(unittest.TestCase):
         self.state.pop("ai_settings")
         self.assertIsNone(ai.enqueue(self.db, self.state, NOW))
 
+    def test_model_and_effort_are_frozen_per_job(self):
+        self.state['ai_settings'].update(model='gpt-6-luna',reasoning_effort='low')
+        job=ai.enqueue(self.db,self.state,NOW,force=True)
+        self.state['ai_settings'].update(model='gpt-6-sol',reasoning_effort='high')
+        context=json.loads(self.db.execute('SELECT context FROM ai_jobs WHERE id=?',(job,)).fetchone()[0])
+        self.assertEqual(context['ai_runtime'],{'model':'gpt-6-luna','reasoning_effort':'low'})
+
     def test_automatic_jobs_deduplicate_and_preserve_account(self):
         identity = ai.enqueue(self.db, self.state, NOW)
         self.assertEqual(ai.enqueue(self.db, self.state, NOW + timedelta(seconds=60)), identity)
