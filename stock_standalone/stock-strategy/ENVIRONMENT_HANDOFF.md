@@ -1,5 +1,13 @@
 # Easy Stock 环境交接
 
+## 2026-10-15 14:58 真实桌面与最新模型选择验收
+
+- 最终 API/Web 发布 `20261015144417`，Web 外置补丁 `20261015145453`，worker `20261015144450`；API/Web healthy、readonly=true、挂载 8/5 个，worker active/running、NRestarts=0。代码/包/镜像哈希与回滚见 [本轮完整记录](docs/tasks/2026-10-15_1458_真实桌面IPC模型与回执修复.md)。
+- Web 已提供实际可用模型与推理强度选择、已保存/最近生效值，以及随指令和任务更新的完成/失败回执；修复内部 interval_seconds 混入设置请求导致 API 拒绝。当前最新列表为 GPT-6-Astra、GPT-6-Luna、GPT-6.1-Sol。
+- 桥已优先当前桌面现有引擎 0.162.0-alpha.17.2，替代旧 CLI shim 0.157.1 的优先路径；没有安装新运行时。模型/强度按任务冻结并校验 app-server 返回配置。
+- 真实 TK/ATS 安装目录 `D:\JohnsonProgram\instockMonitorTK`，活跃 IPC 库按契约定位到 RAMDisk；原节点 WATCHLIST_ADD 既有股验证已由 TK/ATS 双方 synced，故本轮不需重打包。归档库、历史上下文及 quote_status=pending_fetch 不冒充实时就绪。
+- 最终生产浏览器任务 `f278da89d26b482db949d225cb11d459` completed，实际 Luna/low、configuration_confirmed=true，真实 ATS/TK connected，信号包含 2026-10-15；设置回执、分析完成提示、820px 和零异常通过。模拟 Enforce 保持开启，现金 500000、零持仓。
+
 ## 2026-10-15 14:14 Codex / ATS AI 模拟闭环已部署
 
 - 用户明确批准本次固定 flat base 的 API 功能层例外。最终 API/Web 发布 `20261015140855`，API 源码 `97de300`（闭环功能 `22510f1`）；独立模拟 worker `20261015140000`，桌面/worker 实现提交 `472d583c`。以下旧日期的“尚未部署”是历史状态。
