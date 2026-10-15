@@ -1,3 +1,16 @@
+## 2026-10-15 19:45 API CPU 配额优化
+
+- 调整前 API CPU 上限 1 核；20 秒采样曾连续约 18 秒达到 97–103%，随后空闲。PVE 4 核、主机负载约 1.21；LXC 4 核，其他主要容器 CPU 低于 0.1%。
+- 已在线将 `stockstrategy-api` 提升到 2 核；cgroup `cpu.max=200000 100000`、Docker `NanoCpus=2000000000`。内存保持 1 GiB；API healthy、镜像未变、8 个挂载不变、无重启/OOM。
+- `docker/install.sh`、`docker/deploy-prebuilt.sh`、`docker/rollback-prebuilt.sh` 的 API 创建和恢复 CPU 配额统一为 2 核。实际慢查询/AI 响应尚未重放；只记录资源配置生效，不声称延迟改善。详见 [内存与查询卡顿排查](docs/tasks/2026-10-15_1942_后端API内存与查询卡顿.md)。
+## 2026-10-15 19:42 API 内存回收与查询卡顿
+
+- 截图 `stockstrategy-api` 使用 491/512 MiB；在线核验当前镜像 `stockstrategy/backend:20261015144417`，healthy、8 个挂载、RestartCount=0、OOMKilled=false。API CPU 配额为 1 核。
+- 调整前 cgroup 为 534,167,552/536,870,912 字节；匿名页约 61 MiB、文件页缓存约 448 MiB；`memory.events max=69,395`，memory PSI 10 秒窗口 `some=4.93% / full=4.51%`。`stock-data.db` 567 MiB、`linkage-operations.db` 343 MiB、`tdx-cache.db` 247 MiB，说明主要是 SQLite 文件页缓存受容器限额挤压，不是 Go 堆泄漏。
+- PVE 可用内存约 2,107 MiB；LXC 102 上限 2,560 MiB、可用约 1,782 MiB。已在线 `docker update` 将 API 限额与 MemorySwap 上限调至 1 GiB；容器未重启，镜像、挂载、数据库均未变。
+- 调整后容器仍 healthy，Docker stats 566 MiB/1 GiB；cgroup 当前约 703 MiB，其中 file 614 MiB、anon 86 MiB；memory PSI 10 秒窗口约 0.05%，后续 `memory.events max=71,200` 未增加，OOM 为 0。
+- `docker/install.sh`、`docker/deploy-prebuilt.sh` 及 `docker/rollback-prebuilt.sh` 的 API 新建/恢复默认同步为 1 GiB。bash -n 与 git diff --check 通过，未构建/发布镜像。
+- 20 秒采样曾出现约 18 秒 CPU 97–103%，随后低于 1%；CPU 配额保持 1 核，需在真实慢请求期间继续观察。未触发真实 AI 请求；详见 [内存与查询卡顿排查](docs/tasks/2026-10-15_1942_后端API内存与查询卡顿.md)。
 # Easy Stock 环境交接
 
 ## 2026-10-15 19:30 额度恢复后 Web 成功回执补验

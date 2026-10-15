@@ -166,10 +166,10 @@ reverse_rollback() {
         fi
         if [ "$API_CURRENT_MOVED" -eq 1 ]; then
             docker rename "$API_FORWARD" stockstrategy-api >/dev/null 2>&1
-            docker update --restart=always stockstrategy-api >/dev/null 2>&1
+            docker update --memory=1g --memory-swap=1g --cpus=2.00 --restart=always stockstrategy-api >/dev/null 2>&1
             docker start stockstrategy-api >/dev/null 2>&1
         elif docker inspect stockstrategy-api >/dev/null 2>&1; then
-            docker update --restart=always stockstrategy-api >/dev/null 2>&1
+            docker update --memory=1g --memory-swap=1g --cpus=2.00 --restart=always stockstrategy-api >/dev/null 2>&1
             docker start stockstrategy-api >/dev/null 2>&1
         fi
         printf 'Rollback failed; attempted to restore the pre-rollback deployment. Check Docker health and %s.\n' "$ATTEMPT_DIR" >&2
@@ -244,7 +244,8 @@ docker rename "$WEB_BACKUP" stockstrategy-web
 WEB_TARGET_MOVED=1
 docker rename "$API_BACKUP" stockstrategy-api
 API_TARGET_MOVED=1
-docker update --restart=always stockstrategy-api stockstrategy-web >/dev/null
+docker update --memory=1g --memory-swap=1g --cpus=2.00 --restart=always stockstrategy-api >/dev/null
+docker update --restart=always stockstrategy-web >/dev/null
 docker start stockstrategy-api >/dev/null
 wait_healthy stockstrategy-api 45 || fail 'Restored API did not become healthy.'
 docker start stockstrategy-web >/dev/null
