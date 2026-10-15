@@ -54,7 +54,9 @@ def get_cached_lastp_df():
     """日线历史基准指标日内内存级缓存 (Daily TTL Cache)，全量无过滤加载"""
     global _GLOBAL_LASTP_CACHE, _GLOBAL_LASTP_DATE
     cur_today = cct.get_today()
-    if _GLOBAL_LASTP_CACHE is None or _GLOBAL_LASTP_DATE != cur_today or len(_GLOBAL_LASTP_CACHE) < 1000:
+    if _GLOBAL_LASTP_CACHE is None or _GLOBAL_LASTP_DATE != cur_today:
+        _GLOBAL_LASTP_CACHE = None
+        _GLOBAL_LASTP_DATE = None
         try:
             from JSONData import tdx_hdf5_api as h5a
             h5_fname = 'tdx_last_df'
@@ -63,7 +65,7 @@ def get_cached_lastp_df():
             h5 = h5a.load_hdf_db(h5_fname, table=h5_table, code_l=None, timelimit=False)
             if h5 is not None and not h5.empty:
                 keep_cols = [c for c in ['hmax', 'lmin', 'max5', 'min5', 'llow'] if c in h5.columns]
-                _GLOBAL_LASTP_CACHE = h5[keep_cols] if keep_cols else h5
+                _GLOBAL_LASTP_CACHE = h5[keep_cols].copy() if keep_cols else h5
                 _GLOBAL_LASTP_DATE = cur_today
             else:
                 _GLOBAL_LASTP_CACHE = None
@@ -399,6 +401,7 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
 
     # 统一获取全市场最新行情快照，杜绝分市场多次请求与单例累积
     sina = sina_data.Sina(readonly=True)
+    sina._snapshot_only = True
     df_all = sina.all
     if df_all is None or df_all.empty:
         log.warning("sina.all returned empty DataFrame")

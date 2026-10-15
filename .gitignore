@@ -211,3 +211,12 @@ stock_standalone/config/intraday_strategy_state_cache.json.*
 stock_standalone/stock-strategy/AGENTS.md
 stock_standalone/stock-strategy/.pytest_*
 stock_standalone/system_linkage.sqlite3*
+stock_standalone/.pytest_temp_codex_chat_*
+stock_standalone/.pytest_temp_ipo_*
+stock_standalone/.pytest_temp_paths_*
+stock_standalone/data/ipo_learning/*.sqlite
+stock_standalone/data/ipo_learning/paper_auto/shadow_test_report_*
+stock_standalone/data/ipo_learning/paper_auto/state/reconciliation/reconciliation_*
+stock_standalone/data/ipo_learning/paper_auto/state/reconciliation/*.json.gz
+stock_standalone/archives/.ats-write.lock
+stock_standalone/.development/system_linkage.sqlite3

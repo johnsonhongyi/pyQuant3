@@ -73,6 +73,10 @@ def test_retry_keeps_original_deadline(tmp_path, monkeypatch):
 
 
 def test_open_retry_cannot_restart_after_budget_expires(tmp_path, monkeypatch):
+    # 避免 Windows 的短时钟分辨率令真实 20ms sleep 提前返回；明确模拟预算耗尽。
+    now = [0.0]
+    monkeypatch.setattr(h5a.time, 'monotonic', lambda: now[0])
+    monkeypatch.setattr(h5a.time, 'sleep', lambda seconds: now.__setitem__(0, now[0] + seconds + .001))
     attempts = []
     def fail_open(store, *args, **kwargs):
         store._handle = None
