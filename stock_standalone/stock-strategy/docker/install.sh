@@ -296,7 +296,7 @@ docker run -d \
     --network "$NETWORK" \
     --init \
     --read-only --mount "type=bind,source=$API_TMP,target=/tmp" --mount "type=bind,source=$API_RUN,target=/run" \
-    --memory=512m --memory-swap=512m --cpus=1.00 --pids-limit=128 \
+    --memory=1g --memory-swap=1g --cpus=2.00 --pids-limit=128 \
     --log-opt max-size=10m --log-opt max-file=3 \
     --health-cmd='wget -q -T 5 -O /dev/null http://127.0.0.1:20081/api/health || exit 1' \
     --health-interval=10s --health-timeout=5s --health-retries=6 --health-start-period=30s \
