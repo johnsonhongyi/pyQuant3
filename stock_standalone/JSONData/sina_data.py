@@ -297,6 +297,8 @@ class Sina:
 
     def __init__(self, readonly: bool = False) -> None:
         self.readonly = readonly
+        # 仅用于市场宽度统计；默认仍保留完整聚合路径。
+        self._snapshot_only = False
         import pandas as pd
         import numpy as np
         # self.grep_stock_detail = re.compile(r'(\d+)=([^\S][^,]+?)%s' %
@@ -424,6 +426,16 @@ class Sina:
         else:
             return f"{seconds}s"
 
+    def _cache_breadth_snapshot(self, df, cache_key):
+        """缓存市场宽度所需列；在 _LOAD_LOCK 内调用，返回独立副本。"""
+        columns = ['name', 'open', 'high', 'low', 'close', 'llastp', 'percent',
+                   'volume', 'now', 'buy', 'sell', 'b1_v', 'a1_v', 'dt', 'ticktime']
+        snapshot = df.loc[:, [c for c in columns if c in df.columns]].copy()
+        self._MEM_CACHE[cache_key] = {
+            'df': snapshot, 'time': time.time(), 'date': cct.get_today(),
+        }
+        return snapshot.copy()
+
     @property
     def all(self) -> pd.DataFrame:
         """获取所有实时数据 (优化 HDF5 加载逻辑)"""
@@ -434,6 +446,9 @@ class Sina:
         self.load_stock_codes(all_codes)
         time_s = time.time()
         cache_key = f"Sina_all_snapshot_{self.hdf_name}_{self.table}"
+        snapshot_only = self.readonly and getattr(self, '_snapshot_only', False)
+        if snapshot_only:
+            cache_key += '_raw'
         sina_limit_time_int: int = int(self.sina_limit_time) if self.sina_limit_time is not None else 60
 
         # [LOCKING] 确保同一时间只有一个线程在执行 Sina.all 的刷新逻辑（Thundering Herd protection）
@@ -444,7 +459,12 @@ class Sina:
                 c_df = cached_item.get('df')
                 c_time = cached_item.get('time', 0)
                 if c_df is not None and not c_df.empty:
-                    if not cct.get_work_time() or (time.time() - c_time < sina_limit_time_int):
+                    if snapshot_only:
+                        age = time.time() - c_time
+                        if cached_item.get('date') == cct.get_today() and 0 <= age < sina_limit_time_int:
+                            return c_df.copy()
+                        self._MEM_CACHE.pop(cache_key, None)
+                    elif not cct.get_work_time() or (time.time() - c_time < sina_limit_time_int):
                         return c_df
 
             # 1. 尝试从 HDF5 加载历史数据 (通过统一缓存入口)
@@ -456,7 +476,7 @@ class Sina:
             # 核心修正：如果请求包含关键指数（999999），但载入的缓存中缺失该代码，则强制执行实时抓取以同步 HDF5
             if h5 is not None and len(h5) > 0:
                 # 如果内存中没有 lastbuydf，利用 HDF5 中已有的 lastbuy 数据初始化它
-                if cct.GlobalValues().getkey('lastbuydf') is None and 'lastbuy' in h5.columns:
+                if not snapshot_only and cct.GlobalValues().getkey('lastbuydf') is None and 'lastbuy' in h5.columns:
                     if (h5['lastbuy'].fillna(0) > 0).any():
                         cct.GlobalValues().setkey('lastbuydf', h5['lastbuy'])
                         log.info("Initialized memory lastbuydf from HDF5 database (len: %d)" % len(h5))
@@ -517,6 +537,8 @@ class Sina:
                         
                         if ((auction_time and l_time < sina_limit_time_int) or (not auction_time and return_hdf_status)):
                             log.debug("Return HDF5 data early (recent:%s)" % self.format_age(l_time))
+                            if snapshot_only:
+                                return self._cache_breadth_snapshot(h5, cache_key)
                             if self.agg_cache.getkey('agg_metrics') is None or self.agg_cache.getkey('agg_metrics').empty:
                                 self.agg_cache.setkey('agg_metrics', h5.copy())
                             return self._sanitize_indicators(self.combine_lastbuy(h5))
@@ -549,7 +571,7 @@ class Sina:
             df = self.get_stock_data()
 
             # 3. 整合网络数据与聚合指标 (agg_metrics)
-            if df is not None and not df.empty:
+            if df is not None and not df.empty and not snapshot_only:
                 agg_data = self.agg_cache.getkey('agg_metrics')
                 cache_needs_rebuild = (agg_data is None or agg_data.empty)
                 
@@ -591,6 +613,8 @@ class Sina:
             if df is None or df.empty:
                 return pd.DataFrame()
 
+            if snapshot_only:
+                return self._cache_breadth_snapshot(df, cache_key)
             df_final = self._sanitize_indicators(df)
 
             # 6. 定期保存 MultiIndex 轨迹数据
@@ -1075,6 +1099,8 @@ class Sina:
         if df is None or len(df) == 0:
             log.warning("Failed to fetch fresh data from Sina")
             return pd.DataFrame()
+        if self.readonly and getattr(self, '_snapshot_only', False):
+            return df
 
         # 3. 确定是否需要从历史轨迹重建 (Anytime Recovery)
         agg_data = self.agg_cache.getkey('agg_metrics')
@@ -1511,6 +1537,9 @@ class Sina:
         if '999999' in df.index:
             log.info("Sina.format_response_data: Index 999999 successfully generated and indexed.")
         log.info("hdf:all %s %s" % (len(df), len(self.stock_codes)))
+
+        if self.readonly and getattr(self, '_snapshot_only', False):
+            return df
         
         # --- 分别处理轨迹数据(mi)和实时数据(dd) ---
         # 1. 轨迹历史数据 (仅精简 8 列) -> sina_MultiIndex_data.h5
@@ -1943,20 +1972,17 @@ class Sina:
         if h5 is None or len(h5) == 0:
             return pd.DataFrame()
 
-        df = h5[['close', 'volume']].copy()
-
-        if df.empty: return pd.DataFrame()
-
         # 2. 提取底层 NumPy 数组 (脱离 Pandas 索引对齐开销)
         # 获取每个 code 的分组边界索引（核心加速点：利用 MultiIndex 已排序的特性）
-        codes = df.index.get_level_values(0).values
+        codes = h5.index.get_level_values(0).values
         # 找到每个 code 最后一行的位置
         diff_mask = np.concatenate([codes[1:] != codes[:-1], [True]])
         # 找到每个 code 第一行的位置
         first_mask = np.concatenate([[True], codes[1:] != codes[:-1]])
 
-        close = df['close'].values
-        volume = df['volume'].values
+        # 输入只读；只给需要修改的 vol_diff 分配数组。
+        close = h5['close'].values
+        volume = h5['volume'].values
 
         # 3. 极限向量化计算成交量增量 (Vol Diff)
         # 用移位减法代替 groupby.diff()
@@ -1978,32 +2004,20 @@ class Sina:
 
         # 减去上一个代码组的末尾累计值，实现组内 cumsum
         group_ends = np.where(diff_mask)[0]
-        # 获取每个组之前的总偏移量
-        v_offsets = np.zeros_like(cum_vol_all)
-        a_offsets = np.zeros_like(cum_amt_all)
-        
-        # 获取前一组的累计值
-        v_last_cum = cum_vol_all[group_ends[:-1]]
-        a_last_cum = cum_amt_all[group_ends[:-1]]
-        
-        # 填充偏移量数组（通过重复填充）
-        # 获取每组的长度
-        group_lengths = np.diff(np.concatenate([[-1], group_ends]))
-        v_offsets = np.repeat(np.concatenate([[0], v_last_cum]), group_lengths)
-        a_offsets = np.repeat(np.concatenate([[0], a_last_cum]), group_lengths)
-
-        # 计算 VWAP
-        final_cum_vol = cum_vol_all - v_offsets
-        final_cum_amt = cum_amt_all - a_offsets
+        # 仅最后一行会被输出：按组末尾减去上一组末尾，避免为每条 Tick
+        # 创建两份偏移、两份组内累计值及一份 VWAP 全长数组。
+        end_vol = cum_vol_all[group_ends]
+        end_amt = cum_amt_all[group_ends]
+        final_cum_vol = end_vol - np.concatenate([[0], end_vol[:-1]])
+        final_cum_amt = end_amt - np.concatenate([[0], end_amt[:-1]])
         
         # 5. 只取每个 code 的最后一行结果
         # 避免除以 0
         with np.errstate(divide='ignore', invalid='ignore'):
-            nclose_all = final_cum_amt / final_cum_vol
+            res_v = final_cum_amt / final_cum_vol
         
         # 提取结果
-        res_v = nclose_all[diff_mask]
-        res_k = df.index.get_level_values(0)[diff_mask]
+        res_k = h5.index.get_level_values(0)[diff_mask]
 
         return pd.DataFrame({'nclose': res_v}, index=res_k)
 
@@ -2103,6 +2117,27 @@ class Sina:
             
         return dd
         
+    def _get_cached_hdf_history(self, fname, table):
+        """上层仅存版本/加载状态，大表唯一归底层缓存所有。"""
+        with self._LOAD_LOCK:
+            item = self._MEM_CACHE.get(table)
+            if not item or not item.get('ready'):
+                return None, None
+            entry = h5a._get_sina_history_if_current(fname, table)
+            if entry is None:
+                self._MEM_CACHE.pop(table, None)
+                self.agg_cache.setkey(f'unified_h5_hist_{table}', None)
+                self.agg_cache.setkey(f'unified_h5_hist_time_{table}', None)
+                return None, None
+            if (item.get('path') != entry['path'] or
+                    item.get('version') != entry['version'] or 'df' in item):
+                # 兼容旧上层条目；新写入的 canonical 可直接复用，无需重新读盘。
+                item = {'path': entry['path'], 'version': entry['version'],
+                        'last_time': time.time(), 'ready': True}
+                self._MEM_CACHE[table] = item
+                self.agg_cache.setkey(f'unified_h5_hist_{table}', None)
+            return item, entry['df']
+
     def _load_hdf_hist_unified(
         self,
         fname: str = 'sina_MultiIndex_data',
@@ -2123,23 +2158,27 @@ class Sina:
         now_time = time.time()
         on_ui_thread = threading.current_thread() is threading.main_thread()
 
-        # 1. [Memory Cache Check] - 无锁快查
-        item = self._MEM_CACHE.get(table)
-        if item and item.get('ready'):
-            last_t = float(item.get('last_time', 0))
-            if not cct.get_work_time_duration() or (now_time - last_t < limit_time):
-                return item['df']
-
-        # 2. [Concurrency Control] - 角色分配 (Loader vs Waiter)
+        # 版本校验与角色分配在同一临界区；UI 不等待繁忙的缓存锁。
         is_loader = False
         event = None
-        with self._LOAD_LOCK:
-            # 2.1 双检锁 (Double-check inside lock)
-            item = self._MEM_CACHE.get(table)
-            if item and item.get('ready'):
+        if not self._LOAD_LOCK.acquire(blocking=not on_ui_thread):
+            pending = pd.DataFrame()
+            pending.attrs.update(source='sina_hdf', freshness='loading', table=table)
+            return pending
+        try:
+            if on_ui_thread and not h5a._SINA_MI_LOCK.acquire(blocking=False):
+                pending = pd.DataFrame()
+                pending.attrs.update(source='sina_hdf', freshness='loading', table=table)
+                return pending
+            try:
+                item, cached_history = self._get_cached_hdf_history(fname, table)
+            finally:
+                if on_ui_thread:
+                    h5a._SINA_MI_LOCK.release()
+            if item:
                 last_t = float(item.get('last_time', 0))
                 if not cct.get_work_time_duration() or (now_time - last_t < limit_time):
-                    return item['df']
+                    return cached_history
 
             # 2.2 确定角色
             if table in self._LOADING_ST:
@@ -2149,12 +2188,14 @@ class Sina:
                 event = threading.Event()
                 self._LOADING_ST[table] = event
                 is_loader = True
+        finally:
+            self._LOAD_LOCK.release()
 
         if not is_loader:
             # ⚡ [WAITER PATH] - 阻塞并在唤醒后通过 Ready Barrier 验证
-            if item and item.get('ready'):
-                # 💡 [OPTIMIZE] 如果已经有旧缓存数据，直接返回旧数据，不阻塞等待后台刷新
-                return item['df']
+            if cached_history is not None:
+                # 同一文件版本的缓存仍可在后台刷新期间立即返回。
+                return cached_history
 
             if on_ui_thread:
                 pending = pd.DataFrame()
@@ -2167,9 +2208,9 @@ class Sina:
             event.wait(timeout=60)
             
             # 再次查内存，验证 Ready 标志
-            item = self._MEM_CACHE.get(table)
-            if item and item.get('ready'):
-                return item['df']
+            item, cached_history = self._get_cached_hdf_history(fname, table)
+            if item:
+                return cached_history
             else:
                 # 极端情况：非 Ready 状态，返回空交由下轮重试
                 return pd.DataFrame()
@@ -2177,32 +2218,30 @@ class Sina:
         # ⚡ [LOADER PATH] - 进入 IO 执行 (Level 6: Production Stable)
         def _do_load():
             try:
+                with self._LOAD_LOCK:
+                    if self._LOADING_ST.get(table) is not event:
+                        return
                 if debug:
                     log.info(f"[SingleFlight] Loader starting IO: {table}")
                 
-                h5_hist = self.agg_cache.getkey(cache_key_df)
-                last_time = self.agg_cache.getkey(cache_key_time)
-
-                need_load = (
-                    h5_hist is None or 
-                    last_time is None or 
-                    (time.time() - float(last_time) > limit_time and cct.get_work_time_duration())
-                )
-
-                if need_load:
-                    with timed_ctx(f"load_h5_{table}", warn_ms=1000):
-                        h5_hist = h5a.load_hdf_db(fname, table, timelimit=False, MultiIndex=True)
-                    
-                    if h5_hist is not None and not h5_hist.empty:
-                        self.agg_cache.setkey(cache_key_time, time.time())
+                # 旧 GlobalValues 快照没有文件版本，首次使用安全迁移到版本化缓存。
+                self.agg_cache.setkey(cache_key_df, None)
+                with timed_ctx(f"load_h5_{table}", warn_ms=1000):
+                    h5_hist = h5a.load_hdf_db(fname, table, timelimit=False, MultiIndex=True,
+                                             _share_cache=True, _cache_valid=lambda: not event.is_set())
                 
                 # ⚡ [1. CACHE WRITE] 先写缓存和 Ready 标志 (确保数据可见性)
                 if h5_hist is not None and not h5_hist.empty:
-                    self._MEM_CACHE[table] = {
-                        'df': h5_hist, 
-                        'last_time': time.time(),
-                        'ready': True 
-                    }
+                    with self._LOAD_LOCK:
+                        if self._LOADING_ST.get(table) is event:
+                            def publish(entry):
+                                self._MEM_CACHE[table] = {
+                                    'path': entry['path'], 'version': entry['version'],
+                                    'last_time': time.time(), 'ready': True,
+                                }
+                            published = h5a._publish_sina_history_if_current(fname, table, h5_hist, publish)
+                            if published:
+                                self.agg_cache.setkey(cache_key_time, time.time())
             except Exception as e:
                 log.error(f"[SingleFlight] _do_load Exception for {table}: {e}")
             finally:
@@ -2213,7 +2252,7 @@ class Sina:
                 event.set() 
 
         # UI 冷启动也异步加载；已有缓存时维持立即返回的兼容行为。
-        if (item and item.get('ready')) or on_ui_thread:
+        if cached_history is not None or on_ui_thread:
             load_error = None
             try:
                 threading.Thread(target=_do_load, name=f"HDF5_AsyncLoader_{table}", daemon=True).start()
@@ -2224,8 +2263,8 @@ class Sina:
                         del self._LOADING_ST[table]
                 event.set()
                 log.exception('Could not start HDF loader for %s', table)
-            if item and item.get('ready'):
-                return item['df']
+            if cached_history is not None:
+                return cached_history
             pending = pd.DataFrame()
             pending.attrs.update(source='sina_hdf', freshness='error' if load_error else 'loading',
                                  table=table, error=load_error)
@@ -2233,12 +2272,16 @@ class Sina:
         else:
             # 后台调用者冷启动仍等待完整结果，不改变恢复与聚合调用契约。
             _do_load()
-            res = self._MEM_CACHE.get(table)
-            return res['df'] if res and res.get('ready') else pd.DataFrame()
+            _, history = self._get_cached_hdf_history(fname, table)
+            return history if history is not None else pd.DataFrame()
 
     def get_sina_MultiIndex_data(self):
-        """兼容性包装：使用统一缓存获取 MultiIndex 数据"""
-        return self._load_hdf_hist_unified()
+        """公开接口返回独立副本；内部筛选/聚合使用统一缓存的只读源。"""
+        history = self._load_hdf_hist_unified()
+        result = history.copy()
+        result.index = history.index.copy(deep=True)
+        result.columns = history.columns.copy(deep=True)
+        return result
 
     def clear_unified_cache(self, table: str = None, force_gc: bool = True):
         """
@@ -2246,13 +2289,26 @@ class Sina:
         专为长时间运行的长驻 UI 进程设计，在回补历史数据完毕后应强制调用此方法释放 500MB+ 的 DataFrame，
         以避免 Python 进程常驻内存偏高。
         """
-        table_keys = [table] if table else list(self._MEM_CACHE.keys())
         cleared_any = False
         with self._LOAD_LOCK:
+            table_keys = {table} if table else set(self._MEM_CACHE) | set(self._LOADING_ST)
+            history_keys = {k for k in table_keys if self._MEM_CACHE.get(k, {}).get('ready')}
             for k in table_keys:
                 if k in self._MEM_CACHE:
                     del self._MEM_CACHE[k]
                     cleared_any = True
+                event = self._LOADING_ST.pop(k, None)
+                if event is not None:
+                    # 先取消发布，再清理底层；避免旧任务在清理窗口内回填大表。
+                    event.set()
+                    history_keys.add(k)
+                    cleared_any = True
+            history_keys |= h5a._clear_sina_history_cache([table] if table else None)
+            cleared_any = cleared_any or bool(history_keys)
+            # 兼容旧版本遗留的 GlobalValues 历史引用；保留 agg_metrics/lastbuy。
+            for k in history_keys:
+                self.agg_cache.setkey(f'unified_h5_hist_{k}', None)
+                self.agg_cache.setkey(f'unified_h5_hist_time_{k}', None)
         
         if cleared_any:
             if force_gc:

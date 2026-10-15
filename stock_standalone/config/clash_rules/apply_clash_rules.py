@@ -50,16 +50,18 @@ def patch_protected_ai_rules(content):
     end_index = len(lines)
     for index in range(rules_index + 1, len(lines)):
         line = lines[index]
-        if line.strip() and not line[0].isspace() and not line.lstrip().startswith("#"):
+        stripped = line.lstrip()
+        if line.strip() and not line[0].isspace() and not stripped.startswith(("#", "-")):
             end_index = index
             break
 
-    rule_indent = "  "
+    indent_counts = {}
     for line in lines[rules_index + 1:end_index]:
         indent_match = re.match(r"^(\s*)-\s+", line)
         if indent_match:
-            rule_indent = indent_match.group(1)
-            break
+            indent = indent_match.group(1)
+            indent_counts[indent] = indent_counts.get(indent, 0) + 1
+    rule_indent = max(indent_counts, key=indent_counts.get) if indent_counts else "  "
     kept_rules = []
     for line in lines[rules_index + 1:end_index]:
         raw = line.strip()
@@ -75,7 +77,8 @@ def patch_protected_ai_rules(content):
             continue
         if raw.lower() == "process-name,msedge.exe,direct":
             continue
-        kept_rules.append(line)
+        rule_match = re.match(r"^\s*-\s+(.*)$", line)
+        kept_rules.append(f"{rule_indent}- {rule_match.group(1)}" if rule_match else line)
 
     managed_rules = [f"{rule_indent}- {rule}" for rule in PROTECTED_AI_RULES]
     lines = lines[:rules_index + 1] + managed_rules + kept_rules + lines[end_index:]
@@ -89,6 +92,27 @@ def get_rule_backup_paths():
         "script": os.path.join(base, "clash_custom_direct_script.js"),
         "dns": os.path.join(base, "clash_dns_fakeip_filter.yaml"),
     }
+
+
+def get_profile_component_uids(profiles_yaml_path, component_type, fallback_uid=None):
+    """Return only registered component IDs of the requested Clash profile type."""
+    try:
+        with open(profiles_yaml_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        uids = [
+            item.get("uid")
+            for item in data.get("items", [])
+            if isinstance(item, dict)
+            and item.get("type") == component_type
+            and isinstance(item.get("uid"), str)
+            and re.fullmatch(r"[A-Za-z0-9_-]+", item["uid"])
+        ]
+        if fallback_uid and fallback_uid not in uids:
+            uids.insert(0, fallback_uid)
+        return list(dict.fromkeys(uids))
+    except Exception as e:
+        print(f"  [-] Warning on reading profile components ({component_type}): {e}")
+        return [fallback_uid] if fallback_uid else []
 
 def update_profiles_yaml(profiles_yaml_path):
     """确保 profiles.yaml 中的策略组默认选中 DIRECT (Microsoft, Apple, Download)"""
@@ -186,40 +210,34 @@ def apply_rules():
     print(f"[OK] Located Clash Verge Rev dir: {CLASH_VERGE_REV_DIR}")
     paths = get_rule_backup_paths()
     profiles_dir = os.path.join(CLASH_VERGE_REV_DIR, "profiles")
+    profiles_yaml_path = os.path.join(CLASH_VERGE_REV_DIR, "profiles.yaml")
 
-    # 1. 同步 Merge.yaml 与当前激活 profile 的 Merge 文件
+    # 1. Sync only registered Merge components; never overwrite proxies/groups/remote profiles.
     if os.path.exists(paths["merge"]):
-        dest_merge = os.path.join(profiles_dir, "Merge.yaml")
-        shutil.copyfile(paths["merge"], dest_merge)
-        print(f"  [1/5] Synced Global Merge Rules -> {dest_merge}")
+        for uid in get_profile_component_uids(profiles_yaml_path, "merge", "Merge"):
+            dest_merge = os.path.join(profiles_dir, f"{uid}.yaml")
+            shutil.copyfile(paths["merge"], dest_merge)
+            print(f"  [1/5] Synced Merge component -> {dest_merge}")
 
-        for f in os.listdir(profiles_dir):
-            if f.endswith(".yaml") and f not in ("Merge.yaml", "r0Xk7B9JlzuG.yaml") and not f.startswith("Rgq"):
-                dest_f = os.path.join(profiles_dir, f)
-                shutil.copyfile(paths["merge"], dest_f)
-                print(f"  [1/5+] Synced Active Profile Merge -> {dest_f}")
-
-    # 2. 同步当前 profile 的 rules 扩展文件 (r0Xk7B9JlzuG.yaml)
+    # 2. Sync registered Rules components using Clash Verge's `prepend` key.
     if os.path.exists(paths["merge"]):
-        rules_file = os.path.join(profiles_dir, "r0Xk7B9JlzuG.yaml")
         with open(paths["merge"], "r", encoding="utf-8") as f:
             content = f.read()
         content_rules = content.replace("prepend-rules:", "prepend:")
-        with open(rules_file, "w", encoding="utf-8") as f:
-            f.write(content_rules)
-        print(f"  [2/5] Synced Active Profile Rules -> {rules_file}")
+        for uid in get_profile_component_uids(profiles_yaml_path, "rules"):
+            rules_file = os.path.join(profiles_dir, f"{uid}.yaml")
+            with open(rules_file, "w", encoding="utf-8") as f:
+                f.write(content_rules)
+            print(f"  [2/5] Synced Rules component -> {rules_file}")
 
-    # 3. 同步 Script.js 与所有 js 扩展 (核心白名单与兜底转换逻辑)
-    dest_script = os.path.join(profiles_dir, "Script.js")
+    # 3. Sync only registered Script components so the dynamic egress patch is active.
     if os.path.exists(paths["script"]):
-        shutil.copyfile(paths["script"], dest_script)
-        for f in os.listdir(profiles_dir):
-            if f.endswith(".js"):
-                shutil.copyfile(paths["script"], os.path.join(profiles_dir, f))
-        print(f"  [3/5] Synced Global & Profile Scripts -> {dest_script}")
+        for uid in get_profile_component_uids(profiles_yaml_path, "script", "Script"):
+            dest_script = os.path.join(profiles_dir, f"{uid}.js")
+            shutil.copyfile(paths["script"], dest_script)
+            print(f"  [3/5] Synced Script component -> {dest_script}")
 
     # 4. 更新 profiles.yaml 策略组选定状态
-    profiles_yaml_path = os.path.join(CLASH_VERGE_REV_DIR, "profiles.yaml")
     update_profiles_yaml(profiles_yaml_path)
 
     # 5. 更新 dns_config.yaml
@@ -252,7 +270,9 @@ def apply_rules():
     patch_clash_runtime_yaml(runtime_yaml)
 
     # 7. 重启 mihomo 核心以立即应用最新配置
-    restart_mihomo_core()
+    if not restart_mihomo_core():
+        print("\n[PARTIAL] Files were patched, but Mihomo did not confirm the reload.")
+        return False
 
     print("\n[SUCCESS] Whitelist Mode & Direct Rules applied successfully!")
     return True
@@ -279,16 +299,21 @@ def restart_mihomo_core():
 
         # 2. 发送热重载指令
         handle = win32file.CreateFile(pipe_name, win32file.GENERIC_READ | win32file.GENERIC_WRITE, 0, None, win32file.OPEN_EXISTING, 0, None)
-        body = "{}"
+        body = '{"path": "", "payload": ""}'
         req = f"PUT /configs?force=true HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer plokij\r\nContent-Type: application/json\r\nContent-Length: {len(body)}\r\n\r\n{body}"
         win32file.WriteFile(handle, req.encode('utf-8'))
         hr, resp = win32file.ReadFile(handle, 1024)
         win32file.CloseHandle(handle)
         status = resp.split(b"\r\n")[0].decode(errors='ignore')
+        if not status.startswith(("HTTP/1.1 200", "HTTP/1.1 204")):
+            print(f"  [-] Mihomo reload rejected via Named Pipe ({status})")
+            return False
         print(f"  [5/5] Hot-reloaded Mihomo core via Named Pipe ({status})")
         time.sleep(1)
+        return True
     except Exception as e:
         print(f"  [5/5] Warning on pipe hot reload: {e}")
+        return False
 
 def test_speed():
     print("\n" + "=" * 68)

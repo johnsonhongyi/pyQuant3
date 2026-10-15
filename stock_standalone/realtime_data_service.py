@@ -4711,7 +4711,8 @@ class DataPublisher:
             logger.info(f"🔍 Reading HDF5 via Sina unified cache: {h5_fname} table: {h5_table}")
             from JSONData import sina_data
             sina = sina_data.Sina(readonly=True)
-            df_mi = sina.get_sina_MultiIndex_data()
+            # 内部只读借用，reset_index 后再修改；避免公开接口的全表保护副本。
+            df_mi = sina._load_hdf_hist_unified()
             if df_mi is None or df_mi.empty:
                 logger.warning("⚠️ HDF5 recovery source (Sina cache) is empty.")
                 return pd.DataFrame()
@@ -4867,7 +4868,7 @@ class DataPublisher:
         from JSONData import sina_data
         sina = sina_data.Sina(readonly=True)
         # 获取全量 MultiIndex 缓存数据 (已内部管理 SingleFlight 与 L6 缓存)
-        h5_mi = sina.get_sina_MultiIndex_data()
+        h5_mi = sina._load_hdf_hist_unified()
         
         if h5_mi is None or h5_mi.empty:
             return pd.DataFrame()

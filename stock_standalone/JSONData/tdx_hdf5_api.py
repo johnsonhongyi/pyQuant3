@@ -44,10 +44,123 @@ import psutil
 import shutil
 import errno
 import threading
+from functools import wraps
 
 # ⚡ [CACHE] sina_MultiIndex_data 轨迹数据全局内存缓存，用于消除盘中频繁读盘的延迟
 _SINA_MI_CACHE = {}  # {table_name: DataFrame}
 _SINA_MI_LOCK = threading.RLock()
+_SINA_MI_EPOCH = {}  # 清理代次，防止已启动的读取在清理后重新发布缓存。
+_SINA_MI_WRITE_LOCKS = {}
+_SINA_MI_WRITE_GUARD = threading.Lock()
+
+
+def _clear_sina_history_cache(tables=None):
+    """只释放内存引用；不触碰 HDF 文件或正在使用旧快照的调用方。"""
+    with _SINA_MI_LOCK:
+        keys = set(_SINA_MI_CACHE) | set(_SINA_MI_EPOCH) if tables is None else set(tables)
+        for key in keys:
+            _SINA_MI_EPOCH[key] = _SINA_MI_EPOCH.get(key, 0) + 1
+            _SINA_MI_CACHE.pop(key, None)
+        return keys
+
+
+def _sina_history_path(fname):
+    path = cct.get_ramdisk_path(fname)
+    if not path.endswith('.h5') and not os.path.exists(path):
+        path += '.h5'
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _sina_history_version(path, store=None):
+    try:
+        if store is None:
+            stat = os.stat(path)
+        else:
+            # fileno() 也访问 PyTables 底层句柄，遵循同一 HDF 线程安全锁。
+            with _HDF_GLOBAL_LOCK:
+                stat = os.fstat(store._handle.fileno())
+        return stat.st_mtime_ns, stat.st_size, stat.st_ino
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
+def _serialize_sina_history_writes(func):
+    @wraps(func)
+    def write(fname, *args, **kwargs):
+        if not RAMDISK_KEY < 1 or 'sina_MultiIndex_data' not in fname:
+            return func(fname, *args, **kwargs)
+        path = _sina_history_path(fname)
+        with _SINA_MI_WRITE_GUARD:
+            lock = _SINA_MI_WRITE_LOCKS.setdefault(path, threading.RLock())
+        # 不持 HDF 全局锁等待事务，读线程仍能完成 I/O 并关闭句柄。
+        with lock:
+            return func(fname, *args, **kwargs)
+    return write
+
+
+def _sina_history_matches(entry, path, version):
+    return (entry is not None and version is not None and
+            entry.get('path') == path and entry.get('version') == version)
+
+
+def _get_sina_history_if_current(fname, table):
+    """只借用当前规范化快照；重读前释放失效的大表缓存引用。"""
+    if not RAMDISK_KEY < 1:
+        return None
+    path = _sina_history_path(fname)
+    with _SINA_MI_LOCK:
+        entry = _SINA_MI_CACHE.get(table)
+        if _sina_history_matches(entry, path, _sina_history_version(path)):
+            return entry if entry.get('normalized') else None
+        _SINA_MI_CACHE.pop(table, None)
+    return None
+
+
+def _publish_sina_history_if_current(fname, table, frame, publish):
+    """调用方已持统一层锁；只在同一版本仍有效时发布内存字典。"""
+    path = _sina_history_path(fname)
+    with _SINA_MI_LOCK:
+        entry = _SINA_MI_CACHE.get(table)
+        if (_sina_history_matches(entry, path, _sina_history_version(path)) and
+                entry['df'] is frame):
+            publish(entry)
+            return True
+    return False
+
+
+def _sync_sina_history_after_write(path, table, df, base_version, committed_version,
+                                   multi_index, rewrite, requires_reload):
+    """仍持文件锁时同步缓存；缺失旧版本依据时仅失效，不推造完整历史。"""
+    with _SINA_MI_LOCK:
+        entry = _SINA_MI_CACHE.get(table)
+        if entry is None or entry.get('path') != path:
+            return
+        if _sina_history_matches(entry, path, committed_version):
+            return
+        if (requires_reload or committed_version is None or
+                _sina_history_version(path) != committed_version or
+                not _sina_history_matches(entry, path, base_version)):
+            _SINA_MI_CACHE.pop(table, None)
+            return
+        epoch = _SINA_MI_EPOCH.get(table, 0)
+    # 大表合并不占缓存锁；UI 可校验版本，清理/新读取可继续进行。
+    if not multi_index or rewrite:
+        updated = df.copy()
+        normalized = True  # 写入前已经按既有契约 fillna(0)。
+    else:
+        updated = pd.concat([entry['df'], df])
+        updated = updated[~updated.index.duplicated(keep='last')]
+        normalized = entry.get('normalized', False)
+    with _SINA_MI_LOCK:
+        current = _SINA_MI_CACHE.get(table)
+        if (_SINA_MI_EPOCH.get(table, 0) == epoch and
+                (current is entry or current is None) and
+                _sina_history_version(path) == committed_version):
+            _SINA_MI_CACHE[table] = {
+                'df': updated, 'path': path, 'version': committed_version,
+                'mtime': committed_version[0] / 1e9, 'size': committed_version[1],
+                'normalized': normalized,
+            }
 
 # # 从 global.ini 读取 MultiIndex 文件限额 (默认 150MB)
 # def _load_sina_multiindex_limit():
@@ -1653,6 +1766,8 @@ def safe_load_table(
         
     if store is None:
         return pd.DataFrame()
+    latest_tick = kwargs.get('_latest_tick',
+        'sina_MultiIndex_data' in str(getattr(store, 'filename', '')))
 
     lock_started = time.perf_counter()
     with _HDF_GLOBAL_LOCK:
@@ -1667,7 +1782,8 @@ def safe_load_table(
             # 去重 + 防御
             with timed_ctx('hdf_index_dedup_%s' % table_name, warn_ms=500):
                 if not df.index.is_unique:
-                    df = df[~df.index.duplicated(keep='first')]
+                    keep = 'last' if latest_tick and isinstance(df.index, pd.MultiIndex) else 'first'
+                    df = df[~df.index.duplicated(keep=keep)]
             if lock_ms >= 500:
                 log.warning('[HDF-LOCK-WAIT] table=%s global_lock_ms=%.2f thread=%s',
                             table_name, lock_ms, threading.current_thread().name)
@@ -1738,7 +1854,8 @@ def safe_load_table(
             return pd.DataFrame()
 
         # ---------- 6. 最终清洗 ----------
-        df = df[~df.index.duplicated(keep='first')]
+        keep = 'last' if latest_tick and isinstance(df.index, pd.MultiIndex) else 'first'
+        df = df[~df.index.duplicated(keep=keep)]
 
         return df
 
@@ -2235,12 +2352,14 @@ def repair_sina_multiindex_file(fname=None, table=None):
     
     log.debug(f"✨ [REPAIR] Overall repair for {fname} complete.")
 
+@_serialize_sina_history_writes
 def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount=500, append=True, MultiIndex=False, rewrite=False, showtable=False, sizelimit=None):
 
     if 'code' in df.columns:
         df=df.set_index('code')
     time_t=time.time()
-    df=df[~df.index.duplicated(keep='first')]
+    keep = 'last' if 'sina_MultiIndex_data' in fname and isinstance(df.index, pd.MultiIndex) else 'first'
+    df=df[~df.index.duplicated(keep=keep)]
     # df=prepare_df_for_hdf5(df)
     df=df.fillna(0)
     code_subdf=df.index.tolist()
@@ -2261,7 +2380,9 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
         if df is not None and not df.empty and table is not None:
             tmpdf = pd.DataFrame()
             try:
-                with SafeHDFStore(fname, mode='a') as store:
+                probe_mode = ('r' if 'sina_MultiIndex_data' in fname and
+                              os.path.exists(_sina_history_path(fname)) else 'a')
+                with SafeHDFStore(fname, mode=probe_mode) as store:
                     if store is not None:
                         log.debug(f"fname: {(fname)} keys:{store.keys()}")
                         if showtable:
@@ -2355,6 +2476,14 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                                     all_unchanged = False # 出现解析异常时，为了安全，强制执行写入
                                     break
                         
+                        if all_unchanged and 'sina_MultiIndex_data' in fname:
+                            incoming = normalize_SCHEMA(df)
+                            previous = tmpdf[~tmpdf.index.duplicated(keep='last')]
+                            all_unchanged = (
+                                set(incoming.columns).issubset(previous.columns) and
+                                incoming.index.isin(previous.index).all() and
+                                incoming.equals(previous.reindex(incoming.index)[incoming.columns].fillna(0))
+                            )
                         if all_unchanged:
                             log.debug("%s %s Multi batch stagnant (sampled %d codes), Skipping Write." % (fname, table, sample_count))
                             return False
@@ -2367,6 +2496,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
 
 
     time_t=time.time()
+    cache_requires_reload = False
     if df is not None and not df.empty and table is not None:
         # 类型规范化：HDF5 写入时 object 类型可能导致 schema 不匹配
         # [FIX] ⚡ MultiIndex 表（如 sina_MultiIndex_data.h5）中 close/high 等列本质为 float，
@@ -2407,6 +2537,8 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
         fname_path = cct.get_ramdisk_path(fname)
 
         truncated_triggered = False
+        write_base_version = None
+        committed_version = None
         
         # 1. 容灾自愈与强力清场
         with _HDF_GLOBAL_LOCK:
@@ -2421,8 +2553,11 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
         try:
             os.makedirs(os.path.dirname(os.path.abspath(fname_path)), exist_ok=True)
             # 🛡️ 跨进程安全持锁：从准备写入到原子替换完成，全程排他保护，避免并发写冲突与 copy/replace 句柄竞争
-            lock_holder = SafeHDFStore(fname, mode='a')
+            lock_mode = 'r' if 'sina_MultiIndex_data' in fname and os.path.exists(fname_path) else 'a'
+            lock_holder = SafeHDFStore(fname, mode=lock_mode)
             lock_holder.close(release_lock=False)  # 释放底层句柄，排他锁牢固持有！
+            if 'sina_MultiIndex_data' in fname:
+                write_base_version = _sina_history_version(fname_path)
 
             with _HDF_GLOBAL_LOCK:
                 # 2. [OPTIMIZE] 内存侧预裁切逻辑：判断是否需要进行体积管理
@@ -2492,13 +2627,16 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                                 )
 
                                 # --- 5. 写入 ---
-                                with pd.HDFStore(temp_fname, mode='w', complib=complib) as tmp_h5:
+                                # 保留兄弟表及文件元数据，只重写需要裁切的目标表。
+                                shutil.copy2(fname_path, temp_fname)
+                                with pd.HDFStore(temp_fname, mode='a', complib=complib) as tmp_h5:
                                     put_table_safe(tmp_h5, table, truncated_df,
                                                    MultiIndex=MultiIndex,
                                                    rewrite=True,
                                                    complib=complib)
 
                                 truncated_triggered = True
+                                cache_requires_reload = True
                                 log.warning(
                                     f"✅ [HDF-TRUNCATE] Dynamic prune complete. "
                                     f"Rows: {len(hist_df)} -> {len(truncated_df)}"
@@ -2547,6 +2685,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                             put_table_safe(tmp_h5, table, df, MultiIndex=MultiIndex, rewrite=rewrite, complib=complib)
                     except ValueError as ve:
                         if "cannot match existing table structure" in str(ve):
+                            cache_requires_reload = True
                             # [AUTO-FIX] ⚡ schema 不匹配自愈：
                             # 1. 读取原文件全量历史数据
                             # 2. 与新数据 concat + 去重
@@ -2595,7 +2734,12 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                             break
 
                         # 直接使用 os.replace (原子操作)
-                        os.replace(temp_fname, fname_path)
+                        if 'sina_MultiIndex_data' in fname:
+                            with _SINA_MI_LOCK:
+                                os.replace(temp_fname, fname_path)
+                                committed_version = _sina_history_version(fname_path)
+                        else:
+                            os.replace(temp_fname, fname_path)
                         success = True
                         log.debug(f"✅ Atomic replace successful: {fname} (attempt {r+1})")
                         break
@@ -2623,6 +2767,14 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                     repack_hdf_db(fname, complib=complib)
                 else:
                     log.warning(f"⚡ [HDF-REPACK] Skipped during work time.")
+
+            if 'sina_MultiIndex_data' in fname and committed_version is not None:
+                final_version = _sina_history_version(fname_path)
+                if final_version != committed_version:
+                    committed_version = final_version
+                _sync_sina_history_after_write(
+                    os.path.normcase(os.path.abspath(fname_path)), table, df,
+                    write_base_version, committed_version, MultiIndex, rewrite, cache_requires_reload)
                 
         except Exception as e:
             log.exception(f"❌ HDF Write failure: {e}")
@@ -2636,45 +2788,6 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
     duration = time.time() - time_t
     if duration > 3.0 and is_work_time:
         log.warning(f"⚠️ [SLOW] write_hdf_db is slow: {fname} took {duration:.2f}s (is_work_time={is_work_time})")
-    # ⚡ [CACHE-SYNC] 如果是 sina_MultiIndex_data 并且写入成功，同步更新全局内存缓存（附带最新的 mtime/size）
-    if 'sina_MultiIndex_data' in fname:
-        fname_path = cct.get_ramdisk_path(fname)
-        if not fname_path.endswith('.h5') and not os.path.exists(fname_path):
-            fname_path += '.h5'
-            
-        current_mtime = 0.0
-        current_size = 0
-        if os.path.exists(fname_path):
-            try:
-                current_mtime = os.path.getmtime(fname_path)
-                current_size = os.path.getsize(fname_path)
-            except Exception:
-                pass
-
-        global _SINA_MI_CACHE, _SINA_MI_LOCK
-        with _SINA_MI_LOCK:
-            if table in _SINA_MI_CACHE:
-                # 只有当缓存已经初始化才进行更新
-                if not append or rewrite:
-                    updated_df = df.copy()
-                    log.debug(f"⚡ [CACHE-SYNC] Overwrote memory cache for {fname}/{table} with {len(df)} rows")
-                else:
-                    old_df = _SINA_MI_CACHE[table]['df']
-                    combined = pd.concat([old_df, df])
-                    idx_names = list(combined.index.names)
-                    if len(idx_names) > 0 and None not in idx_names:
-                        combined = combined[~combined.index.duplicated(keep='last')]
-                    else:
-                        combined = combined[~combined.index.duplicated(keep='last')]
-                    updated_df = combined
-                    log.debug(f"⚡ [CACHE-SYNC] Appended {len(df)} rows to memory cache for {fname}/{table}, new size: {len(combined)}")
-                
-                _SINA_MI_CACHE[table] = {
-                    'df': updated_df,
-                    'mtime': current_mtime,
-                    'size': current_size
-                }
-
     log.debug("write hdf total time:%0.2f" % (time.time() - time_t))
     return True
 
@@ -2850,9 +2963,9 @@ def _read_requested_hdf_codes(store, table, codes, multi_index=False, index=Fals
 
 def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
                 limit_time=ct.h5_limit_time, dratio_limit=ct.dratio_limit,
-                MultiIndex=False, showtable=False):
+                MultiIndex=False, showtable=False, _share_cache=False, _cache_valid=None):
     """
-    优化版 load_hdf_db — 保留原有行为与参数，仅优化性能与日志级别
+    默认返回独立副本；_share_cache 仅供内部统一缓存借用只读全量轨迹。
     """
     time_t = time.time()
     global RAMDISK_KEY, INIT_LOG_Error, _SINA_MI_CACHE, _SINA_MI_LOCK
@@ -2879,34 +2992,37 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
 
     # ⚡ [CACHE-LOAD] 针对 'sina_MultiIndex_data' 的大轨迹表进行读缓存拦截与多进程物理变更感知
     is_sina_mi = 'sina_MultiIndex_data' in fname
+    # 仅 Sina 统一轨迹缓存可借用只读数据；普通调用仍取得独立副本。
+    share_history = _share_cache and is_sina_mi and code_l is None and MultiIndex and not timelimit
+    read_version = None
     if is_sina_mi:
-        fname_path = cct.get_ramdisk_path(fname)
-        if not fname_path.endswith('.h5') and not os.path.exists(fname_path):
-            fname_path += '.h5'
-            
-        current_mtime = 0.0
-        current_size = 0
-        if os.path.exists(fname_path):
-            try:
-                current_mtime = os.path.getmtime(fname_path)
-                current_size = os.path.getsize(fname_path)
-            except Exception:
-                pass
-
+        fname_path = _sina_history_path(fname)
         with _SINA_MI_LOCK:
             cache_entry = _SINA_MI_CACHE.get(table)
+            cache_epoch = _SINA_MI_EPOCH.setdefault(table, 0)
+            current_version = _sina_history_version(fname_path)
         
         # 仅当缓存存在且物理文件的 mtime 和 size 完全匹配时，才直接从内存返回以杜绝多进程数据不一致
-        if (cache_entry is not None and 
-            cache_entry.get('mtime') == current_mtime and 
-            cache_entry.get('size') == current_size):
+        if _sina_history_matches(cache_entry, fname_path, current_version):
             
             cache_df = cache_entry['df']
+            if share_history:
+                # 写入同步产生的缓存可能尚未按读取契约填充空值；复制一次后发布，
+                # 不原地修改正在被其他线程读取的上一代数据。
+                if not cache_entry.get('normalized', False):
+                    cache_df = cache_df.fillna(0)
+                    normalized_entry = dict(cache_entry, df=cache_df, normalized=True)
+                    with _SINA_MI_LOCK:
+                        if (_SINA_MI_CACHE.get(table) is cache_entry and
+                                _SINA_MI_EPOCH.get(table, 0) == cache_epoch and
+                                (_cache_valid is None or _cache_valid())):
+                            _SINA_MI_CACHE[table] = normalized_entry
+                return cache_df
             log.debug(f"⚡ [CACHE-HIT] load_hdf_db hit memory cache for {fname}/{table} (mtime match)")
             # 如果提供了 code_l，我们在内存 DataFrame 上直接进行过滤并返回，不需要读盘
             if code_l is not None:
                 try:
-                    if MultiIndex:
+                    if MultiIndex or isinstance(cache_df.index, pd.MultiIndex):
                         try:
                             df_filtered = cache_df.loc[cache_df.index.isin(code_l, level='code')]
                         except Exception:
@@ -2914,6 +3030,8 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
                             df_filtered = cache_df.loc[mask]
                     else:
                         # 确保 cache_df 索引被正确提取并标准化
+                        # 只借用数值块，索引转换仅作用于独立的 DataFrame 外壳。
+                        cache_df = cache_df.copy(deep=False)
                         if 'code' in cache_df.columns:
                             try:
                                 cache_df = cache_df.set_index('code')
@@ -2923,13 +3041,20 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
                             first_val = cache_df.index[0]
                             if not isinstance(first_val, str) or (isinstance(first_val, str) and first_val.isdigit() and len(first_val) < 6):
                                 cache_df.index = [_standardize_code(x) for x in cache_df.index]
+                        if index:
+                            code_l = [str(1000000 - int(x)) if x.startswith('0') else x for x in code_l]
                         dif_index = cache_df.index.intersection(code_l)
                         df_filtered = cache_df.loc[dif_index]
+                    df_filtered = df_filtered.copy()
                 except Exception as ex:
                     log.error(f"Failed filtering code_l from cached df: {ex}")
                     df_filtered = cache_df.copy()
             else:
                 df_filtered = cache_df.copy()
+
+            # pandas 深复制默认仍共享 Index 的底层数组，公开结果需隔离元数据。
+            df_filtered.index = df_filtered.index.copy(deep=True)
+            df_filtered.columns = df_filtered.columns.copy(deep=True)
             
             try:
                 df_filtered.fillna(0, inplace=True)
@@ -2948,6 +3073,8 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
             try:
                 with SafeHDFStore(fname, mode='r') as store:
                     if store is not None:
+                        if is_sina_mi:
+                            read_version = _sina_history_version(fname_path, store)
                         keys = store.keys()
                         table_key = '/' + table
                         if table_key in keys:
@@ -3005,7 +3132,7 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
 
 
         if dd is not None and len(dd) > 0:
-            if not MultiIndex:
+            if not MultiIndex and not isinstance(dd.index, pd.MultiIndex):
                 # 检查并标准化物理读出的 dd 结构
                 if 'code' in dd.columns:
                     try:
@@ -3141,6 +3268,8 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
                 with store_context as store:
                     if store is None:
                         raise AttributeError("SafeHDFStore open failed")
+                    if is_sina_mi:
+                        read_version = _sina_history_version(fname_path, store)
 
                     log.debug("fname: %s keys:%s", fname, store.keys())
                     if showtable:
@@ -3153,7 +3282,8 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
                             table,
                             chunk_size=5000,
                             MultiIndex=MultiIndex,
-                            readonly=True
+                            readonly=True,
+                            _latest_tick=is_sina_mi,
                         )
                     else:
                         dd = pd.DataFrame()
@@ -3281,7 +3411,7 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
             # 若 index 操作失败则忽略
             pass
 
-        if fname.find('MultiIndex') > 0 and 'volume' in df.columns:
+        if not is_sina_mi and fname.find('MultiIndex') > 0 and 'volume' in df.columns:
             count_drop = len(df)
             try:
                 df = df.drop_duplicates()
@@ -3298,27 +3428,43 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
             except Exception:
                 pass
 
-    if is_sina_mi and code_l is None and df is not None and not df.empty:
-        fname_path = cct.get_ramdisk_path(fname)
-        if not fname_path.endswith('.h5') and not os.path.exists(fname_path):
-            fname_path += '.h5'
-        current_mtime = 0.0
-        current_size = 0
-        if os.path.exists(fname_path):
-            try:
-                current_mtime = os.path.getmtime(fname_path)
-                current_size = os.path.getsize(fname_path)
-            except Exception:
-                pass
-        with timed_ctx('hdf_cache_copy_%s' % table, warn_ms=500):
-            cache_df = df.copy()
+    if is_sina_mi and df is not None and not df.empty:
         with _SINA_MI_LOCK:
-            _SINA_MI_CACHE[table] = {
-                'df': cache_df,
-                'mtime': current_mtime,
-                'size': current_size
-            }
-            log.info(f"⚡ [CACHE-INIT] Loaded and cached {len(df)} rows for {fname}/{table} (mtime: {current_mtime}, size: {current_size})")
+            current_version = _sina_history_version(fname_path)
+            valid = (_SINA_MI_EPOCH.get(table, 0) == cache_epoch and
+                     (_cache_valid is None or _cache_valid()))
+            if not valid and read_version is not None and current_version == read_version:
+                return df  # 取消缓存发布，不破坏仍在使用同版本快照的调用方。
+            if not valid or read_version is None or current_version != read_version:
+                entry = _SINA_MI_CACHE.get(table)
+                if (valid and code_l is None and
+                        _sina_history_matches(entry, fname_path, current_version)):
+                    if not entry.get('normalized', False):
+                        entry = dict(entry, df=entry['df'].fillna(0), normalized=True)
+                        _SINA_MI_CACHE[table] = entry
+                    result = entry['df'] if share_history else entry['df'].copy()
+                    if not share_history:
+                        result.index = result.index.copy(deep=True)
+                        result.columns = result.columns.copy(deep=True)
+                    return result
+                pending = pd.DataFrame()
+                pending.attrs.update(source='sina_hdf', freshness='stale', table=table,
+                                     error='history_changed_during_read' if valid else 'cache_invalidated')
+                return pending
+            if code_l is None:
+                entry = _SINA_MI_CACHE.get(table)
+                if _sina_history_matches(entry, fname_path, read_version) and entry.get('normalized'):
+                    if share_history:
+                        return entry['df']
+                else:
+                    cache_df = df if share_history else df.copy()
+                    if not share_history:
+                        cache_df.index = df.index.copy(deep=True)
+                        cache_df.columns = df.columns.copy(deep=True)
+                    _SINA_MI_CACHE[table] = {
+                        'df': cache_df, 'path': fname_path, 'version': read_version,
+                        'mtime': read_version[0] / 1e9, 'size': read_version[1], 'normalized': True,
+                    }
 
     return df
     # 与原函数保持一致：返回 reduce_memory_usage(df)
