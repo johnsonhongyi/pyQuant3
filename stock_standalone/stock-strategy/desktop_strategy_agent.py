@@ -20,6 +20,7 @@ import threading
 import time
 from urllib.parse import urlsplit
 from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
+from urllib.error import HTTPError
 
 from follow_ai import RESPONSE_SCHEMA, validate_result, digest
 from datetime import datetime, timezone
@@ -312,7 +313,7 @@ def main():
     from desktop_engine_policy import EngineCatalog
     models, catalog_at, desktop, desktop_at = [], 0, {}, 0
     def heartbeat(status, detail):
-        peer.post("heartbeat", {"status": status, "detail": {"provider":"codex-app-server", "transport":args.transport, "engine_path":cli, "models":models, "catalog_at":catalog_at, **catalog.status(), "desktop_runtime":desktop, **detail}})
+        peer.post("heartbeat", {"status": status, "detail": {"provider":"codex-app-server", "capabilities":["strategy_research","ai_chat_v1"], "transport":args.transport, "engine_path":cli, "models":models, "catalog_at":catalog_at, **catalog.status(), "desktop_runtime":desktop, **detail}})
     ledger = sqlite3.connect(runtime / "agent.db", timeout=3)
     ledger.execute("CREATE TABLE IF NOT EXISTS results(id TEXT PRIMARY KEY,result TEXT,thread_id TEXT,session TEXT)")
     ledger.execute("CREATE TABLE IF NOT EXISTS runtime(key TEXT PRIMARY KEY,value TEXT)")
@@ -347,6 +348,14 @@ def main():
             effective=json.loads(last[0]) if last else {}
             heartbeat("ready", {"default_model":args.model,"effective_model":effective.get("model"),"effective_effort":effective.get("reasoning_effort"),**sidebar.status()})
             job = peer.post("claim", {}).get("job")
+            if not job:
+                try:chat=peer.post('chat_claim',{}).get('job')
+                except HTTPError as exc:
+                    if exc.code not in (404,405):raise
+                    chat=None
+                if chat:
+                    from desktop_chat import run_chat
+                    run_chat(peer,chat,cli,runtime,models,sidebar,ledger,heartbeat)
             if job:
                 context = job["context"]
                 if digest(context) != job["evidence_hash"]:
