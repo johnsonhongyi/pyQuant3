@@ -9,10 +9,19 @@ import sys
 import tempfile
 import unittest
 
-from desktop_strategy_agent import DesktopPeer,ats_evidence
+from desktop_strategy_agent import DesktopPeer,ats_evidence,research_schema
+from follow_ai import RESPONSE_SCHEMA
 
 
 class DesktopAgentTests(unittest.TestCase):
+    def test_per_job_schema_restricts_exact_symbols_without_mutating_global(self):
+        first=research_schema({'stocks':[{'symbol':'002343.SZ','name':'慈文传媒'}]})
+        second=research_schema({'stocks':[{'symbol':'603533.SH'}]})
+        self.assertEqual(first['properties']['plans']['items']['properties']['symbol']['enum'],['002343.SZ'])
+        self.assertEqual(second['properties']['plans']['items']['properties']['symbol']['enum'],['603533.SH'])
+        self.assertNotIn('enum',RESPONSE_SCHEMA['properties']['plans']['items']['properties']['symbol'])
+        self.assertIn('stock:002343.SZ',first['properties']['plans']['items']['properties']['evidence_refs']['items']['enum'])
+
     def test_ats_evidence_is_readonly_and_has_original_date(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);path=root/'trading_signals.db'
