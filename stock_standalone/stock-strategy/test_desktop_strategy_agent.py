@@ -76,5 +76,15 @@ class DesktopAgentTests(unittest.TestCase):
         proxy.flush()
         self.assertEqual(output.getvalue(),message.encode('utf-8'))
 
+    def test_bridge_background_worker_logs_are_captured_in_thread_mode(self):
+        spec=importlib.util.spec_from_file_location('bridge_runner',Path(__file__).parent/'tools/run_desktop_strategy_bridge.py')
+        runner=importlib.util.module_from_spec(spec);spec.loader.exec_module(runner)
+        output,fallback=io.BytesIO(),io.StringIO()
+        proxy=runner._ThreadOutput(threading.get_ident(),output,fallback)
+        worker=threading.Thread(target=lambda:proxy.write('background receipt\n'),name='stock-codex-result-outbox')
+        worker.start();worker.join(1)
+        self.assertEqual(output.getvalue(),b'background receipt\n')
+        self.assertEqual(fallback.getvalue(),'')
+
 
 if __name__=='__main__':unittest.main()

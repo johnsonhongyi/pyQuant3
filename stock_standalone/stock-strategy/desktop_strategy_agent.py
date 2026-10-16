@@ -6,12 +6,15 @@ import configparser
 import copy
 import hashlib
 import hmac
+import http.client
 import ipaddress
+import io
 import json
 import os
 from pathlib import Path
 import queue
 import secrets
+import socket
 import re
 import sqlite3
 import subprocess
@@ -25,11 +28,13 @@ from urllib.error import HTTPError, URLError
 from follow_ai import RESPONSE_SCHEMA, validate_result, digest
 from datetime import datetime, timezone
 
+_LOG_LOCK=threading.Lock()
+
 
 def _emit_log(value):
     record = dict(value) if isinstance(value, dict) else {"message": str(value)}
     record.setdefault("at", time.time())
-    print(json.dumps(record, ensure_ascii=False), flush=True)
+    with _LOG_LOCK:print(json.dumps(record, ensure_ascii=False), flush=True)
 
 
 def _peer_error_code(error):
@@ -57,6 +62,7 @@ def _error_details(error):
         details["backend"] = str(peer_host)[:120]
     if isinstance(error, HTTPError):
         details["http_status"] = int(error.code)
+        if getattr(error,'peer_code',None):details['reason_code']=error.peer_code
         details["message"] = f"HTTP {error.code} {str(error.reason or '')[:120]}".strip()
     else:
         source = getattr(error, "reason", None) if isinstance(error, URLError) else None
@@ -143,8 +149,20 @@ class DesktopPeer:
         if len(self.key) < 32 or not self.node or not self.workspace:
             raise ValueError("desktop linkage identity not configured")
         self.opener = build_opener(ProxyHandler({}), NoRedirect())
+        self.connections = threading.local()
+        self.active_connections = {}
+        self.connection_lock = threading.Lock()
 
-    def post(self, operation, payload):
+    def cancel_request(self, thread_id):
+        with self.connection_lock:
+            connection=self.active_connections.get(thread_id)
+        if connection:
+            try:
+                if connection.sock:connection.sock.shutdown(socket.SHUT_RDWR)
+            except OSError:pass
+            connection.close()
+
+    def post(self, operation, payload, timeout=8):
         path = "/api/v1/linkage/strategy/" + operation
         body = json.dumps({**payload, "node_id": self.node, "workspace_id": self.workspace}, ensure_ascii=False,
                           allow_nan=False, separators=(",", ":")).encode("utf-8")
@@ -154,15 +172,41 @@ class DesktopPeer:
             "X-Linkage-Workspace-ID": self.workspace, "X-Linkage-Timestamp": ts, "X-Linkage-Nonce": nonce,
             "X-Linkage-Signature": hmac.new(self.key, canonical.encode(), hashlib.sha256).hexdigest()}
         try:
-            with self.opener.open(Request(self.base + path, data=body, headers=headers), timeout=8) as response:
-                raw = response.read(256 * 1024 + 1)
+            connection = getattr(self.connections, 'http', None)
+            if connection is None:
+                factory = http.client.HTTPSConnection if urlsplit(self.base).scheme == 'https' else http.client.HTTPConnection
+                connection = factory(urlsplit(self.base).hostname, urlsplit(self.base).port, timeout=timeout)
+                self.connections.http = connection
+            connection.timeout = timeout
+            with self.connection_lock:
+                self.active_connections[threading.get_ident()]=connection
+            if connection.sock:
+                connection.sock.settimeout(timeout)
+            connection.request('POST', path, body=body, headers=headers)
+            response = connection.getresponse()
+            raw = response.read(256 * 1024 + 1)
+            if response.status >= 300:
+                error = HTTPError(self.base + path, response.status, response.reason, response.headers, io.BytesIO(raw))
+                try:error.peer_code = str(json.loads(raw).get('code', ''))[:80]
+                except (ValueError, TypeError):pass
+                raise error
             if len(raw) > 256 * 1024:
                 raise ValueError("peer response too large")
             return json.loads(raw)
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, http.client.HTTPException) as exc:
+            connection = getattr(self.connections, 'http', None)
+            if connection:
+                connection.close()
+                self.connections.http = None
             exc.peer_operation = operation
             exc.peer_host = urlsplit(self.base).netloc
+            if isinstance(exc,http.client.HTTPException) and not isinstance(exc,OSError):
+                failure=OSError(str(exc));failure.peer_operation=operation;failure.peer_host=urlsplit(self.base).netloc
+                raise failure from exc
             raise
+        finally:
+            with self.connection_lock:
+                self.active_connections.pop(threading.get_ident(),None)
 
 
 def ats_evidence(root, symbols, ipc_db=None):
@@ -201,8 +245,11 @@ class AppServer:
         args = [cli, "app-server", "proxy"] if transport == "desktop_proxy" else [cli, "app-server", "--listen", "stdio://"]
         self.process = subprocess.Popen(args, cwd=self.scratch, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        self.messages, self.counter, self.tool = queue.Queue(maxsize=128), 0, tool
-        self.backlog = deque(maxlen=128)
+        from desktop_bridge_runtime import EventInbox
+        self.messages, self.counter, self.tool = EventInbox(), 0, tool
+        self.pending = {}
+        self.pending_lock = threading.Lock()
+        self.send_lock = threading.Lock()
         self.error = None
         self.error_detail = None
         self.active_thread = None
@@ -215,15 +262,23 @@ class AppServer:
                         break
                     if len(line) > 256 * 1024:
                         raise ValueError("app-server event too large")
-                    self.messages.put(json.loads(line), timeout=2)
-            except (ValueError, queue.Full, OSError) as exc:
+                    message = json.loads(line)
+                    if 'id' in message and 'method' not in message:
+                        with self.pending_lock:
+                            waiter = self.pending.get(message['id'])
+                        if waiter:
+                            waiter.put_nowait(message)
+                    else:
+                        self.messages.put(message)
+            except (ValueError, BufferError, queue.Full, OSError) as exc:
                 self.error = type(exc).__name__
                 self.error_detail = _error_details(exc)
             finally:
-                try:
-                    self.messages.put_nowait({"transport_closed": True})
-                except queue.Full:
-                    pass
+                self.messages.close()
+                with self.pending_lock:
+                    for waiter in self.pending.values():
+                        try:waiter.put_nowait({'transport_closed': True})
+                        except queue.Full:pass
         self.reader = threading.Thread(target=read, daemon=True)
         self.reader.start()
         try:
@@ -235,11 +290,12 @@ class AppServer:
         self.send({"method": "initialized", "params": {}})
 
     def send(self, value):
-        self.process.stdin.write((json.dumps(value, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8"))
-        self.process.stdin.flush()
+        with self.send_lock:
+            self.process.stdin.write((json.dumps(value, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8"))
+            self.process.stdin.flush()
 
     def event(self, timeout, pending=True):
-        message = self.backlog.popleft() if pending and self.backlog else self.messages.get(timeout=timeout)
+        message = self.messages.get(timeout=timeout)
         if message.get("transport_closed"):
             raise ValueError("app-server transport closed")
         if "id" in message and "method" in message:
@@ -256,23 +312,36 @@ class AppServer:
         return message
 
     def request(self, method, params, timeout=15):
-        self.counter += 1
-        identity = self.counter
-        self.send({"id": identity, "method": method, "params": params})
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            message = self.event(max(.1, deadline - time.monotonic()), pending=False)
-            if message.get("id") == identity and "method" not in message:
-                if "error" in message:
-                    raise ValueError("app-server request rejected: " + method + ": " + str(message["error"].get("message", ""))[:400])
-                return message["result"]
-            if "method" in message and "id" not in message:
-                self.backlog.append(message)
-        raise TimeoutError(method)
+        deadline=getattr(self,'deadline',None)
+        if deadline is not None and method not in ('turn/interrupt','thread/archive','thread/unsubscribe'):
+            timeout=min(timeout,deadline-time.monotonic())
+            if timeout<=0:raise TimeoutError('MODEL_TIMEOUT')
+        waiter = queue.Queue(maxsize=1)
+        with self.pending_lock:
+            self.counter += 1
+            identity = self.counter
+            self.pending[identity] = waiter
+        try:
+            self.send({"id": identity, "method": method, "params": params})
+            try:message = waiter.get(timeout=timeout)
+            except queue.Empty:raise TimeoutError(method) from None
+            if message.get('transport_closed'):
+                raise OSError('app-server transport closed during ' + method)
+            if "error" in message:
+                raise ValueError("app-server request rejected: " + method + ": " + str(message["error"].get("message", ""))[:400])
+            return message["result"]
+        finally:
+            with self.pending_lock:
+                self.pending.pop(identity, None)
 
     def analyze(self, job, thread_id=None, model="gpt-6-luna", progress=None, effort="medium"):
         # A bounded evidence snapshot per job avoids repeatedly replaying full market history.
         thread_id = None
+        budget=300
+        if job.get('expires_at'):
+            budget=min(budget,max(0,(datetime.fromisoformat(job['expires_at'].replace('Z','+00:00'))-datetime.now(timezone.utc)).total_seconds()))
+        self.deadline=time.monotonic()+max(0,budget-15)
+        if progress:progress(None)
         context = job["context"]
         from muse_research_threads import ensure_project,thread_title,research_prompt,publish_summary
         self.project_id=ensure_project(self)
@@ -305,14 +374,14 @@ class AppServer:
         turn = self.request("turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": research_prompt(job)}],
             "outputSchema": research_schema(context), "effort": effort, "model": model, "approvalPolicy": "never",
             "sandboxPolicy": {"type": "readOnly", "networkAccess": False}})["turn"]
-        deadline, chunks, answer = time.monotonic() + 300, [], None
+        deadline, chunks, answer, answer_bytes = self.deadline, [], None, 0
         completed = False
         try:
             while time.monotonic() < deadline:
                 if progress:
                     progress(thread_id)
                 try:
-                    message = self.event(min(10, max(.1, deadline - time.monotonic())))
+                    message = self.event(min(.2, max(.01, deadline - time.monotonic())))
                 except queue.Empty:
                     continue
                 event = message.get("params", {})
@@ -320,7 +389,8 @@ class AppServer:
                     continue
                 if message.get("method") == "item/agentMessage/delta":
                     chunks.append(event.get("delta", ""))
-                    if sum(len(c) for c in chunks) > 128 * 1024:
+                    answer_bytes+=len(chunks[-1].encode('utf-8'))
+                    if answer_bytes > 128 * 1024:
                         raise ValueError("Codex answer too large")
                 if message.get("method") == "item/completed" and event.get("item", {}).get("type") == "agentMessage":
                     answer = event["item"].get("text")
@@ -347,8 +417,8 @@ class AppServer:
         raise TimeoutError("Codex research timeout")
 
     def close(self):
-        if str(STRATEGY_ROOT) not in sys.path:
-            sys.path.insert(0, str(STRATEGY_ROOT))
+        if str(APP_ROOT) not in sys.path:
+            sys.path.insert(0, str(APP_ROOT))
         from ats.llm.cli_process import _terminate_process_tree
         try:
             _terminate_process_tree(self.process)
@@ -430,22 +500,30 @@ def main(argv=None):
     if "created_at" not in chat_columns:
         ledger.execute("ALTER TABLE chat_results ADD COLUMN created_at REAL")
     ledger.commit()
-    from desktop_sidebar import SidebarOrganizer
-    sidebar=SidebarOrganizer(ledger)
+    from desktop_sidebar import SidebarWorker
+    sidebar=SidebarWorker(ledger,runtime/'agent.db')
+    from desktop_bridge_runtime import AppServerPool,ResultOutbox
+    ResultOutbox.prepare(ledger)
+    deliveries=ResultOutbox(peer,runtime/'agent.db')
+    sessions=AppServerPool(AppServer,runtime/'scratch',args.transport)
     def probe_catalog(candidate):
-        probe=AppServer(candidate,runtime/"scratch",args.transport)
+        probe=sessions.acquire(candidate)
         try:return latest_models(probe.request("model/list",{"limit":100,"includeHidden":False},timeout=30)["data"])
-        finally:probe.close()
+        except (OSError,ValueError,KeyError,TypeError,TimeoutError,queue.Empty):
+            sessions.release(False)
+            raise
     catalog=EngineCatalog(ledger,cli,desktop_cli,probe_catalog)
     peer_error_streak=0
     prefer_chat_queue=False
+    unified_queue=True
+    last_ready_heartbeat=0
     def wait_for_manager_retry(seconds):
         stop_request=runtime/'stop.request'
         for _ in range(max(1,int(seconds))):
             if stop_request.is_file():return
             time.sleep(1)
     while True:
-        app, job, result_ready = None, None, False
+        app, job, chat, result_ready, publisher = None, None, None, False, None
         stage = "loop_start"
         retry_seconds=5
         try:
@@ -457,7 +535,6 @@ def main(argv=None):
                     _emit_log({"status":"stop_request_cleanup_failed", "error_code":type(stop_error).__name__})
                 persist_agent_status("stopping", {"reason":"manager_request"})
                 break
-            sidebar.drain()
             stage = "model_catalog_refresh"
             catalog.refresh_idle(time.time())
             cli,models,catalog_at=catalog.engine,catalog.models,catalog.fetched_at
@@ -466,6 +543,9 @@ def main(argv=None):
                 if args.once:break
                 wait_for_manager_retry(20)
                 continue
+            if sessions.app is None:
+                stage='engine_prewarm'
+                sessions.acquire(cli)
             if time.time()-desktop_at>60:
                 stage = "desktop_runtime_discovery"
                 desktop=discover_runtime();desktop_at=time.time()
@@ -479,11 +559,22 @@ def main(argv=None):
             last=ledger.execute("SELECT result FROM results ORDER BY rowid DESC LIMIT 1").fetchone()
             effective=json.loads(last[0]) if last else {}
             stage = "backend_ready_heartbeat"
-            heartbeat("ready", {"default_model":args.model,"effective_model":effective.get("model"),"effective_effort":effective.get("reasoning_effort"),**sidebar.status()})
+            if time.monotonic()-last_ready_heartbeat>=20:
+                heartbeat("ready", {"default_model":args.model,"effective_model":effective.get("model"),"effective_effort":effective.get("reasoning_effort"),**sidebar.status()})
+                last_ready_heartbeat=time.monotonic()
             job,chat=None,None
             claim_order=("chat","strategy") if prefer_chat_queue else ("strategy","chat")
-            for queue in claim_order:
-                if queue == "chat":
+            if unified_queue:
+                try:
+                    stage='unified_job_wait'
+                    response=peer.post('next',{'wait_ms':1000 if args.once else 5000,'prefer_chat':prefer_chat_queue},timeout=8)
+                    if response.get('kind')=='chat':chat=response.get('job');prefer_chat_queue=False
+                    else:job=response.get('job');prefer_chat_queue=bool(job)
+                except HTTPError as exc:
+                    if exc.code not in (401,403,404,405):raise
+                    unified_queue=False
+            for queue_name in (() if unified_queue else claim_order):
+                if queue_name == "chat":
                     try:
                         stage = "chat_job_claim"
                         chat=peer.post('chat_claim',{}).get('job')
@@ -503,7 +594,7 @@ def main(argv=None):
             if chat:
                 from desktop_chat import run_chat
                 stage = "chat_job_run"
-                run_chat(peer,chat,cli,runtime,models,sidebar,ledger,heartbeat)
+                run_chat(peer,chat,cli,runtime,models,sidebar,ledger,heartbeat,session=sessions)
             if job:
                 stage = "strategy_context_validate"
                 context = job["context"]
@@ -532,19 +623,19 @@ def main(argv=None):
                             return value
                         return {"error": "tool not allowed"}
                     stage = "strategy_app_server_start"
-                    app = AppServer(cli, runtime / "scratch", args.transport, tool=tool)
+                    app = sessions.acquire(cli,tool=tool)
                     app.thread_observer=sidebar.enqueue
                     session = peer.workspace + ":" + context["trade_date"]
-                    last_heartbeat = [0]
+                    from desktop_bridge_runtime import ProgressPublisher
+                    publisher=ProgressPublisher(peer,job,heartbeat,operation='lease')
                     def progress(thread_id):
-                        if time.monotonic() - last_heartbeat[0] > 20:
-                            heartbeat("analyzing", {"thread_id": thread_id, "job_id": job["id"],"effective_model":model,"effective_effort":effort,"elapsed_seconds":int(time.monotonic()-analysis_started)})
-                            last_heartbeat[0] = time.monotonic()
+                        publisher.check()
+                        if (runtime/'stop.request').is_file():raise ValueError('CLI_BRIDGE_STOPPED')
+                        publisher.publish({'thread_id':thread_id,'model':model,'reasoning_effort':effort,'stage':'strategy_codex_turn'})
                     analysis_started=time.monotonic()
                     stage = "strategy_codex_turn"
-                    heartbeat("analyzing", {"job_id":job["id"],"effective_model":model,"effective_effort":effort,"elapsed_seconds":0})
-                    last_heartbeat[0]=time.monotonic()
                     result = app.analyze(job, model=model, progress=progress, effort=effort)
+                    publisher.close();publisher.check();publisher=None
                     result.update(desktop_runtime=desktop,ats_evidence_summary=ats_summary)
                     ledger.execute(
                         "INSERT OR REPLACE INTO results(id,result,thread_id,session,created_at) VALUES(?,?,?,?,?)",
@@ -552,8 +643,10 @@ def main(argv=None):
                     )
                     ledger.commit()
                 result_ready = True
+                ResultOutbox.stage(ledger,'result',job,result)
                 stage = "strategy_result_writeback"
                 peer.post("result", {"id": job["id"], "lease_token": job["lease_token"], "status": "completed", "result": result})
+                ResultOutbox.acknowledge(ledger,'result',job)
                 stage = "backend_ready_heartbeat"
                 heartbeat("ready", {"last_job_id":job["id"],"effective_model":result.get("model"),"effective_effort":result.get("reasoning_effort")})
                 _emit_log({"status": "completed", "job_id": job["id"], "thread_id": result.get("thread_id")})
@@ -566,7 +659,7 @@ def main(argv=None):
             if app and app.error_detail and "cause" not in error_detail:
                 error_detail["cause"] = app.error_detail
             persist_agent_status("degraded", {"error_code":code,"stage":stage,"error_detail":error_detail,"retry_after_seconds":retry_seconds})
-            if job and not result_ready:
+            if job and not result_ready and code in ('CLI_USAGE_LIMIT','CLI_RATE_LIMIT','CLI_AUTH_REQUIRED'):
                 ledger.execute("INSERT OR REPLACE INTO runtime VALUES('cooldown_until',?)",(str(time.time()+(30 if isinstance(exc,TimeoutError) else 300)),));ledger.commit()
             if job and not result_ready:
                 failure={"error_code": code, "provider": "codex-app-server"}
@@ -584,12 +677,17 @@ def main(argv=None):
                        "operation":getattr(exc,"peer_operation",""),"error_detail":error_detail,
                        "retry_after_seconds":retry_seconds})
         finally:
-            if app:
-                app.close()
-            sidebar.drain()
+            try:
+                if publisher:publisher.close()
+            finally:
+                if app:sessions.release(result_ready)
+            if job or chat:last_ready_heartbeat=0
         if args.once:
             break
-        wait_for_manager_retry(retry_seconds)
+        if not job and not chat and (not unified_queue or peer_error_streak):wait_for_manager_retry(retry_seconds)
+    sessions.close()
+    deliveries.close()
+    sidebar.close()
     ledger.close()
     runtime_lock.close()
 

@@ -2,6 +2,7 @@
 from datetime import datetime,timedelta,timezone
 import hashlib
 import os
+import re
 from pathlib import Path
 import sys
 
@@ -28,6 +29,8 @@ def clean(value,limit=120):
 
 
 def ensure_project(app):
+    cached=getattr(app,'project_id',None)
+    if isinstance(cached,str) and cached:return cached
     PROJECT_ROOT.mkdir(exist_ok=True)
     cursor=None
     while True:
@@ -93,14 +96,21 @@ def publish_summary(app,job,result):
     title=thread_title(job,result);text=summary_markdown(job,result);path=report_path(job)
     path.parent.mkdir(exist_ok=True)
     temporary=path.with_suffix('.pending');temporary.write_bytes(text.encode('utf-8'));os.replace(temporary,path)
-    write_index()
+    write_index(updated=path)
     app.request('thread/name/set',{'threadId':result['thread_id'],'name':title})
     result.update(thread_title=title,report_path=str(path),project_id=app.project_id)
 
 
-def write_index():
+def write_index(updated=None):
     rows=[]
-    for path in (PROJECT_ROOT/'reports').glob('*.md'):
+    index=PROJECT_ROOT/'INDEX.md'
+    if updated is not None and index.is_file():
+        names=re.findall(r'\]\(reports/([A-Za-z0-9_.-]+\.md)\)',index.read_text(encoding='utf-8'))
+        paths={PROJECT_ROOT/'reports'/name for name in names}
+        paths.add(Path(updated))
+    else:paths=(PROJECT_ROOT/'reports').glob('*.md')
+    for path in paths:
+        if not path.is_file():continue
         with path.open(encoding='utf-8') as stream:head=[stream.readline() for _ in range(3)]
         title=clean(head[0].removeprefix('# '),180)
         stamp=head[2].partition('证据时间：')[2].partition(' · ')[0].strip()

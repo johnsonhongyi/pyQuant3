@@ -1,8 +1,12 @@
 import json
+import io
 from pathlib import Path
 import sqlite3
 import sys
 import tempfile
+import time
+import queue
+from urllib.error import HTTPError
 import unittest
 from unittest.mock import patch,Mock
 sys.path.insert(0,str(Path(__file__).resolve().parent.parent))
@@ -34,7 +38,14 @@ class ChatTests(unittest.TestCase):
             run_chat(self.peer,self.job,'installed-engine',Path(directory),self.model,self.sidebar,self.db,Mock())
 
     def test_cancelled_lease_interrupts_native_turn_and_closes(self):
-        self.peer.post.side_effect=OSError('cancelled lease')
+        error=HTTPError('http://localhost',409,'Conflict',{},io.BytesIO(b'{}'));error.peer_code='CHAT_CANCELLED';error.peer_operation='chat_result'
+        def post(*args,**kwargs):
+            if any(method=='turn/start' for method,_ in self.app.calls):raise error
+            return {}
+        def wait_event(timeout):
+            time.sleep(min(timeout,0.01));raise queue.Empty
+        self.peer.post.side_effect=post
+        self.app.event=wait_event
         self.run_chat()
         self.assertTrue(self.app.closed)
         self.assertIn('turn/interrupt',[m for m,_ in self.app.calls])

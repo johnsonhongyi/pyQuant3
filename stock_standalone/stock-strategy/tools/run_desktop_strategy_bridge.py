@@ -54,7 +54,8 @@ class _ThreadOutput:
         self.fallback = fallback
 
     def write(self, value):
-        target = self.stream if threading.get_ident() == self.owner_thread else self.fallback
+        owned=threading.get_ident() == self.owner_thread or threading.current_thread().name.startswith('stock-codex-')
+        target = self.stream if owned else self.fallback
         if not target:
             return len(value)
         if target is self.stream and isinstance(value, str):
@@ -63,7 +64,8 @@ class _ThreadOutput:
         return target.write(value)
 
     def flush(self):
-        target = self.stream if threading.get_ident() == self.owner_thread else self.fallback
+        owned=threading.get_ident() == self.owner_thread or threading.current_thread().name.startswith('stock-codex-')
+        target = self.stream if owned else self.fallback
         if target:
             target.flush()
 

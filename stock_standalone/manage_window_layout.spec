@@ -31,6 +31,7 @@ a = Analysis(
         'run_desktop_strategy_bridge',
         'desktop_strategy_agent',
         'desktop_chat',
+        'desktop_bridge_runtime',
         'desktop_runtime',
         'desktop_model_policy',
         'desktop_engine_policy',
