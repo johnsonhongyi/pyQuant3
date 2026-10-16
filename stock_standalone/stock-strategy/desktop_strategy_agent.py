@@ -20,7 +20,7 @@ import threading
 import time
 from urllib.parse import urlsplit
 from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 from follow_ai import RESPONSE_SCHEMA, validate_result, digest
 from datetime import datetime, timezone
@@ -30,6 +30,55 @@ def _emit_log(value):
     record = dict(value) if isinstance(value, dict) else {"message": str(value)}
     record.setdefault("at", time.time())
     print(json.dumps(record, ensure_ascii=False), flush=True)
+
+
+def _peer_error_code(error):
+    operation = getattr(error, "peer_operation", "")
+    if not operation:
+        return type(error).__name__
+    if isinstance(error, HTTPError):
+        return f"{operation}_http_{error.code}"
+    reason = getattr(error, "reason", None)
+    if isinstance(error, URLError) and isinstance(reason, BaseException):
+        error = reason
+    kind = {"timeouterror": "timeout", "urlerror": "url_error",
+            "remotedisconnected": "remote_disconnected"}.get(type(error).__name__.lower(), type(error).__name__.lower())
+    return f"{operation}_{kind}"
+
+
+def _error_details(error):
+    details = {"type": type(error).__name__}
+    for key in ("bridge_stage", "peer_operation"):
+        value = getattr(error, key, None)
+        if value:
+            details["stage" if key == "bridge_stage" else "operation"] = str(value)[:80]
+    peer_host = getattr(error, "peer_host", None)
+    if peer_host:
+        details["backend"] = str(peer_host)[:120]
+    if isinstance(error, HTTPError):
+        details["http_status"] = int(error.code)
+        details["message"] = f"HTTP {error.code} {str(error.reason or '')[:120]}".strip()
+    else:
+        source = getattr(error, "reason", None) if isinstance(error, URLError) else None
+        if isinstance(source, BaseException):
+            details["cause_type"] = type(source).__name__
+            error = source
+        if isinstance(error, OSError):
+            if error.errno is not None:
+                details["errno"] = int(error.errno)
+            if getattr(error, "winerror", None) is not None:
+                details["winerror"] = int(error.winerror)
+            if error.strerror:
+                details["message"] = str(error.strerror)[:240]
+            if error.filename:
+                details["path"] = str(error.filename)[:260]
+            if getattr(error, "filename2", None):
+                details["path2"] = str(error.filename2)[:260]
+        else:
+            message = str(source if source is not None else error).strip()
+            if message:
+                details["message"] = message[:320]
+    return details
 
 
 def _is_packaged():
@@ -104,11 +153,16 @@ class DesktopPeer:
         headers = {"Content-Type": "application/json", "X-Linkage-Node-ID": self.node,
             "X-Linkage-Workspace-ID": self.workspace, "X-Linkage-Timestamp": ts, "X-Linkage-Nonce": nonce,
             "X-Linkage-Signature": hmac.new(self.key, canonical.encode(), hashlib.sha256).hexdigest()}
-        with self.opener.open(Request(self.base + path, data=body, headers=headers), timeout=8) as response:
-            raw = response.read(256 * 1024 + 1)
-        if len(raw) > 256 * 1024:
-            raise ValueError("peer response too large")
-        return json.loads(raw)
+        try:
+            with self.opener.open(Request(self.base + path, data=body, headers=headers), timeout=8) as response:
+                raw = response.read(256 * 1024 + 1)
+            if len(raw) > 256 * 1024:
+                raise ValueError("peer response too large")
+            return json.loads(raw)
+        except (OSError, ValueError) as exc:
+            exc.peer_operation = operation
+            exc.peer_host = urlsplit(self.base).netloc
+            raise
 
 
 def ats_evidence(root, symbols, ipc_db=None):
@@ -150,6 +204,7 @@ class AppServer:
         self.messages, self.counter, self.tool = queue.Queue(maxsize=128), 0, tool
         self.backlog = deque(maxlen=128)
         self.error = None
+        self.error_detail = None
         self.active_thread = None
         self.tool_audit = []
         def read():
@@ -163,6 +218,7 @@ class AppServer:
                     self.messages.put(json.loads(line), timeout=2)
             except (ValueError, queue.Full, OSError) as exc:
                 self.error = type(exc).__name__
+                self.error_detail = _error_details(exc)
             finally:
                 try:
                     self.messages.put_nowait({"transport_closed": True})
@@ -351,11 +407,18 @@ def main(argv=None):
             pending.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
             os.replace(pending, agent_status_path)
         except (OSError, TypeError, ValueError) as exc:
-            _emit_log({"status":"agent_status_write_failed", "error_code":type(exc).__name__})
+            _emit_log({"status":"agent_status_write_failed", "error_code":type(exc).__name__,
+                       "stage":"local_status_write", "error_detail":_error_details(exc)})
     def heartbeat(status, detail):
         payload = {"provider":"codex-app-server", "capabilities":["strategy_research","ai_chat_v1"], "transport":args.transport, "engine_path":cli, "models":models, "catalog_at":catalog_at, **catalog.status(), "desktop_runtime":desktop, **detail}
-        peer.post("heartbeat", {"status": status, "detail": payload})
         persist_agent_status(status, payload)
+        try:
+            peer.post("heartbeat", {"status": status, "detail": payload})
+        except (OSError, ValueError) as exc:
+            error_detail = _error_details(exc)
+            error_detail["stage"] = "backend_heartbeat"
+            persist_agent_status(status, {**payload, "heartbeat_error": _peer_error_code(exc), "heartbeat_error_detail":error_detail})
+            raise
     ledger = sqlite3.connect(runtime / "agent.db", timeout=3)
     ledger.execute("CREATE TABLE IF NOT EXISTS results(id TEXT PRIMARY KEY,result TEXT,thread_id TEXT,session TEXT,created_at REAL)")
     result_columns = {row[1] for row in ledger.execute("PRAGMA table_info(results)")}
@@ -374,10 +437,19 @@ def main(argv=None):
         try:return latest_models(probe.request("model/list",{"limit":100,"includeHidden":False},timeout=30)["data"])
         finally:probe.close()
     catalog=EngineCatalog(ledger,cli,desktop_cli,probe_catalog)
+    peer_error_streak=0
+    def wait_for_manager_retry(seconds):
+        stop_request=runtime/'stop.request'
+        for _ in range(max(1,int(seconds))):
+            if stop_request.is_file():return
+            time.sleep(1)
     while True:
         app, job, result_ready = None, None, False
+        stage = "loop_start"
+        retry_seconds=5
         try:
             stop_request = runtime / "stop.request"
+            stage = "stop_check"
             if stop_request.is_file():
                 try:stop_request.unlink()
                 except OSError as stop_error:
@@ -385,35 +457,44 @@ def main(argv=None):
                 persist_agent_status("stopping", {"reason":"manager_request"})
                 break
             sidebar.drain()
+            stage = "model_catalog_refresh"
             catalog.refresh_idle(time.time())
             cli,models,catalog_at=catalog.engine,catalog.models,catalog.fetched_at
             if not models or not Path(cli).is_file():
                 heartbeat("degraded", {"error_code":"model_catalog_unavailable" if not models else "engine_unavailable", "retry_after_seconds":max(0,int(catalog.retry_at-time.time()))})
                 if args.once:break
-                time.sleep(20)
+                wait_for_manager_retry(20)
                 continue
             if time.time()-desktop_at>60:
+                stage = "desktop_runtime_discovery"
                 desktop=discover_runtime();desktop_at=time.time()
                 if args.ats_data_root:desktop={**desktop,"data_root":os.path.abspath(os.fspath(args.ats_data_root)),"root_source":"explicit"}
             paused=ledger.execute("SELECT value FROM runtime WHERE key='cooldown_until'").fetchone()
             if paused and float(paused[0])>time.time():
                 heartbeat("degraded", {"error_code":"provider_cooldown","retry_after_seconds":int(float(paused[0])-time.time())})
                 if args.once:break
-                time.sleep(20)
+                wait_for_manager_retry(20)
                 continue
             last=ledger.execute("SELECT result FROM results ORDER BY rowid DESC LIMIT 1").fetchone()
             effective=json.loads(last[0]) if last else {}
+            stage = "backend_ready_heartbeat"
             heartbeat("ready", {"default_model":args.model,"effective_model":effective.get("model"),"effective_effort":effective.get("reasoning_effort"),**sidebar.status()})
+            stage = "strategy_job_claim"
             job = peer.post("claim", {}).get("job")
+            peer_error_streak=0
             if not job:
-                try:chat=peer.post('chat_claim',{}).get('job')
+                try:
+                    stage = "chat_job_claim"
+                    chat=peer.post('chat_claim',{}).get('job')
                 except HTTPError as exc:
                     if exc.code not in (404,405):raise
                     chat=None
                 if chat:
                     from desktop_chat import run_chat
+                    stage = "chat_job_run"
                     run_chat(peer,chat,cli,runtime,models,sidebar,ledger,heartbeat)
             if job:
+                stage = "strategy_context_validate"
                 context = job["context"]
                 if digest(context) != job["evidence_hash"]:
                     raise ValueError("evidence hash mismatch")
@@ -439,6 +520,7 @@ def main(argv=None):
                                                 'read_at':datetime.now(timezone.utc).isoformat()})
                             return value
                         return {"error": "tool not allowed"}
+                    stage = "strategy_app_server_start"
                     app = AppServer(cli, runtime / "scratch", args.transport, tool=tool)
                     app.thread_observer=sidebar.enqueue
                     session = peer.workspace + ":" + context["trade_date"]
@@ -448,6 +530,7 @@ def main(argv=None):
                             heartbeat("analyzing", {"thread_id": thread_id, "job_id": job["id"],"effective_model":model,"effective_effort":effort,"elapsed_seconds":int(time.monotonic()-analysis_started)})
                             last_heartbeat[0] = time.monotonic()
                     analysis_started=time.monotonic()
+                    stage = "strategy_codex_turn"
                     heartbeat("analyzing", {"job_id":job["id"],"effective_model":model,"effective_effort":effort,"elapsed_seconds":0})
                     last_heartbeat[0]=time.monotonic()
                     result = app.analyze(job, model=model, progress=progress, effort=effort)
@@ -458,12 +541,20 @@ def main(argv=None):
                     )
                     ledger.commit()
                 result_ready = True
+                stage = "strategy_result_writeback"
                 peer.post("result", {"id": job["id"], "lease_token": job["lease_token"], "status": "completed", "result": result})
+                stage = "backend_ready_heartbeat"
                 heartbeat("ready", {"last_job_id":job["id"],"effective_model":result.get("model"),"effective_effort":result.get("reasoning_effort")})
                 _emit_log({"status": "completed", "job_id": job["id"], "thread_id": result.get("thread_id")})
         except (OSError, ValueError, KeyError, TypeError, sqlite3.Error, queue.Empty, TimeoutError) as exc:
-            code=("MODEL_TIMEOUT" if isinstance(exc,TimeoutError) else "RPC_TIMEOUT" if isinstance(exc,queue.Empty) else str(exc) if re.fullmatch(r"CLI_[A-Z0-9_]+",str(exc)) else type(exc).__name__)
-            persist_agent_status("degraded", {"error_code":code})
+            code=("MODEL_TIMEOUT" if isinstance(exc,TimeoutError) else "RPC_TIMEOUT" if isinstance(exc,queue.Empty) else str(exc) if re.fullmatch(r"CLI_[A-Z0-9_]+",str(exc)) else _peer_error_code(exc))
+            peer_error_streak=min(peer_error_streak+1,5) if isinstance(exc,OSError) else 0
+            retry_seconds=min(60,5*(2**peer_error_streak)) if isinstance(exc,OSError) else 5
+            error_detail=_error_details(exc)
+            error_detail["stage"] = stage
+            if app and app.error_detail and "cause" not in error_detail:
+                error_detail["cause"] = app.error_detail
+            persist_agent_status("degraded", {"error_code":code,"stage":stage,"error_detail":error_detail,"retry_after_seconds":retry_seconds})
             if job and not result_ready:
                 ledger.execute("INSERT OR REPLACE INTO runtime VALUES('cooldown_until',?)",(str(time.time()+(30 if isinstance(exc,TimeoutError) else 300)),));ledger.commit()
             if job and not result_ready:
@@ -478,14 +569,16 @@ def main(argv=None):
                         "result": failure})
                 except (OSError, ValueError, KeyError, TypeError):
                     pass
-            _emit_log({"status": "degraded", "error_code": code})
+            _emit_log({"status": "degraded", "error_code": code, "stage":stage,
+                       "operation":getattr(exc,"peer_operation",""),"error_detail":error_detail,
+                       "retry_after_seconds":retry_seconds})
         finally:
             if app:
                 app.close()
             sidebar.drain()
         if args.once:
             break
-        time.sleep(5)
+        wait_for_manager_retry(retry_seconds)
     ledger.close()
     runtime_lock.close()
 

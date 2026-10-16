@@ -3,8 +3,20 @@ from datetime import datetime,timedelta,timezone
 import hashlib
 import os
 from pathlib import Path
+import sys
 
-ROOT=Path(__file__).resolve().parent
+def _strategy_root():
+    packaged=(getattr(sys,'frozen',False) or '__compiled__' in globals()
+        or 'NUITKA_ONEFILE_DIRECTORY' in os.environ or hasattr(sys,'nuitka_version'))
+    if not packaged:return Path(__file__).resolve().parent
+    app_root=Path(os.path.dirname(os.path.abspath(sys.executable)))
+    if app_root.name.lower() in ('webtools','window_manager'):
+        app_root=app_root.parent
+        if app_root.name.lower()=='webtools':app_root=app_root.parent
+    return app_root/'stock-strategy'
+
+
+ROOT=_strategy_root()
 PROJECT_ROOT=ROOT/'muse-research'
 PROJECT_NAME='Muse 模拟策略'
 HK=timezone(timedelta(hours=8))
