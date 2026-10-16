@@ -16,9 +16,12 @@ THREAD='01a13f4b-5f5a-7fb0-990c-a22bdbe42f68'
 
 
 class App:
+    from desktop_strategy_agent import AppServer
+    readonly_overrides=AppServer.readonly_overrides
     def __init__(self,*args,**kwargs):self.calls=[];self.active_thread=None;self.tool_audit=[];self.closed=False
     def request(self,method,params,**kwargs):
         self.calls.append((method,params))
+        if method=='config/read':return {'config':{}}
         if method in ('thread/start','thread/resume'):return {'thread':{'id':THREAD},'model':'gpt-6-luna','reasoningEffort':'low'}
         if method=='turn/start':return {'turn':{'id':'turn'}}
         return {}

@@ -334,6 +334,14 @@ class AppServer:
             with self.pending_lock:
                 self.pending.pop(identity, None)
 
+    def readonly_overrides(self):
+        config=self.request('config/read',{'includeLayers':False}).get('config')
+        if not isinstance(config,dict):raise ValueError('bridge runtime config unavailable')
+        result={'features.shell_tool':False,'features.apps':False,'web_search':'disabled'}
+        for name in (config.get('mcp_servers') or {}):result['mcp_servers.'+name+'.enabled']=False
+        for name in (config.get('plugins') or {}):result['plugins.'+name+'.enabled']=False
+        return result
+
     def analyze(self, job, thread_id=None, model="gpt-6-luna", progress=None, effort="medium"):
         # A bounded evidence snapshot per job avoids repeatedly replaying full market history.
         thread_id = None
@@ -354,7 +362,7 @@ class AppServer:
             ("get_stock_evidence", "Read one allowed pool stock's quantitative evidence; symbol required"),
             ("get_ats_evidence", "Read ATS IPC evidence with original dates; never assume historical signals are realtime"))]
         params = {"cwd": str(PROJECT_ROOT), "projectId":self.project_id, "model": model, "approvalPolicy": "never", "sandbox": "read-only",
-            "config": {"project_doc_max_bytes": 0, "model_reasoning_effort": effort}, "dynamicTools": tools,
+            "config": {**self.readonly_overrides(),"project_doc_max_bytes": 0, "model_reasoning_effort": effort}, "dynamicTools": tools,
             "developerInstructions": "你是A股模拟盘策略研究员。仅调用指定只读证据工具，不执行命令、不读写文件、不下单。"
                 "按市场情绪、资金轮动、板块地位、个股走势分析，提出逐股条件计划。"
                 "区分事实、推断、缺口；无交易日资金仅作参考，ATS历史信号不是实时数据。"
