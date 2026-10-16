@@ -31,10 +31,11 @@ def pipe_candidates(hint=None):
 
 
 class AppTools:
-    def __init__(self,pipe,thread_id,timeout=6):
+    def __init__(self,pipe,thread_id,timeout=6,stop=None):
         node,server=installed_runtime()
         env={**os.environ,'CODEX_APP_TOOLS_PIPE_PATH':pipe}
         self.thread_id,self.timeout,self.counter=thread_id,timeout,0
+        self.stop=stop
         self.messages=queue.Queue(maxsize=128)
         self.process=subprocess.Popen([str(node),str(server)],env=env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
@@ -66,8 +67,9 @@ class AppTools:
         self.send({'jsonrpc':'2.0','id':identity,'method':method,'params':params})
         deadline=time.monotonic()+self.timeout
         while time.monotonic()<deadline:
-            try:message=self.messages.get(timeout=max(.01,deadline-time.monotonic()))
-            except queue.Empty:raise TimeoutError('APP_TOOLS_TIMEOUT') from None
+            if self.stop and self.stop.is_set():raise OSError('APP_TOOLS_STOPPED')
+            try:message=self.messages.get(timeout=min(.1,max(.01,deadline-time.monotonic())))
+            except queue.Empty:continue
             if message.get('closed'):raise OSError('APP_TOOLS_DISCONNECTED')
             if message.get('id')!=identity:continue
             if 'error' in message:raise ValueError('APP_TOOLS_RPC_REJECTED')
@@ -103,9 +105,10 @@ def section(snapshot):
 
 
 class SidebarOrganizer:
-    def __init__(self,ledger,client=AppTools,discover=pipe_candidates,clock=time.time):
+    def __init__(self,ledger,client=AppTools,discover=pipe_candidates,clock=time.time,stop=None):
         self.db,self.client,self.discover,self.clock=ledger,client,discover,clock
         self.pipe=None;self.probe_cursor=0
+        self.stop=stop
         ledger.execute('CREATE TABLE IF NOT EXISTS sidebar_threads(thread_id TEXT PRIMARY KEY,job_id TEXT,status TEXT,error TEXT,attempts INTEGER,next_retry REAL,section_id TEXT,updated_at REAL)')
         ledger.commit()
 
@@ -122,15 +125,18 @@ class SidebarOrganizer:
             if not candidates:raise OSError('APP_TOOLS_DESKTOP_OFFLINE')
             # One endpoint per attempt bounds delays even with many desktop windows.
             pipe=self.pipe if self.pipe in candidates else candidates[self.probe_cursor%len(candidates)]
-            client=self.client(pipe,thread_id)
-            snapshot=client.call('list_threads',{'limit':1});target=section(snapshot)
+            client=self.client(pipe,thread_id,stop=self.stop) if self.client is AppTools else self.client(pipe,thread_id)
+            def call(name,args):
+                if self.stop and self.stop.is_set():raise OSError('APP_TOOLS_STOPPED')
+                return client.call(name,args)
+            snapshot=call('list_threads',{'limit':1});target=section(snapshot)
             if target is None:
-                created=client.call('create_sidebar_section',{'name':SECTION_NAME})
+                created=call('create_sidebar_section',{'name':SECTION_NAME})
                 target={'sectionId':created['sectionId'],'itemKeys':[]}
             key='codex:thread:local:'+thread_id
             if key not in target.get('itemKeys',[]):
-                client.call('move_thread_to_sidebar_section',{'threadId':thread_id,'sectionId':target['sectionId'],'hostId':'local'})
-            confirmed=section(client.call('list_threads',{'limit':1}))
+                call('move_thread_to_sidebar_section',{'threadId':thread_id,'sectionId':target['sectionId'],'hostId':'local'})
+            confirmed=section(call('list_threads',{'limit':1}))
             if not confirmed or confirmed['sectionId']!=target['sectionId'] or key not in confirmed.get('itemKeys',[]):raise ValueError('APP_TOOLS_PLACEMENT_UNCONFIRMED')
             self.pipe=pipe
             self.db.execute("UPDATE sidebar_threads SET status='grouped',error='',section_id=?,updated_at=? WHERE thread_id=?",(target['sectionId'],self.clock(),thread_id))
@@ -145,3 +151,40 @@ class SidebarOrganizer:
         pending=self.db.execute("SELECT count(*) FROM sidebar_threads WHERE status='pending'").fetchone()[0]
         last=self.db.execute("SELECT error FROM sidebar_threads WHERE status='pending' ORDER BY updated_at DESC LIMIT 1").fetchone()
         return {'sidebar_pending':pending,'sidebar_error':last[0] if last else '', 'sidebar_group':SECTION_NAME}
+
+
+class SidebarWorker:
+    """UI presentation has its own SQLite connection and never blocks dispatch."""
+    def __init__(self, ledger, path):
+        self.organizer = SidebarOrganizer(ledger)
+        self.path = path
+        self.stop = threading.Event()
+        self.wake = threading.Event()
+        self.thread = threading.Thread(target=self._run, name='stock-codex-sidebar', daemon=True)
+        self.thread.start()
+
+    def enqueue(self, thread_id, job_id):
+        self.organizer.enqueue(thread_id, job_id)
+        self.wake.set()
+
+    def status(self):
+        return self.organizer.status()
+
+    def _run(self):
+        import sqlite3
+        from contextlib import closing
+        from desktop_strategy_agent import _emit_log
+        with closing(sqlite3.connect(self.path, timeout=1)) as db:
+            organizer = SidebarOrganizer(db,stop=self.stop)
+            while not self.stop.is_set():
+                try:organizer.drain()
+                except sqlite3.Error as exc:
+                    db.rollback()
+                    _emit_log({'status':'degraded','stage':'sidebar','error_code':type(exc).__name__})
+                self.wake.wait(2)
+                self.wake.clear()
+
+    def close(self):
+        self.stop.set()
+        self.wake.set()
+        self.thread.join(timeout=8)
