@@ -4399,16 +4399,22 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
     def _hide_tray_message_window(self):
         """物理将 QTrayIconMessageWindow 与 PyInstaller Onefile Hidden Window 等后台辅助遮罩窗口移出屏幕外部(-10000, -10000)并强行隐蔽，彻底消灭打包后的白屏遮罩"""
         try:
-            import win32gui, win32con
+            import win32gui, win32con, win32process
+            auxiliary_names = {"QTrayIconMessageWindow", "PyInstaller Onefile Hidden Window", "Hidden Window"}
             def _kill_aux_wnd(hwnd, _):
                 if win32gui.IsWindow(hwnd):
+                    # Only touch this process's auxiliary windows, never another app's console.
+                    _, owner_pid = win32process.GetWindowThreadProcessId(hwnd)
+                    if owner_pid != os.getpid() or hwnd == main_hwnd:
+                        return True
                     title = win32gui.GetWindowText(hwnd) or ""
                     cls = win32gui.GetClassName(hwnd) or ""
-                    if any(k in title for k in ("QTrayIconMessageWindow", "PyInstaller", "Hidden Window")) or \
-                       any(k in cls for k in ("QTrayIconMessageWindow", "PyInstaller", "Hidden Window")):
+                    if cls in {"CASCADIA_HOSTING_WINDOW_CLASS", "ConsoleWindowClass"}:
+                        return True
+                    if title in auxiliary_names or cls in auxiliary_names:
                         win32gui.ShowWindow(hwnd, win32con.SW_HIDE)
                         win32gui.SetWindowPos(hwnd, 0, -10000, -10000, 0, 0,
-                                            win32con.SWP_HIDEWINDOW | win32con.SWP_NOACTIVATE | win32con.SWP_NOZORDER)
+                                            win32con.SWP_HIDEWINDOW | win32con.SWP_NOACTIVATE | win32con.SWP_NOZORDER | win32con.SWP_NOSIZE)
                 return True
 
             main_hwnd = int(self.winId()) if hasattr(self, 'winId') and self.winId() else 0
