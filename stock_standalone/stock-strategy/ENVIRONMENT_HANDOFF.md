@@ -1,3 +1,48 @@
+## 2026-10-16 21:30 后续打包源代码修复（尚未打包/部署）
+
+- 用户在手动重打包后报告 Web 对话阶段 `OSError: 函数不正确`，路径指向 `G:\Temp\_MEI263162`。已修正 `muse_research_threads.py`：PyInstaller/Nuitka 打包运行时从 `sys.executable` 定位管理器安装目录，再使用稳定的 `stock-strategy\muse-research` 项目目录；源码开发运行仍从源码位置取根目录。此修复针对临时解包目录路径，不代表已验证所有 RAMDisk/权限场景。
+- 管理器状态误把复用中的 `bridge.pid`（曾指向无关 `node.exe`）报告为桥运行。现在必须同时匹配活动状态并核验进程身份；桥退出时清理自己写入的 PID 文件。
+- 桌面聊天/桥接端补充 Web 对话进度阶段、Codex 过期 thread 新建会话回退、终态结果本机缓存与回执重试/重放、检测会话归档与本地测试记录清理、心跳先落本机、停止请求可中断重试等待，以及包含阶段/操作/HTTP/WinError/errno/路径的诊断日志。管理器显示后台桥名录、友好错误和日志，并采集独立 worker 输出。
+- 当前改动只在工作区源代码和 v5 手动打包 spec；没有重建或部署 EXE，也没有重新启动管理器/桌面桥。用户负责手动打包并测试。Python 语法检查和 `git diff --check` 已通过，未运行测试套件。
+- Web/API 的历史部署记录仍按各自时间保留。Web 桥下拉仍可能显示旧 Codex 登记项：本 checkout 没有对应 Web/API 源码，未删除后端登记，也未在本次代码中声称解决该列表清理。
+
+## 2026-10-16 17:29 桌面桥回执幂等、日志诊断与打包桥闭环已部署
+
+- API/Web 发布 `20261016171738`，隔离发布源码提交 `da9bad51f097b92f2b3eef2a8c891165bd1eb1dc`；部署脚本 health、隔离 smoke 与上线门禁通过。回滚：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261016171738`。
+- 后端终态回执支持同一租约/相同结果幂等重试；`result_writeback` 暂留 15 秒租约，未写回时桥可快速重领本机缓存成功结果。测试任务的终态 GET 不再立即删除，Web 客户端收到终态后通过 DELETE 确认清理，避免丢包后重查 404。
+- Web 桥测试展示本机引擎启动、会话建立、Codex 回复和结果写回阶段及等待时长；成功/失败终态后清理临时 Web job/session。
+- 桥日志记录阶段、操作、HTTP 状态、errno/WinError、原因、后端地址或本机路径；管理器把常见网络/文件错误映射为中文说明并捕获打包桥启动输出。心跳支持 Go RFC3339Nano 与 epoch 秒/毫秒/微秒/纳秒，兼容 Python 3.9，显示本地时间和相对时长。
+- 管理器 v5 并排安装：`D:\JohnsonProgram\instockMonitorTK\manage_window_layout.bridge-closed-loop-20261016-v5.exe`，46,318,047 字节，SHA256 `9107CC9974DCD3754D5A1EA4ADD571574FA727925956552E46F7317217341F9E`。当前运行 worker PID `26572`，可执行文件为 v5；身份 `411ad92c / b33bb748`，在线/ready，后台运行/排队 `0/0`。旧管理器 UI 未强制关闭；需打开 v5 管理器查看新的日志格式，已安装的 v4 是时间解析修正前的中间包，不要用于查看时间。
+- 生产 Web→API→打包 v5 桥→Codex→回执闭环通过：固定标记 `CODEX_BRIDGE_OK`，`gpt-6-luna / max`，10.7 秒；随后 DELETE 清理了 Web 测试 job/session，后台队列归零。Codex 测试 thread 保留在桌面 Codex 历史。API health、Web 根页和 SettingsDrawer/AIChatWorkspace 资源均 HTTP 200。未调用市场工具或交易。
+- 未运行测试套件；Python 语法检查和部署构建通过。历史 OSError 日志没有 errno/路径，无法事后还原具体根因；之后的新异常会带操作阶段和系统错误详情。
+
+## 2026-10-16 14:12 桌面桥自动切换、全链路检测与后台计数已部署
+
+- 发布号 `20261016141223`，隔离发布源码 SHA `d36092d3cb0d2c7d375a211b29fa861442824f66`；部署脚本返回 `Deployment healthy`。回滚命令：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261016141223`。
+- API 设置与 AI 对话页现按新鲜心跳和可用模型筛选所有登记桥；仍在线时保持原桥，离线时优先默认 ATS 工作区的活跃桥，否则选其他活跃桥。对话页每 30 秒轻量复核，自动保存切换并提示桥短标识；不重置输入状态。
+- API 设置新增“测试桌面桥全链路”：只对当前选择的桥提交固定 `CODEX_BRIDGE_OK` 检测，显示后端排队、桥领取、Codex 回复和回执阶段；Web 侧测试任务/会话记录在终态读取后清理；新建的 Codex 测试 thread 和桌面管理器本地结果历史会保留。测试不改已保存配置，也不调用市场工具；页面提示会占用一次 Codex 调用。本次没有点击真实测试按钮。
+- 管理器名录显示所有登记桥及有效运行/排队数，过期租约不计入；修正名录表格为 5 列。新版管理器 `D:\JohnsonProgram\instockMonitorTK\manage_window_layout.bridge-inventory-20261016-v2.exe`，SHA256 `0f5efb11b9d375363c37b765a44ccdd82d9c5bfe4488aefdc5aae364ec8a823a`，46,310,520 字节。旧 EXE 未覆盖；本轮未主动停止这 4 个运行进程。
+- 只读验收：API health、Web、SettingsDrawer、AIChatWorkspace 资源均 HTTP 200；HMAC 名录返回 3 个桥。Web 对话 `411ad92c/b33bb748` 为在线/ready，后台运行/排队均 0；策略桥 `bf952db5/c1f09cc3` 心跳已过期，默认联动桥 `eac80a9a/b33bb748` 无心跳。
+- TypeScript 检查和 Vite 生产构建通过，PyInstaller 管理器构建与 SHA256 校验通过。未运行真实 Codex 对话/桥全链路测试，未更改策略桥选择，未重启 TK/ATS，未操作模拟账户或交易账本。
+
+## 2026-10-16 13:28 桥名录与管理器对齐 UI 已部署
+
+- Go/Web 发布号 20261016132815，隔离发布源码 SHA 7568387bcfe50206dd4efbc4f4af15ea4c03d3d2。部署脚本返回 Deployment healthy；API 地址 http://192.168.50.60:20073，回滚命令：bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261016132815。
+- 后端只读桥名录允许已登记桥使用无查询参数、无请求体的 HMAC GET；列出全部后台桥、90 秒心跳状态、Web 对话目标、策略研究目标和默认联动节点。其他读写权限未变。Web 桥选择项统一为 Codex · 节点短 ID / 工作区短 ID。
+- 部署后只读 HMAC 核验返回 3 个后台桥。当前 Web 对话为 codex-411ad92c / ws-b33bb748（在线、ready）；策略研究为 codex-bf952db5 / ws-c1f09cc3（在线、ready）；默认联动为 JohnsonTriton / tk-eac80a9a / ws-b33bb748（名录中无心跳）。本机打包桥身份与 Web 对话目标一致。
+- API health、Web 根路径及 SettingsDrawer、AutoFollowWorkspace 静态资源均 HTTP 200。TypeScript 检查、Vite 生产构建和部署脚本隔离 API smoke 通过；未运行真实 Codex 对话或策略任务。
+- 管理器包已构建并校验 SHA256：b3082b2c1d72815f5e1e650418b589575c5047ce00d46a53ac37b87be1c9d16f，46,308,749 字节。新版并排放在 D:\JohnsonProgram\instockMonitorTK\manage_window_layout.bridge-inventory-20261016.exe；旧版仍被 4 个进程占用，没有覆盖或停止这些进程。需启动新版主程序后，在 Codex 桌面桥管理器中打开“后台桥名录”标签。
+- 此前计划任务 StockStrategy-CodexATSBridge 使用开发桥 codex-bf952db5fd9f615f2a8fff37 / ws-c1f09cc351724da6946658c4；Web 选中的安装版管理器桥为 codex-411ad92cc5ef25a8efbc8e82 / ws-b33bb748186a4bbc8e69ab72。之前重启命中开发桥，不是安装版桥。此后以 node_id 和 workspace_id 成对核对。
+- 本轮未重启 TK/ATS、未停止桥进程、未更改 Web/策略/default 桥设置，也未发送 AI 任务或触碰模拟账户与交易账本。
+
+## 2026-10-16 12:45 AI 桌面桥自适应与对话恢复部署
+
+- 用户明确要求按部署手册部署。Go/Web 发布源码 SHA `75981727b03e7d9404b77f39cae00a26d9da80c6`（隔离干净发布分支 `codex/ai-chat-bridge-auto-release-20261016`），固定 API base `stockstrategy/backend:flatbase-20261010171545`，base ID `sha256:ed8cbe9544efbcd5f4a50039b79884d43d1d2b662dc9ee6715325c1525d52d6d`。
+- 发布号 `20261016124537`。API 镜像 `stockstrategy/backend:20261016124537`，ID `sha256:ad0ce585e30d3d3a8a05e266e6c826086d365e77e1321fe70173fc5f8b9abab1`，119,504,356 字节、2 层；Web 沿用 `stockstrategy/web:20261011114424`，ID `sha256:ce15ecc17364a415c3a4e609a2858b046af4f3bc9f1058c33bdfaf13b1bb07e9`，62,396,647 字节、11 层。
+- 部署前 SSH 指纹、API/Web health、always 重启策略及资源预检通过；可用内存 1,911,348 KiB，数据盘剩余 574,521,304 KiB，Docker 盘剩余 4,619,424 KiB。Go 编译、集成 Web `npm ci` / `tsc -b` / Vite 构建通过，远端隔离 API smoke 通过。
+- 上线后 API/Web 均 `healthy`、重启策略 `always`、`ReadOnlyRootfs=true`、`SizeRw=0`；挂载仍为 8/5。API/Web→API health 返回 `ok=true`，Web 根路径 HTTP 200，`AIChatWorkspace-BibFBvpp.js` HTTP 200。回滚快照 `/mnt/4TB/dockerf/stockstrategy/rollback/20261016124537/COMPLETE` 存在且 `SHA256SUMS` 全部通过；回滚命令：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261016124537`。
+- 身份区分：计划任务 StockStrategy-CodexATSBridge 使用开发桥 codex-bf952db5fd9f615f2a8fff37 / ws-c1f09cc351724da6946658c4；安装版管理器桥为 codex-411ad92cc5ef25a8efbc8e82 / ws-b33bb748186a4bbc8e69ab72。此前重启命中开发桥，不是 Web 当前选中的打包桥。确认队列空闲后，仅重启该任务；停止检查时有新任务并发领取，等待它完成后通过 `stop.request` 正常退出，未中断任务。任务现为 `Running`，单桥/单 agent，状态 `ready`；节点 `codex-bf952db5fd9f615f2a8fff37`、工作区 `ws-c1f09cc351724da6946658c4` 保持不变，模型目录 3 项、`catalog_day=2026-10-16`，引擎路径 `C:\Users\Johnson\AppData\Local\OpenAI\Codex\bin\9614f1d9b40d9c4f\codex.exe`。桥按现有注册流程重新注册，标签代码包含节点与工作区 ID。
+- 没有重启 TK/ATS，没有执行真实 Codex 对话、个股研究或交易；仅执行部署 smoke、健康和静态资源只读验收。外置行情库、模拟账户与交易账本未改。
 ## 2026-10-15 23:24 个股 AI 模型偏好恢复修复已部署
 
 - 修复研究记录恢复时把历史任务的 `ai_provider/model/reasoning_effort` 覆盖当前选择的问题；模型选择仍在点击时写入浏览器 `localStorage`，历史任务只恢复股票、用途、周期和分析深度。
@@ -328,3 +373,11 @@
 - 已知 AI 例外：Web 快速 Codex 研判返回 JSON 字段校验错误，任务降级；/stocks/ai-analysis 的 Hermes 模式当前也不可用。Web 页面默认 deep 的 Codex Desktop 路径已成功；上述快速模式/Hermes 另行处理。
 
 详细记录见任务报告 docs/tasks/2026-10-16_0254_Web基准指数数据回补闭环.md。
+## 2026-10-16 桌面桥 Web→API→Codex→回执闭环修复
+
+- 发布 `20261016144526`，隔离发布源码提交 `a9cefc5d80d29f2dc9fb02cacae378a59bdb48f5`；API/Web healthy，原有数据挂载与交易配置未改。回滚：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261016144526`。
+- Web/API 修复桌面聊天 GET 短暂失败重试、取消确认、租约过期与本地缓存回执重放竞态。设置检测的 Codex 回合上限 120 秒，Web 总上限 180 秒。
+- 桥端 `chat_result` 瞬时网络错误最多重试 3 次；成功结果保留本地账本并可在租约重领时重放；本机心跳状态先落盘。新日志标明 operation 与 HTTP 状态。
+- 打包管理器 v3 已并排安装，SHA256 `3E0C7339DA31EE90A1C9E37842153077AD5C813ED56F43EB42ED75F9959FFF5B`；已使用该包的冻结 worker 优雅替换空闲旧桥。当前本机 agent ready、无活动 job；API runtime 查询 online=true，模型目录正常；HMAC 名录确认 chat_running=0、chat_queued=0。
+- API health、Web 根页及设置/对话资源 HTTP 200；Python 语法检查、Go 编译、TypeScript 检查和 Vite 生产构建通过。未运行测试套件；执行一次真实固定短标记闭环检测，9.1 秒返回 `CODEX_BRIDGE_OK`，测试 job/session 清理后队列为 0/0。未改行情、持仓、账户或交易风控数据。
+- OSError 本身无法证明路径故障；当前 Codex 引擎路径存在、桥状态文件持续更新。若再出现异常，新日志可区分桥请求、HTTP 状态、Codex 启动/回合和本地路径阶段。详见 [任务记录](docs/tasks/2026-10-16_1452_桌面桥闭环超时与回执修复.md)。

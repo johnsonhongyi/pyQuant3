@@ -44,7 +44,7 @@ else:
 for _path in (ROOT, APP_ROOT):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
-from desktop_strategy_agent import NoRedirect,DesktopPeer
+from desktop_strategy_agent import NoRedirect,DesktopPeer,_error_details,_peer_error_code
 
 
 class _ThreadOutput:
@@ -131,6 +131,24 @@ def acquire_bridge_lock(runtime):
     return lock
 
 
+def _record_bridge_failure(runtime, stage, exc):
+    detail = _error_details(exc)
+    detail["stage"] = stage
+    record = {"status":"degraded", "error_code":_peer_error_code(exc), "stage":stage, "error_detail":detail, "at":time.time()}
+    try:
+        runtime.mkdir(parents=True, exist_ok=True)
+        with (runtime / 'agent-output.txt').open('ab') as output:
+            output.write((json.dumps(record, ensure_ascii=False) + '\n').encode('utf-8'))
+    except OSError:
+        print(json.dumps(record, ensure_ascii=False), flush=True)
+    try:
+        temporary=runtime/'status.pending'
+        temporary.write_text(json.dumps(record,ensure_ascii=False),encoding='utf-8')
+        os.replace(temporary,runtime/'status.json')
+    except OSError:
+        pass
+
+
 class _WindowsBridgeLock:
     def __init__(self,kernel32,handle):
         self.kernel32=kernel32
@@ -153,14 +171,22 @@ def main(argv=None):
     parser.add_argument('--once',action='store_true')
     args=parser.parse_args(argv)
     runtime=_absolute_path(args.runtime);desktop_root=_absolute_path(args.desktop_root)
-    bridge_lock=acquire_bridge_lock(runtime)
+    stage='bridge_lock'
+    try:
+        bridge_lock=acquire_bridge_lock(runtime)
+    except OSError as exc:
+        _record_bridge_failure(runtime,stage,exc)
+        raise
     if bridge_lock is None:
         print(json.dumps({'status':'already_running','runtime':str(runtime),'at':time.time()}),flush=True)
         return
     try:
+        stage='config_prepare'
         config_path,cfg=prepare(runtime,args.backend,desktop_root)
+        stage='peer_configure'
         peer=DesktopPeer(config_path)
-    except Exception:
+    except Exception as exc:
+        _record_bridge_failure(runtime,stage,exc)
         bridge_lock.close()
         raise
     def status(value):
@@ -175,15 +201,19 @@ def main(argv=None):
     config=SimpleNamespace(cfg=cfg,cfg_file=str(config_path),linkage_enabled=True,ipc_node_id=peer.node,
         ipc_workspace_id=peer.workspace,ipc_key_file=str(runtime/'peer.key'),stock_strategy_base_url=args.backend,
         ipc_bind_host='auto_lan',ipc_advertise_host='auto',ipc_linkage_port=26776,ipc_peer_allowlist=[urlsplit(args.backend).hostname])
-    gateway=SystemLinkageGateway(config,database_path=str(runtime/'gateway.db'))
+    gateway=None
     child=None
     try:
+        stage='local_gateway_init'
+        gateway=SystemLinkageGateway(config,database_path=str(runtime/'gateway.db'))
+        stage='local_gateway_start'
         registration=gateway.start()
         package=build_setup_package(registration,gateway._key)
         package['backend_base_url']=args.backend
-        package['label']='Desktop Codex / ATS AI bridge'
+        package['label']='Desktop Codex / ATS AI bridge / '+peer.node+' / '+peer.workspace
         # LAN import uses the existing same-host admin policy; no auth dump or key logging.
         request=Request(args.backend.rstrip('/')+'/api/v1/linkage/targets/import',data=json.dumps(package).encode(),headers={'Content-Type':'application/json'})
+        stage='backend_register'
         with build_opener(ProxyHandler({}),NoRedirect()).open(request,timeout=20) as response:enrolled=json.load(response)
         if not enrolled.get('target_registered'):raise ValueError('desktop target registration failed')
         status({'status':'registered','desktop_status':enrolled.get('desktop_status'),'port':registration['port']})
@@ -194,6 +224,7 @@ def main(argv=None):
             (runtime/'bridge.pid').write_text(str(os.getpid()),encoding='ascii')
             if getattr(sys,'frozen',False) or args.launch_mode=='thread':
                 from desktop_strategy_agent import main as run_agent
+                stage='agent_start'
                 status({'status':'agent_starting','agent_pid':os.getpid(),'port':registration['port']})
                 previous_stdout,previous_stderr=sys.stdout,sys.stderr
                 owner_thread=threading.get_ident()
@@ -204,6 +235,7 @@ def main(argv=None):
                 finally:sys.stdout,sys.stderr=previous_stdout,previous_stderr
                 status({'status':'stopped','agent_pid':os.getpid()})
             else:
+                stage='agent_start'
                 command=[sys.executable,str(ROOT/'desktop_strategy_agent.py'),*agent_arguments]
                 child=subprocess.Popen(command,cwd=ROOT,stdout=output,stderr=subprocess.STDOUT,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
                 status({'status':'agent_starting','agent_pid':child.pid,'port':registration['port']})
@@ -211,17 +243,27 @@ def main(argv=None):
                 if code:raise RuntimeError('desktop agent exited')
                 status({'status':'stopped','agent_pid':child.pid})
     except (OSError,ValueError,RuntimeError,SystemExit) as exc:
-        status({'status':'degraded','error_code':type(exc).__name__})
+        _record_bridge_failure(runtime,stage,exc)
+        status({'status':'degraded','error_code':_peer_error_code(exc),'stage':stage,'error_detail':_error_details(exc)})
         raise SystemExit(1)
     except Exception as exc:
-        status({'status':'degraded','error_code':type(exc).__name__})
+        _record_bridge_failure(runtime,stage,exc)
+        status({'status':'degraded','error_code':_peer_error_code(exc),'stage':stage,'error_detail':_error_details(exc)})
         raise
     finally:
         if child and child.poll() is None:
             from ats.llm.cli_process import _terminate_process_tree
             _terminate_process_tree(child)
-        gateway.stop()
+        if gateway:gateway.stop()
         bridge_lock.close()
+        try:
+            pid_file=runtime/'bridge.pid'
+            if pid_file.read_text(encoding='ascii').strip()==str(os.getpid()):pid_file.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            print(json.dumps({'status':'degraded','error_code':'bridge_pid_cleanup_failed',
+                'stage':'bridge_pid_cleanup','error_detail':_error_details(exc)},ensure_ascii=False),flush=True)
 
 
 if __name__=='__main__':main()

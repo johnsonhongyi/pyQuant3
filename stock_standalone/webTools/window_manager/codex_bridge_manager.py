@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import configparser
+import hashlib
+import hmac
+import secrets
 import ctypes
 import json
 import os
@@ -15,8 +18,9 @@ import time
 from ctypes import wintypes
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.request import HTTPRedirectHandler, Request, ProxyHandler, build_opener
 
-from PyQt6 import QtCore, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets
 
 
 DEFAULT_BACKEND = "http://192.168.50.60:20073"
@@ -55,10 +59,90 @@ _RESULT_FIELD_LABELS = {
 
 def _status_label(status, error_code="") -> str:
     if error_code:
-        return f"失败（{error_code}）"
+        return f"失败（{_friendly_error_code(error_code)}）"
     raw = str(status or "").strip()
     return _STATUS_LABELS.get(raw.lower(), raw or "状态未知")
 
+
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+def _short_bridge_id(value: str) -> str:
+    raw = str(value or "").strip()
+    for prefix in ("codex-", "ws-", "tk-"):
+        if raw.lower().startswith(prefix):
+            raw = raw[len(prefix):]
+            break
+    return raw[:8] or "—"
+
+
+def _bridge_target_name(label: str) -> str:
+    raw = str(label or "").strip()
+    if not raw or raw.lower().startswith("desktop codex") or "ats ai bridge" in raw.lower():
+        return "Codex"
+    return raw[:32]
+
+def _parse_bridge_heartbeat(value):
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        numeric = float(value)
+    else:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            numeric = float(raw)
+        except (ValueError, TypeError, OverflowError):
+            numeric = None
+    if numeric is not None:
+        magnitude = abs(numeric)
+        if magnitude >= 1e17:
+            numeric /= 1e9
+        elif magnitude >= 1e14:
+            numeric /= 1e6
+        elif magnitude >= 1e11:
+            numeric /= 1e3
+        try:
+            return datetime.fromtimestamp(numeric).astimezone()
+        except (ValueError, TypeError, OSError, OverflowError):
+            return None
+    raw = str(value).strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    fraction_start = raw.find(".")
+    if fraction_start >= 0:
+        offsets = [position for position in (raw.find("+", fraction_start), raw.find("-", fraction_start)) if position >= 0]
+        offset_start = min(offsets) if offsets else len(raw)
+        fraction = raw[fraction_start + 1:offset_start]
+        if fraction.isdigit() and len(fraction) > 6:
+            raw = raw[:fraction_start + 1] + fraction[:6] + raw[offset_start:]
+    for candidate in (raw, raw.replace(" UTC", "+00:00")):
+        try:
+            return datetime.fromisoformat(candidate).astimezone()
+        except (ValueError, TypeError, OSError, OverflowError):
+            continue
+    return None
+
+
+def _format_bridge_heartbeat(value) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "未记录"
+    stamp = _parse_bridge_heartbeat(value)
+    if stamp is None:
+        return "时间不可解析"
+    age = (datetime.now().astimezone() - stamp).total_seconds()
+    if age < -5:
+        relative = "时钟有偏差"
+    elif age < 60:
+        relative = f"{max(0, int(age))} 秒前"
+    elif age < 3600:
+        relative = f"{int(age // 60)} 分钟前"
+    elif age < 86400:
+        relative = f"{int(age // 3600)} 小时前"
+    else:
+        relative = f"{int(age // 86400)} 天前"
+    return stamp.strftime("%m-%d %H:%M:%S") + " · " + relative
 
 def _decode_nested_json(value, depth: int = 0):
     if depth >= 5:
@@ -107,12 +191,87 @@ def _friendly_error_code(value) -> str:
     raw = str(value or "").strip()
     if not raw:
         return ""
+    key = raw.lower()
     labels = {
         "timeout": "请求超时", "timeouterror": "等待响应超时",
-        "model_timeout": "模型响应超时", "rpc_timeout": "Codex 引擎通信超时",
+        "model_timeout": "Codex 响应超时", "rpc_timeout": "Codex 引擎通信超时",
         "connectionerror": "连接失败", "connectionrefusederror": "连接被拒绝",
+        "remotedisconnected": "后端主动关闭连接", "urlerror": "网络地址不可达",
+        "oserror": "本机或网络 I/O 失败", "permissionerror": "本机路径无权限",
+        "filenotfounderror": "本机文件或目录不存在", "connectionreseterror": "网络连接被重置",
+        "agent_status_write_failed": "本机桥状态文件写入失败",
+        "stop_request_cleanup_failed": "停止标记清理失败",
+        "chat_result_oserror": "对话结果写回时发生网络 I/O 错误",
+        "chat_result_timeout": "对话结果写回超时",
+        "chat_result_remote_disconnected": "结果写回连接被后端关闭",
+        "chat_claim_timeout": "领取 Web 任务超时",
+        "chat_claim_url_error": "无法连接 Web 后端领取任务",
+        "app_server_start_oserror": "Codex 引擎启动或管道通信失败",
+        "thread_resume_oserror": "恢复 Codex 会话失败",
+        "thread_start_oserror": "创建 Codex 会话失败",
+        "result_writeback_oserror": "策略结果写回时发生网络 I/O 错误",
+        "backend_register_timeout": "桥注册到 Web 后端超时",
+        "backend_register_url_error": "桥无法连接 Web 后端完成注册",
     }
-    return labels.get(raw.lower(), raw.replace("_", " "))
+    if key in labels:
+        return labels[key]
+    for prefix, label in (("chat_result_http_", "对话回执接口返回 HTTP "), ("result_http_", "策略回执接口返回 HTTP "), ("heartbeat_http_", "桥心跳接口返回 HTTP "), ("chat_claim_http_", "任务领取接口返回 HTTP "), ("claim_http_", "任务领取接口返回 HTTP "), ("backend_register_http_", "桥注册接口返回 HTTP ")):
+        if key.startswith(prefix):
+            return label + key[len(prefix):]
+    for suffix, label in (("_oserror", "发生本机或网络 I/O 错误"), ("_timeout", "等待超时"), ("_url_error", "网络地址不可达"), ("_remote_disconnected", "连接被后端关闭")):
+        if key.endswith(suffix):
+            stage = key[:-len(suffix)]
+            return _STAGE_LABELS.get(stage, stage.replace("_", " ")) + "：" + label
+    return raw.replace("_", " ")
+
+
+def _friendly_error_detail(value) -> str:
+    if not isinstance(value, dict):
+        return " ".join(str(value or "").split())[:260]
+    parts = []
+    winerror = value.get("winerror")
+    errno = value.get("errno")
+    code = winerror if winerror is not None else errno
+    code_labels = {
+        2: "文件不存在", 3: "目录不存在", 5: "访问被拒绝", 13: "访问被拒绝",
+        32: "文件正被其他进程占用", 33: "文件锁冲突", 10054: "远端重置连接",
+        10060: "网络请求超时", 10061: "后端拒绝连接",
+    }
+    kind = str(value.get("cause_type") or value.get("type") or "").lower()
+    kind_labels = {"oserror":"系统 I/O 错误", "permissionerror":"文件访问被拒绝", "filenotfounderror":"文件或目录不存在", "connectionrefusederror":"后端拒绝连接", "connectionreseterror":"连接被重置", "remotedisconnected":"后端主动关闭连接", "urlerror":"网络地址不可达"}
+    if code in code_labels:
+        parts.append(code_labels[code])
+    elif kind in ("timeout", "timeouterror", "socket.timeout"):
+        parts.append("等待响应超时")
+    elif kind in kind_labels:
+        parts.append(kind_labels[kind])
+    elif kind:
+        parts.append(kind.replace("error", "错误").replace("os", "系统"))
+    message = str(value.get("message") or "").strip()
+    if message and message not in parts:
+        parts.append(message[:180])
+    path = value.get("path") or value.get("path2")
+    if path:
+        parts.append("路径 " + str(path)[:220])
+    backend = value.get("backend")
+    if backend:
+        parts.append("后端 " + str(backend)[:120])
+    return "；".join(parts)[:420]
+
+
+_STAGE_LABELS = {
+    "stop_check": "停止检查", "model_catalog_refresh": "刷新模型目录",
+    "desktop_runtime_discovery": "发现桌面运行环境", "backend_ready_heartbeat": "发送后端心跳",
+    "strategy_job_claim": "领取策略任务", "chat_job_claim": "领取 Web 对话任务",
+    "chat_job_run": "运行 Web 对话", "strategy_context_validate": "校验策略任务",
+    "strategy_app_server_start": "启动 Codex 引擎", "strategy_codex_turn": "等待 Codex 分析",
+    "strategy_result_writeback": "回写策略结果", "local_status_write": "写入本机状态",
+    "app_server_start": "启动 Codex 引擎", "project_setup": "准备 Codex 工作区",
+    "thread_resume": "恢复 Codex 会话", "thread_start": "创建 Codex 会话",
+    "thread_label": "标记 Codex 会话", "turn_start": "提交 Codex 请求",
+    "codex_reply": "等待 Codex 回复", "result_cache": "保存本机回执",
+    "result_writeback": "回写 Web 结果", "backend_register": "桥注册",
+}
 
 
 def _format_bridge_log_entry(raw_line: str) -> tuple[str, str, str]:
@@ -145,6 +304,18 @@ def _format_bridge_log_entry(raw_line: str) -> tuple[str, str, str]:
             details.append(f"任务 {payload['job_id']}")
         if payload.get("thread_id"):
             details.append(f"Thread {payload['thread_id']}")
+        error_info = payload.get("error_detail") if isinstance(payload.get("error_detail"), dict) else {}
+        stage = payload.get("stage") or error_info.get("stage")
+        if stage:
+            details.append("阶段 " + _STAGE_LABELS.get(str(stage), str(stage)))
+        operation = payload.get("operation") or error_info.get("operation")
+        if operation:
+            details.append("操作 " + str(operation))
+        error_detail = _friendly_error_detail(error_info)
+        if error_detail:
+            details.append("详情 " + error_detail)
+        if payload.get("retry_after_seconds"):
+            details.append("将在 %s 秒后重试" % payload["retry_after_seconds"])
         if details:
             message += "；" + "；".join(details)
     else:
@@ -190,7 +361,8 @@ def _bridge_log_status(task: dict, parent: dict, agent: dict, heartbeat_age) -> 
     status_text = _status_label(status)
     error_code = detail.get("error_code") if running else parent.get("error_code")
     if error_code:
-        status_text += f"；最近错误：{_friendly_error_code(error_code)}"
+        detail_text = _friendly_error_detail(detail.get("error_detail"))
+        status_text += f"；最近错误：{_friendly_error_code(error_code)}" + ("（" + detail_text + "）" if detail_text else "")
 
     updated = (agent.get("updated_epoch") or parent.get("at")) if running else (parent.get("at") or agent.get("updated_epoch"))
     updated_text = _format_history_time(updated, {}) if updated else "时间未知"
@@ -380,6 +552,10 @@ class BridgeController:
         self.project_root = Path(os.path.abspath(os.fspath(project_root or Path.cwd())))
         self.runtime_root = self.project_root / "stock-strategy" / "logs" / "desktop-strategy-live"
         self.preference_path = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "pyQuant3" / "codex-bridge-manager.json"
+        self._backend_inventory_cache_key = None
+        self._backend_inventory_cache_at = 0.0
+        self._backend_inventory_cache = {"ok": False, "targets": []}
+        self._backend_inventory_lock = threading.Lock()
 
     def task_info(self) -> dict:
         command = self.bridge_command()
@@ -389,7 +565,6 @@ class BridgeController:
             pid = int((self.runtime_path() / "bridge.pid").read_text(encoding="ascii").strip())
         except (OSError, ValueError):
             pass
-        running = bool(pid > 0 and _process_is_running(pid))
         agent = _read_json(self.runtime_path() / "agent" / "agent-status.json")
         agent_updated = float(agent.get("updated_epoch") or 0)
         agent_fresh = bool(agent_updated and time.time() - agent_updated <= 90)
@@ -399,17 +574,26 @@ class BridgeController:
             status_at = float(status.get("at") or 0)
         except (TypeError, ValueError):
             status_pid, status_at = 0, 0
-        if (not running and status_pid > 0 and status.get("status") in active_statuses
-                and _bridge_owner_is_alive(status_pid, self.runtime_path(), status_at,
-                                           status.get("launch_mode") or self.run_mode())):
-            pid = status_pid
-            running = True
+        launch_mode = status.get("launch_mode") or self.run_mode()
+        # bridge.pid can outlive a stopped worker and later be reused by an
+        # unrelated process (for example Codex's Node runtime). Require an
+        # active status and verify the recorded process identity before treating
+        # that PID as the bridge.
+        running = False
+        if status.get("status") in active_statuses:
+            for candidate in dict.fromkeys((pid, status_pid)):
+                if candidate > 0 and _bridge_owner_is_alive(
+                        candidate, self.runtime_path(), status_at, launch_mode):
+                    pid = candidate
+                    running = True
+                    break
         # A packaged onefile worker runs inside the manager's process tree, so
         # bridge.pid points at the manager/bootloader PID rather than a child.
-        if getattr(sys, "frozen", False) and pid > 0 and agent_fresh and agent.get("status") in (
+        if (getattr(sys, "frozen", False) and status.get("status") in active_statuses
+                and pid > 0 and agent_fresh and agent.get("status") in (
             "ready", "analyzing", "degraded", "stopping"
-        ):
-            process_alive = _process_is_running(pid)
+        )):
+            process_alive = _bridge_owner_is_alive(pid, self.runtime_path(), status_at, launch_mode)
             if not process_alive:
                 process_alive = self._process_tree_contains(pid, os.getpid())
             if process_alive:
@@ -534,10 +718,108 @@ class BridgeController:
                 "backend": section.get("stock_strategy_base_url", ""),
                 "node_id": section.get("ipc_node_id", ""),
                 "workspace_id": section.get("ipc_workspace_id", ""),
+                "key_file": section.get("ipc_key_file", "") or str(runtime / "peer.key"),
             }
         except (OSError, configparser.Error, KeyError, TypeError):
             return {}
 
+    def backend_bridge_inventory(self, config: dict) -> dict:
+        backend = str(config.get("backend") or "").rstrip("/")
+        node = str(config.get("node_id") or "")
+        workspace = str(config.get("workspace_id") or "")
+        key_file = str(config.get("key_file") or "")
+        cache_key = (backend, node, workspace, key_file)
+        now = time.monotonic()
+        with self._backend_inventory_lock:
+            ttl = 15 if self._backend_inventory_cache.get("ok") else 5
+            if cache_key == self._backend_inventory_cache_key and now - self._backend_inventory_cache_at < ttl:
+                return self._backend_inventory_cache
+        try:
+            if not backend or not node or not workspace or not key_file:
+                raise ValueError("bridge_identity_missing")
+            raw_key = Path(key_file).read_bytes().strip()
+            key = bytes.fromhex(raw_key.decode("ascii")) if len(raw_key) == 64 else raw_key
+            if len(key) < 32:
+                raise ValueError("bridge_key_invalid")
+            path = "/api/v1/linkage/targets"
+            timestamp = str(int(time.time()))
+            nonce = secrets.token_hex(24)
+            body_hash = hashlib.sha256(b"").hexdigest()
+            canonical = "\n".join(("GET", path, body_hash, timestamp, nonce, node, workspace))
+            signature = hmac.new(key, canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+            request = Request(
+                backend + path,
+                headers={
+                    "Accept": "application/json",
+                    "X-Linkage-Node-ID": node,
+                    "X-Linkage-Workspace-ID": workspace,
+                    "X-Linkage-Timestamp": timestamp,
+                    "X-Linkage-Nonce": nonce,
+                    "X-Linkage-Signature": signature,
+                },
+                method="GET",
+            )
+            with build_opener(ProxyHandler({}), _NoRedirect()).open(request, timeout=5) as response:
+                raw = response.read(256 * 1024 + 1)
+            if len(raw) > 256 * 1024:
+                raise ValueError("bridge_inventory_too_large")
+            payload = json.loads(raw.decode("utf-8"))
+            if not isinstance(payload, dict) or not isinstance(payload.get("targets"), list):
+                raise ValueError("bridge_inventory_invalid")
+            targets = []
+            for target in payload["targets"][:64]:
+                if not isinstance(target, dict):
+                    continue
+                node_id = str(target.get("node_id") or "")
+                workspace_id = str(target.get("workspace_id") or "")
+                if not node_id or not workspace_id:
+                    continue
+                targets.append({
+                    "node_id": node_id,
+                    "workspace_id": workspace_id,
+                    "label": str(target.get("label") or ""),
+                    "status": str(target.get("status") or "configured"),
+                    "online": str(target.get("online") or "").lower() == "true",
+                    "desktop_status": str(target.get("desktop_status") or ""),
+                    "heartbeat": str(target.get("heartbeat") or ""),
+                    "chat_queued": str(target.get("chat_queued") or "0"),
+                    "chat_running": str(target.get("chat_running") or "0"),
+                    "chat_jobs_status": str(target.get("chat_jobs_status") or "status_unavailable"),
+                })
+            chat_target = payload.get("chat_target")
+            if not isinstance(chat_target, dict):
+                chat_target = {}
+            strategy_target = payload.get("strategy_target")
+            if not isinstance(strategy_target, dict):
+                strategy_target = {}
+            result = {
+                "ok": True,
+                "targets": targets,
+                "default_node_id": str(payload.get("default_node_id") or ""),
+                "chat_target": {
+                    "provider": str(chat_target.get("provider") or "hermes"),
+                    "node_id": str(chat_target.get("node_id") or ""),
+                    "workspace_id": str(chat_target.get("workspace_id") or ""),
+                },
+                "strategy_target": {
+                    "node_id": str(strategy_target.get("node_id") or ""),
+                    "workspace_id": str(strategy_target.get("workspace_id") or ""),
+                },
+                "message": "",
+            }
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            result = {
+                "ok": False,
+                "targets": [],
+                "default_node_id": "",
+                "chat_target": {},
+                "message": "后台桥名录读取失败：" + _friendly_error_code(type(exc).__name__) + ("；" + _friendly_error_detail({"type":type(exc).__name__,"message":str(exc)[:220],"path":getattr(exc,"filename",None)}) if str(exc) or getattr(exc,"filename",None) else ""),
+            }
+        with self._backend_inventory_lock:
+            self._backend_inventory_cache_key = cache_key
+            self._backend_inventory_cache_at = time.monotonic()
+            self._backend_inventory_cache = result
+        return result
     @staticmethod
     def _tail(path: Path, max_bytes: int = 96 * 1024, max_lines: int = 160) -> str:
         try:
@@ -599,6 +881,7 @@ class BridgeController:
         parent = _read_json(runtime / "status.json")
         agent = _read_json(runtime / "agent" / "agent-status.json")
         config = self._read_config(runtime)
+        backend_targets = self.backend_bridge_inventory(config)
         heartbeat = float(agent.get("updated_epoch") or 0)
         age = max(0, time.time() - heartbeat) if heartbeat else None
         if task.get("running") and age is not None and age <= 90 and agent.get("status"):
@@ -608,7 +891,7 @@ class BridgeController:
         db_path = runtime / "agent" / "agent.db"
         result = {
             "task": task, "runtime": str(runtime), "parent": parent, "agent": agent,
-            "config": config, "heartbeat_age": age, "desktop": desktop,
+            "config": config, "backend_targets": backend_targets, "heartbeat_age": age, "desktop": desktop,
             "history": self._history(db_path),
             "logs": _format_bridge_logs(self._tail(runtime / "agent-output.txt")),
             "log_status": _bridge_log_status(task, parent, agent, age),
@@ -686,19 +969,25 @@ class BridgeController:
         worker_env = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1",
                       "PYQUANT3_CODEX_BRIDGE_WORKER": "1",
                       "PYQUANT3_CODEX_BRIDGE_ARGS": json.dumps(arguments)} if getattr(sys, "frozen", False) else None
-        process = subprocess.Popen(
-            command, cwd=str(self.project_root), stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            close_fds=True, creationflags=creationflags,
-            env=worker_env,
-        )
+        output_path = self.runtime_root / "agent-output.txt"
+        with output_path.open("ab") as output:
+            process = subprocess.Popen(
+                command, cwd=str(self.project_root), stdin=subprocess.DEVNULL,
+                stdout=output, stderr=subprocess.STDOUT,
+                close_fds=True, creationflags=creationflags,
+                env=worker_env,
+            )
         time.sleep(0.3)
         if process.poll() is not None:
             if process.returncode == 0 and self.task_info().get("running"):
                 return
             status = _read_json(self.runtime_root / "status.json")
-            details = str(status.get("error_code") or status.get("status") or "unknown")
-            raise RuntimeError(f"桥接进程启动后立即退出，退出码 {process.returncode}，状态 {details}；请查看 {self.runtime_root / 'status.json'}")
+            error_code = status.get("error_code") or status.get("status") or "unknown"
+            details = _friendly_error_code(error_code)
+            error_detail = _friendly_error_detail(status.get("error_detail"))
+            if error_detail:
+                details += "（" + error_detail + "）"
+            raise RuntimeError(f"桥接进程启动后立即退出，退出码 {process.returncode}，状态 {details}；查看桥接日志：{self.runtime_root / 'agent-output.txt'}")
 
     @staticmethod
     def _run_bridge_thread(command: list[str], arguments: tuple[str, ...]) -> None:
@@ -712,14 +1001,17 @@ class BridgeController:
                 from run_desktop_strategy_bridge import main as run_bridge
             run_bridge(list(arguments))
         except (OSError, RuntimeError, ValueError, TypeError) as exc:
-            # The bridge owns detailed agent diagnostics; this fallback records only a safe error class.
             runtime_arg = next((arguments[i + 1] for i, value in enumerate(arguments[:-1]) if value == "--runtime"), "")
             if runtime_arg:
                 path = Path(runtime_arg) / "status.json"
                 try:
                     pending = path.with_suffix(".pending")
-                    pending.write_text(json.dumps({"status": "degraded", "error_code": type(exc).__name__, "at": time.time()}), encoding="utf-8")
+                    detail = {"type":type(exc).__name__, "message":str(exc)[:320], "stage":"manager_thread_start"}
+                    record = {"status":"degraded", "error_code":type(exc).__name__, "stage":"manager_thread_start", "error_detail":detail, "at":time.time()}
+                    pending.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
                     os.replace(pending, path)
+                    with (Path(runtime_arg) / "agent-output.txt").open("ab") as output:
+                        output.write((json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8"))
                 except OSError:
                     pass
 
@@ -898,6 +1190,23 @@ class CodexBridgeManagerDialog(QtWidgets.QDialog):
         overview_layout.addStretch()
         self.tabs.addTab(overview, "状态与用量")
 
+        bridges = QtWidgets.QWidget()
+        bridges_layout = QtWidgets.QVBoxLayout(bridges)
+        self.bridge_inventory_label = QtWidgets.QLabel("正在读取后台桥名录…")
+        self.bridge_inventory_label.setWordWrap(True)
+        self.bridge_inventory_label.setStyleSheet("color: #93c5fd; padding: 6px;")
+        bridges_layout.addWidget(self.bridge_inventory_label)
+        self.bridge_inventory_table = QtWidgets.QTableWidget(0, 5)
+        self.bridge_inventory_table.setHorizontalHeaderLabels(["状态", "桥标识", "当前用途", "后台对话", "最近心跳"])
+        self.bridge_inventory_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.bridge_inventory_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        self.bridge_inventory_table.setWordWrap(False)
+        self.bridge_inventory_table.setTextElideMode(QtCore.Qt.TextElideMode.ElideRight)
+        self.bridge_inventory_table.verticalHeader().setVisible(False)
+        self.bridge_inventory_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+        bridges_layout.addWidget(self.bridge_inventory_table, 1)
+        self.tabs.addTab(bridges, "后台桥名录")
+
         tasks = QtWidgets.QWidget()
         tasks_layout = QtWidgets.QVBoxLayout(tasks)
         self.active_label = QtWidgets.QLabel("当前任务：—")
@@ -1040,8 +1349,12 @@ class CodexBridgeManagerDialog(QtWidgets.QDialog):
             f"最近更新 {task.get('last_run') or '暂无时间'} · 状态 {task.get('last_result', '状态未知')}"
         )
         self.info["backend"].setText(config.get("backend") or "未配置")
-        self.info["node"].setText(config.get("node_id") or agent.get("node_id") or "—")
-        self.info["workspace"].setText(config.get("workspace_id") or agent.get("workspace_id") or "—")
+        node_id = str(config.get("node_id") or agent.get("node_id") or "")
+        self.info["node"].setText(_short_bridge_id(node_id) if node_id else "—")
+        self.info["node"].setToolTip(node_id)
+        workspace_id = str(config.get("workspace_id") or agent.get("workspace_id") or "")
+        self.info["workspace"].setText(_short_bridge_id(workspace_id) if workspace_id else "—")
+        self.info["workspace"].setToolTip(workspace_id)
         self.info["heartbeat"].setText(heartbeat)
         self.info["port"].setText(str(port))
         self.info["runtime"].setText(snapshot.get("runtime") or "—")
@@ -1053,6 +1366,7 @@ class CodexBridgeManagerDialog(QtWidgets.QDialog):
         names = [str(item.get("id", "")) for item in models if isinstance(item, dict) and item.get("id")]
         self.info["engine"].setText(detail.get("engine_path") or "—")
         self.info["models"].setText("、".join(names) if names else "目录尚未加载")
+        self._render_backend_inventory(snapshot.get("backend_targets") or {}, config)
         self._render_tokens(snapshot.get("tokens"))
         task_status = agent.get("status", "") if running else "stopped"
         self._render_tasks(snapshot.get("history") or [], detail, task_status)
@@ -1061,6 +1375,89 @@ class CodexBridgeManagerDialog(QtWidgets.QDialog):
         if self.log_view.toPlainText() != logs:
             self.log_view.setPlainText(logs)
 
+    def _render_backend_inventory(self, inventory: dict, local_config: dict):
+        table = self.bridge_inventory_table
+        targets = inventory.get("targets") or []
+        if not inventory.get("ok"):
+            table.setRowCount(0)
+            self.bridge_inventory_label.setText(inventory.get("message") or "后台桥名录暂不可用。")
+            return
+        local_node = str(local_config.get("node_id") or "")
+        local_workspace = str(local_config.get("workspace_id") or "")
+        chat = inventory.get("chat_target") or {}
+        chat_node = str(chat.get("node_id") or "") if chat.get("provider") == "codex_desktop" else ""
+        chat_workspace = str(chat.get("workspace_id") or "")
+        default_node = str(inventory.get("default_node_id") or "")
+        strategy = inventory.get("strategy_target") or {}
+        strategy_node = str(strategy.get("node_id") or "")
+        strategy_workspace = str(strategy.get("workspace_id") or "")
+        local_found = False
+        provider = chat.get("provider")
+        if provider == "codex_desktop" and chat_node:
+            chat_label = "Codex · " + _short_bridge_id(chat_node) + " / " + _short_bridge_id(chat_workspace)
+        elif provider == "hermes":
+            chat_label = "Hermes"
+        else:
+            chat_label = "未设置" if provider == "codex_desktop" else "读取失败"
+        for target in targets:
+            if target["node_id"] == chat_node and target["workspace_id"] == chat_workspace:
+                chat_label = _bridge_target_name(target.get("label", "")) + " · " + _short_bridge_id(chat_node) + " / " + _short_bridge_id(chat_workspace)
+                break
+        table.setRowCount(len(targets))
+        for row, target in enumerate(targets):
+            node = target["node_id"]
+            workspace = target["workspace_id"]
+            is_local = node == local_node and workspace == local_workspace
+            is_chat = node == chat_node and workspace == chat_workspace and bool(chat_node)
+            is_default = node == default_node and bool(default_node)
+            is_strategy = node == strategy_node and workspace == strategy_workspace and bool(strategy_node)
+            local_found = local_found or is_local
+            online = bool(target.get("online"))
+            desktop_status = str(target.get("desktop_status") or "")
+            if online:
+                state = "在线 · " + ({"analyzing": "处理中", "ready": "空闲"}.get(desktop_status, _status_label(desktop_status)))
+            elif desktop_status == "status_unavailable":
+                state = "状态不可读"
+            elif target.get("heartbeat"):
+                state = "心跳过期"
+            else:
+                state = "已登记 · 无心跳"
+            name = _bridge_target_name(target.get("label", ""))
+            identity = _short_bridge_id(node) + " / " + _short_bridge_id(workspace)
+            roles = []
+            if is_local:
+                roles.append("本机")
+            if is_chat:
+                roles.append("Web 对话")
+            if is_strategy:
+                roles.append("策略研究")
+            if is_default:
+                roles.append("默认联动")
+            details = "节点 ID：%s\n工作区 ID：%s\n状态：%s\n最近心跳：%s" % (
+                node, workspace, desktop_status or "未上报", target.get("heartbeat") or "无",
+            )
+            heartbeat = _format_bridge_heartbeat(target.get("heartbeat")) if target.get("heartbeat") else (
+                "不可读" if desktop_status == "status_unavailable" else "无记录"
+            )
+            if target.get("chat_jobs_status") == "status_unavailable":
+                chat_jobs = "读取失败"
+            else:
+                chat_jobs = "运行 %s · 排队 %s" % (target.get("chat_running", "0"), target.get("chat_queued", "0"))
+            values = (state, name + " · " + identity, " / ".join(roles) or "—", chat_jobs, heartbeat)
+            for column, value in enumerate(values):
+                item = QtWidgets.QTableWidgetItem(str(value))
+                item.setToolTip(details)
+                if is_local:
+                    item.setBackground(QtGui.QBrush(QtGui.QColor("#243b55")))
+                table.setItem(row, column, item)
+        local_label = _short_bridge_id(local_node) + " / " + _short_bridge_id(local_workspace)
+        default_label = _short_bridge_id(default_node) if default_node else "未设置"
+        strategy_label = _short_bridge_id(strategy_node) + " / " + _short_bridge_id(strategy_workspace) if strategy_node else "未设置"
+        self.bridge_inventory_label.setText(
+            "后台登记 %d 个桥 · 本机：%s%s · Web 对话：%s · 策略研究：%s · 默认联动节点：%s。"
+            "Web 对话与策略研究可按同一节点 / 工作区标识选择。" %
+            (len(targets), local_label, "" if local_found else "（本机未登记）", chat_label, strategy_label, default_label)
+        )
     def _render_tokens(self, tokens: dict | None):
         if not tokens or not tokens.get("available"):
             self.token_label.setText("未找到本机 Codex 会话用量记录。")
