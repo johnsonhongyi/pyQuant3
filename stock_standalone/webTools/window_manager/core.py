@@ -962,6 +962,14 @@ def get_exe_path(hwnd) -> str:
     return ""
 
 
+def _is_terminal_window(hwnd: int) -> bool:
+    """Identify console hosts by window class, not the active tab's mutable title."""
+    try:
+        return win32gui.GetClassName(hwnd) in {"CASCADIA_HOSTING_WINDOW_CLASS", "ConsoleWindowClass"}
+    except Exception:
+        return False
+
+
 def cancel_window_maximized_or_fullscreen(hwnd: int) -> bool:
     """
     智能检测并取消窗口的最大化 (Maximized)、全屏 (Fullscreen) 或最小化 (Minimized) 状态，
@@ -1184,9 +1192,23 @@ def set_window_hwnd_pos(hwnd, pos_str: str, title: str = ""):
         parts = [int(p.strip()) for p in pos_str.split(',')]
         if len(parts) == 4:
             x, y, width, height = parts
-            
-            # 仅对专属磁吸折叠窗口做反向纠偏；常规日常软件直接按精准坐标设定
-            x, y, width, height = normalize_docked_window_rect(x, y, width, height, title=title)
+            if width <= 0 or height <= 0:
+                print(f"[Window Safety] Rejected non-positive size for HWND {hwnd}: {pos_str}")
+                return False
+
+            if _is_terminal_window(hwnd):
+                # Reject corrupted title-bar-only or completely off-screen console layouts.
+                if width < 160 or height < 100:
+                    print(f"[Window Safety] Rejected unusable Terminal size: {pos_str}")
+                    return False
+                monitors = get_monitors()
+                if not any(x < m.x + m.width and x + width > m.x and
+                           y < m.y + m.height and y + height > m.y for m in monitors):
+                    print(f"[Window Safety] Rejected off-screen Terminal layout: {pos_str}")
+                    return False
+            else:
+                # Terminal tab titles can resemble magnetic panels; do not infer docking from them.
+                x, y, width, height = normalize_docked_window_rect(x, y, width, height, title=title)
 
             # 🛡️ 智能检测宿主关系：区分独立程序与从属对话框浮窗
             host_rel = get_window_host_relation(hwnd)
@@ -1336,6 +1358,9 @@ def set_window_pos_by_title(target_title: str, pos_str: str, show_cmd=SW_SHOWNOR
         
     success = False
     for hwnd, title in found:
+        if show_cmd == SW_HIDE and _is_terminal_window(hwnd):
+            print(f"[Window Safety] Refused to hide a shared console host: HWND {hwnd}")
+            continue
         # 提取当前物理坐标
         left, top, width, height = get_window_rect(hwnd)
         
@@ -1361,9 +1386,10 @@ def set_window_pos_by_title(target_title: str, pos_str: str, show_cmd=SW_SHOWNOR
             user32.ShowWindow(hwnd, 9)  # SW_RESTORE 强制恢复显示展开态
             time.sleep(0.05)
             
-        if set_window_hwnd_pos(hwnd, pos_str, title=title):
-            success = True
-            
+        if not set_window_hwnd_pos(hwnd, pos_str, title=title):
+            continue
+        success = True
+
         if show_cmd != SW_SHOWNORMAL:
             user32.ShowWindow(hwnd, show_cmd)
 
@@ -3259,7 +3285,9 @@ class AcerPerformanceController:
                         try:
                             title = win32gui.GetWindowText(hwnd)
                             clsname = win32gui.GetClassName(hwnd)
-                            if win32gui.IsWindowVisible(hwnd) and ("predatorsense" in title.lower() or "HwndWrapper[PredatorSense.exe" in clsname):
+                            if (win32gui.IsWindowVisible(hwnd)
+                                    and ("predatorsense" in title.lower() or "HwndWrapper[PredatorSense.exe" in clsname)
+                                    and os.path.basename(get_exe_path(hwnd)).lower() == "predatorsense.exe"):
                                 rect = win32gui.GetWindowRect(hwnd)
                                 if (rect[2] - rect[0]) > 600 and (rect[3] - rect[1]) > 400:
                                     main_hwnd = hwnd
@@ -3388,6 +3416,10 @@ class AcerPerformanceController:
             # 4. 【最后一步】根据 post_action 选定的方式处理控制面板窗口 (Hide/Close/Kill)
             time.sleep(0.5)
             try:
+                # Recheck ownership after automation in case the original HWND was recycled.
+                if os.path.basename(get_exe_path(main_hwnd)).lower() != "predatorsense.exe":
+                    _do_log("[Window Safety] PredatorSense window ownership changed; skipped post-action.")
+                    return
                 pa_str = str(post_action).lower()
                 if pa_str in ["close", "关闭"]:
                     win32gui.PostMessage(main_hwnd, win32con.WM_CLOSE, 0, 0)

@@ -220,3 +220,4 @@ stock_standalone/data/ipo_learning/paper_auto/state/reconciliation/reconciliatio
 stock_standalone/data/ipo_learning/paper_auto/state/reconciliation/*.json.gz
 stock_standalone/archives/.ats-write.lock
 stock_standalone/.development/system_linkage.sqlite3
+stock_standalone/docs/engineering/
