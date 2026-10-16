@@ -97,7 +97,7 @@ def main():
         else:
             result = terminal.get('result') or {}
             sample.update({'marker_ok': result.get('content', '').strip() == 'CODEX_BRIDGE_OK',
-                'timings': result.get('timings'), 'error': result.get('error')})
+                'timings': result.get('timings'), 'token_usage': result.get('token_usage'),'error': result.get('error')})
             with request(path+'/'+job['id'], method='DELETE') as response:
                 json.load(response)
         save()

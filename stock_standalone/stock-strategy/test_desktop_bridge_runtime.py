@@ -20,6 +20,16 @@ from desktop_chat import run_chat
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_readonly_thread_overrides_disable_inherited_tools_without_copying_credentials(self):
+        from desktop_strategy_agent import AppServer
+        app=Mock()
+        app.request.return_value={'config':{'mcp_servers':{'private':{'command':'secret-command','env':{'KEY':'secret'}}},'plugins':{'pdf@example':{'enabled':True}},'some_key':'secret'}}
+        overrides=AppServer.readonly_overrides(app)
+        self.assertFalse(overrides['mcp_servers.private.enabled'])
+        self.assertFalse(overrides['plugins.pdf@example.enabled'])
+        self.assertFalse(overrides['features.apps'])
+        self.assertNotIn('secret',json.dumps(overrides))
+
     def test_cache_and_outbox_commit_as_one_generation(self):
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/'receipts.db'
