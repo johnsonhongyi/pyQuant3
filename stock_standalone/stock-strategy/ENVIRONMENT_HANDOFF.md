@@ -387,3 +387,14 @@
 - 打包管理器 v3 已并排安装，SHA256 `3E0C7339DA31EE90A1C9E37842153077AD5C813ED56F43EB42ED75F9959FFF5B`；已使用该包的冻结 worker 优雅替换空闲旧桥。当前本机 agent ready、无活动 job；API runtime 查询 online=true，模型目录正常；HMAC 名录确认 chat_running=0、chat_queued=0。
 - API health、Web 根页及设置/对话资源 HTTP 200；Python 语法检查、Go 编译、TypeScript 检查和 Vite 生产构建通过。未运行测试套件；执行一次真实固定短标记闭环检测，9.1 秒返回 `CODEX_BRIDGE_OK`，测试 job/session 清理后队列为 0/0。未改行情、持仓、账户或交易风控数据。
 - OSError 本身无法证明路径故障；当前 Codex 引擎路径存在、桥状态文件持续更新。若再出现异常，新日志可区分桥请求、HTTP 状态、Codex 启动/回合和本地路径阶段。详见 [任务记录](docs/tasks/2026-10-16_1452_桌面桥闭环超时与回执修复.md)。
+
+
+## 2026-10-17 02:56 桌面桥常驻、派发、流式与性能验收
+
+- Web/API 发布 20261017021507，独立 source 源码 SHA 540876a57041a3286f20569efc3e93083367a592，干净隔离副本通过原脚本发布；28 个变更文件生产摘要一致。API ID sha256:46006d7148592fa3a8367da2591c55c1598925ca1f53080d968d5708372224e4，2 层、119590372 字节；Web 复用 web:20261011114424。healthy、always、ReadonlyRootfs=true、SizeRw=0，8/5 个 bind mounts 保持。
+- 生产管理器已通过原批量打包选项 7 替换，代码 SHA f7a701fda58bb9a04b3b39d6070ff519913b7ada，EXE SHA256 1A8EEC129AC2FB8800C24B6F5C40BA6F67E6C47909316FA79E9B879B64EE805A。桥 ready/online，原 node/workspace 及 luna/max 配置保持；队列 0/0，WAL 账本 quick_check=ok、待回执 0，唯一常驻引擎。
+- 修复缓存/回执原子性、网络退出、同步桌面扫描、题材短写锁竞争及 queue.Empty 遮蔽，保留研究/对话独立桥选择；关闭桥不需要的继承 MCP/插件，仅保留显式只读工具。Python 46 项、相关 Go 模块、Web 9 项及生产构建通过；真实动态工具调用、停止回收及浏览器 SSE 闭环通过。
+- 阶段性 103 个短标记全部成功，最终版本 10/10，总耗时 P50/P95=5.016/11.734 秒、领取 P95=46 ms。此前 31 样本含原生 Codex 回合 88.4 秒长尾；最终确认有一次回传重试函数 4.844 秒，不承诺稳定秒回。
+- 北新路桥 quick/standard=22.516/99.140 秒；deep 两次=144.500/317.087 秒，均 AI ready。最终真实页面提交 635082c525e807a96ce09aca4edf999d，SSE 200、页面运行错误 0；core 一轮 239.277 秒，剩余主要时间在 Codex 调用，保留资料缺失及行情日期。
+- 回滚快照 20261017021507 的 COMPLETE 和 SHA256SUMS 全部通过，命令 bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261017021507；优化前完整快照为 20261017015525，原管理器备份同编号目录下 manage_window_layout.exe。未回滚数据、未触发实盘下单，未实际执行生产回撤。
+- 详见 [部署与性能验收记录](../docs/tasks/2026-10-17_0256_桌面桥生产部署与性能验收.md)。仅本地 Git 提交，未推送。
