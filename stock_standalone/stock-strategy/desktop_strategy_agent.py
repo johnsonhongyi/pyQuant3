@@ -410,7 +410,7 @@ def main(argv=None):
             _emit_log({"status":"agent_status_write_failed", "error_code":type(exc).__name__,
                        "stage":"local_status_write", "error_detail":_error_details(exc)})
     def heartbeat(status, detail):
-        payload = {"provider":"codex-app-server", "capabilities":["strategy_research","ai_chat_v1"], "transport":args.transport, "engine_path":cli, "models":models, "catalog_at":catalog_at, **catalog.status(), "desktop_runtime":desktop, **detail}
+        payload = {"provider":"codex-app-server", "capabilities":["strategy_research","ai_chat_v1","stock_research_v1"], "transport":args.transport, "engine_path":cli, "models":models, "catalog_at":catalog_at, **catalog.status(), "desktop_runtime":desktop, **detail}
         persist_agent_status(status, payload)
         try:
             peer.post("heartbeat", {"status": status, "detail": payload})
@@ -438,6 +438,7 @@ def main(argv=None):
         finally:probe.close()
     catalog=EngineCatalog(ledger,cli,desktop_cli,probe_catalog)
     peer_error_streak=0
+    prefer_chat_queue=False
     def wait_for_manager_retry(seconds):
         stop_request=runtime/'stop.request'
         for _ in range(max(1,int(seconds))):
@@ -479,20 +480,30 @@ def main(argv=None):
             effective=json.loads(last[0]) if last else {}
             stage = "backend_ready_heartbeat"
             heartbeat("ready", {"default_model":args.model,"effective_model":effective.get("model"),"effective_effort":effective.get("reasoning_effort"),**sidebar.status()})
-            stage = "strategy_job_claim"
-            job = peer.post("claim", {}).get("job")
+            job,chat=None,None
+            claim_order=("chat","strategy") if prefer_chat_queue else ("strategy","chat")
+            for queue in claim_order:
+                if queue == "chat":
+                    try:
+                        stage = "chat_job_claim"
+                        chat=peer.post('chat_claim',{}).get('job')
+                    except HTTPError as exc:
+                        if exc.code not in (404,405):raise
+                        chat=None
+                    if chat:
+                        prefer_chat_queue=False
+                        break
+                else:
+                    stage = "strategy_job_claim"
+                    job=peer.post("claim", {}).get("job")
+                    if job:
+                        prefer_chat_queue=True
+                        break
             peer_error_streak=0
-            if not job:
-                try:
-                    stage = "chat_job_claim"
-                    chat=peer.post('chat_claim',{}).get('job')
-                except HTTPError as exc:
-                    if exc.code not in (404,405):raise
-                    chat=None
-                if chat:
-                    from desktop_chat import run_chat
-                    stage = "chat_job_run"
-                    run_chat(peer,chat,cli,runtime,models,sidebar,ledger,heartbeat)
+            if chat:
+                from desktop_chat import run_chat
+                stage = "chat_job_run"
+                run_chat(peer,chat,cli,runtime,models,sidebar,ledger,heartbeat)
             if job:
                 stage = "strategy_context_validate"
                 context = job["context"]
