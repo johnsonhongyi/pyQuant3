@@ -2395,6 +2395,18 @@ def check_and_activate_existing_instance() -> bool:
 
                 p_name = (p.info['name'] or '').lower()
                 if p_name == 'manage_window_layout.exe' or 'manage_window_layout.py' in p_name:
+                    # Codex 桌面桥与管理器共用 onefile EXE；后台桥进程不能视为已运行的管理器 UI。
+                    try:
+                        cmdline = [str(arg).lower() for arg in p.cmdline()]
+                    except Exception:
+                        cmdline = []
+                    is_codex_bridge = (
+                        '--backend' in cmdline
+                        and '--runtime' in cmdline
+                        and '--launch-mode' in cmdline
+                    )
+                    if is_codex_bridge:
+                        continue
                     target_pids.add(p_pid)
             except Exception:
                 continue

@@ -2,11 +2,14 @@
 import configparser
 from contextlib import closing
 import importlib.util
+import io
 import json
 from pathlib import Path
 import sqlite3
+import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 
 from desktop_strategy_agent import DesktopPeer,ats_evidence,research_schema
@@ -45,6 +48,33 @@ class DesktopAgentTests(unittest.TestCase):
             self.assertEqual(first.node,second.node);self.assertEqual(first.workspace,second.workspace)
             self.assertEqual((runtime/'peer.key').read_bytes(),key)
             self.assertFalse((runtime/'gateway.db').exists())
+
+    def test_bridge_lock_is_exclusive_across_processes(self):
+        spec=importlib.util.spec_from_file_location('bridge_runner',Path(__file__).parent/'tools/run_desktop_strategy_bridge.py')
+        runner=importlib.util.module_from_spec(spec);spec.loader.exec_module(runner)
+        with tempfile.TemporaryDirectory() as directory:
+            runtime=Path(directory)
+            first=runner.acquire_bridge_lock(runtime)
+            self.assertIsNotNone(first)
+            code=("import importlib.util,sys;from pathlib import Path;"
+                  "p=Path(sys.argv[1]);s=importlib.util.spec_from_file_location('bridge_runner',p);"
+                  "m=importlib.util.module_from_spec(s);s.loader.exec_module(m);"
+                  "print('locked' if m.acquire_bridge_lock(Path(sys.argv[2])) is None else 'acquired')")
+            result=subprocess.run([sys.executable,'-c',code,str(Path(__file__).parent/'tools/run_desktop_strategy_bridge.py'),str(runtime)],
+                capture_output=True,text=True,timeout=15)
+            self.assertEqual(result.returncode,0,result.stderr)
+            self.assertEqual(result.stdout.strip(),'locked')
+            first.close()
+
+    def test_thread_output_writes_text_to_binary_log(self):
+        spec=importlib.util.spec_from_file_location('bridge_runner',Path(__file__).parent/'tools/run_desktop_strategy_bridge.py')
+        runner=importlib.util.module_from_spec(spec);spec.loader.exec_module(runner)
+        output=io.BytesIO()
+        message='bridge error: timeout\n'
+        proxy=runner._ThreadOutput(threading.get_ident(),output,None)
+        self.assertEqual(proxy.write(message),len(message))
+        proxy.flush()
+        self.assertEqual(output.getvalue(),message.encode('utf-8'))
 
 
 if __name__=='__main__':unittest.main()

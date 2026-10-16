@@ -1,3 +1,18 @@
+## 2026-10-15 23:24 个股 AI 模型偏好恢复修复已部署
+
+- 修复研究记录恢复时把历史任务的 `ai_provider/model/reasoning_effort` 覆盖当前选择的问题；模型选择仍在点击时写入浏览器 `localStorage`，历史任务只恢复股票、用途、周期和分析深度。
+- 前端 TypeScript 检查及 Vite 生产构建通过。Web 外置静态补丁 `20261015232159` 已原子替换入口；发布前旧 index SHA256 `78f4b74875a161f28dc19513bb22b1cc45afdc6525f3eb0fff5ba792333439ad`，上线后本地和 HTTP index SHA256 均为 `1200793047462ac23f9088984a844910bfb7110255f4a3f532874905101c050f`。新个股分析资源 `StockAIAnalysisWorkspace-BIso3zX7.js` 可正常读取。
+- 回滚入口备份和 `COMPLETE` 位于 `/mnt/4TB/dockerf/stockstrategy/auto-follow/web-hotfix/20261015232159`；静态资源目录仍为 `/mnt/4TB/dockerf/stockstrategy/app/web-dist/20261015224710`。API/Web 镜像未变，均 healthy、只读根文件系统、`SizeRw=0`，挂载保持 8/5；未重启容器、未改数据库或模拟账户。未执行浏览器交互验收，待用户刷新后确认选择恢复。
+
+## 2026-10-15 22:54 个股 AI Codex 模型与字体设置已部署
+
+- 用户授权审核通过后部署。源码提交 `6e81720f88c313528215df70c3677c0300402851`；发布号 `20261015224710`。
+- Go 编译、集成 Web 的 TypeScript/Vite 生产构建、隔离 API health smoke、线上 API/Web 健康检查及 Web→API health 检查通过。
+- API 镜像 `stockstrategy/backend:20261015224710`，ID `sha256:a520cd6d97e1d7b1c6f0a6b2b5a31d87dcee4bc42ece7cfe639c7968b15f36e7`，119,516,644 字节、2 层；固定 base ID `sha256:ed8cbe9544efbcd5f4a50039b79884d43d1d2b662dc9ee6715325c1525d52d6d`、1 层。
+- Web 沿用 `stockstrategy/web:20261011114424`（ID `sha256:ce15ecc17364a415c3a4e609a2858b046af4f3bc9f1058c33bdfaf13b1bb07e9`，62,396,647 字节、11 层），静态资源更新到本次发布。API/Web healthy、只读根文件系统、容器写层 0；挂载数量保持 8/5。
+- 桌面桥已重启并报告 `running`，agent PID `33364`；桌面节点 `codex-bf952db5fd9f615f2a8fff37` 和工作区 `ws-c1f09cc351724da6946658c4` 沿用原值。桥文件 `desktop_chat.py` SHA256 `905a22331168b11a506cdf507b6bfb94728ef69187e67a90bf8a4d77be25428f`。未运行真实 Codex 个股研究或功能测试，未重启 TK/ATS、未生成订单。
+- 回滚快照 `/mnt/4TB/dockerf/stockstrategy/rollback/20261015224710/COMPLETE` 已核验。回滚命令：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261015224710`。
+
 ## 2026-10-15 Web 补丁 20261015211435 已上线
 
 - 用户明确授权“部署本次补丁”后，已执行此前待批的 Web 外置资源补丁，源码 74dbefb；包哈希校验、发布锁、原子 index 替换、HTTP 入口一致性和 API/Web 健康检查完成，脚本返回 healthy。
@@ -300,3 +315,16 @@
 - 程序 SHA256 `2e1ef4159939f2c24cc03429803a993eaeeccde30360aa2441a3fa486fdec7b9`；Web 最终 index SHA256 `f659273f1faba3337de9a138ce774184b2b6bedbfb4e464cd794764f095043bf`，资源 `index-DbLS3fwf.js`。镜像标签表示构建时状态，Web 外置修补以文件哈希/补丁记录识别，不能用镜像标签冒充当前 Web 代码 SHA。
 - 主回滚快照 rollback/20261015013333 COMPLETE 存在且 SHA256SUMS 通过；整体回撤先停止模拟 worker，再运行 `bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261015013333`，不回滚账户数据。Web 补丁备份在 auto-follow/web-hotfix/20261015014500；详细包哈希、回撤限制与验收见 [任务记录](docs/tasks/2026-10-15_0105_自动跟单控制台闭环.md)。
 - 当前夜间无候选/成交，不代表盘中已验收；仍需盘中核验信号、行情新鲜度、跨日退出与长期稳定性。公网独立设备未专项验证。未提交/推送代码。
+
+
+## 2026-10-16 Web 基准指数 TDX 回补闭环
+
+- Web 选股分析按板块使用 000001.SH、399001.SZ、399006.SZ。InStock 日任务新增指数历史读取、缺口回补和每日自动调度；即使 INSTOCK_STOCK_SPOT_ONLY=1 也会运行指数回补。优先使用 TDX HQ，失败时逐年请求腾讯历史行情；按交易日日历校验目标日和最近 300 根，并以原子替换写入 SH000001.TXT、SZ399001.TXT、SZ399006.TXT。
+- 生产 LXC 102 的 inStock 容器已在 strategy_enter.lock 下更新单个日任务文件，无容器重启或镜像重建。运行文件 SHA256：cd5d818eab7692d31127c7ad464d38f424d5556f681776ab5c944e899e400e48；回滚副本：/data/InStock/instock/job/basic_data_daily_job.py.bak-codex-permissions-20261016025343。
+- 生产回补目标 2026-10-15。共享数据目录三文件末日均为目标日，权限均为 0644；行数：SZ399001.TXT 8696、SZ399006.TXT 3974、SH000001.TXT 8590。最新 300 个交易日均无缺口，完成标记 /data/InStock/instock/cache/close_finalize/tdx-index-2026-10-15.done 为 complete=true、missing_recent_dates=0。
+- 生产原历史仍有少量早期缺口：深证成指 19 个（1991–1995）、上证指数 8 个（1992–1994）；它们不影响 Web 的 300 日窗口，也不会触发每日重复全量下载。数据回滚副本位于共享 forwardp 目录，后缀为 .pre-window-finalize-20261016024944。
+- stockstrategy-api 只读挂载同一 TDX 目录。Web 容器快速分析接口返回 200，benchmark_symbol=399006.SZ、质量 ready、缺失错误数 0；Web Codex Desktop deep 研究完成，任务 succeeded、AI ready、基准 ready。完整研究通过生产 API 路由执行，未验证浏览器视觉点击。
+- TDX HQ 对指数历史请求返回 pytdx 解包错误，腾讯兜底已实际用于回补。新增 Python 回归 7 项通过，原 TDX HQ 回归 11 项通过。新增 Go 文件读取测试覆盖三种基准；本机无 Go 工具链，未运行该 Go 测试，线上 Web API 实测已验证数据读取。
+- 已知 AI 例外：Web 快速 Codex 研判返回 JSON 字段校验错误，任务降级；/stocks/ai-analysis 的 Hermes 模式当前也不可用。Web 页面默认 deep 的 Codex Desktop 路径已成功；上述快速模式/Hermes 另行处理。
+
+详细记录见任务报告 docs/tasks/2026-10-16_0254_Web基准指数数据回补闭环.md。

@@ -4092,6 +4092,12 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         except Exception as e:
             logger.error(f"托盘图标 Agent Hub 快捷菜单初始化异常: {e}")
 
+        try:
+            bridge_action = self.tray_menu.addAction("🧩 Codex 桌面桥管理...")
+            bridge_action.triggered.connect(self.open_codex_bridge_manager)
+        except Exception as e:
+            logger.error(f"托盘图标 Codex 桌面桥菜单初始化异常: {e}")
+
         self.tray_menu.addSeparator()
         quit_action = self.tray_menu.addAction("❌ 完全退出")
         quit_action.triggered.connect(self.force_quit)
@@ -4199,8 +4205,6 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             QApplication.instance().quit()
         except Exception:
             pass
-        import os
-        os._exit(0)
         
     def on_tray_activated(self, reason):
         try:
@@ -5075,7 +5079,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.chk_autostart.stateChanged.connect(self.on_autostart_changed)
         bottom_bar.addWidget(self.chk_autostart)
 
-        # 5 个扩展工具按钮 (平铺模式下展现，收纳模式下收进下拉菜单)
+        # 7 个扩展工具按钮 (平铺模式下展现，收纳模式下收进下拉菜单)
         self.btn_open_perf = QPushButton("📐 性能")
         self.btn_open_perf.setObjectName("btnPerf")
         self.btn_open_perf.setToolTip("显示器与窗口布局性能分析")
@@ -5107,6 +5111,11 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.btn_agent_hub.setStyleSheet("background-color: #0284c7; color: white; font-weight: bold; padding: 3px 8px; font-size: 12px; min-height: 24px; max-height: 25px;")
         self.btn_agent_hub.setToolTip("查看多 Agent 协同运行状态、任务实施流转进度、执行心跳与审查决策大屏")
         self.btn_agent_hub.clicked.connect(self.open_agent_hub_monitor)
+        self.btn_codex_bridge = QPushButton("🧩 Codex桥")
+        self.btn_codex_bridge.setObjectName("btnCodexBridge")
+        self.btn_codex_bridge.setStyleSheet("background-color: #0f766e; color: white; font-weight: bold; padding: 3px 8px; font-size: 12px; min-height: 24px; max-height: 25px;")
+        self.btn_codex_bridge.setToolTip("查看独立 Codex 桌面桥状态、任务、连接和本机 Token 用量")
+        self.btn_codex_bridge.clicked.connect(self.open_codex_bridge_manager)
 
         # 平铺模式专属【⇋ 收纳】按钮 (平铺时显示，点击瞬间切回收纳下拉菜单，并持久化状态)
         self.btn_collapse_tools = QPushButton("⇋ 收纳")
@@ -5118,7 +5127,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         # 构建【🛠️ 扩展工具】下拉菜单
         self.btn_tools_menu = QPushButton("🛠️ 扩展工具")
         self.btn_tools_menu.setObjectName("btnToolsMenu")
-        self.btn_tools_menu.setToolTip("包含 Antigravity 账户管理、Acer 硬件性能、RamDisk 同步、静态路由、性能分析")
+        self.btn_tools_menu.setToolTip("包含 Codex 桌面桥、Antigravity 账户管理、Agent Hub、硬件性能与系统工具")
         
         self.tools_menu = QMenu(self)
         self.tools_menu.setStyleSheet("""
@@ -5147,6 +5156,13 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         act_ag.triggered.connect(self.open_antigravity_account_manager)
         act_hub = self.tools_menu.addAction("🤖 Agent Hub 多Agent运行与任务进度监控...")
         act_hub.triggered.connect(self.open_agent_hub_monitor)
+        act_codex = self.tools_menu.addAction("🧩 Codex 桌面桥状态、任务与用量管理...")
+        act_codex.triggered.connect(self.open_codex_bridge_manager)
+        self.act_codex_bridge_autostart = self.tools_menu.addAction("Codex \u684c\u9762\u6865\uff1a\u968f\u7ba1\u7406\u5668\u542f\u52a8")
+        self.act_codex_bridge_autostart.setCheckable(True)
+        self.act_codex_bridge_autostart.setChecked(self._codex_bridge_autostart_enabled())
+        self.act_codex_bridge_autostart.toggled.connect(self._set_codex_bridge_autostart)
+        self.tools_menu.aboutToShow.connect(self._refresh_codex_bridge_autostart_action)
         act_acer = self.tools_menu.addAction("💻 Acer 笔记本性能与散热控制...")
         act_acer.triggered.connect(self.open_acer_performance_settings)
         act_ramdisk = self.tools_menu.addAction("💾 RamDisk 内存盘同步与备份规则...")
@@ -5162,8 +5178,8 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.btn_tools_menu.setMenu(self.tools_menu)
         bottom_bar.addWidget(self.btn_tools_menu)
 
-        # 把平铺模式的 7 个按钮（6工具+1收纳）加入 bottom_bar
-        for b in [self.btn_open_perf, self.btn_route_settings, self.btn_acer_perf, self.btn_ramdisk_sync, self.btn_ag_manager, self.btn_agent_hub, self.btn_collapse_tools]:
+        # 把平铺模式的 8 个按钮（7工具+1收纳）加入 bottom_bar
+        for b in [self.btn_open_perf, self.btn_route_settings, self.btn_acer_perf, self.btn_ramdisk_sync, self.btn_ag_manager, self.btn_agent_hub, self.btn_codex_bridge, self.btn_collapse_tools]:
             bottom_bar.addWidget(b)
 
         # 核心主操作按钮 (紧凑高颜值，常驻显眼)
@@ -5213,7 +5229,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.btn_tools_menu.setVisible(not expanded)
         if hasattr(self, 'btn_collapse_tools'):
             self.btn_collapse_tools.setVisible(expanded)
-        for b in [self.btn_open_perf, self.btn_route_settings, getattr(self, 'btn_acer_perf', None), self.btn_ramdisk_sync, self.btn_ag_manager, getattr(self, 'btn_agent_hub', None)]:
+        for b in [self.btn_open_perf, self.btn_route_settings, getattr(self, 'btn_acer_perf', None), self.btn_ramdisk_sync, self.btn_ag_manager, getattr(self, 'btn_agent_hub', None), getattr(self, 'btn_codex_bridge', None)]:
             if b is not None:
                 b.setVisible(expanded)
 
@@ -5457,6 +5473,55 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             except Exception as e2:
                 logger.error(f"打开 Agent Hub 监控中心异常: {e2}")
                 QMessageBox.critical(self, "打开失败", f"打开 Agent Hub 监控中心异常: {e2}")
+
+    def open_codex_bridge_manager(self):
+        """打开 Codex 桌面桥管理面板。"""
+        try:
+            dialog = getattr(self, "_codex_bridge_dialog", None)
+            if dialog is not None and dialog.isVisible():
+                dialog.raise_()
+                dialog.activateWindow()
+                return
+            from .codex_bridge_manager import CodexBridgeManagerDialog
+            dialog = CodexBridgeManagerDialog(project_root=core.get_app_root(), parent=self)
+            self._codex_bridge_dialog = dialog
+            dialog.finished.connect(lambda _=0: setattr(self, "_codex_bridge_dialog", None))
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+            self.log("已打开 Codex 桌面桥管理面板。")
+        except Exception as exc:
+            logger.exception("打开 Codex 桌面桥管理面板失败")
+            QMessageBox.critical(self, "打开失败", f"无法打开 Codex 桌面桥管理面板：{type(exc).__name__}")
+    def _codex_bridge_autostart_enabled(self):
+        try:
+            from .codex_bridge_manager import BridgeController
+            return BridgeController(core.get_app_root()).autostart_enabled()
+        except Exception as exc:
+            logger.warning("Codex bridge autostart preference read failed: %s", type(exc).__name__)
+            return False
+
+    def _refresh_codex_bridge_autostart_action(self):
+        action = getattr(self, "act_codex_bridge_autostart", None)
+        if action is None:
+            return
+        action.blockSignals(True)
+        action.setChecked(self._codex_bridge_autostart_enabled())
+        action.blockSignals(False)
+
+    def _set_codex_bridge_autostart(self, enabled: bool):
+        action = getattr(self, "act_codex_bridge_autostart", None)
+        try:
+            from .codex_bridge_manager import BridgeController
+            BridgeController(core.get_app_root()).perform("autostart", bool(enabled))
+            self.log("Codex bridge autostart enabled." if enabled else "Codex bridge autostart disabled.")
+        except Exception as exc:
+            if action is not None:
+                action.blockSignals(True)
+                action.setChecked(not enabled)
+                action.blockSignals(False)
+            detail = " ".join(str(exc).split())[:240]
+            QMessageBox.warning(self, "Codex bridge", f"Autostart setting failed: {type(exc).__name__}: {detail}")
 
     def _trigger_ramdisk_sync_from_tray(self):
         """从托盘右键一键手动触发立即同步备份"""
@@ -7867,6 +7932,15 @@ def main(hide_window: bool = False):
             pass
 
     app = QApplication(sys.argv)
+
+    def shutdown_codex_bridge_with_manager():
+        try:
+            from .codex_bridge_manager import BridgeController
+            BridgeController(core.get_app_root()).shutdown_for_manager_exit()
+        except Exception as exc:
+            logger.error("Manager exit bridge cleanup failed: %s", type(exc).__name__)
+
+    app.aboutToQuit.connect(shutdown_codex_bridge_with_manager)
     app.setStyle('Fusion')
     
     dark_palette = QtGui.QPalette()
@@ -7886,6 +7960,57 @@ def main(hide_window: bool = False):
     app.setPalette(dark_palette)
 
     window = WindowPosManagerUI()
+
+    def start_codex_bridge_with_manager():
+        try:
+            from .codex_bridge_manager import BridgeController
+            controller = BridgeController(core.get_app_root())
+            enabled = controller.autostart_enabled()
+            run_mode = controller.run_mode()
+            mode_label = "独立进程" if run_mode == "process" else "管理器线程"
+            window.log(
+                f"[Codex 桌面桥] 管理器联动自启{'已开启' if enabled else '未开启'}；"
+                f"启动方式：{mode_label}。"
+            )
+            try:
+                result = controller.start_if_enabled()
+                window.log(f"[Codex 桌面桥] 启动结果：{result}")
+            except Exception as exc:
+                logger.warning("管理器启动 Codex 桌面桥失败：%s", type(exc).__name__)
+                window.log(f"[Codex 桌面桥] 启动失败（{type(exc).__name__}），继续检查桥接状态。")
+
+            last_signature = [None]
+
+            def report_bridge_status():
+                try:
+                    info = controller.task_info()
+                    running = bool(info.get("running"))
+                    status_text = info.get("last_result") or "状态未知"
+                    error = info.get("error") or ""
+                    signature = (enabled, run_mode, running, status_text, error)
+                    if signature == last_signature[0]:
+                        return
+                    last_signature[0] = signature
+                    state_text = "运行中" if running else "未运行"
+                    message = f"[Codex 桌面桥] 当前状态：{state_text}；后端状态：{status_text}。"
+                    if error:
+                        message += f"诊断：{error}。"
+                    window.log(message)
+                except Exception as status_exc:
+                    logger.warning("读取 Codex 桌面桥状态失败：%s", type(status_exc).__name__)
+                    window.log(f"[Codex 桌面桥] 状态读取失败（{type(status_exc).__name__}）。")
+
+            report_bridge_status()
+            bridge_status_timer = QtCore.QTimer(window)
+            bridge_status_timer.setInterval(15000)
+            bridge_status_timer.timeout.connect(report_bridge_status)
+            bridge_status_timer.start()
+            window._codex_bridge_status_timer = bridge_status_timer
+        except Exception as exc:
+            logger.warning("管理器启动 Codex 桌面桥失败：%s", type(exc).__name__)
+            window.log(f"[Codex 桌面桥] 初始化失败（{type(exc).__name__}），请查看桥接面板状态。")
+
+    QtCore.QTimer.singleShot(1200, start_codex_bridge_with_manager)
     
     # 判读是否隐藏启动（开机自启、-hide、-min、-hidetray）
     is_hide = hide_window or any(arg.lower() in ("-hide", "--hide", "-min", "--min", "-hidetray") for arg in sys.argv[1:])
