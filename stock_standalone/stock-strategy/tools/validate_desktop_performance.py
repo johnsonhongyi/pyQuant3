@@ -102,9 +102,10 @@ def main():
                 json.load(response)
         save()
         print(json.dumps({k:v for k,v in sample.items() if k not in ('request','events')}, ensure_ascii=True), flush=True)
-        if terminal['status'] != ('succeeded' if research else 'completed'):
+        if terminal['status'] != ('succeeded' if research else 'completed') or (not research and not sample['marker_ok']):
             break
-    good = [s for s in report['samples'] if s.get('status') == ('succeeded' if args.research_level else 'completed')]
+    good = [s for s in report['samples'] if s.get('status') == ('succeeded' if args.research_level else 'completed')
+        and (args.research_level or s.get('marker_ok'))]
     metrics = {}
     for key in ('total_ms', 'visible_first_content_ms'):
         values = sorted(s[key] for s in good if key in s)

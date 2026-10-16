@@ -20,6 +20,29 @@ from desktop_chat import run_chat
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_cache_and_outbox_commit_as_one_generation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'receipts.db'
+            from contextlib import closing
+            with closing(sqlite3.connect(path)) as writer,closing(sqlite3.connect(path)) as observer:
+                writer.execute('PRAGMA journal_mode=WAL')
+                writer.execute('CREATE TABLE chat_results(id TEXT PRIMARY KEY,result TEXT)')
+                ResultOutbox.prepare(writer)
+                job={'id':'job','lease_token':'lease'}
+                with self.assertRaises(RuntimeError):
+                    with writer:
+                        writer.execute('INSERT INTO chat_results VALUES(?,?)',('job','cached'))
+                        ResultOutbox.stage(writer,'chat_result',job,{'content':'answer'},commit=False)
+                        self.assertEqual(observer.execute('SELECT count(*) FROM result_outbox').fetchone()[0],0)
+                        raise RuntimeError('simulated crash before commit')
+                self.assertEqual(observer.execute('SELECT count(*) FROM chat_results').fetchone()[0],0)
+                self.assertEqual(observer.execute('SELECT count(*) FROM result_outbox').fetchone()[0],0)
+                with writer:
+                    writer.execute('INSERT INTO chat_results VALUES(?,?)',('job','cached'))
+                    ResultOutbox.stage(writer,'chat_result',job,{'content':'answer'},commit=False)
+                self.assertEqual(observer.execute('SELECT count(*) FROM chat_results').fetchone()[0],1)
+                self.assertEqual(observer.execute('SELECT count(*) FROM result_outbox').fetchone()[0],1)
+
     def test_publisher_shutdown_cancels_blocked_network_request(self):
         entered,released=threading.Event(),threading.Event()
         peer=Mock()

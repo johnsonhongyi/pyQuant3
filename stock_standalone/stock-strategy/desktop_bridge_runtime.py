@@ -213,17 +213,17 @@ class ResultOutbox:
         db.commit()
 
     @staticmethod
-    def stage(db, operation, job, result):
+    def stage(db, operation, job, result, commit=True):
         payload={'id':job['id'],'lease_token':job['lease_token'],'status':'completed','result':result}
         db.execute('INSERT OR REPLACE INTO result_outbox VALUES(?,?,?,?,?,NULL,NULL)',
             (job['id'],operation,job['lease_token'],json.dumps(payload,ensure_ascii=False,allow_nan=False),time.time()+10))
-        db.commit()
+        if commit:db.commit()
 
     @staticmethod
-    def acknowledge(db, operation, job):
+    def acknowledge(db, operation, job, commit=True):
         db.execute('UPDATE result_outbox SET delivered_at=?,error_code=NULL WHERE id=? AND operation=? AND lease_token=?',
             (time.time(),job['id'],operation,job['lease_token']))
-        db.commit()
+        if commit:db.commit()
 
     @staticmethod
     def prune(db, now=None):

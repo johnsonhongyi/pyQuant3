@@ -213,15 +213,25 @@ def run_chat(peer,job,cli,runtime,models,sidebar,ledger,heartbeat,session=None):
                 timings['bridge_to_completed_ms']=round((time.monotonic()-claimed_at)*1000)
                 result={'content':content,'thread_id':thread,'model':model,'reasoning_effort':effort,'provider':'codex-app-server','configuration_confirmed':True,'tool_audit':app.tool_audit[-30:],'timings':timings}
                 stage='result_cache'
-                ledger.execute('INSERT OR REPLACE INTO chat_results(id,result,created_at) VALUES(?,?,?)',(job['id'],json.dumps(result,ensure_ascii=False),time.time()));ledger.commit();result_saved=True
-                ResultOutbox.stage(ledger,'chat_result',job,result)
-                ledger.execute('UPDATE chat_attempts SET state=?,updated_at=? WHERE id=?',('completed',time.time(),job['id']));ledger.commit()
+                publisher.publish({**result,'stage':'result_writeback'})
+                cache_started=time.monotonic()
+                with ledger:
+                    ledger.execute('INSERT OR REPLACE INTO chat_results(id,result,created_at) VALUES(?,?,?)',(job['id'],json.dumps(result,ensure_ascii=False),time.time()))
+                    ResultOutbox.stage(ledger,'chat_result',job,result,commit=False)
+                    ledger.execute('UPDATE chat_attempts SET state=?,updated_at=? WHERE id=?',('completed',time.time(),job['id']))
+                result_saved=True
+                receipt_timings={'cache_ms':round((time.monotonic()-cache_started)*1000)}
                 stage='result_writeback'
+                close_started=time.monotonic()
                 publisher.close();publisher.check();publisher=None
+                receipt_timings['publisher_close_ms']=round((time.monotonic()-close_started)*1000)
+                writeback_started=time.monotonic()
                 _post_chat_result(peer,{'id':job['id'],'lease_token':job['lease_token'],'status':'completed','result':result});completed=True
-                ResultOutbox.acknowledge(ledger,'chat_result',job)
-                ledger.execute('UPDATE chat_results SET delivered_at=? WHERE id=?',(time.time(),job['id']));ledger.commit()
-                _emit_log({'status':'completed','job_id':job['id'][:12],'timings':{**timings,'backend_confirmed_ms':round((time.monotonic()-claimed_at)*1000)}})
+                receipt_timings['writeback_ms']=round((time.monotonic()-writeback_started)*1000)
+                with ledger:
+                    ResultOutbox.acknowledge(ledger,'chat_result',job,commit=False)
+                    ledger.execute('UPDATE chat_results SET delivered_at=? WHERE id=?',(time.time(),job['id']))
+                _emit_log({'status':'completed','job_id':job['id'][:12],'receipt_timings':receipt_timings,'timings':{**timings,'backend_confirmed_ms':round((time.monotonic()-claimed_at)*1000)}})
                 if bridge_test:_forget_bridge_test_result(ledger,job['id'])
                 return
         raise TimeoutError('MODEL_TIMEOUT')

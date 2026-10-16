@@ -490,6 +490,8 @@ def main(argv=None):
             persist_agent_status(status, {**payload, "heartbeat_error": _peer_error_code(exc), "heartbeat_error_detail":error_detail})
             raise
     ledger = sqlite3.connect(runtime / "agent.db", timeout=3)
+    ledger.execute('PRAGMA journal_mode=WAL')
+    ledger.execute('PRAGMA synchronous=FULL')
     ledger.execute("CREATE TABLE IF NOT EXISTS results(id TEXT PRIMARY KEY,result TEXT,thread_id TEXT,session TEXT,created_at REAL)")
     result_columns = {row[1] for row in ledger.execute("PRAGMA table_info(results)")}
     if "created_at" not in result_columns:
