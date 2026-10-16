@@ -11,6 +11,7 @@
 import sys
 import os
 import ctypes
+import json
 
 # 针对 Windows 控制台环境，防止 GBK 编码输出特殊字符或 Emoji 导致 UnicodeEncodeError 崩溃
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
@@ -78,6 +79,14 @@ def attach_to_parent_console() -> bool:
     return False
 
 
+if os.environ.pop('PYQUANT3_CODEX_BRIDGE_WORKER', '') == '1':
+    get_app_root()
+    from run_desktop_strategy_bridge import main as run_codex_bridge
+    worker_args = os.environ.pop('PYQUANT3_CODEX_BRIDGE_ARGS', '')
+    run_codex_bridge(json.loads(worker_args) if worker_args else sys.argv[1:])
+    raise SystemExit(0)
+
+
 if __name__ == '__main__':
     import multiprocessing as mp
     mp.freeze_support()
@@ -87,6 +96,17 @@ if __name__ == '__main__':
         pass
 
     app_root = get_app_root()
+
+    if '--codex-bridge-worker' in sys.argv[1:]:
+        worker_args = sys.argv[1:]
+        worker_args.remove('--codex-bridge-worker')
+        if not getattr(sys, 'frozen', False):
+            strategy_root = os.path.join(app_root, 'stock-strategy')
+            if strategy_root not in sys.path:
+                sys.path.insert(0, strategy_root)
+        from run_desktop_strategy_bridge import main as run_codex_bridge
+        run_codex_bridge(worker_args)
+        sys.exit(0)
 
     # 1. 前置解析命令行参数
     use_ui = True

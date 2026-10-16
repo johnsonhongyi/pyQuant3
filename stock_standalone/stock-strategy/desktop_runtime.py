@@ -12,6 +12,9 @@ from contextlib import closing
 
 def desktop_cli():
     """Prefer an already-installed desktop engine over the standalone CLI shim."""
+    configured = os.environ.get('CODEX_CLI_PATH', '').strip()
+    if configured and Path(configured).is_file():
+        return str(Path(configured).resolve())
     base=Path(os.environ.get('LOCALAPPDATA',''))/'OpenAI'/'Codex'/'bin'
     candidates=[p for p in base.glob('*/codex.exe') if p.is_file()]
     if candidates:return str(max(candidates,key=lambda p:p.stat().st_mtime_ns))

@@ -26,6 +26,35 @@ from follow_ai import RESPONSE_SCHEMA, validate_result, digest
 from datetime import datetime, timezone
 
 
+def _emit_log(value):
+    record = dict(value) if isinstance(value, dict) else {"message": str(value)}
+    record.setdefault("at", time.time())
+    print(json.dumps(record, ensure_ascii=False), flush=True)
+
+
+def _is_packaged():
+    return (getattr(sys, "frozen", False) or "__compiled__" in globals()
+            or "NUITKA_ONEFILE_DIRECTORY" in os.environ or hasattr(sys, "nuitka_version"))
+
+
+def _application_root():
+    """Use the same persistent EXE-relative root as the TK manager."""
+    root = Path(os.path.dirname(os.path.abspath(sys.executable)))
+    if root.name.lower() in ("webtools", "window_manager"):
+        root = root.parent
+        if root.name.lower() == "webtools":
+            root = root.parent
+    return root
+
+
+if _is_packaged():
+    APP_ROOT = _application_root()
+    STRATEGY_ROOT = APP_ROOT / "stock-strategy"
+else:
+    STRATEGY_ROOT = Path(os.path.dirname(os.path.abspath(__file__)))
+    APP_ROOT = STRATEGY_ROOT.parent
+
+
 def research_schema(context):
     schema=copy.deepcopy(RESPONSE_SCHEMA)
     symbols=[s['symbol'] for s in context.get('stocks',[])]
@@ -42,7 +71,7 @@ class NoRedirect(HTTPRedirectHandler):
 
 class DesktopPeer:
     def __init__(self, config_path):
-        config_path = Path(config_path).resolve()
+        config_path = Path(os.path.abspath(os.fspath(config_path)))
         cfg = configparser.ConfigParser(interpolation=None)
         cfg.read(config_path, encoding="utf-8-sig")
         def option(name):
@@ -93,7 +122,7 @@ def ats_evidence(root, symbols, ipc_db=None):
         if not path.is_file() or not symbols:
             continue
         try:
-            with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+            with closing(sqlite3.connect(Path(os.path.abspath(os.fspath(path))).as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
                 db.row_factory = sqlite3.Row
                 db.execute("PRAGMA query_only=ON")
                 rows = db.execute(query, params).fetchall()
@@ -113,7 +142,7 @@ def ats_evidence(root, symbols, ipc_db=None):
 
 class AppServer:
     def __init__(self, cli, scratch, transport="local", tool=None):
-        self.scratch = str(Path(scratch).resolve())
+        self.scratch = os.path.abspath(os.fspath(scratch))
         Path(self.scratch).mkdir(parents=True, exist_ok=True)
         args = [cli, "app-server", "proxy"] if transport == "desktop_proxy" else [cli, "app-server", "--listen", "stdio://"]
         self.process = subprocess.Popen(args, cwd=self.scratch, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -262,7 +291,8 @@ class AppServer:
         raise TimeoutError("Codex research timeout")
 
     def close(self):
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        if str(STRATEGY_ROOT) not in sys.path:
+            sys.path.insert(0, str(STRATEGY_ROOT))
         from ats.llm.cli_process import _terminate_process_tree
         try:
             _terminate_process_tree(self.process)
@@ -276,23 +306,23 @@ class AppServer:
             self.reader.join(timeout=1)
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default=str(Path(__file__).resolve().parent.parent / "global.ini"))
-    parser.add_argument("--desktop-root", type=Path, default=Path(__file__).resolve().parent.parent)
+    parser.add_argument("--config", default=str(STRATEGY_ROOT / "global.ini"))
+    parser.add_argument("--desktop-root", type=Path, default=APP_ROOT)
     parser.add_argument("--ats-data-root", type=Path, help="explicit ATS runtime evidence directory")
     parser.add_argument("--runtime-root", type=Path, help="separate local agent ledger/scratch directory")
     parser.add_argument("--transport", choices=("local", "desktop_proxy"), default="local")
     parser.add_argument("--model", default="gpt-6-luna")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--probe", action="store_true", help="local protocol handshake only; no model request")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     sys.path.insert(0, str(args.desktop_root))
     from desktop_runtime import desktop_cli
     cli = desktop_cli()
     if not cli:
         raise SystemExit("Codex CLI not found")
-    runtime = args.runtime_root or Path(__file__).resolve().parent / "logs" / "desktop-strategy"
+    runtime = args.runtime_root or STRATEGY_ROOT / "logs" / "desktop-strategy"
     runtime.mkdir(parents=True, exist_ok=True)
     if args.probe:
         app = AppServer(cli, runtime / "scratch", args.transport)
@@ -312,11 +342,31 @@ def main():
     from desktop_runtime import discover_runtime
     from desktop_engine_policy import EngineCatalog
     models, catalog_at, desktop, desktop_at = [], 0, {}, 0
+    agent_status_path = runtime / "agent-status.json"
+    def persist_agent_status(status, detail):
+        value = {"status":status, "detail":detail, "updated_at":datetime.now(timezone.utc).isoformat(),
+                 "updated_epoch":time.time(), "node_id":peer.node, "workspace_id":peer.workspace}
+        pending = agent_status_path.with_suffix(".pending")
+        try:
+            pending.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+            os.replace(pending, agent_status_path)
+        except (OSError, TypeError, ValueError) as exc:
+            _emit_log({"status":"agent_status_write_failed", "error_code":type(exc).__name__})
     def heartbeat(status, detail):
-        peer.post("heartbeat", {"status": status, "detail": {"provider":"codex-app-server", "capabilities":["strategy_research","ai_chat_v1"], "transport":args.transport, "engine_path":cli, "models":models, "catalog_at":catalog_at, **catalog.status(), "desktop_runtime":desktop, **detail}})
+        payload = {"provider":"codex-app-server", "capabilities":["strategy_research","ai_chat_v1"], "transport":args.transport, "engine_path":cli, "models":models, "catalog_at":catalog_at, **catalog.status(), "desktop_runtime":desktop, **detail}
+        peer.post("heartbeat", {"status": status, "detail": payload})
+        persist_agent_status(status, payload)
     ledger = sqlite3.connect(runtime / "agent.db", timeout=3)
-    ledger.execute("CREATE TABLE IF NOT EXISTS results(id TEXT PRIMARY KEY,result TEXT,thread_id TEXT,session TEXT)")
+    ledger.execute("CREATE TABLE IF NOT EXISTS results(id TEXT PRIMARY KEY,result TEXT,thread_id TEXT,session TEXT,created_at REAL)")
+    result_columns = {row[1] for row in ledger.execute("PRAGMA table_info(results)")}
+    if "created_at" not in result_columns:
+        ledger.execute("ALTER TABLE results ADD COLUMN created_at REAL")
     ledger.execute("CREATE TABLE IF NOT EXISTS runtime(key TEXT PRIMARY KEY,value TEXT)")
+    ledger.execute("CREATE TABLE IF NOT EXISTS chat_results(id TEXT PRIMARY KEY,result TEXT NOT NULL,created_at REAL)")
+    chat_columns = {row[1] for row in ledger.execute("PRAGMA table_info(chat_results)")}
+    if "created_at" not in chat_columns:
+        ledger.execute("ALTER TABLE chat_results ADD COLUMN created_at REAL")
+    ledger.commit()
     from desktop_sidebar import SidebarOrganizer
     sidebar=SidebarOrganizer(ledger)
     def probe_catalog(candidate):
@@ -327,6 +377,13 @@ def main():
     while True:
         app, job, result_ready = None, None, False
         try:
+            stop_request = runtime / "stop.request"
+            if stop_request.is_file():
+                try:stop_request.unlink()
+                except OSError as stop_error:
+                    _emit_log({"status":"stop_request_cleanup_failed", "error_code":type(stop_error).__name__})
+                persist_agent_status("stopping", {"reason":"manager_request"})
+                break
             sidebar.drain()
             catalog.refresh_idle(time.time())
             cli,models,catalog_at=catalog.engine,catalog.models,catalog.fetched_at
@@ -337,7 +394,7 @@ def main():
                 continue
             if time.time()-desktop_at>60:
                 desktop=discover_runtime();desktop_at=time.time()
-                if args.ats_data_root:desktop={**desktop,"data_root":str(args.ats_data_root.resolve()),"root_source":"explicit"}
+                if args.ats_data_root:desktop={**desktop,"data_root":os.path.abspath(os.fspath(args.ats_data_root)),"root_source":"explicit"}
             paused=ledger.execute("SELECT value FROM runtime WHERE key='cooldown_until'").fetchone()
             if paused and float(paused[0])>time.time():
                 heartbeat("degraded", {"error_code":"provider_cooldown","retry_after_seconds":int(float(paused[0])-time.time())})
@@ -391,16 +448,22 @@ def main():
                             heartbeat("analyzing", {"thread_id": thread_id, "job_id": job["id"],"effective_model":model,"effective_effort":effort,"elapsed_seconds":int(time.monotonic()-analysis_started)})
                             last_heartbeat[0] = time.monotonic()
                     analysis_started=time.monotonic()
+                    heartbeat("analyzing", {"job_id":job["id"],"effective_model":model,"effective_effort":effort,"elapsed_seconds":0})
+                    last_heartbeat[0]=time.monotonic()
                     result = app.analyze(job, model=model, progress=progress, effort=effort)
                     result.update(desktop_runtime=desktop,ats_evidence_summary=ats_summary)
-                    ledger.execute("INSERT INTO results VALUES(?,?,?,?)", (job["id"], json.dumps(result, ensure_ascii=False), result["thread_id"], session))
+                    ledger.execute(
+                        "INSERT OR REPLACE INTO results(id,result,thread_id,session,created_at) VALUES(?,?,?,?,?)",
+                        (job["id"], json.dumps(result, ensure_ascii=False), result["thread_id"], session, time.time()),
+                    )
                     ledger.commit()
                 result_ready = True
                 peer.post("result", {"id": job["id"], "lease_token": job["lease_token"], "status": "completed", "result": result})
                 heartbeat("ready", {"last_job_id":job["id"],"effective_model":result.get("model"),"effective_effort":result.get("reasoning_effort")})
-                print(json.dumps({"status": "completed", "job_id": job["id"], "thread_id": result.get("thread_id")}), flush=True)
+                _emit_log({"status": "completed", "job_id": job["id"], "thread_id": result.get("thread_id")})
         except (OSError, ValueError, KeyError, TypeError, sqlite3.Error, queue.Empty, TimeoutError) as exc:
             code=("MODEL_TIMEOUT" if isinstance(exc,TimeoutError) else "RPC_TIMEOUT" if isinstance(exc,queue.Empty) else str(exc) if re.fullmatch(r"CLI_[A-Z0-9_]+",str(exc)) else type(exc).__name__)
+            persist_agent_status("degraded", {"error_code":code})
             if job and not result_ready:
                 ledger.execute("INSERT OR REPLACE INTO runtime VALUES('cooldown_until',?)",(str(time.time()+(30 if isinstance(exc,TimeoutError) else 300)),));ledger.commit()
             if job and not result_ready:
@@ -415,7 +478,7 @@ def main():
                         "result": failure})
                 except (OSError, ValueError, KeyError, TypeError):
                     pass
-            print(json.dumps({"status": "degraded", "error_code": code}), flush=True)
+            _emit_log({"status": "degraded", "error_code": code})
         finally:
             if app:
                 app.close()
