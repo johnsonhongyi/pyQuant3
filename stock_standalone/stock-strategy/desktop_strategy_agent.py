@@ -465,9 +465,9 @@ def main(argv=None):
         try:msvcrt.locking(runtime_lock.fileno(),msvcrt.LK_NBLCK,1)
         except OSError:raise SystemExit('desktop agent already owns this runtime')
     from desktop_model_policy import latest_models, resolve_selection
-    from desktop_runtime import discover_runtime
+    from desktop_runtime import DesktopRuntimeProbe
     from desktop_engine_policy import EngineCatalog
-    models, catalog_at, desktop, desktop_at = [], 0, {}, 0
+    models, catalog_at, desktop = [], 0, {}
     agent_status_path = runtime / "agent-status.json"
     def persist_agent_status(status, detail):
         value = {"status":status, "detail":detail, "updated_at":datetime.now(timezone.utc).isoformat(),
@@ -513,6 +513,7 @@ def main(argv=None):
             sessions.release(False)
             raise
     catalog=EngineCatalog(ledger,cli,desktop_cli,probe_catalog)
+    desktop_probe=DesktopRuntimeProbe()
     peer_error_streak=0
     prefer_chat_queue=False
     unified_queue=True
@@ -546,10 +547,8 @@ def main(argv=None):
             if sessions.app is None:
                 stage='engine_prewarm'
                 sessions.acquire(cli)
-            if time.time()-desktop_at>60:
-                stage = "desktop_runtime_discovery"
-                desktop=discover_runtime();desktop_at=time.time()
-                if args.ats_data_root:desktop={**desktop,"data_root":os.path.abspath(os.fspath(args.ats_data_root)),"root_source":"explicit"}
+            desktop=desktop_probe.snapshot()
+            if args.ats_data_root:desktop={**desktop,"data_root":os.path.abspath(os.fspath(args.ats_data_root)),"root_source":"explicit"}
             paused=ledger.execute("SELECT value FROM runtime WHERE key='cooldown_until'").fetchone()
             if paused and float(paused[0])>time.time():
                 heartbeat("degraded", {"error_code":"provider_cooldown","retry_after_seconds":int(float(paused[0])-time.time())})
@@ -685,11 +684,10 @@ def main(argv=None):
         if args.once:
             break
         if not job and not chat and (not unified_queue or peer_error_streak):wait_for_manager_retry(retry_seconds)
-    sessions.close()
-    deliveries.close()
-    sidebar.close()
-    ledger.close()
-    runtime_lock.close()
+    for component in (desktop_probe,sessions,deliveries,sidebar,ledger,runtime_lock):
+        try:component.close()
+        except (OSError,ValueError,RuntimeError,sqlite3.Error) as exc:
+            _emit_log({'status':'degraded','stage':'worker_shutdown','error_code':type(exc).__name__})
 
 
 if __name__ == "__main__":

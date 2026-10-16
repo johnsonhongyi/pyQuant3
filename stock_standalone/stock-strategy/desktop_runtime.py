@@ -7,6 +7,8 @@ import urllib.request
 import hashlib
 import sqlite3
 import time
+import threading
+import copy
 from contextlib import closing
 
 
@@ -36,13 +38,32 @@ def live_store(root,name):
     return local
 
 
-def discover_runtime():
+def _discovery_output(script, stop_event):
+    process = subprocess.Popen(['powershell.exe','-NoProfile','-NonInteractive','-Command',script],
+        stdout=subprocess.PIPE,stderr=subprocess.PIPE,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+    deadline = time.monotonic()+15
+    try:
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                raise InterruptedError('desktop discovery stopped')
+            try:
+                stdout, _ = process.communicate(timeout=min(0.2,max(0.01,deadline-time.monotonic())))
+                if process.returncode:raise ValueError('desktop discovery failed')
+                return stdout
+            except subprocess.TimeoutExpired:
+                if time.monotonic()>=deadline:raise
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=2)
+
+
+def discover_runtime(stop_event=None):
     if os.name!='nt':return {'status':'unavailable','error':'Windows desktop required'}
     script="""$p=@(Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('ATS_Terminal.exe','instock_MonitorTK_Nuita.exe','instock_MonitorTK.exe') } | Select-Object ProcessId,Name,ExecutablePath); $c=@(Get-NetTCPConnection -State Listen | Where-Object { $_.LocalPort -in @(26670,26676) } | Select-Object LocalAddress,LocalPort,OwningProcess); @{processes=$p;listeners=$c} | ConvertTo-Json -Depth 4 -Compress"""
     try:
-        process=subprocess.run(['powershell.exe','-NoProfile','-NonInteractive','-Command',script],capture_output=True,timeout=15,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
-        if process.returncode:raise ValueError('desktop discovery failed')
-        data=json.loads(process.stdout.decode('utf-8-sig'))
+        data=json.loads(_discovery_output(script,stop_event).decode('utf-8-sig'))
+        if stop_event is not None and stop_event.is_set():raise InterruptedError('desktop discovery stopped')
         processes=data.get('processes') or []
         roots={str(Path(p['ExecutablePath']).parent) for p in processes if p.get('ExecutablePath') and (Path(p['ExecutablePath']).parent/'global.ini').is_file() and (Path(p['ExecutablePath']).parent/'trading_signals.db').is_file()}
         if len(roots)!=1:raise ValueError('ambiguous or missing packaged desktop data root')
@@ -66,3 +87,29 @@ def discover_runtime():
                 'linkage_db':str(store),'ipc_health':ipc_health}
     except (OSError,ValueError,KeyError,sqlite3.Error,subprocess.TimeoutExpired) as exc:
         return {'status':'unavailable','error':type(exc).__name__}
+
+
+class DesktopRuntimeProbe:
+    """One cancellable scan owner; task dispatch only reads its last snapshot."""
+    def __init__(self, interval=60, probe=None):
+        self.stop=threading.Event()
+        self.lock=threading.Lock()
+        self.value={'status':'discovering'}
+        self.interval,self.probe=interval,probe or discover_runtime
+        self.thread=threading.Thread(target=self._run,name='stock-codex-desktop-probe',daemon=True)
+        self.thread.start()
+
+    def _run(self):
+        while not self.stop.is_set():
+            try:value=self.probe(self.stop)
+            except Exception as exc:value={'status':'unavailable','error':type(exc).__name__}
+            with self.lock:self.value={**value,'observed_at_epoch':time.time()}
+            if self.stop.wait(self.interval):return
+
+    def snapshot(self):
+        with self.lock:return copy.deepcopy(self.value)
+
+    def close(self):
+        self.stop.set()
+        self.thread.join(timeout=5)
+        if self.thread.is_alive():raise TimeoutError('desktop probe shutdown timeout')
