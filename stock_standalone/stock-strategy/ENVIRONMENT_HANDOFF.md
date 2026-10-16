@@ -1,3 +1,9 @@
+## 2026-10-16 打包入口核对
+
+- 用户实际使用 `D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock_standalone\instock-pyinstall-batch.cmd 7`。菜单 7 映射到管理器，调用 `C:\Users\Johnson\instock-pyinstall-manage-exe.cmd`；本机该闭环脚本在 `stock_standalone` 目录执行 `pyinstaller manage_window_layout.spec`，目标文件为 `dist\manage_window_layout.exe`，并在打包前后调用归档脚本。
+- 默认 `manage_window_layout.spec` 已包含桥管理器、worker、对话和 `muse_research_threads` 的 hidden imports；与版本化 v5 spec 功能配置相同。版本化 spec 的 `name` 会生成不同 EXE 名，闭环脚本没有引用它。因此手动打包继续用默认 spec；v5 仅是此前并排版本配置副本，v4 是中间文件。
+- 管理脚本设置的 `TEMP/TMP=C:\Temp` 仅作用于构建时。spec 使用 `runtime_tmpdir=None`，EXE 运行时的 `_MEI...` 解包路径由启动环境决定；本次源码修复是让 Codex 项目目录基于 EXE 路径，而不是把运行时解包目录改到 C 盘。源码修复还需用户通过默认闭环脚本重新打包后验收。
+
 ## 2026-10-16 21:30 后续打包源代码修复（尚未打包/部署）
 
 - 用户在手动重打包后报告 Web 对话阶段 `OSError: 函数不正确`，路径指向 `G:\Temp\_MEI263162`。已修正 `muse_research_threads.py`：PyInstaller/Nuitka 打包运行时从 `sys.executable` 定位管理器安装目录，再使用稳定的 `stock-strategy\muse-research` 项目目录；源码开发运行仍从源码位置取根目录。此修复针对临时解包目录路径，不代表已验证所有 RAMDisk/权限场景。
