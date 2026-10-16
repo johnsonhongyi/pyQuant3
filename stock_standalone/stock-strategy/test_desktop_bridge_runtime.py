@@ -87,6 +87,23 @@ class RuntimeTests(unittest.TestCase):
                 self.assertEqual(headers['X-Linkage-Signature'],hmac.new(b'k'*32,canonical.encode(),hashlib.sha256).hexdigest())
                 connection.close.assert_called_once()
 
+    def test_idle_keepalive_is_replaced_before_result_writeback(self):
+        from desktop_strategy_agent import DesktopPeer
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);(root/'key').write_bytes(b'k'*32)
+            (root/'bridge.ini').write_bytes(b'[bridge]\nstock_strategy_base_url=http://127.0.0.1:20084\nipc_node_id=node\nipc_workspace_id=workspace\nipc_key_file=key\n')
+            peer=DesktopPeer(root/'bridge.ini')
+            response=Mock(status=200,reason='OK',headers={});response.read.return_value=b'{"status":"stored"}'
+            first,second=Mock(),Mock()
+            first.getresponse.return_value=second.getresponse.return_value=response
+            with patch('desktop_strategy_agent.http.client.HTTPConnection',side_effect=[first,second]) as factory:
+                peer.post('heartbeat',{'status':'ready'})
+                peer.connections.used_at=-100
+                self.assertEqual(peer.post('chat_result',{'id':'job'}),{'status':'stored'})
+                self.assertEqual(factory.call_count,2)
+                first.close.assert_called_once()
+                self.assertIs(peer.connections.http,second)
+
     def test_rpc_reply_is_routed_without_consuming_burst_notifications(self):
         from desktop_strategy_agent import AppServer
         with tempfile.TemporaryDirectory() as directory:

@@ -173,6 +173,10 @@ class DesktopPeer:
             "X-Linkage-Signature": hmac.new(self.key, canonical.encode(), hashlib.sha256).hexdigest()}
         try:
             connection = getattr(self.connections, 'http', None)
+            if connection is not None and time.monotonic()-getattr(self.connections,'used_at',0)>30:
+                connection.close()
+                connection=None
+                self.connections.http=None
             if connection is None:
                 factory = http.client.HTTPSConnection if urlsplit(self.base).scheme == 'https' else http.client.HTTPConnection
                 connection = factory(urlsplit(self.base).hostname, urlsplit(self.base).port, timeout=timeout)
@@ -192,7 +196,9 @@ class DesktopPeer:
                 raise error
             if len(raw) > 256 * 1024:
                 raise ValueError("peer response too large")
-            return json.loads(raw)
+            value=json.loads(raw)
+            self.connections.used_at=time.monotonic()
+            return value
         except (OSError, ValueError, http.client.HTTPException) as exc:
             connection = getattr(self.connections, 'http', None)
             if connection:
