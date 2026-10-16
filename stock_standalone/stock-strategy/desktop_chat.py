@@ -19,6 +19,7 @@ def _is_expired_thread_error(error):
 def _post_chat_result(peer, payload, attempts=3):
     last_error = None
     for attempt in range(attempts):
+        started=time.perf_counter()
         try:
             return peer.post('chat_result', payload, timeout=2)
         except HTTPError as exc:
@@ -28,6 +29,11 @@ def _post_chat_result(peer, payload, attempts=3):
         except (OSError, TimeoutError) as exc:
             last_error = exc
         if attempt + 1 < attempts:
+            from desktop_strategy_agent import _emit_log,_error_details,_peer_error_code
+            _emit_log({'status':'degraded','stage':'chat_result_retry','operation':'chat_result',
+                'job_id':str(payload.get('id',''))[:12],'attempt':attempt+1,
+                'elapsed_ms':round((time.perf_counter()-started)*1000),
+                'error_code':_peer_error_code(last_error),'error_detail':_error_details(last_error)})
             time.sleep(0.25 * (2 ** attempt))
     raise last_error
 
