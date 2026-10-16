@@ -398,3 +398,12 @@
 - 北新路桥 quick/standard=22.516/99.140 秒；deep 两次=144.500/317.087 秒，均 AI ready。最终真实页面提交 635082c525e807a96ce09aca4edf999d，SSE 200、页面运行错误 0；core 一轮 239.277 秒，剩余主要时间在 Codex 调用，保留资料缺失及行情日期。
 - 回滚快照 20261017021507 的 COMPLETE 和 SHA256SUMS 全部通过，命令 bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261017021507；优化前完整快照为 20261017015525，原管理器备份同编号目录下 manage_window_layout.exe。未回滚数据、未触发实盘下单，未实际执行生产回撤。
 - 详见 [部署与性能验收记录](../docs/tasks/2026-10-17_0256_桌面桥生产部署与性能验收.md)。仅本地 Git 提交，未推送。
+
+
+## 2026-10-17 Web 桥链路计时复核与后续优化
+
+- 最终发布 20261017034210，独立 source SHA 2b012b64902dc9a2a0027292ea844c8c999f3e5d，27 个变更文件生产摘要一致。API ID sha256:3e16c9533a9b699aade3f97366d19e1ccbde6c2e6b1d6eb8ff16337cfb466bb6，2层、119594468字节；Web复用20261011114424。两个容器healthy、always、只读根、SizeRw=0，8/5挂载保留；固定base及回滚快照门禁通过。
+- 原脚本选项7重新打包并原子替换管理器，代码SHA 1e714ca7a14b6eb11f8a1ed390cfd0c075d13f76，EXE SHA256 A2DC5C414015F59425C91EEA5E463B71003B1C6374166D43180A086BEDEB5FC7。桥ready，唯一引擎，默认luna/max，队列0/0、账本ok、待回执0。旧包备份为原performance-20261017015525目录下manage_window_layout.pre-receipt-latency.exe。
+- 减少空闲领取写锁、nonce清理频率与重复SSE，新增闲置连接轮换/回执重试诊断、研究分段计时及降级诊断保留。Python44项、Web13项、相关Go模块与构建通过；最终3次快速研究及3次短对话均成功。首阶段另有一次21.489秒证据降级，未冒充AI成功。
+- 43.252秒记录中AI调用38.994、其余4.258；旧22.476秒为18.880/3.596，并非Web固定增加21秒。新quick同档实测29.640/32.543/47.672秒，浏览器额外约329ms；最慢一次Codex等待及输出43秒，仍有原生调用长尾，不能保证稳定22秒。
+- 回滚：bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261017034210；COMPLETE及摘要均已核验，未实际回撤、不回滚业务数据。详见[性能复核记录](../docs/tasks/2026-10-17_0350_Web桥计时与性能复核.md)。仅本地提交，未推送。
