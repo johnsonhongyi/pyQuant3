@@ -1,0 +1,4 @@
+# Shell entrypoints must stay executable after Windows checkouts.
+/stock-strategy/docker/*.sh text eol=lf
+/tools/ac86u_clash/** text eol=lf
+/.router_merlinclash_ai_rules.sh text eol=lf

@@ -335,7 +335,7 @@ docker run -d \
     --log-opt max-size=10m --log-opt max-file=3 \
     --health-cmd='wget -q -T 5 -O /dev/null http://127.0.0.1/' \
     --health-interval=10s --health-timeout=5s --health-retries=6 --health-start-period=10s \
-    -p 192.168.50.60:20073:80 \
+    -p 20073:80 \
     -v "$WEB_DIST:/usr/share/nginx/html:ro" \
     -v "$DATA_ROOT/logs/web:/logs/web" \
     "stockstrategy/web:$BUILD_TAG"
