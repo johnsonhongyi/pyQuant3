@@ -64,11 +64,14 @@ class HiddenConsoleTests(unittest.TestCase):
     def test_default_callers_keep_no_window_and_agv_hidden_mode_is_opt_in(self):
         original = subprocess.Popen
         flags = []
+        processes = []
         def launch(*args, **kwargs):
             flags.append(kwargs["creationflags"])
             self.assertTrue(kwargs["startupinfo"].dwFlags & subprocess.STARTF_USESHOWWINDOW)
             self.assertEqual(kwargs["startupinfo"].wShowWindow, subprocess.SW_HIDE)
-            return original(*args, **kwargs)
+            process = original(*args, **kwargs)
+            processes.append(process)
+            return process
         with tempfile.TemporaryDirectory() as folder, patch("ats.llm.cli_process.subprocess.Popen", side_effect=launch):
             for hidden in (False, True):
                 run_bounded_cli([sys.executable, "-c", "print('ok')"], cwd=folder,
@@ -76,6 +79,7 @@ class HiddenConsoleTests(unittest.TestCase):
         self.assertTrue(flags[0] & subprocess.CREATE_NO_WINDOW)
         self.assertEqual(flags[1], subprocess.CREATE_NEW_CONSOLE)
         self.assertFalse(flags[1] & subprocess.CREATE_NO_WINDOW)
+        self.assertTrue(all(process.stdout.closed and process.stderr.closed for process in processes))
 
     def test_hidden_console_timeout_reaps_owned_child(self):
         import psutil

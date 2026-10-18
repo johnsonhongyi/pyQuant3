@@ -95,7 +95,8 @@ class AntigravityCatalog:
                 return True
             try:
                 result = run_bounded_cli([self.engine, "models"], cwd=Path(self.engine).parent,
-                    stdin_bytes=b"", timeout_seconds=15, max_stdout_bytes=64 * 1024)
+                    stdin_bytes=b"", timeout_seconds=15, max_stdout_bytes=64 * 1024,
+                    hidden_console=True)
                 models = _parse_model_catalog(result.stdout.decode("utf-8", errors="replace"))
                 if result.returncode or not models:
                     raise BoundedCLIError("AGY_MODEL_CATALOG_EMPTY")
@@ -144,7 +145,11 @@ def _parse_model_catalog(output: str) -> list[dict]:
         if "\t" not in line:
             continue
         fixed = re.search(r"-(low|medium|high|xhigh|max)$", model)
-        efforts = [fixed[1]] if fixed else ["low", "medium", "high", "xhigh", "max"]
+        labeled = re.search(r"\((low|medium|high|xhigh|max)\)\s*$", name, re.I)
+        discovered_effort = fixed[1] if fixed else labeled[1].lower() if labeled else ""
+        # `agy models` lists concrete effort slugs. A model without an explicit
+        # tier (for example, Claude Thinking) uses the CLI's model default.
+        efforts = [discovered_effort] if discovered_effort else ["auto"]
         models[model] = {"id": model, "name": name, "efforts": efforts,
                          "default_effort": efforts[0]}
     return list(models.values())
@@ -245,17 +250,21 @@ def _chat_error_info(error: Exception):
 
 def _resolve_cli_effort(model: str, requested, models: list[dict], fallback: str = "low") -> str:
     model_info = next((item for item in models if isinstance(item, dict) and item.get("id") == model), {})
-    efforts = model_info.get("efforts") if isinstance(model_info.get("efforts"), list) else []
+    has_catalog_efforts = isinstance(model_info.get("efforts"), list)
+    efforts = model_info.get("efforts") if has_catalog_efforts else []
     efforts = [item for item in efforts if isinstance(item, str)]
     if isinstance(requested, str) and requested in efforts:
         return requested
-    if requested and efforts:
-        raise BoundedCLIError("AGY_REASONING_EFFORT_UNSUPPORTED")
+    # Claimed jobs freeze this pair on the server. Only adapt before enqueueing.
+    if requested and has_catalog_efforts and (efforts or requested != "auto"):
+        raise BoundedCLIError("AGY_REASONING_EFFORT_UNSUPPORTED_REFRESH_REQUIRED")
     default = model_info.get("default_effort")
     if isinstance(default, str) and default in efforts:
         return default
     if efforts:
         return efforts[0]
+    if has_catalog_efforts:
+        return "auto"
     return requested if isinstance(requested, str) and requested in {"low", "medium", "high", "xhigh", "max"} else fallback
 
 
@@ -407,8 +416,9 @@ def run_antigravity_chat(peer: DesktopPeer, job: dict, cli: str, runtime: Path, 
         else:
             timeout = _job_cli_timeout(job)
             cmd = [cli, "--input-format", "stream-json", "--output-format", "stream-json",
-                   "--sandbox", "--disable-slash-commands", "--print-timeout", f"{max(1, timeout - 3)}s",
-                   "--effort", effort]
+                   "--sandbox", "--disable-slash-commands", "--print-timeout", f"{max(1, timeout - 3)}s"]
+            if effort != "auto":
+                cmd.extend(["--effort", effort])
             if model:
                 cmd.extend(["--model", model])
             prompt_event = json.dumps({"event": "user", "message": {"content": prompt}}, ensure_ascii=False) + "\n"
@@ -423,7 +433,7 @@ def run_antigravity_chat(peer: DesktopPeer, job: dict, cli: str, runtime: Path, 
                     cmd, cwd=scratch_dir, stdin_bytes=prompt_event.encode("utf-8"),
                     timeout_seconds=timeout, timeout_limit_seconds=180.0,
                     completion_predicate=lambda _: stream.result_event is not None,
-                    stdout_callback=stream.feed,
+                    stdout_callback=stream.feed, hidden_console=True,
                 )
             stream.finish()
             if stream.actual_model and stream.actual_model != model:
@@ -557,8 +567,10 @@ def run_antigravity_strategy(peer: DesktopPeer, job: dict, cli: str, runtime: Pa
     cmd = [
         cli, "--input-format", "stream-json", "--output-format", "stream-json",
         "--json-schema", str(schema_file), "--sandbox", "--disable-slash-commands",
-        "--print-timeout", f"{max(1, _job_cli_timeout(job) - 3)}s", "--effort", effort,
+        "--print-timeout", f"{max(1, _job_cli_timeout(job) - 3)}s",
     ]
+    if effort != "auto":
+        cmd.extend(["--effort", effort])
     if model:
         cmd.extend(["--model", model])
 
@@ -573,7 +585,7 @@ def run_antigravity_strategy(peer: DesktopPeer, job: dict, cli: str, runtime: Pa
                 cmd, cwd=isolated_dir, stdin_bytes=prompt_event.encode("utf-8"),
                 timeout_seconds=_job_cli_timeout(job), timeout_limit_seconds=180.0,
                 completion_predicate=lambda _: stream.result_event is not None,
-                stdout_callback=stream.feed,
+                stdout_callback=stream.feed, hidden_console=True,
             )
         stream.finish()
         if stream.actual_model and stream.actual_model != model:
