@@ -1,3 +1,33 @@
+## 2026-10-19 01:48 研究记录模型与强度分栏
+
+- 用户授权后按 `build-and-deploy.ps1 -AllowLayeredImageBuild` 发布，发布号 `20261019014846`；部署脚本返回 `Deployment healthy`。回滚：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261019014846`。
+- TypeScript 检查与 Vite 生产构建通过；部署后 `/api/health` 返回 `ok=true`，个股分析 JS/CSS 分包均 HTTP 200，资源确认包含独立模型/强度标签和通用 ID 后缀规范化。
+- 历史卡片显示基础模型 ID 与单独的推理强度标签；若模型 ID 以记录中的同一强度后缀结尾，动态移除该后缀，筛选及去重按基础模型 ID + 强度匹配。Antigravity 执行时仍按 CLI 目录中的具体变体 ID 调用；未触发新的研究或交易。
+
+## 2026-10-19 00:57 研究差异速览适配研究目的
+
+- 用户授权后按 `build-and-deploy.ps1 -AllowLayeredImageBuild` 发布，发布号 `20261019005716`；部署脚本返回 `Deployment healthy`。回滚：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261019005716`。
+- TypeScript 与 Vite 生产构建通过；部署后 `/api/health` 返回 `ok=true`，个股分析分包 `StockAIAnalysisWorkspace-qMhCDXVC.js` 和样式 `StockAIAnalysisWorkspace-C-VnVF5n.css` 均 HTTP 200，资源包含差异速览、限量标色与“观察重点”分支。
+- 速览卡片按研究目的展示观察重点、新仓建议或持仓建议；未发起真实模型研究或交易。
+
+## 2026-10-19 00:52 研究记录差异标注优化
+
+- 用户授权后按 `build-and-deploy.ps1 -AllowLayeredImageBuild` 发布 Web/API，发布号 `20261019005229`；部署脚本返回 `Deployment healthy`。回滚：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261019005229`。
+- TypeScript 检查与 Vite 生产构建通过；部署后 `/api/health` 返回 `ok=true`，首页、`StockAIAnalysisWorkspace-T0jakefx.js` 与 `StockAIAnalysisWorkspace-C-VnVF5n.css` 均 HTTP 200。线上资源确认包含“主要结论速览”、有限差异标注和模型配色样式。
+- 差异页新增按模型色条排列的结论/建议速览；仅结论、判断、建议与价格条件行使用模型色短语标注，每格最多 48 字符、最多 3 段；长篇证据和来源不着色，输入/截止时间移至表格末尾。未发起真实模型研究或交易。
+
+## 2026-10-19 00:26 研究记录同股模型差异对比部署
+
+- 用户明确授权后按 `build-and-deploy.ps1 -AllowLayeredImageBuild` 发布 Web/API，发布号 `20261019002636`；脚本返回 `Deployment healthy`。回滚：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261019002636`。
+- TypeScript 检查、Vite 生产构建通过；部署后 `/api/health` 为 `ok=true`，首页、主 JS `index-CUZ-jwTB.js` 和个股分析分包 `StockAIAnalysisWorkspace-Bckmalmr.js` 均 HTTP 200。分包含同股勾选、差异表、总耗时最快标记及证据覆盖信息。
+- 研究记录支持勾选同一股票 2–4 条已完成报告，只呈现不同的研判项目，并提示研究输入/快照差异。未发起真实模型研究或交易。
+
+## 2026-10-19 00:09 个股研究记录模型/推理强度筛选部署
+
+- 用户授权后按 `build-and-deploy.ps1 -AllowLayeredImageBuild` 发布 Web/API，发布号 `20261019000901`；脚本返回 `Deployment healthy`。回滚：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261019000901`。
+- 本地 TypeScript 检查与 Vite 生产构建通过；部署后 `/api/health` 返回 `ok=true`，首页、主 JS `index-DCopkiPn.js` 和个股分析分包 `StockAIAnalysisWorkspace-C85EL9CA.js` 均 HTTP 200。分包含模型/推理强度筛选与去重提示文本。
+- 研究记录可按模型/推理强度组合查看；同一股票同一配置仅显示最新记录，原始历史数据未删除。未触发真实模型研究或交易。
+
 ## 2026-10-18 23:36 AGV 回调修复与账号菜单发布（实机模型待验）
 
 - 用户授权后按 `build-and-deploy.ps1 -AllowLayeredImageBuild` 发布 Web/API，发布号 `20261018232904`，部署脚本返回 `Deployment healthy`。回滚：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261018232904`。
