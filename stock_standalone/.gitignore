@@ -83,3 +83,8 @@ data/ipo_learning/shadow_observations.sqlite
 /system_linkage.sqlite3
 # The nested stock-strategy checkout owns its own Git history.
 /stock-strategy/source/
+
+# Private router snapshots, runtime credentials, downloaded packages and test output.
+/scratch/ac86u-clash-20261018/
+!tools/ac86u_clash/inspect_lan_router.py
+!tools/ac86u_clash/inspect_docker_lan_ports.py

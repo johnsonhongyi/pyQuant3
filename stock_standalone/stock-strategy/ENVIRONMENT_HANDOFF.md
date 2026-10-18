@@ -1,3 +1,10 @@
+## 2026-10-18 02:10 Web 20073 按 inStock 方式发布
+
+- 用户明确授权把 20073 调整为与 inStock 相同的全 IPv4 地址发布；已由 `192.168.50.60:20073 → 80/tcp` 改为 `0.0.0.0:20073 → 80/tcp`。Windows 访问 `http://192.168.1.60:20073/`、`http://192.168.50.60:20073/` 均为 200；LXC 内两个地址的根页内容 SHA256 一致，`/api/health` 均 200。
+- 通过 PVE `pct exec 102`，持有既有 `/run/lock/stockstrategy-deploy.lock`，仅重建 stockstrategy-web 的端口发布。新容器 a486650a6107；原 image ID `sha256:ce15ecc17364a415c3a4e609a2858b046af4f3bc9f1058c33bdfaf13b1bb07e9`、应用版本 20261017034210、全部 Config、5 个挂载、只读根文件系统、SizeRw=0、always 重启策略及资源/网络配置保持；stockstrategy-api 身份和健康保持。
+- 本地 `docker/install.sh`、`docker/deploy-prebuilt.sh` 与 LXC 安装模板已改为 `-p 20073:80`；未构建或更新镜像、未修改数据或交易行为。
+- 旧容器 `stockstrategy-web-before-dual20073-20261018-020949` 保留为停止状态、restart=no。LXC 回滚：`sh /mnt/4TB/dockerf/stockstrategy/backups/dual-web-bindings-20261018-020949/rollback.sh`，恢复旧容器与安装模板，因此也会恢复旧的单地址绑定。报告只记录端口/镜像/挂载等元数据，不保存完整环境变量。
+
 ## 2026-10-16 打包入口核对
 
 - 用户实际使用 `D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock_standalone\instock-pyinstall-batch.cmd 7`。菜单 7 映射到管理器，调用 `C:\Users\Johnson\instock-pyinstall-manage-exe.cmd`；本机该闭环脚本在 `stock_standalone` 目录执行 `pyinstaller manage_window_layout.spec`，目标文件为 `dist\manage_window_layout.exe`，并在打包前后调用归档脚本。
