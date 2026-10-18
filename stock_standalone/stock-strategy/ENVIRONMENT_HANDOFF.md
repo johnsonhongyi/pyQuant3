@@ -1,3 +1,29 @@
+## 2026-10-18 23:36 AGV 回调修复与账号菜单发布（实机模型待验）
+
+- 用户授权后按 `build-and-deploy.ps1 -AllowLayeredImageBuild` 发布 Web/API，发布号 `20261018232904`，部署脚本返回 `Deployment healthy`。回滚：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261018232904`。
+- 绕过本机无效代理直连核验：`/api/health`、Web 首页、`index-DdmL7TDO.js`、`StockAIAnalysisWorkspace-Kapl9FNP.js` 均 HTTP 200；前端 bundle 含 `stock-open-account-manager`、`账号管理` 和 Codex/Antigravity 独立桥标签。账号入口随系统设置展示。
+- 用户手动启动管理器后，当前 `agv-59333f82b2a74c0363cd3ede / ws-b33bb748186a4bbc8e69ab72` 在线/ready；本机 AGV bridge PID `34348` 存活，监听端口 `26778`。线上名录返回 `chat_queued=0`、`chat_running=0`；旧节点 `agv-7a8969d8 / ws-c1f09cc3` 仍心跳过期。未重复重启 worker。
+- 本次没有发起真实 AGY 模型调用。UUID conversation_id、进度回执和错误包装修复已有离线回归，但 `CLI_OUTPUT_CALLBACK_FAILED` 是否在真实 Gemini 对话中消失，及真实流式输出/耗时，仍需由一次受控对话验证；不代表模型速度已验证。
+## 2026-10-18 23:17 AGV 对话回调错误闭环修复（待实机）
+
+- `CLI_OUTPUT_CALLBACK_FAILED` 的直接根因已定位：AGV 在模型完成会话初始化前发送了非 UUID 的 `thread_id=chat-<job>`；后台 `chat_result` 校验拒绝该进度回执（`CHAT_INVALID_THREAD`），`ProgressPublisher` 记录 400 后，下一次 stdout 回调因 `publish()` 检查失败被有界运行器包装成 `CLI_OUTPUT_CALLBACK_FAILED`。
+- AGV 现从 AGY `init` / `step_update` / `result` 读取并校验真实 `conversation_id`，初始化前不发送 thread_id；最终结果也使用该 UUID，并回传 `reasoning_effort`，满足后台会话字段校验。回调错误日志/失败码保留底层 peer 错误，个股研究失败前缀按 Codex / Antigravity provider 区分。
+- 离线验证：AGV/桥运行时 Python 19 项通过，CLI bounded runner 12 项通过；Go `internal/httpapi` 与 `internal/stockanalysis` 测试通过。尚未部署该 Go 提示修正，也未重启桌面 AGV worker；未发起真实 AGY 请求或交易，需发布并在受控任务上完成实机闭环。
+
+## 2026-10-18 22:50 双桥模型偏好修复部署
+
+- 按既有授权执行 `build-and-deploy.ps1 -AllowLayeredImageBuild`，发布号 `20261018225043`；脚本返回 `Deployment healthy`。部署后只读核验 Web 首页 HTTP 200，`StockAIAnalysisWorkspace-CMwd1dIU.js` HTTP 200，bundle 同时包含 Codex 与 Antigravity 独立偏好键。回滚：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261018225043`。
+- Web 模型、推理强度与桥节点按 provider 分开写入本地存储；保留旧 `easy-stock.stock-ai-model.v1` 的匹配 provider 迁移，并阻止另一桥的默认模型/强度覆盖当前选择。
+- AGV worker 的源码修复不在 Web/API 发布包内：进度载荷改为 Codex 同契约并使用 `chat_result`/租约令牌；AGY stream-json 使用限时有界进程、标准 `step_update`/`result` 解析、独立 stderr 排空、`--effort` 参数，策略格式错误不再伪装成已完成 WATCH。尚未重启本机 AGV worker，也未进行真实模型调用；需管理器重新启动该 worker 后再做实机验收。
+- 回归：Web 46 个测试文件、235 项通过，生产构建通过；AGV/桥运行时 Python 17 项与 CLI 安全测试 12 项通过。测试均使用模拟流或离线进程，不触发模型请求或交易。
+
+## 2026-10-18 22:16 Web 双桥适配部署
+
+- 按用户要求执行 `build-and-deploy.ps1 -AllowLayeredImageBuild`，发布号 `20261018221610`。SSH 指纹、API/Web 健康、重启策略与磁盘预检通过；Go 后端与 `easy-stock-web` 前端构建通过；远端隔离 API smoke、Web/API 健康门禁通过，脚本返回 `Deployment healthy`。
+- 上线后只读核验：API health HTTP 200，Web 首页和 `StockAIAnalysisWorkspace-Bo5-ML1I.js` HTTP 200；当前前端资源包含 Antigravity 选项和 provider 字段。回滚：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261018221610`。
+- HMAC 后台名录将 `agv-*` 标为 `antigravity_desktop`、`codex-*` 标为 `codex_desktop`。截至 2026-10-18 22:28 HKT，`agv-59333f82b2a74c0363cd3ede / ws-b33bb748186a4bbc8e69ab72` 与 `codex-411ad92cc5ef25a8efbc8e82 / ws-b33bb748186a4bbc8e69ab72` 均在线/ready、队列 0/0；精确运行时查询分别返回 Gemini 与 GPT 模型目录。`agv-7a8969d81fd3f3f924cb1294 / ws-c1f09cc351724da6946658c4` 和 `codex-bf952db5fd9f615f2a8fff37 / ws-c1f09cc351724da6946658c4` 为心跳过期节点，工作区不同。
+- 用户截图中的 502/超时发生在发布切换时段，当前 API health 与两个活动节点的只读查询均已恢复。截图中的 `No module named 'ats'` 属 17:29 历史日志；当前本机 `agv-7a89…` 仍未运行。本次发布没有重建桌面管理器 EXE，也没有对该节点发起启动。
+
 ## 2026-10-18 02:10 Web 20073 按 inStock 方式发布
 
 - 用户明确授权把 20073 调整为与 inStock 相同的全 IPv4 地址发布；已由 `192.168.50.60:20073 → 80/tcp` 改为 `0.0.0.0:20073 → 80/tcp`。Windows 访问 `http://192.168.1.60:20073/`、`http://192.168.50.60:20073/` 均为 200；LXC 内两个地址的根页内容 SHA256 一致，`/api/health` 均 200。
@@ -414,3 +440,11 @@
 - 减少空闲领取写锁、nonce清理频率与重复SSE，新增闲置连接轮换/回执重试诊断、研究分段计时及降级诊断保留。Python44项、Web13项、相关Go模块与构建通过；最终3次快速研究及3次短对话均成功。首阶段另有一次21.489秒证据降级，未冒充AI成功。
 - 43.252秒记录中AI调用38.994、其余4.258；旧22.476秒为18.880/3.596，并非Web固定增加21秒。新quick同档实测29.640/32.543/47.672秒，浏览器额外约329ms；最慢一次Codex等待及输出43秒，仍有原生调用长尾，不能保证稳定22秒。
 - 回滚：bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261017034210；COMPLETE及摘要均已核验，未实际回撤、不回滚业务数据。详见[性能复核记录](../docs/tasks/2026-10-17_0350_Web桥计时与性能复核.md)。仅本地提交，未推送。
+
+## 2026-10-18 InStock 策略收益列自适应显示
+
+- 在当前 InStock `stock_web.html` 增加 `rate_N` 收益列自适应：日期、代码、名称等核心列始终列入显示；收益列数量至少填满当前表格可用宽度；数据期数更多时保留所有已发现的收益期数，由原有横向滚动查看。
+- 期数按当前策略和日期的数据页逐页累计；窗口大小改变时重新计算列数。DataTables 请求仅发送后端实际使用的列搜索字段；复制、CSV、打印仍导出完整列。
+- 原模板及 SHA-256 副本、可重放补丁工具保存在 InStock 既有外置 cache 备份目录。仅修改模板，不重建镜像、不重启容器。
+- 首次检查时运行中的 `run_web` 仍返回旧模板；已只重启 supervisor 的 `run_web`（`run_cron` 未动），新进程 PID 11505。实时页面响应现已包含 `__instockAdaptiveReturnsV1`，确认新模板已加载。
+- 未运行自动测试或登录浏览器 UI 验收；用户侧若仍显示旧布局需强制刷新页面（Ctrl+F5）。未做基准测试，性能收益尚无实测百分比。

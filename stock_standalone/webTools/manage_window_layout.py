@@ -86,6 +86,13 @@ if os.environ.pop('PYQUANT3_CODEX_BRIDGE_WORKER', '') == '1':
     run_codex_bridge(json.loads(worker_args) if worker_args else sys.argv[1:])
     raise SystemExit(0)
 
+if os.environ.pop('PYQUANT3_ANTIGRAVITY_BRIDGE_WORKER', '') == '1':
+    get_app_root()
+    from run_desktop_antigravity_bridge import main as run_agv_bridge
+    worker_args = os.environ.pop('PYQUANT3_ANTIGRAVITY_BRIDGE_ARGS', '')
+    run_agv_bridge(json.loads(worker_args) if worker_args else sys.argv[1:])
+    raise SystemExit(0)
+
 
 if __name__ == '__main__':
     import multiprocessing as mp
@@ -106,6 +113,17 @@ if __name__ == '__main__':
                 sys.path.insert(0, strategy_root)
         from run_desktop_strategy_bridge import main as run_codex_bridge
         run_codex_bridge(worker_args)
+        sys.exit(0)
+
+    if '--antigravity-bridge-worker' in sys.argv[1:]:
+        worker_args = sys.argv[1:]
+        worker_args.remove('--antigravity-bridge-worker')
+        if not getattr(sys, 'frozen', False):
+            strategy_root = os.path.join(app_root, 'stock-strategy')
+            if strategy_root not in sys.path:
+                sys.path.insert(0, strategy_root)
+        from run_desktop_antigravity_bridge import main as run_agv_bridge
+        run_agv_bridge(worker_args)
         sys.exit(0)
 
     # 1. 前置解析命令行参数

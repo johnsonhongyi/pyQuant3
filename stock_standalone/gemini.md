@@ -1,5 +1,64 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-18 23:39 【AGV进度回调修复与发布后现场状态】
+- `CLI_OUTPUT_CALLBACK_FAILED` 根因是模型初始化前进度回执携带非 UUID 的临时会话 ID，被后端拒绝；源码已改为收到并校验 AGY `conversation_id` 后才附带会话 ID，并保留底层回调错误，相关离线回归通过。
+- Web/API 发布号 `20261018232904`，部署健康门禁通过；线上 API health、Web 首页、主入口和个股分析 bundle 均 HTTP 200。资源包含账号管理入口与两桥 provider 标识；回滚命令见 `stock-strategy/ENVIRONMENT_HANDOFF.md`。
+- 用户手动启动管理器后，活动 AGV `agv-59333f82 / ws-b33bb748` 在线/ready，队列 0/0；旧节点 `agv-7a8969d8 / ws-c1f09cc3` 仍离线。
+- 没有发起真实 AGY/Gemini 模型调用，故真实回复、流式输出及耗时仍待一次受控对话验收。较早的“全链路”条目记录的是当时验证范围，不作为真实模型调用已通过的证据。
+
+## 2026-10-18 17:35 【远端Docker部署上线、Schema与请求载荷彻底对齐及桌面管理器生产热替换闭环】(`build-and-deploy.ps1`, `desktop_antigravity_agent.py`, `D:\JohnsonProgram\instockMonitorTK\manage_window_layout.exe`)
+- [x] **【远端 Docker 生产镜像构建与无缝滚动替换上线（彻底解决 Web 页面未见 AGV 桥问题）】**：
+    - 穿透定位：Web 端 `http://192.168.50.60:20073/#stock-ai` 运行于 PVE LXC 102 远端 Docker，本地修改的 Go 后端与 Vite 前端此前尚未构建发布；
+    - 针对 `build-and-deploy.ps1` 在 Windows PowerShell 5.1 环境下的兼容性进行加固：修复 `ssh-keyscan` stderr 导致的 `NativeCommandError`，用 `[System.IO.File]::WriteAllText` 兼容无 `utf8NoBOM` 枚举，用 `sed` 消除远端 preflight `A_STOCK_TOKEN` 提取时的双引号转义冲突；
+    - 执行 `build-and-deploy.ps1 -AllowLayeredImageBuild`，本地编译 Go Linux amd64 二进制与 Vite 前端打包（`✓ built in 5.31s`），安全上传并完成远端 Docker 容器滚动更新；
+- [x] **【Backend 接口 Schema 强校验与长轮询请求载荷彻底对齐】**：
+    - 排查穿透 `chat_claim_http_400` 根因：Go 端 `autoFollowAIPeer` 启用了 `decoder.DisallowUnknownFields()`，而 `desktop_antigravity_agent.py` 原先向 `chat_claim` 发送了未定义的 `capabilities` 字段；
+    - 对齐 `desktop_strategy_agent.py` 标准工业实践：长轮询改用统一队列 `next`（payload `{"wait_ms": 4000, "prefer_chat": False}`）与轻量 `chat_claim`（payload `{}`）；
+    - 修复 `AntigravityCatalog.models` 结构：由纯字符串列表升级为符合 Go 端 `desktopChatModel` 的结构体字典列表（`id`, `name`, `efforts`, `default_effort`），彻底恢复 `online: true` 与全量 Gemini 3.8 Flash / Pro 模型识别；
+    - 修复 `desktop_antigravity_agent.py` 顶层 `sys.path` 初始化顺序，解决子进程启动时 `ModuleNotFoundError: No module named 'ats'`；
+- [x] **【桌面管理器单文件全量打包与生产环境热替换】**：
+    - 再次运行 PyInstaller 重新编译生成 `dist\manage_window_layout.exe`；
+    - 安全覆盖至生产环境 `D:\JohnsonProgram\instockMonitorTK\manage_window_layout.exe`；
+    - 验证生产环境运行 `--antigravity-bridge-worker --once` 退出码 0，`agent-status.json` 状态为标准 `"ready"`，远端 targets 与 `/api/v1/ai/runtime` 均返回 `online: true`。
+
+## 2026-10-18 16:40 【管理器子进程单实例冲突根治、Web端与子项目个股分析设置全对齐及生产热替换】(`antigravity_bridge_manager.py`, `manage_window_layout.py`, `research_snapshot.go`, `stock_research.go`, `codex_stock_research.go`, `codex_chat.go`, `StockAIAnalysisWorkspace.tsx`, `ChatRuntimeSettingsPanel.tsx`, `D:\JohnsonProgram\instockMonitorTK\manage_window_layout.exe`)
+- [x] **【管理器自启单实例冲突与进程树识别根治（彻底解决未运行/未知问题）】**：
+    - 穿透查明单文件打包模式下，原启动调用未带 `--antigravity-bridge-worker` 命令行参数和 `PYQUANT3_ANTIGRAVITY_BRIDGE_WORKER=1` 环境变量，导致子进程被当成普通桌面管理器启动并命中 `ManageWindowLayout_SingleInstance_Server`，发送 `WAKEUP` 消息后退出的根因；
+    - 在 `antigravity_bridge_manager.py` 的 `_start_bridge()` 中严谨对齐传参：注入 `--antigravity-bridge-worker`、`--backend`、`--runtime`、`--desktop-root`、`--launch-mode` 及隔离环境变量，将输出定向至 `agent-output.txt`；
+    - 在 `task_info()` 中引入 `_process_tree_contains` PowerShell 进程祖先后代判定，并在 frozen 模式下准确识别孙子 Worker 存活状态；
+- [x] **【Web 后端子项目（`easy-stock-analysis`）全功能对齐】**：
+    - `backend/internal/stockanalysis/research_snapshot.go`：校验逻辑扩充支持 `antigravity_desktop`，与 `codex_desktop` 享有完全一致的模型与思考等级参数校验；
+    - `backend/internal/httpapi/stock_research.go`：`runStockResearch` 全流程识别 `antigravity_desktop`，规范打标为 `Antigravity Desktop · %s / %s` 并调用桌面 Prompter；
+    - `backend/internal/httpapi/codex_stock_research.go`：`stockResearchCodexIdentity` 与 `newStockResearchCodexPrompter` 针对 `antigravity_desktop` 生成独立一致的确定性 identity 与会话上下文；
+    - `backend/internal/httpapi/codex_chat.go`：`desktopChatRuntime` 与 `desktopChatJob` 放行 `antigravity_desktop`，支持全局配置保存、查询与测试调度；
+- [x] **【Web 前端子项目（`easy-stock-web` & `frontend`）全功能对齐】**：
+    - `stock-research.ts` 与 `desktop-chat.ts`：扩充 `ResearchRequest` 与 `ChatRuntimeConfig` 包含 `antigravity_desktop`；
+    - `StockAIAnalysisWorkspace.tsx`：引擎下拉框增加 `桌面 Antigravity`，发起个股分析时优先匹配 `agv-` 独立节点，自适应传递对应模型与思考强度；
+    - `ChatRuntimeSettingsPanel.tsx`：AI 对话设置面板对齐支持 `桌面 Antigravity`；
+- [x] **【全套单元测试 100% 纯绿通过】**：
+    - 在 `tests/test_antigravity_bridge_parity.py` 扩充包含打包 Worker 启动命令行参数与环境变量注入专项测试，全部 7 项测试纯绿通过；
+- [x] **【生产环境管理器重新编译打包与无缝热替换】**：
+    - 执行 PyInstaller 成功生成 43MB 单文件可执行程序 `dist\manage_window_layout.exe`；
+    - 原生产文件备份为 `D:\JohnsonProgram\instockMonitorTK\manage_window_layout.exe.bak_20261018_1638`，最新打包程序覆盖至生产环境；
+    - 验证生产环境运行 `--antigravity-bridge-worker --prepare-only` 正常退出，彻底消除单实例冲突。
+
+## 2026-10-18 15:35 【Codex 与 Antigravity 双桌面桥全业务落地实施、生产环境管理器打包替换与全链路自检闭环】(`tools/run_desktop_antigravity_bridge.py`, `desktop_antigravity_agent.py`, `webTools/window_manager/antigravity_bridge_manager.py`, `webTools/window_manager/ui.py`, `manage_window_layout.spec`, `D:\JohnsonProgram\instockMonitorTK\manage_window_layout.exe`)
+- [x] **【Antigravity 独立桌面桥运行时与启动脚本全功能落地】**：
+    - 新增 `tools/run_desktop_antigravity_bridge.py`：实现独立的 Windows 命名互斥体 `Local\PyQuant3AntigravityBridge_...`，绑定独立网关端口 `26778`，分配 `agv-` 独立 Node ID 与 `logs/desktop-agv-bridge-live` 隔离目录；
+    - 新增 `desktop_antigravity_agent.py`：实现基于 `agy` stream-json / Python SDK 的桌面 Worker，心跳上报 `provider: "antigravity-cli"`，支持 `ai_chat_v1` 流式 200ms 防抖发布（`ProgressPublisher`）、`stock_research_v1` 本地确定性行情切片冻结注入（`ats_evidence`）与 JSON Schema 强校验，离线 WAL 出件箱（`ResultOutbox`）幂等交付；
+- [x] **【桌面管理器端全功能对齐与生命周期控制】**：
+    - 新增 `webTools/window_manager/antigravity_bridge_manager.py`：实现 `AntigravityBridgeController`（偏好文件 `antigravity-bridge-manager.json`）与 4-Tab 完整管理界面 `AntigravityBridgeManagerDialog`（状态与用量、后台名录、任务历史、桥接日志、`ANTIGRAVITY_BRIDGE_OK` 全链路探针）；
+    - 升级 `webTools/window_manager/ui.py`：底栏增加 `btn_agv_bridge` 专属紫色按钮；托盘右键增加 `🌟 Antigravity 桌面桥管理...`；扩展工具菜单增加管理入口与 `Antigravity 桌面桥：随管理器启动` 勾选开关；启动时 1500ms 错峰自启并注入 15s 状态防抖轮询；退出时通过 `shutdown_antigravity_bridge_with_manager` 挂载 `app.aboutToQuit` 实现安全析构；
+- [x] **【自动化单元测试 100% 纯绿通过】**：
+    - 新增 `tests/test_antigravity_bridge_parity.py`：全方位覆盖偏好文件物理隔离、双桥互斥锁并行独立性、配置生成与 Node ID 格式、Gemini 模型目录探针、UI 辅助方法接口对齐、状态日志读取等 6 项自动化单测，0.013 秒纯绿全过；
+- [x] **【生产环境管理器编译打包与无缝热替换落地】**：
+    - 升级 `manage_window_layout.spec` 打包配置，注入新模块 `hiddenimports`；
+    - 执行 PyInstaller 成功生成 43MB 单文件可执行程序 `dist\manage_window_layout.exe`；
+    - 将生产环境原文件备份为 `D:\JohnsonProgram\instockMonitorTK\manage_window_layout.exe.bak_20261018`，并将最新打包的管理器成功替换到生产环境，启动自检 0 报错；
+- [x] **【全链路与全业务闭环验证】**：
+    - 执行 `run_desktop_antigravity_bridge.py --prepare-only` 成功生成运行环境；
+    - 验证双桥控制器同时存在并能独立读取状态，Web 调度中心与本地桥接链路全面闭环。
+
 ## 2026-10-18 15:05 【Codex 与 Antigravity 双桌面桥并行独立架构与管理器全功能对齐落地设计方案】(`stock-strategy/docs/tasks/2026-10-18_1505_Codex与Antigravity双桌面桥并行独立架构与管理器全功能对齐落地设计.md`, `webTools/window_manager/ui.py`, `webTools/window_manager/codex_bridge_manager.py`)
 - [x] **【双桥架构定性与并行独立原则确立（严正纠偏）】**：
     - 坚决纠偏“单引擎切换/替代”误区，确立 Codex 桌面桥与 Antigravity 桌面桥为**完全并行、物理隔离、各自独立存活**的双核架构；
