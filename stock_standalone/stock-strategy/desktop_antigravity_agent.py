@@ -259,7 +259,7 @@ def _agy_result_failure(result: dict) -> BoundedCLIError:
     if isinstance(message, str):
         message = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", message)
         message = re.sub(r"(?i)bearer\s+\S+", "Bearer [redacted]", message)
-        message = re.sub(r"(?i)((?:api[_-]?key|access[_-]?token|refresh[_-]?token|password)\s*[:=]\s*)[^\s&\"']+", r"\1[redacted]", message)
+        message = re.sub(r"(?i)((?:api[_-]?key|access[_-]?token|refresh[_-]?token|password)[\"']?\s*[:=]\s*[\"']?)[^\s&\"']+", r"\1[redacted]", message)
         message = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", "[email]", message)
         error.agy_error_message = " ".join(message.split())[:640]
     return error
