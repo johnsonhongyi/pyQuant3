@@ -243,9 +243,26 @@ def _chat_error_info(error: Exception):
     root_error = cause or error
     error_code = str(getattr(root_error, "peer_code", "") or getattr(root_error, "code", "") or type(root_error).__name__)[:120]
     details = _error_details(root_error)
+    if getattr(root_error, "agy_error_message", ""):
+        details["message"] = root_error.agy_error_message
     if cause:
         details["callback_error_code"] = error.code
     return error_code, details
+
+
+def _agy_result_failure(result: dict) -> BoundedCLIError:
+    status = str(result.get("status") or "ERROR").upper()
+    error = BoundedCLIError("AGY_RESULT_" + (status if re.fullmatch(r"[A-Z_]{1,32}", status) else "ERROR"))
+    message = result.get("error")
+    if isinstance(message, dict):
+        message = message.get("message")
+    if isinstance(message, str):
+        message = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", message)
+        message = re.sub(r"(?i)bearer\s+\S+", "Bearer [redacted]", message)
+        message = re.sub(r"(?i)((?:api[_-]?key|access[_-]?token|refresh[_-]?token|password)\s*[:=]\s*)[^\s&\"']+", r"\1[redacted]", message)
+        message = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", "[email]", message)
+        error.agy_error_message = " ".join(message.split())[:640]
+    return error
 
 
 def _resolve_cli_effort(model: str, requested, models: list[dict], fallback: str = "low") -> str:
@@ -446,7 +463,7 @@ def run_antigravity_chat(peer: DesktopPeer, job: dict, cli: str, runtime: Path, 
             if isinstance(result_status, str) and result_status.upper() in {
                 "ERROR", "FAILED", "CANCELED", "CANCELLED", "INTERRUPTED", "INVALID",
             }:
-                raise BoundedCLIError(f"AGY_RESULT_{result_status.upper()}")
+                raise _agy_result_failure(stream.result_event)
             final_text = "".join(stream.content).strip()
             if not final_text:
                 raise BoundedCLIError("AGY_RESULT_CONTENT_EMPTY")
@@ -511,7 +528,7 @@ def run_antigravity_chat(peer: DesktopPeer, job: dict, cli: str, runtime: Path, 
             "status": "failed",
             "provider": "antigravity-cli",
             "error_code": error_code,
-            "error_message": error_code,
+            "error_message": error_detail.get("message") or error_code,
             "completed_at": time.time(),
         }
         try:
@@ -598,7 +615,7 @@ def run_antigravity_strategy(peer: DesktopPeer, job: dict, cli: str, runtime: Pa
             raise BoundedCLIError("AGY_RESULT_EVENT_MISSING")
         result_status = result_event.get("status")
         if isinstance(result_status, str) and result_status.upper() not in ("SUCCESS", "COMPLETED"):
-            raise BoundedCLIError(f"AGY_RESULT_{result_status.upper()}")
+            raise _agy_result_failure(result_event)
         result_obj = _coerce_structured_output(result_event)
         if not result_obj or not matches_json_schema(result_obj, schema):
             raise BoundedCLIError("AGY_STRUCTURED_OUTPUT_INVALID")
