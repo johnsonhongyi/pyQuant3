@@ -1,5 +1,39 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-18 15:05 【Codex 与 Antigravity 双桌面桥并行独立架构与管理器全功能对齐落地设计方案】(`stock-strategy/docs/tasks/2026-10-18_1505_Codex与Antigravity双桌面桥并行独立架构与管理器全功能对齐落地设计.md`, `webTools/window_manager/ui.py`, `webTools/window_manager/codex_bridge_manager.py`)
+- [x] **【双桥架构定性与并行独立原则确立（严正纠偏）】**：
+    - 坚决纠偏“单引擎切换/替代”误区，确立 Codex 桌面桥与 Antigravity 桌面桥为**完全并行、物理隔离、各自独立存活**的双核架构；
+    - 两座桥拥有完全独立的本地运行时（`desktop-strategy-live` vs `desktop-agv-bridge-live`）、独立互斥体锁（`Local\PyQuant3CodexBridge_...` vs `Local\PyQuant3AntigravityBridge_...`）、独立偏好持久化（`codex-bridge-manager.json` vs `antigravity-bridge-manager.json`）与独立出件箱（`agent.db` WAL）；
+- [x] **【Web 前端与 ATS 终端双端自适应调度机制闭环】**：
+    - 深入剖析 `/api/v1/linkage/targets` 注册契约（`provider="codex-app-server"` vs `provider="antigravity-cli"`），两桥同时向调度中心发送心跳并呈现在桥名录中；
+    - Web 看板与 ATS 终端支持用户显式选择，并在个股异动速查（Gemini 3.8 Flash 直出）、策略条件分析（受控高思考链）与长周期代码归因（Gemini 3.8 Pro 百万上下文）中实现毫秒级自适应调度与存活容灾故障转移；
+- [x] **【桌面管理器（`ui.py`）生命周期与交互 100% 全功能对齐设计】**：
+    - **底栏工具栏**：新增独立紫色 `btn_agv_bridge = QPushButton("🌟 AGV桥")` 并列排布；
+    - **托盘右键菜单**：新增独立动作 `🌟 Antigravity 桌面桥管理...`；
+    - **扩展工具菜单**：新增 `🌟 Antigravity 桌面桥状态、任务与用量管理...` 及其专属独立的 Checkable 开关 `Antigravity 桌面桥：随管理器启动`，菜单弹出自动同步状态；
+    - **生命周期调度**：设计 `1500ms` 错峰自启动（避免启动 I/O 争用）、独立 15s 状态定时器与日志防抖指纹，以及退出时 `shutdown_antigravity_bridge_with_manager` 线程级物理安全回收；
+- [x] **【独立管理面板与推理模型梯队落地方案】**：
+    - 完整设计 `AntigravityBridgeManagerDialog`（4 Tab：状态与用量、后台名录、任务历史、桥接日志）及 `ANTIGRAVITY_BRIDGE_OK` 全链路健康自检闭环；
+    - 梳理 Gemini 3.8 Flash / Pro 与本地离线 Ollama 的分级选型与推理强度（Reasoning Effort）矩阵；
+    - 严格遵循用户**“更新优化可落地实施方案，但绝对不实施”**的工程铁律，产出完备设计与代码落库清单，未修改任何生产业务执行代码。
+
+## 2026-10-18 14:30 【Codex桌面桥深度分析、Antigravity CLI (agv) 桥全功能对齐评估与推理模型选型实施方案】(`docs/tasks/2026-10-18_1430_Codex桌面桥深度分析与Antigravity_CLI_agv桥对齐接入方案.md`)
+- [x] **【Codex 桌面桥全链路设计与实现深度剖析】**：
+    - 完整梳理远程 Web 服务与本地交易环境（ATS / MonitorTK / RAMDisk）之间的协同拓扑：`DesktopPeer` HMAC-SHA256 签名轮询、`EventInbox` 4MB 内存上限与文本增量合并、`AppServerPool` 单实例进程池与空闲边界切换、`ProgressPublisher` 200ms 防抖流式推送、`ResultOutbox` SQLite WAL 离线幂等出件箱、`codex_bridge_manager.py` Windows 命名互斥体与单实例归属校验；
+    - 厘清 `thread/start`、`turn/start`、`item/agentMessage/delta` 以及只读动态工具回调 `item/tool/call` (`get_market_context`) 的端到端时序闭环；
+- [x] **【Antigravity CLI (agv) 模式全功能对齐可行性评估】**：
+    - 穿透对比长生命周期 JSON-RPC 2.0 与 AGY 子进程流式管道（`stream-json`），评估会话断点续聊、流式 token 推送、动态证据工具注入、任务打断取消、安全隔离沙箱等核心维度的技术实现路径；
+    - 确立“静态证据前置冻结注入 + 动态 MCP 扩展”双轨机制，消除模型因网络波动读取跨毫秒脏数据的风险；
+- [x] **【基于 agv cli 模式的工程接入落地方案】**：
+    - 遵循 SOLID 原则抽象 `BaseDesktopEngineBackend`，引入 `AntigravityCLIBackend` 与 `CodexAppServerBackend` 双引擎支持，保持 `ResultOutbox`、`DesktopPeer` 契约 100% 稳定；
+    - 设计 `global.ini` 动态配置切换与 `codex_bridge_manager.py` 平滑升级，支持全链路一键测试与故障自愈；
+- [x] **【量化场景推理模型选型与落地实施策略】**：
+    - 针对股票实时监控与策略研判的四大刚性约束（极低 TTFT、零幻觉数值一致性、100% JSON Schema 依从、配额成本效益），确立分级路由体系：
+        - **主力实时/高频梯队**：Gemini 3.8 Flash / Gemini 2.5 Flash（亚秒级流式响应，负责 `bridge_test`、`ai_chat_v1`、`stock_research_v1` 初筛）；
+        - **深度投研/复杂因果推演梯队**：Gemini 3.8 Pro / Gemini 2.5 Pro（超长上下文与深层思维链，负责 `TradingAnalyzer` 盘后复盘、`--ipo-learning` Gate 4/5 影子决策）；
+        - **离线安全梯队**：本地 Ollama / LiteRT（断网离线保底与完全隔离风控）；
+    - 明确四阶段演进路径，确保生产系统零停机、零破坏。
+
 ## 2026-10-11 22:15 【TK与ATS高性能语言实现审核及Qt架构对齐演进评估报告】(`docs/tasks/2026-10-11_2215_TK与ATS高性能语言及Qt对齐架构审核.md`, `instock_MonitorTK.py`, `ats/`)
 - [x] **【TK 与 ATS 现状底层架构深度审核与性能瓶颈定性】**：
     - 查明当前系统最严重的体验瓶颈不是底层 Python 算不动，而是 Tkinter `ttk.Treeview` 宽表同步绘制（2938px 宽屏下 5500 行重绘高达 328~330ms）死锁 GUI 线程，导致帧率跌至 3~7 FPS，产生滚动卡顿与点击延迟；

@@ -88,3 +88,22 @@ data/ipo_learning/shadow_observations.sqlite
 /scratch/ac86u-clash-20261018/
 !tools/ac86u_clash/inspect_lan_router.py
 !tools/ac86u_clash/inspect_docker_lan_ports.py
+
+# Private web gateway topology, live credentials and recovery artifacts.
+/docs/tasks/2026-10-18_1152_AC86U外网端口与HTTPS修复.md
+/tools/ac86u_clash/private/
+/tools/ac86u_clash/**/*.local.conf
+/tools/ac86u_clash/scripts/ac86u-web-access.conf
+/tools/ac86u_clash/**/acme/
+/tools/ac86u_clash/**/certs/
+/tools/ac86u_clash/**/cert-releases/
+/tools/ac86u_clash/**/*.pass
+/tools/ac86u_clash/**/*.key
+/tools/ac86u_clash/**/*.pem
+/tools/ac86u_clash/**/*.cer
+/tools/ac86u_clash/**/*.p12
+/tools/ac86u_clash/**/*.pfx
+/tools/ac86u_clash/**/web_cert_sync
+/tools/ac86u_clash/**/*known_hosts*
+/tools/ac86u_clash/**/*.tar*
+/tools/ac86u_clash/**/*_ed25519

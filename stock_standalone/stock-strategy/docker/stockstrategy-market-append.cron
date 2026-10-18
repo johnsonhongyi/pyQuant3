@@ -1,12 +1,13 @@
 SHELL=/bin/sh
 PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
 
+# Debian cron schedules in the host timezone: Asia/Shanghai.
+# CRON_TZ also documents the timezone for the Web status parser.
 CRON_TZ=Asia/Shanghai
+TZ=Asia/Shanghai
 20 16 * * 1-5 root /root/johnson/stock-strategy/docker/market-append.sh cn
 20 17 * * 1-5 root /root/johnson/stock-strategy/docker/market-append.sh cn-retry
-
-CRON_TZ=Asia/Hong_Kong
 15 6 * * * root /root/johnson/stock-strategy/docker/market-append.sh us
 
-CRON_TZ=UTC
-15 0 * * * root /root/johnson/stock-strategy/docker/market-append.sh crypto
+# UTC daily candles close at 08:00 Beijing time; retry once at 09:15.
+15 8,9 * * * root /root/johnson/stock-strategy/docker/market-append.sh crypto

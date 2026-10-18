@@ -249,7 +249,7 @@ def apply_commands(db, state, now):
                     raise ValueError("invalid AI model")
                 if data.get("reasoning_effort", "medium") not in ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"):
                     raise ValueError("invalid reasoning effort")
-                state["ai_settings"] = {**DEFAULT_AI, **data}
+                state["ai_settings"] = {**DEFAULT_AI, **state.get("ai_settings", {}), **data}
                 state.pop("ai_latest", None)
             elif action == "ai_ask":
                 from follow_ai import enqueue

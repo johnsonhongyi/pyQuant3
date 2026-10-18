@@ -588,7 +588,9 @@ def main():
     runt.run_with_args(save_nph_stock_spot_data)
     if os.environ.get("INSTOCK_STOCK_SPOT_ONLY") != "1":
         runt.run_with_args(save_nph_etf_spot_data)
-    runt.run_with_args(save_tdx_index_history)
+    # The generic runner leaves before=True for non-save_nph functions.
+    # Run the index close writer explicitly for this trading date.
+    save_tdx_index_history(now.date(), before=False)
 
 
 # main函数入口

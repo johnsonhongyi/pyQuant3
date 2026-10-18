@@ -30,6 +30,26 @@ class AIFollowTests(unittest.TestCase):
         self.state.pop("ai_settings")
         self.assertIsNone(ai.enqueue(self.db, self.state, NOW))
 
+    def test_bridge_settings_preserve_cadence_and_frozen_jobs(self):
+        import tempfile
+        from pathlib import Path
+        self.state["ai_settings"].update(interval_seconds=720, mode="enforce", model="gpt-6-luna", reasoning_effort="max")
+        job = ai.enqueue(self.db, self.state, NOW, force=True)
+        frozen = self.db.execute("SELECT context FROM ai_jobs WHERE id=?", (job,)).fetchone()[0]
+        before = (self.state["cash"], self.state["positions"], self.state["enabled"], self.state["kill"])
+        with tempfile.TemporaryDirectory() as folder:
+            control = af.connect_control(Path(folder) / "account.db")
+            try:
+                payload = {"enabled": True, "mode": "enforce", "node_id": "active-bridge", "workspace_id": "active-workspace", "model": "gpt-6-luna", "reasoning_effort": "max"}
+                control.execute("INSERT INTO commands(id,action,payload,created_at) VALUES('auto-bridge-test','ai_settings',?,?)", (json.dumps(payload), NOW.isoformat()))
+                af.apply_commands(control, self.state, NOW)
+            finally:
+                control.close()
+        self.assertEqual(self.state["ai_settings"]["node_id"], "active-bridge")
+        self.assertEqual(self.state["ai_settings"]["interval_seconds"], 720)
+        self.assertEqual(before, (self.state["cash"], self.state["positions"], self.state["enabled"], self.state["kill"]))
+        self.assertEqual(self.db.execute("SELECT context FROM ai_jobs WHERE id=?", (job,)).fetchone()[0], frozen)
+
     def test_model_and_effort_are_frozen_per_job(self):
         self.state['ai_settings'].update(model='gpt-6-luna',reasoning_effort='low')
         job=ai.enqueue(self.db,self.state,NOW,force=True)
