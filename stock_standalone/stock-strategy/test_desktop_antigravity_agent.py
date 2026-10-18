@@ -31,6 +31,7 @@ class AntigravityChatTests(unittest.TestCase):
                 self.closed = True
 
         def fake_run(command, **kwargs):
+            self.assertTrue(kwargs["hidden_console"])
             self.assertIn("--effort", command)
             self.assertEqual(command[command.index("--effort") + 1], "high")
             prompt = json.loads(kwargs["stdin_bytes"].decode("utf-8"))
@@ -42,6 +43,7 @@ class AntigravityChatTests(unittest.TestCase):
             stream(b'{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"hello "}}\n')
             stream(b'{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"world"}}\n')
             stream(json.dumps({"event": "result", "result": {"status": "SUCCESS", "response": "hello world",
+                                                                   "usage": {"input_tokens": 14429, "cache_read_tokens": 1000, "output_tokens": 123, "thinking_tokens": 917, "total_tokens": 14552},
                                                                    "conversation_id": conversation_id}}).encode() + b"\n")
             return SimpleNamespace(returncode=0, stdout=b"", completed_by_predicate=True)
 
@@ -66,6 +68,12 @@ class AntigravityChatTests(unittest.TestCase):
         self.assertEqual(posted[0]["result"]["content"], "hello world")
         self.assertEqual(posted[0]["result"]["thread_id"], "c3b66b04-872b-4fbe-a3a4-058a026ef20a")
         self.assertEqual(posted[0]["result"]["reasoning_effort"], "high")
+        result = posted[0]["result"]
+        self.assertEqual(result["token_usage"]["inputTokens"], 14429)
+        self.assertEqual(result["token_usage"]["cachedInputTokens"], 1000)
+        self.assertEqual(result["token_usage"]["reasoningOutputTokens"], 917)
+        self.assertLessEqual(result["timings"]["turn_started_ms"], result["timings"]["first_token_ms"])
+        self.assertLessEqual(result["timings"]["first_token_ms"], result["timings"]["bridge_to_completed_ms"])
         self.assertTrue(all(item.get("thread_id", "") in ("", "c3b66b04-872b-4fbe-a3a4-058a026ef20a") for item in publisher_instances[0].payloads))
         self.assertEqual(ledger.execute("SELECT result FROM chat_results WHERE id='job-123'").fetchone() is not None, True)
 
@@ -80,6 +88,88 @@ class AntigravityChatTests(unittest.TestCase):
         self.assertEqual("".join(stream.content), "ok")
         self.assertEqual(stream.result_event["status"], "SUCCESS")
         self.assertEqual(stream.thread_id, "c3b66b04-872b-4fbe-a3a4-058a026ef20a")
+        self.assertEqual(stream.token_usage, {})
+
+    def test_dynamic_catalog_filters_unavailable_and_gpt_oss_and_caches_probe(self):
+        output = (b"gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n"
+                  b"gemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n"
+                  b"claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n"
+                  b"gpt-oss-120b-medium\tGPT-OSS 120B (Medium)\n"
+                  b"gemini-4-argon\tGemini 4 Argon Unavailable\n")
+        with tempfile.TemporaryDirectory() as directory:
+            cli = Path(directory) / "agy.exe"
+            cli.touch()
+            with patch.object(agent, "run_bounded_cli", return_value=SimpleNamespace(stdout=output, returncode=0)) as run:
+                catalog = agent.AntigravityCatalog(str(cli))
+                self.assertTrue(catalog.probe())
+                self.assertEqual(run.call_count, 1)
+                self.assertTrue(run.call_args.kwargs["hidden_console"])
+                self.assertEqual(catalog.default_model, "gemini-3.8-flash-low")
+                self.assertEqual(len(catalog.models), 3)
+                self.assertEqual(catalog.models[0]["efforts"], ["high"])
+                self.assertEqual(catalog.models[2]["default_effort"], "low")
+                catalog.fetched_at -= 301
+                self.assertTrue(catalog.probe())
+                self.assertEqual(run.call_count, 2)
+
+    def test_catalog_failure_clears_availability_and_backs_off(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cli = Path(directory) / "agy.exe"
+            cli.touch()
+            with patch.object(agent, "run_bounded_cli", side_effect=agent.BoundedCLIError("CLI_TIMEOUT")) as run:
+                catalog = agent.AntigravityCatalog(str(cli))
+                self.assertFalse(catalog.probe())
+                self.assertEqual(run.call_count, 1)
+                self.assertFalse(catalog.status()["models_available"])
+                self.assertEqual(catalog.models, [])
+
+    def test_model_and_fixed_effort_mismatch_fail_explicitly(self):
+        models = agent._parse_model_catalog("gemini-3.8-flash-low\tGemini Flash (Low)\n")
+        with self.assertRaisesRegex(agent.BoundedCLIError, "MODEL_UNAVAILABLE"):
+            agent._select_model({"model": "removed-model"}, models, "")
+        with self.assertRaisesRegex(agent.BoundedCLIError, "EFFORT_UNSUPPORTED"):
+            agent._resolve_cli_effort(models[0]["id"], "high", models)
+
+    def test_failed_receipt_is_durable_and_replayed_without_inference(self):
+        job = {"id": "receipt", "lease_token": "lease", "context": {
+            "prompt": "probe", "bridge_test": True, "model": "flash-low"}}
+        models = [{"id": "flash-low", "efforts": ["low"], "default_effort": "low"}]
+        with tempfile.TemporaryDirectory() as directory, sqlite3.connect(":memory:") as ledger:
+            with patch.object(agent, "ProgressPublisher"), patch.object(agent, "_emit_log"), \
+                 patch.object(agent, "run_bounded_cli") as run, \
+                 patch.object(agent, "_post_chat_result", side_effect=OSError("offline")) as post:
+                with self.assertRaises(OSError):
+                    agent.run_antigravity_chat(Mock(), job, "agy", Path(directory), models, ledger, Mock())
+                self.assertEqual(post.call_count, 1)
+                self.assertEqual(post.call_args.args[1]["status"], "completed")
+                self.assertIsNone(ledger.execute("SELECT delivered_at FROM result_outbox").fetchone()[0])
+                post.side_effect = None
+                agent.run_antigravity_chat(Mock(), job, "agy", Path(directory), models, ledger, Mock())
+                self.assertIsNotNone(ledger.execute("SELECT delivered_at FROM result_outbox").fetchone()[0])
+                run.assert_not_called()
+
+    def test_strategy_preserves_usage_and_replays_validated_result(self):
+        proposal = {"market_view": "missing evidence", "rotation_view": "unknown", "answer": "observe", "plans": []}
+        job = {"id": "strategy", "lease_token": "lease", "context": {"model": "flash-low"}}
+        models = [{"id": "flash-low", "efforts": ["low"], "default_effort": "low"}]
+        peer = Mock()
+
+        def run(command, **kwargs):
+            event = {"event": "result", "result": {"status": "SUCCESS", "response": json.dumps(proposal),
+                "usage": {"input_tokens": 100, "output_tokens": 10, "total_tokens": 110}}}
+            kwargs["stdout_callback"](json.dumps(event).encode() + b"\n")
+            return SimpleNamespace(returncode=0, stdout=b"")
+
+        with tempfile.TemporaryDirectory() as directory, sqlite3.connect(":memory:") as ledger:
+            with patch.object(agent, "ProgressPublisher"), patch.object(agent, "_emit_log"), \
+                 patch.object(agent, "ats_evidence", return_value={}), \
+                 patch.object(agent, "run_bounded_cli", side_effect=run) as runner:
+                for _ in range(2):
+                    agent.run_antigravity_strategy(peer, job, "agy", Path(directory), models, ledger, Mock())
+                self.assertEqual(runner.call_count, 1)
+                saved = json.loads(ledger.execute("SELECT result FROM results").fetchone()[0])
+                self.assertEqual(saved["proposal"], proposal)
+                self.assertEqual(saved["token_usage"]["inputTokens"], 100)
 
     def test_progress_publisher_uses_only_valid_agy_conversation_ids(self):
         sent = []

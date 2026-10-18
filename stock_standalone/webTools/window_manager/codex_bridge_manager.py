@@ -21,6 +21,7 @@ from pathlib import Path
 from urllib.request import HTTPRedirectHandler, Request, ProxyHandler, build_opener
 
 from PyQt6 import QtCore, QtGui, QtWidgets
+from .bridge_token_usage import token_usage_text
 
 
 DEFAULT_BACKEND = "http://192.168.50.60:20073"
@@ -601,6 +602,12 @@ class BridgeController:
             if process_alive:
                 running = True
                 status = {**status, "status": agent.get("status"), "agent_pid": pid}
+        if launch_mode == "thread" and status_pid == os.getpid():
+            with self._thread_registry_lock:
+                thread = self._thread_registry.get(str(self.runtime_root).casefold())
+                running = bool(thread and thread.is_alive())
+        elif launch_mode == "process" and pid == os.getpid():
+            running = False
         last_run = ""
         last_run_at = status.get("at") or (agent.get("updated_epoch") if agent_fresh else 0)
         try:
@@ -628,12 +635,23 @@ class BridgeController:
     def bridge_command(self) -> list[str] | None:
         if getattr(sys, "frozen", False):
             return [sys.executable]
-        runner_candidates = (
-            self.project_root / "stock-strategy" / "tools" / "run_desktop_strategy_bridge.py",
-            self.project_root / "stock_standalone" / "stock-strategy" / "tools" / "run_desktop_strategy_bridge.py",
-        )
-        runner = next((path for path in runner_candidates if path.is_file()), None)
-        return [sys.executable, str(runner)] if runner else None
+        # Source launches may start from the monorepo, strategy root, or a
+        # nested development directory. Probe ancestors without walking trees.
+        checked = set()
+        for anchor in (self.project_root.resolve(), Path(__file__).resolve().parent):
+            for root in (anchor, *anchor.parents):
+                for relative in (
+                    "tools/run_desktop_strategy_bridge.py",
+                    "stock-strategy/tools/run_desktop_strategy_bridge.py",
+                    "stock_standalone/stock-strategy/tools/run_desktop_strategy_bridge.py",
+                ):
+                    candidate = root / relative
+                    if candidate in checked:
+                        continue
+                    checked.add(candidate)
+                    if candidate.is_file():
+                        return [sys.executable, str(candidate)]
+        return None
 
     @staticmethod
     def _process_tree_contains(pid: int, ancestor_pid: int) -> bool:
@@ -1014,19 +1032,24 @@ class BridgeController:
             if getattr(sys, "frozen", False):
                 from run_desktop_strategy_bridge import main as run_bridge
             else:
-                runner_root = Path(os.path.abspath(command[1])).parent.parent
-                if str(runner_root) not in sys.path:
-                    sys.path.insert(0, str(runner_root))
-                from run_desktop_strategy_bridge import main as run_bridge
+                import importlib.util
+                runner_path = Path(os.path.abspath(command[1]))
+                spec = importlib.util.spec_from_file_location("_codex_desktop_bridge_runner", runner_path)
+                if spec is None or spec.loader is None:
+                    raise ImportError(f"Cannot load desktop bridge runner: {runner_path}")
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                run_bridge = module.main
             run_bridge(list(arguments))
-        except (OSError, RuntimeError, ValueError, TypeError) as exc:
+        except (OSError, RuntimeError, ValueError, TypeError, ImportError) as exc:
             runtime_arg = next((arguments[i + 1] for i, value in enumerate(arguments[:-1]) if value == "--runtime"), "")
             if runtime_arg:
                 path = Path(runtime_arg) / "status.json"
                 try:
+                    path.parent.mkdir(parents=True, exist_ok=True)
                     pending = path.with_suffix(".pending")
                     detail = {"type":type(exc).__name__, "message":str(exc)[:320], "stage":"manager_thread_start"}
-                    record = {"status":"degraded", "error_code":type(exc).__name__, "stage":"manager_thread_start", "error_detail":detail, "at":time.time()}
+                    record = {"status":"degraded", "error_code":type(exc).__name__, "stage":"manager_thread_start", "error_detail":detail, "at":time.time(), "agent_pid":os.getpid(), "launch_mode":"thread"}
                     pending.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
                     os.replace(pending, path)
                     with (Path(runtime_arg) / "agent-output.txt").open("ab") as output:
@@ -1328,8 +1351,13 @@ class CodexBridgeManagerDialog(QtWidgets.QDialog):
             state_text = "运行器就绪 · 桥接已停止"
         self.status_label.setText(state_text)
         self.cmb_run_mode.blockSignals(True)
-        mode_index = self.cmb_run_mode.findData(task.get("mode", "process"))
+        mode_index = self.cmb_run_mode.findData(self.controller.run_mode())
         self.cmb_run_mode.setCurrentIndex(max(0, mode_index))
+        current_mode = "管理器线程" if task.get("mode") == "thread" else "独立进程"
+        self.cmb_run_mode.setToolTip(
+            f"运行方式在下次启动桥时生效；当前：{current_mode}。" if running else
+            "运行方式在下次启动桥时生效；管理器线程随管理器退出。"
+        )
         self.cmb_run_mode.setEnabled(self._operation_worker is None)
         self.cmb_run_mode.blockSignals(False)
         self.btn_start.setEnabled(exists and not running and self._operation_worker is None)
@@ -1469,13 +1497,7 @@ class CodexBridgeManagerDialog(QtWidgets.QDialog):
         if not tokens or not tokens.get("available"):
             self.token_label.setText("未找到本机 Codex 会话用量记录。")
             return
-        today = tokens.get("today") or {}
-        week = tokens.get("week") or {}
-        hit = (week.get("cached", 0) / week.get("input", 1) * 100) if week.get("input", 0) else 0
-        self.token_label.setText(
-            f"今日：{today.get('total', 0):,} tokens（输入 {today.get('input', 0):,} / 缓存 {today.get('cached', 0):,} / 输出 {today.get('output', 0):,}，{today.get('turns', 0)} 轮）\n"
-            f"近 7 日：{week.get('total', 0):,} tokens（输入 {week.get('input', 0):,} / 缓存 {week.get('cached', 0):,} / 输出 {week.get('output', 0):,}，缓存占输入 {hit:.1f}%）"
-        )
+        self.token_label.setText(token_usage_text(tokens))
 
     def _render_tasks(self, history: list[dict], detail: dict, status: str):
         if status == "analyzing":
