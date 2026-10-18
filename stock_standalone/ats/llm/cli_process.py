@@ -75,6 +75,7 @@ def run_bounded_cli(
     max_stdout_bytes: int = MAX_STDOUT_BYTES,
     max_stderr_bytes: int = MAX_STDERR_BYTES,
     completion_predicate: Callable[[bytes], bool] | None = None,
+    stdout_callback: Callable[[bytes], None] | None = None,
     timeout_limit_seconds: float = 30.0,
     cancel_event: threading.Event | None = None,
 ) -> BoundedCLIResult:
@@ -110,6 +111,8 @@ def run_bounded_cli(
     buffers = {"stdout": bytearray(), "stderr": bytearray()}
     limits = {"stdout": max_stdout_bytes, "stderr": max_stderr_bytes}
     exceeded = threading.Event()
+    callback_failed = threading.Event()
+    callback_errors: list[Exception] = []
     buffer_lock = threading.Lock()
     process: subprocess.Popen[bytes] | None = None
 
@@ -126,6 +129,12 @@ def run_bounded_cli(
                         target.extend(chunk[:remaining])
                     if len(chunk) > remaining:
                         exceeded.set()
+                if name == "stdout" and stdout_callback is not None:
+                    try:
+                        stdout_callback(chunk)
+                    except Exception as exc:
+                        callback_errors.append(exc)
+                        callback_failed.set()
         except (OSError, ValueError):
             return
 
@@ -169,6 +178,10 @@ def run_bounded_cli(
                     failure_code = "CLI_OUTPUT_LIMIT"
                     _terminate_process_tree(process)
                     break
+                if callback_failed.is_set():
+                    failure_code = "CLI_OUTPUT_CALLBACK_FAILED"
+                    _terminate_process_tree(process)
+                    break
                 if completion_predicate is not None:
                     with buffer_lock:
                         stdout_snapshot = bytes(buffers["stdout"])
@@ -201,6 +214,12 @@ def run_bounded_cli(
                     reader.join(timeout=0.5)
                 if any(reader.is_alive() for reader in readers):
                     raise BoundedCLIError("CLI_OUTPUT_READER_STUCK")
+            if callback_failed.is_set():
+                raise BoundedCLIError("CLI_OUTPUT_CALLBACK_FAILED") from callback_errors[0]
+            if completion_predicate is not None and not completed_by_predicate:
+                with buffer_lock:
+                    stdout_snapshot = bytes(buffers["stdout"])
+                completed_by_predicate = completion_predicate(stdout_snapshot)
             if exceeded.is_set() and not failure_code:
                 failure_code = "CLI_OUTPUT_LIMIT"
             if failure_code:

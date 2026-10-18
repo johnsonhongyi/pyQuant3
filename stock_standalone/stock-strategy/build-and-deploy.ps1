@@ -95,11 +95,23 @@ if ($LASTEXITCODE -ne 0 -or [System.IO.Path]::GetFullPath($gitRoot) -ne [System.
 try {
     $null = New-Item -ItemType Directory -Path $work,$cacheRoot -Force
     Write-Host "Checking pinned SSH identity for $Server..."
-    $keys = & $sshKeyscan -T 10 -t ed25519 $Server 2>$null
+    $prevEap = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'SilentlyContinue'
+        $keys = & $sshKeyscan -T 10 -t ed25519 $Server 2>$null
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
     if ($LASTEXITCODE -ne 0 -or -not $keys) { throw 'Could not read the server ED25519 host key.' }
     $key = $keys | Where-Object { $_ -and $_ -notmatch '^#' } | Select-Object -First 1
-    Set-Content -LiteralPath $knownHosts -Value $key -Encoding utf8NoBOM
-    $keyInfo = (& $sshKeygen -lf $knownHosts -E sha256 2>$null | Out-String)
+    [System.IO.File]::WriteAllText($knownHosts, $key + "`n", [System.Text.UTF8Encoding]::new($false))
+    $prevEap = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'SilentlyContinue'
+        $keyInfo = (& $sshKeygen -lf $knownHosts -E sha256 2>$null | Out-String)
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
     $fingerprint = [regex]::Match($keyInfo, 'SHA256:[A-Za-z0-9+/=]+').Value
     if ($fingerprint -ne $expectedFingerprint) { throw 'Server SSH identity differs from the approved ED25519 fingerprint.' }
     $sshOptions = @('-o',"UserKnownHostsFile=$knownHosts",'-o','StrictHostKeyChecking=yes','-o','IdentitiesOnly=yes','-o','ConnectTimeout=15','-o','ServerAliveInterval=30','-o','ServerAliveCountMax=3','-o','BatchMode=yes')
@@ -128,7 +140,7 @@ try {
         'printf ''DATA_FREE_KB=%s\n'' "$disk_free"',
         'printf ''DOCKER_FREE_KB=%s\n'' "$docker_free"',
         'printf ''A_STOCK_TOKEN=''',
-        'awk -F= ''$1 == "A_STOCK_TOKEN" {sub(/^[^=]*=/, ""); print; exit}'' "$DATA_ROOT/config/backend.env"'
+        'sed -n ''s/^A_STOCK_TOKEN=//p'' "$DATA_ROOT/config/backend.env" | head -n 1'
     ) -join [char]10
     $preflightLines = & $ssh @sshOptions $target $preflight
     if ($LASTEXITCODE -ne 0) { throw 'Remote preflight failed; no build or deployment changes were made.' }

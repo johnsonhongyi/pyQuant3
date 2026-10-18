@@ -70,15 +70,17 @@ class _NoRedirect(HTTPRedirectHandler):
 
 def _short_bridge_id(value: str) -> str:
     raw = str(value or "").strip()
-    for prefix in ("codex-", "ws-", "tk-"):
+    for prefix in ("codex-", "agv-", "ws-", "tk-"):
         if raw.lower().startswith(prefix):
             raw = raw[len(prefix):]
             break
     return raw[:8] or "—"
 
 
-def _bridge_target_name(label: str) -> str:
+def _bridge_target_name(label: str, node_id: str = "", provider: str = "") -> str:
     raw = str(label or "").strip()
+    if str(node_id or "").strip().lower().startswith("agv-") or "antigravity" in str(provider or "").lower() or "antigravity" in raw.lower():
+        return "Antigravity"
     if not raw or raw.lower().startswith("desktop codex") or "ats ai bridge" in raw.lower():
         return "Codex"
     return raw[:32]
@@ -614,7 +616,7 @@ class BridgeController:
             "state": "Running" if running else "Ready" if command else "Missing",
             "running": running,
             "enabled": self.autostart_enabled(),
-            "mode": status.get("launch_mode") or self.run_mode(),
+            "mode": (status.get("launch_mode") or self.run_mode()) if running else self.run_mode(),
             "last_run": last_run,
             "last_result": _status_label(reported_status, str(last_error)),
             "error": "bridge_binary_missing" if command is None else "",
@@ -657,6 +659,17 @@ class BridgeController:
 
     def autostart_enabled(self) -> bool:
         return bool(_read_json(self.preference_path).get("start_with_manager", False))
+
+    def manager_exit_shutdown_forced(self, mode: str | None = None) -> bool:
+        return (mode or self.run_mode()) == "thread"
+
+    def stop_on_manager_exit_enabled(self, mode: str | None = None) -> bool:
+        if self.manager_exit_shutdown_forced(mode):
+            return True
+        return bool(_read_json(self.preference_path).get("stop_with_manager", False))
+
+    def set_stop_on_manager_exit_enabled(self, enabled: bool) -> None:
+        self._write_preferences(stop_with_manager=bool(enabled))
 
     def run_mode(self) -> str:
         value = _read_json(self.preference_path).get("run_mode")
@@ -778,6 +791,7 @@ class BridgeController:
                     "node_id": node_id,
                     "workspace_id": workspace_id,
                     "label": str(target.get("label") or ""),
+                    "provider": str(target.get("provider") or ""),
                     "status": str(target.get("status") or "configured"),
                     "online": str(target.get("online") or "").lower() == "true",
                     "desktop_status": str(target.get("desktop_status") or ""),
@@ -923,11 +937,16 @@ class BridgeController:
             stop_request = self.runtime_path() / "agent" / "stop.request"
             if not stop_request.parent.is_dir():
                 raise RuntimeError("桥接代理尚未运行，无法请求优雅停止")
-            pending = stop_request.with_suffix(".pending")
-            pending.write_text("manager-request\n", encoding="utf-8")
-            os.replace(pending, stop_request)
+            self._request_bridge_stop("manager-request")
             return "已请求停止；当前任务完成后会退出"
         raise ValueError("unsupported bridge operation")
+
+    def _request_bridge_stop(self, reason: str) -> None:
+        stop_request = self.runtime_path() / "agent" / "stop.request"
+        stop_request.parent.mkdir(parents=True, exist_ok=True)
+        pending = stop_request.with_suffix(".pending")
+        pending.write_text(str(reason) + "\n", encoding="utf-8")
+        os.replace(pending, stop_request)
 
     def _start_bridge(self) -> None:
         command = self.bridge_command()
@@ -1025,32 +1044,20 @@ class BridgeController:
 
 
     def shutdown_for_manager_exit(self) -> None:
-        """Gracefully stop an in-process bridge; detached process mode is a service."""
-        status = _read_json(self.runtime_root / "status.json")
-        active_mode = status.get("launch_mode") or self.run_mode()
-        if active_mode != "thread":
+        """Request a graceful bridge stop when configured (thread mode is tied to this process)."""
+        task = self.task_info()
+        if not task.get("running"):
+            return
+        active_mode = task.get("mode") or self.run_mode()
+        if active_mode != "thread" and not self.stop_on_manager_exit_enabled(active_mode):
             return
         try:
-            owner_pid = int(status.get("agent_pid") or 0)
+            owner_pid = int((task.get("status") or {}).get("agent_pid") or 0)
         except (TypeError, ValueError):
             owner_pid = 0
-        if owner_pid and owner_pid != os.getpid():
+        if active_mode == "thread" and owner_pid and owner_pid != os.getpid():
             return
-        key = str(self.runtime_root).casefold()
-        with self._thread_registry_lock:
-            bridge_thread = self._thread_registry.get(key)
-        if not bridge_thread or not bridge_thread.is_alive():
-            return
-        stop_request = self.runtime_root / "agent" / "stop.request"
-        stop_request.parent.mkdir(parents=True, exist_ok=True)
-        pending = stop_request.with_suffix(".pending")
-        pending.write_text("manager-exit\n", encoding="utf-8")
-        os.replace(pending, stop_request)
-        # Stop after the current Codex turn, then release the gateway and bridge lock.
-        bridge_thread.join()
-        with self._thread_registry_lock:
-            if self._thread_registry.get(key) is bridge_thread:
-                self._thread_registry.pop(key, None)
+        self._request_bridge_stop("manager-exit")
 
 
 class _SnapshotWorker(QtCore.QThread):
@@ -1135,16 +1142,16 @@ class CodexBridgeManagerDialog(QtWidgets.QDialog):
         root.addLayout(header)
 
         controls = QtWidgets.QHBoxLayout()
-        self.chk_autostart = QtWidgets.QCheckBox("管理器启动时自动启动桥接")
-        self.chk_autostart.setToolTip("启用后，管理器每次启动都会在后台拉起独立桥接；关闭管理器不会停止桥接。勾选时会立即启动。")
-        self.chk_autostart.toggled.connect(lambda enabled: self._start_operation("autostart", enabled))
-        controls.addWidget(self.chk_autostart)
+        self.btn_startup_management = QtWidgets.QPushButton("启动管理…")
+        self.btn_startup_management.setToolTip("统一设置 Codex 与 Antigravity 桌面桥随管理器启动和退出的行为。")
+        self.btn_startup_management.clicked.connect(self._open_startup_management)
+        controls.addWidget(self.btn_startup_management)
         controls.addWidget(QtWidgets.QLabel("运行方式："))
         self.cmb_run_mode = QtWidgets.QComboBox()
         self.cmb_run_mode.addItem("独立进程", "process")
         self.cmb_run_mode.addItem("管理器线程", "thread")
         self.cmb_run_mode.setFixedWidth(140)
-        self.cmb_run_mode.setToolTip("独立进程会在管理器关闭后继续运行；管理器线程更轻，但退出管理器会停止桥接。")
+        self.cmb_run_mode.setToolTip("独立进程可在“桌面桥启动管理”中设置退出行为；管理器线程随管理器进程退出。")
         self.cmb_run_mode.currentIndexChanged.connect(self._run_mode_changed)
         controls.addWidget(self.cmb_run_mode)
         self.btn_start = QtWidgets.QPushButton("启动桥")
@@ -1154,7 +1161,6 @@ class CodexBridgeManagerDialog(QtWidgets.QDialog):
         self.btn_stop.clicked.connect(self._request_stop)
         controls.addWidget(self.btn_stop)
         controls.addStretch()
-        controls.addWidget(QtWidgets.QLabel("独立进程在管理器关闭后继续运行；线程模式随管理器退出。"))
         root.addLayout(controls)
 
         self.tabs = QtWidgets.QTabWidget()
@@ -1321,10 +1327,6 @@ class CodexBridgeManagerDialog(QtWidgets.QDialog):
         else:
             state_text = "运行器就绪 · 桥接已停止"
         self.status_label.setText(state_text)
-        self.chk_autostart.blockSignals(True)
-        self.chk_autostart.setChecked(bool(task.get("enabled")))
-        self.chk_autostart.setEnabled(self._operation_worker is None)
-        self.chk_autostart.blockSignals(False)
         self.cmb_run_mode.blockSignals(True)
         mode_index = self.cmb_run_mode.findData(task.get("mode", "process"))
         self.cmb_run_mode.setCurrentIndex(max(0, mode_index))
@@ -1344,8 +1346,7 @@ class CodexBridgeManagerDialog(QtWidgets.QDialog):
             heartbeat = f"{int(age)} 秒前" if age < 3600 else f"{int(age / 60)} 分钟前"
         task_state = "运行中" if running else "运行器就绪" if exists else "运行器缺失"
         self.info["task"].setText(
-            f"{task_state} · {'管理器联动自启已开' if task.get('enabled') else '管理器联动自启已关'} · "
-            f"方式 {'独立进程' if task.get('mode') == 'process' else '管理器线程'} · "
+            f"{task_state} · 方式 {'独立进程' if task.get('mode') == 'process' else '管理器线程'} · "
             f"最近更新 {task.get('last_run') or '暂无时间'} · 状态 {task.get('last_result', '状态未知')}"
         )
         self.info["backend"].setText(config.get("backend") or "未配置")
@@ -1375,6 +1376,11 @@ class CodexBridgeManagerDialog(QtWidgets.QDialog):
         if self.log_view.toPlainText() != logs:
             self.log_view.setPlainText(logs)
 
+    def _open_startup_management(self):
+        opener = getattr(self.parent(), "open_bridge_startup_manager", None)
+        if callable(opener):
+            opener()
+
     def _render_backend_inventory(self, inventory: dict, local_config: dict):
         table = self.bridge_inventory_table
         targets = inventory.get("targets") or []
@@ -1385,23 +1391,24 @@ class CodexBridgeManagerDialog(QtWidgets.QDialog):
         local_node = str(local_config.get("node_id") or "")
         local_workspace = str(local_config.get("workspace_id") or "")
         chat = inventory.get("chat_target") or {}
-        chat_node = str(chat.get("node_id") or "") if chat.get("provider") == "codex_desktop" else ""
+        provider = str(chat.get("provider") or "")
+        chat_node = str(chat.get("node_id") or "") if provider in ("codex_desktop", "antigravity_desktop") else ""
         chat_workspace = str(chat.get("workspace_id") or "")
         default_node = str(inventory.get("default_node_id") or "")
         strategy = inventory.get("strategy_target") or {}
         strategy_node = str(strategy.get("node_id") or "")
         strategy_workspace = str(strategy.get("workspace_id") or "")
         local_found = False
-        provider = chat.get("provider")
-        if provider == "codex_desktop" and chat_node:
-            chat_label = "Codex · " + _short_bridge_id(chat_node) + " / " + _short_bridge_id(chat_workspace)
+        if provider in ("codex_desktop", "antigravity_desktop") and chat_node:
+            engine = "Antigravity" if provider == "antigravity_desktop" else "Codex"
+            chat_label = engine + " · " + _short_bridge_id(chat_node) + " / " + _short_bridge_id(chat_workspace)
         elif provider == "hermes":
             chat_label = "Hermes"
         else:
-            chat_label = "未设置" if provider == "codex_desktop" else "读取失败"
+            chat_label = "未设置" if provider in ("", "unknown") else "读取失败"
         for target in targets:
             if target["node_id"] == chat_node and target["workspace_id"] == chat_workspace:
-                chat_label = _bridge_target_name(target.get("label", "")) + " · " + _short_bridge_id(chat_node) + " / " + _short_bridge_id(chat_workspace)
+                chat_label = _bridge_target_name(target.get("label", ""), chat_node, target.get("provider", "")) + " · " + _short_bridge_id(chat_node) + " / " + _short_bridge_id(chat_workspace)
                 break
         table.setRowCount(len(targets))
         for row, target in enumerate(targets):
@@ -1422,7 +1429,7 @@ class CodexBridgeManagerDialog(QtWidgets.QDialog):
                 state = "心跳过期"
             else:
                 state = "已登记 · 无心跳"
-            name = _bridge_target_name(target.get("label", ""))
+            name = _bridge_target_name(target.get("label", ""), node, target.get("provider", ""))
             identity = _short_bridge_id(node) + " / " + _short_bridge_id(workspace)
             roles = []
             if is_local:
@@ -1557,7 +1564,6 @@ class CodexBridgeManagerDialog(QtWidgets.QDialog):
         worker.finished.connect(lambda current=worker: self._clear_operation_worker(current))
         worker.finished.connect(worker.deleteLater)
         self._operation_worker = worker
-        self.chk_autostart.setEnabled(False)
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(False)
         worker.start()

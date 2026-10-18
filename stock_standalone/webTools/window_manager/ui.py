@@ -4092,11 +4092,8 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         except Exception as e:
             logger.error(f"托盘图标 Agent Hub 快捷菜单初始化异常: {e}")
 
-        try:
-            bridge_action = self.tray_menu.addAction("🧩 Codex 桌面桥管理...")
-            bridge_action.triggered.connect(self.open_codex_bridge_manager)
-        except Exception as e:
-            logger.error(f"托盘图标 Codex 桌面桥菜单初始化异常: {e}")
+        bridge_action = self.tray_menu.addAction("🧩 桌面桥启动管理...")
+        bridge_action.triggered.connect(self.open_bridge_startup_manager)
 
         self.tray_menu.addSeparator()
         quit_action = self.tray_menu.addAction("❌ 完全退出")
@@ -5117,11 +5114,11 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.btn_agent_hub.setStyleSheet("background-color: #0284c7; color: white; font-weight: bold; padding: 3px 8px; font-size: 12px; min-height: 24px; max-height: 25px;")
         self.btn_agent_hub.setToolTip("查看多 Agent 协同运行状态、任务实施流转进度、执行心跳与审查决策大屏")
         self.btn_agent_hub.clicked.connect(self.open_agent_hub_monitor)
-        self.btn_codex_bridge = QPushButton("🧩 Codex桥")
-        self.btn_codex_bridge.setObjectName("btnCodexBridge")
-        self.btn_codex_bridge.setStyleSheet("background-color: #0f766e; color: white; font-weight: bold; padding: 3px 8px; font-size: 12px; min-height: 24px; max-height: 25px;")
-        self.btn_codex_bridge.setToolTip("查看独立 Codex 桌面桥状态、任务、连接和本机 Token 用量")
-        self.btn_codex_bridge.clicked.connect(self.open_codex_bridge_manager)
+        self.btn_bridge_manager = QPushButton("🧩 桌面桥")
+        self.btn_bridge_manager.setObjectName("btnBridgeManager")
+        self.btn_bridge_manager.setStyleSheet("background-color: #0f766e; color: white; font-weight: bold; padding: 3px 8px; font-size: 12px; min-height: 24px; max-height: 25px;")
+        self.btn_bridge_manager.setToolTip("统一管理 Codex 与 Antigravity 桌面桥启动、退出和详细状态")
+        self.btn_bridge_manager.clicked.connect(self.open_bridge_startup_manager)
 
         # 平铺模式专属【⇋ 收纳】按钮 (平铺时显示，点击瞬间切回收纳下拉菜单，并持久化状态)
         self.btn_collapse_tools = QPushButton("⇋ 收纳")
@@ -5162,13 +5159,8 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         act_ag.triggered.connect(self.open_antigravity_account_manager)
         act_hub = self.tools_menu.addAction("🤖 Agent Hub 多Agent运行与任务进度监控...")
         act_hub.triggered.connect(self.open_agent_hub_monitor)
-        act_codex = self.tools_menu.addAction("🧩 Codex 桌面桥状态、任务与用量管理...")
-        act_codex.triggered.connect(self.open_codex_bridge_manager)
-        self.act_codex_bridge_autostart = self.tools_menu.addAction("Codex \u684c\u9762\u6865\uff1a\u968f\u7ba1\u7406\u5668\u542f\u52a8")
-        self.act_codex_bridge_autostart.setCheckable(True)
-        self.act_codex_bridge_autostart.setChecked(self._codex_bridge_autostart_enabled())
-        self.act_codex_bridge_autostart.toggled.connect(self._set_codex_bridge_autostart)
-        self.tools_menu.aboutToShow.connect(self._refresh_codex_bridge_autostart_action)
+        act_bridge_startup = self.tools_menu.addAction("🧩 桌面桥启动管理...")
+        act_bridge_startup.triggered.connect(self.open_bridge_startup_manager)
         act_acer = self.tools_menu.addAction("💻 Acer 笔记本性能与散热控制...")
         act_acer.triggered.connect(self.open_acer_performance_settings)
         act_ramdisk = self.tools_menu.addAction("💾 RamDisk 内存盘同步与备份规则...")
@@ -5185,7 +5177,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         bottom_bar.addWidget(self.btn_tools_menu)
 
         # 把平铺模式的 8 个按钮（7工具+1收纳）加入 bottom_bar
-        for b in [self.btn_open_perf, self.btn_route_settings, self.btn_acer_perf, self.btn_ramdisk_sync, self.btn_ag_manager, self.btn_agent_hub, self.btn_codex_bridge, self.btn_collapse_tools]:
+        for b in [self.btn_open_perf, self.btn_route_settings, self.btn_acer_perf, self.btn_ramdisk_sync, self.btn_ag_manager, self.btn_agent_hub, self.btn_bridge_manager, self.btn_collapse_tools]:
             bottom_bar.addWidget(b)
 
         # 核心主操作按钮 (紧凑高颜值，常驻显眼)
@@ -5235,7 +5227,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.btn_tools_menu.setVisible(not expanded)
         if hasattr(self, 'btn_collapse_tools'):
             self.btn_collapse_tools.setVisible(expanded)
-        for b in [self.btn_open_perf, self.btn_route_settings, getattr(self, 'btn_acer_perf', None), self.btn_ramdisk_sync, self.btn_ag_manager, getattr(self, 'btn_agent_hub', None), getattr(self, 'btn_codex_bridge', None)]:
+        for b in [self.btn_open_perf, self.btn_route_settings, getattr(self, 'btn_acer_perf', None), self.btn_ramdisk_sync, self.btn_ag_manager, getattr(self, 'btn_agent_hub', None), getattr(self, 'btn_bridge_manager', None)]:
             if b is not None:
                 b.setVisible(expanded)
 
@@ -5499,35 +5491,45 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         except Exception as exc:
             logger.exception("打开 Codex 桌面桥管理面板失败")
             QMessageBox.critical(self, "打开失败", f"无法打开 Codex 桌面桥管理面板：{type(exc).__name__}")
-    def _codex_bridge_autostart_enabled(self):
+    def open_antigravity_bridge_manager(self):
+        """打开 Antigravity 桌面桥管理面板。"""
         try:
-            from .codex_bridge_manager import BridgeController
-            return BridgeController(core.get_app_root()).autostart_enabled()
+            dialog = getattr(self, "_antigravity_bridge_dialog", None)
+            if dialog is not None and dialog.isVisible():
+                dialog.raise_()
+                dialog.activateWindow()
+                return
+            from .antigravity_bridge_manager import AntigravityBridgeManagerDialog
+            dialog = AntigravityBridgeManagerDialog(project_root=core.get_app_root(), parent=self)
+            self._antigravity_bridge_dialog = dialog
+            dialog.finished.connect(lambda _=0: setattr(self, "_antigravity_bridge_dialog", None))
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+            self.log("已打开 Antigravity 桌面桥管理面板。")
         except Exception as exc:
-            logger.warning("Codex bridge autostart preference read failed: %s", type(exc).__name__)
-            return False
+            logger.exception("打开 Antigravity 桌面桥管理面板失败")
+            QMessageBox.critical(self, "打开失败", f"无法打开 Antigravity 桌面桥管理面板：{type(exc).__name__}")
 
-    def _refresh_codex_bridge_autostart_action(self):
-        action = getattr(self, "act_codex_bridge_autostart", None)
-        if action is None:
-            return
-        action.blockSignals(True)
-        action.setChecked(self._codex_bridge_autostart_enabled())
-        action.blockSignals(False)
-
-    def _set_codex_bridge_autostart(self, enabled: bool):
-        action = getattr(self, "act_codex_bridge_autostart", None)
+    def open_bridge_startup_manager(self):
+        """打开统一的 Codex / Antigravity 启动管理窗口。"""
         try:
-            from .codex_bridge_manager import BridgeController
-            BridgeController(core.get_app_root()).perform("autostart", bool(enabled))
-            self.log("Codex bridge autostart enabled." if enabled else "Codex bridge autostart disabled.")
+            dialog = getattr(self, "_bridge_startup_dialog", None)
+            if dialog is not None and dialog.isVisible():
+                dialog.refresh_settings()
+                dialog.raise_()
+                dialog.activateWindow()
+                return
+            from .bridge_startup_manager import BridgeStartupManagerDialog
+            dialog = BridgeStartupManagerDialog(project_root=core.get_app_root(), parent=self)
+            self._bridge_startup_dialog = dialog
+            dialog.finished.connect(lambda _=0: setattr(self, "_bridge_startup_dialog", None))
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
         except Exception as exc:
-            if action is not None:
-                action.blockSignals(True)
-                action.setChecked(not enabled)
-                action.blockSignals(False)
-            detail = " ".join(str(exc).split())[:240]
-            QMessageBox.warning(self, "Codex bridge", f"Autostart setting failed: {type(exc).__name__}: {detail}")
+            logger.exception("打开桌面桥启动管理失败")
+            QMessageBox.critical(self, "打开失败", f"无法打开桌面桥启动管理：{type(exc).__name__}")
 
     def _trigger_ramdisk_sync_from_tray(self):
         """从托盘右键一键手动触发立即同步备份"""
@@ -7946,7 +7948,15 @@ def main(hide_window: bool = False):
         except Exception as exc:
             logger.error("Manager exit bridge cleanup failed: %s", type(exc).__name__)
 
+    def shutdown_antigravity_bridge_with_manager():
+        try:
+            from .antigravity_bridge_manager import AntigravityBridgeController
+            AntigravityBridgeController(core.get_app_root()).shutdown_for_manager_exit()
+        except Exception as exc:
+            logger.error("Manager exit Antigravity bridge cleanup failed: %s", type(exc).__name__)
+
     app.aboutToQuit.connect(shutdown_codex_bridge_with_manager)
+    app.aboutToQuit.connect(shutdown_antigravity_bridge_with_manager)
     app.setStyle('Fusion')
     
     dark_palette = QtGui.QPalette()
@@ -7972,11 +7982,12 @@ def main(hide_window: bool = False):
             from .codex_bridge_manager import BridgeController
             controller = BridgeController(core.get_app_root())
             enabled = controller.autostart_enabled()
+            stop_on_exit = controller.stop_on_manager_exit_enabled()
             run_mode = controller.run_mode()
             mode_label = "独立进程" if run_mode == "process" else "管理器线程"
             window.log(
-                f"[Codex 桌面桥] 管理器联动自启{'已开启' if enabled else '未开启'}；"
-                f"启动方式：{mode_label}。"
+                f"[Codex 桌面桥] 随管理器启动{'已开启' if enabled else '未开启'}；"
+                f"随管理器退出关闭{'已开启' if stop_on_exit else '未开启'}；运行方式：{mode_label}。"
             )
             try:
                 result = controller.start_if_enabled()
@@ -7993,12 +8004,20 @@ def main(hide_window: bool = False):
                     running = bool(info.get("running"))
                     status_text = info.get("last_result") or "状态未知"
                     error = info.get("error") or ""
-                    signature = (enabled, run_mode, running, status_text, error)
+                    current_enabled = controller.autostart_enabled()
+                    current_run_mode = info.get("mode") if running else controller.run_mode()
+                    current_stop_on_exit = controller.stop_on_manager_exit_enabled(current_run_mode)
+                    signature = (current_enabled, current_stop_on_exit, current_run_mode, running, status_text, error)
                     if signature == last_signature[0]:
                         return
                     last_signature[0] = signature
                     state_text = "运行中" if running else "未运行"
-                    message = f"[Codex 桌面桥] 当前状态：{state_text}；后端状态：{status_text}。"
+                    message = (
+                        f"[Codex 桌面桥] 当前状态：{state_text}；后端状态：{status_text}；"
+                        f"随管理器启动{'开启' if current_enabled else '关闭'}；"
+                        f"随管理器退出关闭{'开启' if current_stop_on_exit else '关闭'}；"
+                        f"运行方式：{'独立进程' if current_run_mode == 'process' else '管理器线程'}。"
+                    )
                     if error:
                         message += f"诊断：{error}。"
                     window.log(message)
@@ -8017,6 +8036,66 @@ def main(hide_window: bool = False):
             window.log(f"[Codex 桌面桥] 初始化失败（{type(exc).__name__}），请查看桥接面板状态。")
 
     QtCore.QTimer.singleShot(1200, start_codex_bridge_with_manager)
+
+    def start_antigravity_bridge_with_manager():
+        try:
+            from .antigravity_bridge_manager import AntigravityBridgeController
+            controller = AntigravityBridgeController(core.get_app_root())
+            enabled = controller.autostart_enabled()
+            stop_on_exit = controller.stop_on_manager_exit_enabled()
+            run_mode = controller.run_mode()
+            mode_label = "独立进程" if run_mode == "process" else "管理器线程"
+            window.log(
+                f"[Antigravity 桌面桥] 随管理器启动{'已开启' if enabled else '未开启'}；"
+                f"随管理器退出关闭{'已开启' if stop_on_exit else '未开启'}；运行方式：{mode_label}。"
+            )
+            try:
+                result = controller.start_if_enabled()
+                window.log(f"[Antigravity 桌面桥] 启动结果：{result}")
+            except Exception as exc:
+                logger.warning("管理器启动 Antigravity 桌面桥失败：%s", type(exc).__name__)
+                window.log(f"[Antigravity 桌面桥] 启动失败（{type(exc).__name__}），继续检查桥接状态。")
+
+            last_agv_signature = [None]
+
+            def report_agv_status():
+                try:
+                    info = controller.task_info()
+                    running = bool(info.get("running"))
+                    status_text = info.get("last_result") or "状态未知"
+                    error = info.get("error") or ""
+                    current_enabled = controller.autostart_enabled()
+                    current_run_mode = info.get("mode") if running else controller.run_mode()
+                    current_stop_on_exit = controller.stop_on_manager_exit_enabled(current_run_mode)
+                    sig = (current_enabled, current_stop_on_exit, current_run_mode, running, status_text, error)
+                    if sig == last_agv_signature[0]:
+                        return
+                    last_agv_signature[0] = sig
+                    state_text = "运行中" if running else "未运行"
+                    message = (
+                        f"[Antigravity 桌面桥] 当前状态：{state_text}；后端状态：{status_text}；"
+                        f"随管理器启动{'开启' if current_enabled else '关闭'}；"
+                        f"随管理器退出关闭{'开启' if current_stop_on_exit else '关闭'}；"
+                        f"运行方式：{'独立进程' if current_run_mode == 'process' else '管理器线程'}。"
+                    )
+                    if error:
+                        message += f"诊断：{error}。"
+                    window.log(message)
+                except Exception as status_exc:
+                    logger.warning("读取 Antigravity 桌面桥状态失败：%s", type(status_exc).__name__)
+                    window.log(f"[Antigravity 桌面桥] 状态读取失败（{type(status_exc).__name__}）。")
+
+            report_agv_status()
+            agv_status_timer = QtCore.QTimer(window)
+            agv_status_timer.setInterval(15000)
+            agv_status_timer.timeout.connect(report_agv_status)
+            agv_status_timer.start()
+            window._antigravity_bridge_status_timer = agv_status_timer
+        except Exception as exc:
+            logger.warning("管理器启动 Antigravity 桌面桥失败：%s", type(exc).__name__)
+            window.log(f"[Antigravity 桌面桥] 初始化失败（{type(exc).__name__}），请查看桥接面板状态。")
+
+    QtCore.QTimer.singleShot(1500, start_antigravity_bridge_with_manager)
     
     # 判读是否隐藏启动（开机自启、-hide、-min、-hidetray）
     is_hide = hide_window or any(arg.lower() in ("-hide", "--hide", "-min", "--min", "-hidetray") for arg in sys.argv[1:])
