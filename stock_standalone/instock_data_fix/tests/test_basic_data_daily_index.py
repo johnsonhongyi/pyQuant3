@@ -167,13 +167,17 @@ class BasicDataDailyIndexTests(unittest.TestCase):
 
     def test_main_schedules_index_backfill_even_in_stock_only_mode(self):
         with mock.patch.object(_JOB.trd, 'is_trade_date', return_value=True, create=True), \
-                mock.patch.object(_JOB.runt, 'run_with_args', create=True) as run:
+                mock.patch.object(_JOB.runt, 'run_with_args', create=True) as run, \
+                mock.patch.object(_JOB, 'save_tdx_index_history') as index_run:
             with mock.patch.dict(os.environ, {'INSTOCK_STOCK_SPOT_ONLY': '1'}), \
                     mock.patch.object(sys, 'argv', ['basic_data_daily_job.py']):
                 _JOB.main()
         scheduled = [call.args[0] for call in run.call_args_list]
-        self.assertEqual(scheduled, [_JOB.save_nph_stock_spot_data,
-                                     _JOB.save_tdx_index_history])
+        self.assertEqual(scheduled, [_JOB.save_nph_stock_spot_data])
+        index_run.assert_called_once()
+        self.assertEqual(index_run.call_args.kwargs, {'before': False})
+        self.assertEqual(index_run.call_args.args[0],
+                         _JOB.datetime.datetime.now(_JOB._TIMEZONE).date())
     def test_new_index_file_is_world_readable_for_web_container(self):
         path = self.forward_dir / 'SZ399006.TXT'
         bar = {'date': self.target, 'open': 100, 'high': 102, 'low': 99,
