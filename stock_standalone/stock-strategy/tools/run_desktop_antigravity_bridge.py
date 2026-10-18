@@ -306,12 +306,19 @@ def main(argv=None):
             else:
                 stage = 'agent_start'
                 command = [sys.executable, str(ROOT / 'desktop_antigravity_agent.py'), *agent_arguments]
+                startupinfo = None
+                if os.name == 'nt':
+                    startupinfo = subprocess.STARTUPINFO()
+                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    startupinfo.wShowWindow = subprocess.SW_HIDE
                 child = subprocess.Popen(
                     command,
                     cwd=ROOT,
+                    stdin=subprocess.DEVNULL,
                     stdout=output,
                     stderr=subprocess.STDOUT,
                     creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
+                    startupinfo=startupinfo,
                 )
                 status({'status': 'agent_starting', 'agent_pid': child.pid, 'port': registration['port']})
                 code = child.wait()

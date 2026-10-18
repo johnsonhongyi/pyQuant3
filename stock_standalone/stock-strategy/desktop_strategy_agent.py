@@ -63,6 +63,7 @@ def _error_details(error):
     if isinstance(error, HTTPError):
         details["http_status"] = int(error.code)
         if getattr(error,'peer_code',None):details['reason_code']=error.peer_code
+        if getattr(error,'peer_message',None):details['server_message']=error.peer_message
         details["message"] = f"HTTP {error.code} {str(error.reason or '')[:120]}".strip()
     else:
         source = getattr(error, "reason", None) if isinstance(error, URLError) else None
@@ -191,7 +192,15 @@ class DesktopPeer:
             raw = response.read(256 * 1024 + 1)
             if response.status >= 300:
                 error = HTTPError(self.base + path, response.status, response.reason, response.headers, io.BytesIO(raw))
-                try:error.peer_code = str(json.loads(raw).get('code', ''))[:80]
+                try:
+                    failure = json.loads(raw)
+                    if isinstance(failure, dict):
+                        error.peer_code = str(failure.get('code', ''))[:80]
+                        # Only record known protocol errors, never arbitrary
+                        # response bodies, proxy HTML, or provider diagnostics.
+                        message = failure.get('error')
+                        if message in ('invalid desktop status', 'desktop heartbeat unavailable', 'AI queue unavailable'):
+                            error.peer_message = message
                 except (ValueError, TypeError):pass
                 raise error
             if len(raw) > 256 * 1024:

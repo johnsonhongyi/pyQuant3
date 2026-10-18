@@ -4,14 +4,13 @@
 from __future__ import annotations
 
 import configparser
-import ctypes
-from ctypes import wintypes
 from datetime import datetime, timedelta
 import hashlib
 import hmac
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import sqlite3
 import subprocess
@@ -21,6 +20,7 @@ import time
 from urllib.request import HTTPRedirectHandler, Request, ProxyHandler, build_opener
 
 from PyQt6 import QtCore, QtGui, QtWidgets
+from .bridge_token_usage import agv_token_counts, token_usage_text
 
 DEFAULT_BACKEND = "http://192.168.50.60:20073"
 
@@ -65,13 +65,8 @@ def _status_label(status, error_code="") -> str:
     return str(label)
 
 
-_DEFAULT_ANTIGRAVITY_MODELS = (
-    "gemini-3.8-flash", "gemini-3.8-pro", "gemini-2.5-flash",
-)
-
-
 def _model_display_names(models) -> list[str]:
-    """Accept both the worker's model objects and legacy string catalogs."""
+    """Show each model family once; keep execution IDs in the worker catalog."""
     names = []
     if isinstance(models, (list, tuple)):
         for model in models:
@@ -80,16 +75,15 @@ def _model_display_names(models) -> list[str]:
             elif isinstance(model, dict):
                 model_id = model.get("id") or model.get("model") or model.get("model_id")
                 display_name = model.get("name") or model.get("display_name")
-                if model_id and display_name and str(model_id) != str(display_name):
-                    label = f"{display_name} ({model_id})"
-                else:
-                    label = model_id or display_name or ""
+                label = display_name or model_id or ""
                 label = str(label).strip()
             else:
                 continue
+            label = re.sub(r"\s*\((?:low|medium|high|xhigh|max|thinking)\)\s*$", "", label, flags=re.I)
+            label = re.sub(r"-(?:low|medium|high|xhigh|max|thinking)$", "", label, flags=re.I).strip()
             if label and label not in names:
                 names.append(label)
-    return names or list(_DEFAULT_ANTIGRAVITY_MODELS)
+    return names or ["等待 AGY 动态模型目录"]
 
 
 def _short_bridge_id(value: str) -> str:
@@ -161,6 +155,8 @@ _AGV_STAGE_LABELS = {
     "peer_configure": "配置后端连接", "local_gateway_init": "初始化本机网关",
     "local_gateway_start": "启动本机网关", "backend_register": "注册后台桥",
     "agent_start": "启动 Antigravity Agent", "backend_heartbeat": "发送后端心跳",
+    "backend_ready_heartbeat": "发送就绪心跳", "model_catalog_refresh": "刷新模型目录",
+    "chat_claim": "领取对话任务", "strategy_claim": "领取策略任务",
     "unified_job_wait": "等待统一任务", "chat_run": "运行 Antigravity 对话",
     "strategy_run": "运行 Antigravity 策略研究", "chat_result_retry": "重试写回对话结果",
     "antigravity_chat_exec": "执行 Antigravity 对话", "antigravity_strategy_exec": "执行 Antigravity 策略研究",
@@ -204,6 +200,8 @@ def _agv_error_detail(value) -> str:
     message = str(value.get("message") or "").strip()
     if message and message not in parts:
         parts.append(message[:220])
+    if value.get("server_message"):
+        parts.append("后端原因：" + str(value["server_message"])[:120])
     for key, label in (("errno", "errno"), ("winerror", "WinError"), ("status", "HTTP"), ("backend", "后端"), ("path", "路径")):
         item = value.get(key)
         if item is not None and str(item).strip():
@@ -286,23 +284,8 @@ class _NoRedirect(HTTPRedirectHandler):
 
 def _bridge_owner_is_alive(pid: int, runtime_dir: Path, status_at: float = 0.0,
                            launch_mode: str = "process") -> bool:
-    if os.name != "nt" or pid <= 0:
-        return False
-    kernel32 = ctypes.windll.kernel32
-    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, wintypes.DWORD(pid))
-    if not handle:
-        return False
-    try:
-        exit_code = wintypes.DWORD()
-        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
-            return False
-        STILL_ACTIVE = 259
-        if exit_code.value != STILL_ACTIVE:
-            return False
-        return True
-    finally:
-        kernel32.CloseHandle(handle)
+    from .codex_bridge_manager import _bridge_owner_is_alive as validate_owner
+    return validate_owner(pid, runtime_dir, status_at, launch_mode)
 
 
 class AntigravityBridgeController:
@@ -401,6 +384,14 @@ class AntigravityBridgeController:
             if process_alive:
                 running = True
                 status = {**status, "status": agent.get("status"), "agent_pid": pid}
+
+        # The manager process outlives a failed in-process bridge thread.
+        if launch_mode == "thread" and status_pid == os.getpid():
+            with self._thread_registry_lock:
+                thread = self._thread_registry.get(str(self.runtime_path().resolve()))
+                running = bool(thread and thread.is_alive())
+        elif launch_mode == "process" and pid == os.getpid():
+            running = False
 
         last_run = ""
         last_run_at = status.get("at")
@@ -537,12 +528,14 @@ class AntigravityBridgeController:
             command = [sys.executable, "--antigravity-bridge-worker"]
         command = [*command, *arguments]
         creationflags = 0
+        startupinfo = None
         if os.name == "nt":
-            creationflags = (
-                getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
-                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
-                | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-            )
+            # The worker inherits redirected stdout/stderr; creating a new
+            # console here can surface a console window in the GUI build.
+            creationflags = subprocess.CREATE_NO_WINDOW
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
         worker_env = (
             {
                 **os.environ,
@@ -563,6 +556,7 @@ class AntigravityBridgeController:
                 stderr=subprocess.STDOUT,
                 close_fds=True,
                 creationflags=creationflags,
+                startupinfo=startupinfo,
                 env=worker_env,
             )
         time.sleep(0.3)
@@ -606,9 +600,12 @@ class AntigravityBridgeController:
         if active_mode != "thread" and not self.stop_on_manager_exit_enabled(active_mode):
             return
         try:
-            self._request_bridge_stop("manager-exit")
-        except OSError:
+            owner_pid = int((info.get("status") or {}).get("agent_pid") or 0)
+        except (TypeError, ValueError):
+            owner_pid = 0
+        if active_mode == "thread" and owner_pid and owner_pid != os.getpid():
             return
+        self._request_bridge_stop("manager-exit")
 
     def read_history(self, limit: int = 40) -> list[dict]:
         db_path = self.runtime_path() / "agent" / "agent.db"
@@ -784,6 +781,7 @@ class AntigravityBridgeController:
 class _BackendInventoryWorker(QtCore.QThread):
     ready = QtCore.pyqtSignal(dict)
     history_ready = QtCore.pyqtSignal(list)
+    tokens_ready = QtCore.pyqtSignal(dict)
 
     def __init__(self, controller: AntigravityBridgeController, config: dict, force: bool = False, parent=None):
         super().__init__(parent)
@@ -792,6 +790,7 @@ class _BackendInventoryWorker(QtCore.QThread):
         self.force = force
 
     def run(self):
+        self.tokens_ready.emit(agv_token_counts(self.controller.runtime_path() / "agent" / "agent.db"))
         try:
             self.history_ready.emit(self.controller.read_history())
         except Exception:
@@ -882,7 +881,7 @@ class AntigravityBridgeManagerDialog(QtWidgets.QDialog):
         for key, label in (
             ("task", "桥接进程"), ("backend", "生产 API"), ("node", "桥接节点"),
             ("workspace", "工作区"), ("heartbeat", "后端心跳"), ("port", "网关端口 (26778)"),
-            ("runtime", "运行目录"), ("engine", "AGY CLI 路径"), ("models", "可用 Gemini 模型"),
+            ("runtime", "运行目录"), ("engine", "AGY CLI 路径"), ("models", "AGY 可用模型"),
         ):
             val = QtWidgets.QLabel("—")
             val.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -891,12 +890,19 @@ class AntigravityBridgeManagerDialog(QtWidgets.QDialog):
             form.addRow(label + "：", val)
         ov_layout.addWidget(info_group)
 
-        quota_group = QtWidgets.QGroupBox("Gemini 配额与 Token 用量")
+        quota_group = QtWidgets.QGroupBox("AGY 模型与 Token 用量")
         quota_layout = QtWidgets.QVBoxLayout(quota_group)
-        self.quota_label = QtWidgets.QLabel("模型目录: gemini-3.8-flash, gemini-3.8-pro, gemini-2.5-flash\n"
+        self.quota_label = QtWidgets.QLabel("模型目录: 自动读取当前账户 agy models（排除 GPT-OSS）\n"
                                            "流式传输: agy stream-json 管道 (200ms 防抖发布)\n"
                                            "调度定位: 盘中秒级异动速问优选 / 策略逐股条件分析")
         quota_layout.addWidget(self.quota_label)
+        self.token_label = QtWidgets.QLabel("等待本机 AGV 桥用量统计…")
+        self.token_label.setWordWrap(True)
+        quota_layout.addWidget(self.token_label)
+        token_note = QtWidgets.QLabel("统计本机 AGV 桥已保存结果中的真实用量；旧版估算及未采集字段不计入，不代表订阅额度。")
+        token_note.setWordWrap(True)
+        token_note.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        quota_layout.addWidget(token_note)
         ov_layout.addWidget(quota_group)
         ov_layout.addStretch()
         self.tabs.addTab(overview, "状态与用量")
@@ -990,6 +996,14 @@ class AntigravityBridgeManagerDialog(QtWidgets.QDialog):
     def refresh_data(self, force_inventory: bool = False):
         info = self.controller.task_info()
         running = info.get("running", False)
+        self.cmb_run_mode.blockSignals(True)
+        self.cmb_run_mode.setCurrentIndex(self.cmb_run_mode.findData(self.controller.run_mode()))
+        self.cmb_run_mode.blockSignals(False)
+        current_mode = "管理器线程" if info.get("mode") == "thread" else "独立进程"
+        self.cmb_run_mode.setToolTip(
+            f"运行方式在下次启动桥时生效；当前：{current_mode}。" if running else
+            "运行方式在下次启动桥时生效；管理器线程随管理器退出。"
+        )
         self.status_label.setText("🟢 运行中" if running else "⚪ 未运行")
         self.status_label.setStyleSheet("color: #4ade80;" if running else "color: #94a3b8;")
 
@@ -1043,6 +1057,7 @@ class AntigravityBridgeManagerDialog(QtWidgets.QDialog):
             worker = _BackendInventoryWorker(self.controller, config, force=force_inventory, parent=self)
             worker.ready.connect(self._render_backend_inventory)
             worker.history_ready.connect(self._render_history)
+            worker.tokens_ready.connect(lambda tokens: self.token_label.setText(token_usage_text(tokens)))
             worker.finished.connect(lambda current=worker: self._clear_inventory_worker(current))
             worker.finished.connect(worker.deleteLater)
             self._inventory_worker = worker

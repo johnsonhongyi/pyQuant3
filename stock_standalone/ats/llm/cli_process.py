@@ -78,6 +78,7 @@ def run_bounded_cli(
     stdout_callback: Callable[[bytes], None] | None = None,
     timeout_limit_seconds: float = 30.0,
     cancel_event: threading.Event | None = None,
+    hidden_console: bool = False,
 ) -> BoundedCLIResult:
     """Run a no-shell CLI while bounding captured output and wall time."""
     if (
@@ -87,6 +88,8 @@ def run_bounded_cli(
         raise BoundedCLIError("CLI_ARGUMENT_INVALID")
     if not isinstance(stdin_bytes, bytes):
         raise BoundedCLIError("CLI_INPUT_INVALID")
+    if not isinstance(hidden_console, bool):
+        raise BoundedCLIError("CLI_ARGUMENT_INVALID")
     if len(stdin_bytes) > 64 * 1024:
         raise BoundedCLIError("CLI_INPUT_TOO_LARGE")
     if (
@@ -151,8 +154,15 @@ def run_bounded_cli(
                 "bufsize": 0,
             }
             if os.name == "nt":
-                kwargs["creationflags"] = (getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-                                           | getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                # A hidden console gives agent-spawned console helpers an
+                # existing console to inherit. NO_WINDOW only covers the root
+                # process and leaves its console handle unset.
+                kwargs["creationflags"] = (subprocess.CREATE_NEW_CONSOLE if hidden_console else
+                    subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW)
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = subprocess.SW_HIDE
+                kwargs["startupinfo"] = startupinfo
             else:
                 kwargs["start_new_session"] = True
             process = subprocess.Popen(list(command), **kwargs)

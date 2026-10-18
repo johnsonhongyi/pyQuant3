@@ -212,6 +212,7 @@ class AntigravityCLIBackend:
                     command, cwd=scratch, stdin_bytes=prompt_event,
                     timeout_seconds=min(30.0, timeout + 2.0),
                     completion_predicate=self._has_result_event,
+                    hidden_console=True,
                 )
             duration = (time.monotonic() - started) * 1000.0
             result_event = self._parse_result_event(completed.stdout)
