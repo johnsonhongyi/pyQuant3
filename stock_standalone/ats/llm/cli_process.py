@@ -140,6 +140,8 @@ def run_bounded_cli(
                         callback_failed.set()
         except (OSError, ValueError):
             return
+        finally:
+            stream.close()  # type: ignore[attr-defined]
 
     try:
         with tempfile.TemporaryFile(mode="w+b") as input_file:

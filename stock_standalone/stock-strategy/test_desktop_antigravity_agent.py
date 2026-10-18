@@ -107,7 +107,8 @@ class AntigravityChatTests(unittest.TestCase):
                 self.assertEqual(catalog.default_model, "gemini-3.8-flash-low")
                 self.assertEqual(len(catalog.models), 3)
                 self.assertEqual(catalog.models[0]["efforts"], ["high"])
-                self.assertEqual(catalog.models[2]["default_effort"], "low")
+                self.assertEqual(catalog.models[2]["efforts"], ["auto"])
+                self.assertEqual(catalog.models[2]["default_effort"], "auto")
                 catalog.fetched_at -= 301
                 self.assertTrue(catalog.probe())
                 self.assertEqual(run.call_count, 2)
@@ -123,12 +124,40 @@ class AntigravityChatTests(unittest.TestCase):
                 self.assertFalse(catalog.status()["models_available"])
                 self.assertEqual(catalog.models, [])
 
-    def test_model_and_fixed_effort_mismatch_fail_explicitly(self):
+    def test_model_and_effort_selection_adapts_to_catalog(self):
         models = agent._parse_model_catalog("gemini-3.8-flash-low\tGemini Flash (Low)\n")
         with self.assertRaisesRegex(agent.BoundedCLIError, "MODEL_UNAVAILABLE"):
             agent._select_model({"model": "removed-model"}, models, "")
         with self.assertRaisesRegex(agent.BoundedCLIError, "EFFORT_UNSUPPORTED"):
             agent._resolve_cli_effort(models[0]["id"], "high", models)
+        fixed = agent._parse_model_catalog("claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n")[0]
+        with self.assertRaisesRegex(agent.BoundedCLIError, "EFFORT_UNSUPPORTED"):
+            agent._resolve_cli_effort(fixed["id"], "high", [fixed])
+        self.assertEqual(agent._resolve_cli_effort(fixed["id"], "auto", [fixed]), "auto")
+
+    def test_fixed_model_omits_effort_flag_and_uses_model_default(self):
+        posted = []
+
+        def fake_run(command, **kwargs):
+            self.assertNotIn("--effort", command)
+            self.assertEqual(command[command.index("--model") + 1], "claude-sonnet-4-6")
+            stream = kwargs["stdout_callback"]
+            conversation_id = "c3b66b04-872b-4fbe-a3a4-058a026ef20a"
+            stream(json.dumps({"event": "init", "init": {"model": "claude-sonnet-4-6"},
+                               "conversation_id": conversation_id}).encode() + b"\n")
+            stream(json.dumps({"event": "result", "result": {"status": "SUCCESS", "response": "ok",
+                               "conversation_id": conversation_id}}).encode() + b"\n")
+            return SimpleNamespace(returncode=0, stdout=b"", completed_by_predicate=True)
+
+        fixed = agent._parse_model_catalog("claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n")
+        with tempfile.TemporaryDirectory() as directory, sqlite3.connect(":memory:") as ledger:
+            with patch.object(agent, "ProgressPublisher"), patch.object(agent, "run_bounded_cli", side_effect=fake_run), \
+                 patch.object(agent, "_post_chat_result", side_effect=lambda peer, payload: posted.append(payload)), \
+                 patch.object(agent, "_emit_log"):
+                agent.run_antigravity_chat(Mock(), {"id": "fixed-model", "lease_token": "lease",
+                    "remaining_seconds": 90, "context": {"prompt": "test", "model": "claude-sonnet-4-6",
+                    "reasoning_effort": "auto"}}, "agy", Path(directory), fixed, ledger, Mock())
+        self.assertEqual(posted[0]["result"]["reasoning_effort"], "auto")
 
     def test_failed_receipt_is_durable_and_replayed_without_inference(self):
         job = {"id": "receipt", "lease_token": "lease", "context": {
@@ -150,11 +179,13 @@ class AntigravityChatTests(unittest.TestCase):
 
     def test_strategy_preserves_usage_and_replays_validated_result(self):
         proposal = {"market_view": "missing evidence", "rotation_view": "unknown", "answer": "observe", "plans": []}
-        job = {"id": "strategy", "lease_token": "lease", "context": {"model": "flash-low"}}
-        models = [{"id": "flash-low", "efforts": ["low"], "default_effort": "low"}]
+        job = {"id": "strategy", "lease_token": "lease", "context": {
+            "model": "claude-sonnet-4-6", "reasoning_effort": "auto"}}
+        models = agent._parse_model_catalog("claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n")
         peer = Mock()
 
         def run(command, **kwargs):
+            self.assertNotIn("--effort", command)
             event = {"event": "result", "result": {"status": "SUCCESS", "response": json.dumps(proposal),
                 "usage": {"input_tokens": 100, "output_tokens": 10, "total_tokens": 110}}}
             kwargs["stdout_callback"](json.dumps(event).encode() + b"\n")
