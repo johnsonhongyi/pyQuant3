@@ -3259,7 +3259,7 @@ class AcerPerformanceController:
             # 2. 如果属于无进程冷启动，或者进程创建时间小于 6.5s (仍在播开场动画)，强行挂起等待动画播完
             if is_cold_start:
                 _do_log("[Step 2/4] 发起 explorer.exe AUMID 界面唤起...")
-                subprocess.Popen(f'explorer.exe "{app_aumid}"', shell=True)
+                subprocess.Popen(['explorer.exe', app_aumid])
                 anim_wait = 9.5 if sys_cold_boot else 6.8 # 系统冷启动下开场动画加载稍长
                 _do_log(f"[Step 2/4] 冷启动等待 WPF 开场动画播放与 UI 渲染 ({anim_wait}s)...")
                 time.sleep(anim_wait)
@@ -3276,7 +3276,7 @@ class AcerPerformanceController:
             for retry_round in range(3):
                 if not is_cold_start or retry_round > 0:
                     _do_log(f"[Step 3/4] [重试第 {retry_round+1} 轮] 再次调起 AUMID 探查窗口...")
-                    subprocess.Popen(f'explorer.exe "{app_aumid}"', shell=True)
+                    subprocess.Popen(['explorer.exe', app_aumid])
 
                 # 每轮等待探查窗口 (系统冷启动放宽探查)
                 for _ in range(max_enum_steps):

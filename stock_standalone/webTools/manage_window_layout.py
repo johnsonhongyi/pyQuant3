@@ -13,6 +13,14 @@ import os
 import ctypes
 import json
 
+# keyboard and commonTips probe Windows versions during their first import.
+# Install the manager-only compatibility shim before either import can spawn CMD.
+_startup_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _startup_root not in sys.path:
+    sys.path.insert(0, _startup_root)
+from webTools.startup_console import install_quiet_version_probe
+install_quiet_version_probe()
+
 # 针对 Windows 控制台环境，防止 GBK 编码输出特殊字符或 Emoji 导致 UnicodeEncodeError 崩溃
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
     try:
