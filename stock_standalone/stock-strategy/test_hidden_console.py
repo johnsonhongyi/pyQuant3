@@ -44,7 +44,7 @@ class HiddenConsoleTests(unittest.TestCase):
             self.assertFalse(rows[1]["console"])
             self.assertFalse(any(row["visible"] for row in rows))
 
-    def test_root_and_child_share_one_hidden_console_with_pipes_intact(self):
+    def test_root_and_child_have_no_console_with_pipes_intact(self):
         probe = (
             "import ctypes,json; k=ctypes.windll.kernel32; u=ctypes.windll.user32; "
             "k.GetConsoleWindow.restype=ctypes.c_void_p; u.IsWindowVisible.argtypes=[ctypes.c_void_p]; "
@@ -57,7 +57,7 @@ class HiddenConsoleTests(unittest.TestCase):
         rows = [json.loads(line) for line in result.stdout.splitlines()]
         self.assertEqual(result.returncode, 0)
         self.assertEqual(len(rows), 2)
-        self.assertTrue(rows[0]["console"])
+        self.assertFalse(rows[0]["console"])
         self.assertEqual(rows[0]["console"], rows[1]["console"])
         self.assertFalse(any(row["visible"] for row in rows))
 
@@ -77,8 +77,8 @@ class HiddenConsoleTests(unittest.TestCase):
                 run_bounded_cli([sys.executable, "-c", "print('ok')"], cwd=folder,
                     stdin_bytes=b"", timeout_seconds=5, hidden_console=hidden)
         self.assertTrue(flags[0] & subprocess.CREATE_NO_WINDOW)
-        self.assertEqual(flags[1], subprocess.CREATE_NEW_CONSOLE)
-        self.assertFalse(flags[1] & subprocess.CREATE_NO_WINDOW)
+        self.assertTrue(flags[1] & subprocess.CREATE_NO_WINDOW)
+        self.assertFalse(flags[1] & subprocess.CREATE_NEW_CONSOLE)
         self.assertTrue(all(process.stdout.closed and process.stderr.closed for process in processes))
 
     def test_hidden_console_timeout_reaps_owned_child(self):

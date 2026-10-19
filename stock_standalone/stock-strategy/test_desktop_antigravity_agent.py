@@ -242,9 +242,15 @@ class AntigravityChatTests(unittest.TestCase):
         job = {"id": "receipt", "lease_token": "lease", "context": {
             "prompt": "probe", "bridge_test": True, "model": "flash-low"}}
         models = [{"id": "flash-low", "efforts": ["low"], "default_effort": "low"}]
+        def infer(command, **kwargs):
+            event = {'event': 'result', 'result': {'status': 'SUCCESS',
+                'response': 'ANTIGRAVITY_BRIDGE_OK',
+                'conversation_id': 'c3b66b04-872b-4fbe-a3a4-058a026ef20a'}}
+            kwargs['stdout_callback'](json.dumps(event).encode() + b'\n')
+            return SimpleNamespace(returncode=0, stdout=b'', completed_by_predicate=True)
         with tempfile.TemporaryDirectory() as directory, sqlite3.connect(":memory:") as ledger:
             with patch.object(agent, "ProgressPublisher"), patch.object(agent, "_emit_log"), \
-                 patch.object(agent, "run_bounded_cli") as run, \
+                 patch.object(agent, "run_bounded_cli", side_effect=infer) as run, \
                  patch.object(agent, "_post_chat_result", side_effect=OSError("offline")) as post:
                 with self.assertRaises(OSError):
                     agent.run_antigravity_chat(Mock(), job, "agy", Path(directory), models, ledger, Mock())
@@ -254,12 +260,13 @@ class AntigravityChatTests(unittest.TestCase):
                 post.side_effect = None
                 agent.run_antigravity_chat(Mock(), job, "agy", Path(directory), models, ledger, Mock())
                 self.assertIsNotNone(ledger.execute("SELECT delivered_at FROM result_outbox").fetchone()[0])
-                run.assert_not_called()
+                self.assertEqual(run.call_count, 1)
 
     def test_strategy_preserves_usage_and_replays_validated_result(self):
         proposal = {"market_view": "missing evidence", "rotation_view": "unknown", "answer": "observe", "plans": []}
         job = {"id": "strategy", "lease_token": "lease", "context": {
-            "model": "claude-sonnet-4-6", "reasoning_effort": "auto"}}
+            "model": "claude-sonnet-4-6", "reasoning_effort": "auto", "stocks": []}}
+        job['evidence_hash'] = agent.digest(job['context'])
         models = agent._parse_model_catalog("claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n")
         peer = Mock()
 
@@ -273,7 +280,10 @@ class AntigravityChatTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, sqlite3.connect(":memory:") as ledger:
             with patch.object(agent, "ProgressPublisher"), patch.object(agent, "_emit_log"), \
                  patch.object(agent, "ats_evidence", return_value={}), \
+                 patch.object(agent, "DesktopRuntimeProbe") as probe, \
                  patch.object(agent, "run_bounded_cli", side_effect=run) as runner:
+                probe.return_value.snapshot.return_value = {}
+                peer.desktop_runtime_probe = probe.return_value
                 for _ in range(2):
                     agent.run_antigravity_strategy(peer, job, "agy", Path(directory), models, ledger, Mock())
                 self.assertEqual(runner.call_count, 1)
