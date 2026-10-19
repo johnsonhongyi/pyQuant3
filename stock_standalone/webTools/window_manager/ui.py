@@ -68,7 +68,8 @@ class WindowMixin:
         return os.path.join(app_root, filename)
 
     def load_window_position_qt(self, win, window_name: str, file_path: str = "window_config.json", 
-                                default_width: int = 500, default_height: int = 500, offset_step: int = 100) -> tuple:
+                                default_width: int = 500, default_height: int = 500, offset_step: int = 100,
+                                preserve_default_position: bool = False) -> tuple:
         try:
             window_name = str(window_name)
             scale = self._get_dpi_scale_factor()
@@ -78,11 +79,13 @@ class WindowMixin:
             y = None
             width = default_width
             height = default_height
+            has_saved_geometry = False
 
             if os.path.exists(config_file_path):
                 with open(config_file_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 if window_name in data:
+                    has_saved_geometry = True
                     pos = data[window_name]
                     # Qt6 中 win.geometry() 原生使用 Logical Pixels，无需二次乘以 scale
                     width = int(pos.get("width", default_width))
@@ -115,6 +118,10 @@ class WindowMixin:
                     except Exception as ex:
                         logger.error(f"[load_window_position_qt] 溢出防护检查异常: {ex}")
 
+            if not has_saved_geometry and preserve_default_position:
+                win.resize(default_width, default_height)
+                return default_width, default_height, None, None
+
             if x is None or y is None:
                 x, y = 100, 100
 
@@ -126,13 +133,14 @@ class WindowMixin:
             win.resize(default_width, default_height)
             return default_width, default_height, None, None
 
-    def save_window_position_qt_visual(self, win, window_name: str, file_path: str = "window_config.json") -> None:
+    def save_window_position_qt_visual(self, win, window_name: str, file_path: str = "window_config.json",
+                                       force: bool = False) -> None:
         import time
         if not hasattr(self, "_window_save_debounce"):
             self._window_save_debounce = {}
         current_time = time.time()
         last_time = self._window_save_debounce.get(window_name, 0)
-        if current_time - last_time < 5:
+        if not force and current_time - last_time < 5:
             return
         self._window_save_debounce[window_name] = current_time
 
@@ -4092,6 +4100,15 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         except Exception as e:
             logger.error(f"托盘图标 Agent Hub 快捷菜单初始化异常: {e}")
 
+        restart_menu = self.tray_menu.addMenu("🔄 桌面桥快速重启")
+        restart_all_action = restart_menu.addAction("同时重启 Codex 与 Antigravity")
+        restart_all_action.triggered.connect(self.restart_all_bridges_from_manager)
+        restart_menu.addSeparator()
+        codex_restart_action = restart_menu.addAction("快速重启 Codex 桌面桥")
+        codex_restart_action.triggered.connect(lambda _=False: self.restart_bridge_from_manager("codex"))
+        agv_restart_action = restart_menu.addAction("快速重启 Antigravity 桌面桥")
+        agv_restart_action.triggered.connect(lambda _=False: self.restart_bridge_from_manager("antigravity"))
+        self.tray_menu.addSeparator()
         bridge_action = self.tray_menu.addAction("🧩 桌面桥启动管理...")
         bridge_action.triggered.connect(self.open_bridge_startup_manager)
 
@@ -4162,8 +4179,25 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         
         self.apply_current_layout(show_tray_message=show_tray_message)
         
+    def _bridge_lifecycle_operation_running(self) -> bool:
+        workers = list(getattr(self, "_bridge_restart_workers", {}).values())
+        for dialog_name in ("_bridge_startup_dialog", "_codex_bridge_dialog", "_antigravity_bridge_dialog"):
+            dialog = getattr(self, dialog_name, None)
+            if dialog is None:
+                continue
+            workers.extend(getattr(dialog, "_restart_workers", {}).values())
+            for attr in ("_restart_worker", "_operation_worker"):
+                worker = getattr(dialog, attr, None)
+                if worker is not None:
+                    workers.append(worker)
+        return any(worker.isRunning() for worker in workers if hasattr(worker, "isRunning"))
+
     def force_quit(self):
         """彻底安全退出管理器，释放所有资源并完全终止进程"""
+        if self._bridge_lifecycle_operation_running():
+            self.log("桌面桥正在重启；请等待重启完成后再完全退出管理器。")
+            QMessageBox.information(self, "桌面桥重启中", "桥接重启尚未完成，请等待完成后再退出管理器。")
+            return
         try:
             if hasattr(self, "_window_save_debounce"):
                 self._window_save_debounce.clear()
@@ -4225,6 +4259,10 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             self.log("界面已隐藏至状态栏。")
             event.ignore()
         else:
+            if self._bridge_lifecycle_operation_running():
+                self.log("桌面桥正在重启；请等待重启完成后再关闭管理器。")
+                event.ignore()
+                return
             try:
                 if getattr(self, '_hotkey_thread', None):
                     self._hotkey_thread.stop()
@@ -5530,6 +5568,72 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         except Exception as exc:
             logger.exception("打开桌面桥启动管理失败")
             QMessageBox.critical(self, "打开失败", f"无法打开桌面桥启动管理：{type(exc).__name__}")
+
+    def restart_bridge_from_manager(self, bridge: str):
+        workers = getattr(self, "_bridge_restart_workers", None)
+        if workers is None:
+            workers = self._bridge_restart_workers = {}
+        current = workers.get(bridge)
+        if current is not None and current.isRunning():
+            self.log(f"[{bridge}] 桌面桥重启已在进行中。")
+            return
+        try:
+            from .bridge_startup_manager import BridgeRestartWorker
+            if bridge == "codex":
+                from .codex_bridge_manager import BridgeController
+                controller = BridgeController(core.get_app_root())
+                label = "Codex"
+            elif bridge == "antigravity":
+                from .antigravity_bridge_manager import AntigravityBridgeController
+                controller = AntigravityBridgeController(core.get_app_root())
+                label = "Antigravity"
+            else:
+                raise ValueError("unknown desktop bridge")
+            worker = BridgeRestartWorker(controller, bridge, self)
+            workers[bridge] = worker
+            worker.progress.connect(self._bridge_restart_progress)
+            worker.result_ready.connect(self._bridge_restart_finished)
+            worker.finished.connect(self._clear_finished_bridge_restart_workers)
+            worker.finished.connect(worker.deleteLater)
+            self.log(f"[{label}] 重启已开始：正在检查桥状态。")
+            worker.start()
+        except Exception as exc:
+            logger.exception("启动桌面桥重启任务失败：%s", bridge)
+            self.log(f"[{bridge}] 无法启动重启任务：{type(exc).__name__}：{str(exc)[:240]}")
+
+    def restart_all_bridges_from_manager(self):
+        self.log("双桥重启开始：分别停止旧桥、等待当前任务完成，再启动并核验新桥。")
+        tray = getattr(self, "tray_icon", None)
+        if tray is not None and tray.isVisible():
+            tray.showMessage(
+                "双桥重启中",
+                "Codex 与 Antigravity 正在停止、启动并核验；阶段进度见管理器日志。",
+                QtWidgets.QSystemTrayIcon.MessageIcon.Information,
+                4000,
+            )
+        self.restart_bridge_from_manager("codex")
+        self.restart_bridge_from_manager("antigravity")
+
+    def _bridge_restart_progress(self, bridge: str, message: str):
+        label = "Codex" if bridge == "codex" else "Antigravity"
+        self.log(f"[{label}] {message}")
+
+    def _bridge_restart_finished(self, bridge: str, success: bool, message: str):
+        label = "Codex" if bridge == "codex" else "Antigravity"
+        self.log(f"[{label}] {'重启完成' if success else '重启失败'}：{message}")
+        tray = getattr(self, "tray_icon", None)
+        if tray is not None and tray.isVisible():
+            icon = (
+                QtWidgets.QSystemTrayIcon.MessageIcon.Information if success
+                else QtWidgets.QSystemTrayIcon.MessageIcon.Warning
+            )
+            tray.showMessage(f"{label} 桌面桥{'已重启' if success else '重启失败'}", message, icon, 5000)
+
+    def _clear_finished_bridge_restart_workers(self):
+        workers = getattr(self, "_bridge_restart_workers", {})
+        for bridge, worker in tuple(workers.items()):
+            if not worker.isRunning():
+                workers.pop(bridge, None)
 
     def _trigger_ramdisk_sync_from_tray(self):
         """从托盘右键一键手动触发立即同步备份"""
