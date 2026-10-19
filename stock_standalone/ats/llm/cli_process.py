@@ -118,6 +118,7 @@ def run_bounded_cli(
     callback_errors: list[Exception] = []
     buffer_lock = threading.Lock()
     process: subprocess.Popen[bytes] | None = None
+    desktop_process = None
 
     def capture(name: str, stream: object) -> None:
         try:
@@ -165,7 +166,12 @@ def run_bounded_cli(
                 kwargs["startupinfo"] = startupinfo
             else:
                 kwargs["start_new_session"] = True
-            process = subprocess.Popen(list(command), **kwargs)
+            if os.name == "nt" and hidden_console and Path(command[0]).name.lower() in {"agy", "agy.exe"}:
+                from ats.llm.windows_cli_desktop import DesktopCLIProcess
+                desktop_process = DesktopCLIProcess(list(command), **kwargs)
+                process = desktop_process
+            else:
+                process = subprocess.Popen(list(command), **kwargs)
             input_file.close()
             readers = [
                 threading.Thread(
@@ -246,3 +252,6 @@ def run_bounded_cli(
         if process is not None:
             _terminate_process_tree(process)
         raise BoundedCLIError("CLI_START_OR_IO_FAILED") from exc
+    finally:
+        if desktop_process is not None:
+            desktop_process.close()
