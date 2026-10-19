@@ -216,7 +216,7 @@ def run_chat(peer,job,cli,runtime,models,sidebar,ledger,heartbeat,session=None):
             if message.get('method')=='turn/completed' and event.get('turn',{}).get('id')==turn['id']:
                 if event['turn']['status']!='completed':
                     from ats.llm.codex_cli_backend import CodexCLIBackend
-                    raise ValueError(CodexCLIBackend._classify_cli_exit(1,json.dumps(event['turn'].get('error') or {}).encode()))
+                    raise CodexCLIBackend._turn_failure(event['turn'].get('error'))
                 if not content.strip():raise ValueError('CHAT_EMPTY_RESULT')
                 model_completed=True
                 timings['bridge_to_completed_ms']=round((time.monotonic()-claimed_at)*1000)
@@ -247,13 +247,20 @@ def run_chat(peer,job,cli,runtime,models,sidebar,ledger,heartbeat,session=None):
     except (OSError,ValueError,KeyError,TypeError,queue.Empty,TimeoutError) as exc:
         code=str(exc) if re.fullmatch(r'(CLI|CHAT)_[A-Z0-9_]+',str(exc)) else 'MODEL_TIMEOUT' if isinstance(exc,TimeoutError) and str(exc)=='MODEL_TIMEOUT' else _peer_error_code(exc) if getattr(exc,'peer_operation',None) else f"{stage}_{'timeout' if isinstance(exc,TimeoutError) else type(exc).__name__}".lower()
         error_detail=_error_details(exc);error_detail['stage']=stage
+        error_detail.update(getattr(exc,'codex_diagnostic',{}))
+        error_detail.update(elapsed_ms=round((time.monotonic()-claimed_at)*1000),timeout_budget_ms=round(max(0,remaining-15)*1000),received_content=bool(content))
+        if not result_saved:
+            ledger.execute('UPDATE chat_attempts SET state=?,updated_at=? WHERE id=?',('failed',time.time(),job['id']));ledger.commit()
+        if code in ('CLI_USAGE_LIMIT','CLI_RATE_LIMIT','CLI_AUTH_REQUIRED'):
+            ledger.execute('CREATE TABLE IF NOT EXISTS runtime(key TEXT PRIMARY KEY,value TEXT)')
+            ledger.execute("INSERT OR REPLACE INTO runtime VALUES('cooldown_until',?)",(str(time.time()+300),));ledger.commit()
         if app and getattr(app,'error_detail',None) and 'cause' not in error_detail:error_detail['cause']=app.error_detail
         cancelled=getattr(exc,'peer_code','') in ('CHAT_CANCELLED','CHAT_NOT_FOUND','CHAT_LEASE_REPLACED')
         _emit_log({'status':'cancelled' if cancelled else 'degraded','error_code':getattr(exc,'peer_code','') or code,'stage':stage,'operation':getattr(exc,'peer_operation',''),'error_detail':error_detail,'job_id':job['id'][:12]})
         if publisher:
             publisher.close();publisher=None
         if not cancelled and (not result_saved or not _should_replay_saved_result(exc)):
-            try:_post_chat_result(peer,{'id':job['id'],'lease_token':job['lease_token'],'status':'failed','result':{'error_code':code,'thread_id':getattr(app,'active_thread',None),'stage':stage}})
+            try:_post_chat_result(peer,{'id':job['id'],'lease_token':job['lease_token'],'status':'failed','result':{'error_code':code,'error_message':error_detail.get('upstream_reason',code),'thread_id':getattr(app,'active_thread',None),'stage':stage}})
             except (OSError,ValueError,KeyError,TypeError):pass # Cancelled/expired lease or unreachable backend is recovered by lease cleanup.
     finally:
         try:

@@ -123,6 +123,35 @@ class CodexCLIBackend:
         return {"status": "UNAVAILABLE", "error_code": code}
 
     @staticmethod
+    def _turn_failure(error: Any) -> ValueError:
+        """Classify structured turn errors without leaking arbitrary upstream text."""
+        payload = error if isinstance(error, dict) else {}
+        code = CodexCLIBackend._classify_cli_exit(1, json.dumps(payload).encode("utf-8"))
+        info = payload.get("codexErrorInfo", payload.get("codex_error_info"))
+        if code == "CLI_EXIT_CODE_1" and isinstance(info, str):
+            code = {"usageLimitExceeded": "CLI_USAGE_LIMIT",
+                    "httpConnectionFailed": "CLI_NETWORK_ERROR",
+                    "responseStreamConnectionFailed": "CLI_NETWORK_ERROR",
+                    "responseStreamDisconnected": "CLI_NETWORK_ERROR",
+                    "serverOverloaded": "CLI_RATE_LIMIT"}.get(info, code)
+        failure = ValueError(code)
+        reasons = {
+            "CLI_ROUTING_DISCOVERY_FAILED": "workspace routing discovery failed",
+            "CLI_USAGE_LIMIT": "Codex usage limit reached",
+            "CLI_RATE_LIMIT": "Codex request rate limited",
+            "CLI_NETWORK_ERROR": "Codex upstream connection failed",
+            "CLI_AUTH_REQUIRED": "Codex authentication required",
+        }
+        failure.codex_diagnostic = {"upstream_reason": reasons.get(code, "Codex turn failed")}
+        info = payload.get("codexErrorInfo", payload.get("codex_error_info"))
+        if isinstance(info, str) and info in {
+            "other", "usageLimitExceeded", "httpConnectionFailed", "responseStreamConnectionFailed",
+            "responseStreamDisconnected", "responseTooManyFailedAttempts", "serverOverloaded", "internalServerError",
+        }:
+            failure.codex_diagnostic["codex_error_info"] = info
+        return failure
+
+    @staticmethod
     def _classify_cli_exit(returncode: int, stderr: bytes) -> str:
         """Map common local CLI failures to stable codes without retaining diagnostics."""
         text = stderr.decode("utf-8", errors="replace").lower()
@@ -131,6 +160,8 @@ class CodexCLIBackend:
             "limit reached", "5-hour limit", "5 hour limit",
         )):
             return "CLI_USAGE_LIMIT"
+        if "workspace routing discovery failed" in text:
+            return "CLI_ROUTING_DISCOVERY_FAILED"
         if any(marker in text for marker in ("rate limit", "rate_limit", "too many requests", "429")):
             return "CLI_RATE_LIMIT"
         if any(marker in text for marker in (

@@ -167,6 +167,10 @@ _AGV_STAGE_LABELS = {
 def _agv_error_label(value) -> str:
     raw = str(value or "").strip()
     key = raw.lower()
+    if key == "agy_location_unsupported":
+        return "AGV 上游拒绝当前地区访问（AGY_LOCATION_UNSUPPORTED）"
+    if key == "agy_eligibility_network_error":
+        return "AGV 资格检查连接中断（AGY_ELIGIBILITY_NETWORK_ERROR）"
     if key == "engine_unavailable":
         return "找不到 AGY CLI"
     if "jsondecodeerror" in key:
@@ -234,8 +238,15 @@ def _format_agv_logs(raw_text: str, max_lines: int = 160) -> str:
                     timestamp = ""
                 status = str(payload.get("status") or "").strip()
                 if status:
-                    parts = [_status_label(status)]
+                    error_info = payload.get("error_detail") if isinstance(payload.get("error_detail"), dict) else {}
                     error_code = payload.get("error_code") or payload.get("error")
+                    location_blocked = (str(error_code).upper() == "AGY_LOCATION_UNSUPPORTED"
+                                        or "user location is not supported" in str(error_info.get("message", "")).lower())
+                    parts = [_status_label("failed" if location_blocked else status)]
+                    if location_blocked:
+                        if str(error_code).upper() != "AGY_LOCATION_UNSUPPORTED":
+                            parts.append("原始码 " + str(error_code))
+                        error_code = "AGY_LOCATION_UNSUPPORTED"
                     if error_code:
                         parts.append("错误：" + _agv_error_label(error_code))
                     stage = payload.get("stage")
@@ -252,8 +263,12 @@ def _format_agv_logs(raw_text: str, max_lines: int = 160) -> str:
                     detail = _agv_error_detail(error_info)
                     if detail:
                         parts.append("详情 " + detail)
-                    if payload.get("retry_after_seconds"):
-                        parts.append("将在 %s 秒后重试" % payload["retry_after_seconds"])
+                    if location_blocked:
+                        parts.append("可能原因：AGV未走预期代理、分流直连、出口地区被拒绝或账号地区条件受限")
+                        parts.append("处理建议：核对AGY进程实际代理与命中规则、实际出口及账号地区资格；更换模型或重启桥不能保证解决")
+                        parts.append("此任务不会自动重试；访问条件恢复后重新提交")
+                    elif payload.get("retry_after_seconds"):
+                        parts.append("将在 %s 秒后恢复检查（不代表原任务已重试）" % payload["retry_after_seconds"])
                     message = "；".join(parts)
                 else:
                     message = str(payload.get("message") or payload.get("detail") or "").strip()
