@@ -110,3 +110,44 @@ def test_delayed_acer_launch_and_retry_do_not_create_cmd():
         eval(compile(ast.fix_missing_locations(expression), str(source), 'eval'),
              {'subprocess': SimpleNamespace(Popen=launcher), 'app_aumid': aumid})
         launcher.assert_called_once_with(['explorer.exe', aumid])
+
+
+def test_performance_analyzer_fallback_does_not_create_visible_console():
+    source = Path(__file__).resolve().parents[1] / 'webTools/window_manager/ui.py'
+    tree = ast.parse(source.read_text(encoding='utf-8-sig'))
+    method = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+                  and node.name == 'open_performance_analyzer')
+    call = next(node for node in ast.walk(method) if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute) and node.func.attr == 'Popen')
+    namespace = {
+        'subprocess': SimpleNamespace(Popen=Mock(), CREATE_NEW_CONSOLE=0x10, CREATE_NO_WINDOW=0x08000000),
+        'sys': SimpleNamespace(executable='manager.exe', platform='win32'),
+        'script_path': r'C:\app\sys_performance_analyzer.py',
+    }
+    eval(compile(ast.fix_missing_locations(ast.Expression(body=call)), str(source), 'eval'), namespace)
+    namespace['subprocess'].Popen.assert_called_once_with(
+        ['manager.exe', r'C:\app\sys_performance_analyzer.py'], creationflags=0x08000000)
+
+
+def test_application_command_shell_is_hidden_for_gui_launches():
+    source = Path(__file__).resolve().parents[1] / 'webTools/window_manager/ui.py'
+    tree = ast.parse(source.read_text(encoding='utf-8-sig'))
+    method = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+                  and node.name == '_launch_program')
+    flag_assignment = next(node for node in ast.walk(method) if isinstance(node, ast.Assign)
+                           and any(isinstance(target, ast.Name) and target.id == 'creationflags'
+                                   for target in node.targets))
+    call = next(node for node in ast.walk(method) if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute) and node.func.attr == 'Popen')
+    popen = Mock()
+    namespace = {
+        'subprocess': SimpleNamespace(Popen=popen, CREATE_NO_WINDOW=0x08000000),
+        'sys': SimpleNamespace(platform='win32'),
+        'cmd_run': 'cd /d "C:\\app" && app.exe',
+        'target_dir': r'C:\app',
+        'sub_env': {},
+    }
+    body = ast.Module(body=[flag_assignment, ast.Expr(value=call)], type_ignores=[])
+    exec(compile(ast.fix_missing_locations(body), str(source), 'exec'), namespace)
+    popen.assert_called_once_with(namespace['cmd_run'], shell=True, cwd=r'C:\app',
+                                  env={}, creationflags=0x08000000)

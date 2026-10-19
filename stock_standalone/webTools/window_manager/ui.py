@@ -5392,7 +5392,7 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 script_path = os.path.join(app_root, "sys_performance_analyzer.py")
                 if os.path.exists(script_path):
                     # 在非 frozen 环境下使用 python 运行脚本
-                    proc = subprocess.Popen([sys.executable, script_path], creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == 'win32' else 0)
+                    proc = subprocess.Popen([sys.executable, script_path], creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
                     self._detailed_analysis_process = proc
                     self.log(f"🚀 [Fallback] 通过 subprocess 成功拉起性能分析器脚本 (PID: {proc.pid})")
                 else:
@@ -7678,8 +7678,11 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             sub_env.pop("INSTOCK_APP_ROOT", None)
             sub_env.pop("NUITKA_ONEFILE_DIRECTORY", None)
 
-            # 在 windows 上，使用 shell=True 启动任何脚本或命令最稳妥
-            subprocess.Popen(cmd_run, shell=True, cwd=target_dir, env=sub_env)
+            # Keep shell parsing for configured command chains, but hide its
+            # transient console when this GUI launches the child process.
+            creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            subprocess.Popen(cmd_run, shell=True, cwd=target_dir, env=sub_env,
+                             creationflags=creationflags)
             self._setup_post_launch_layout_timer(title, pos_item)
             return True
         except OSError as e:
