@@ -31,6 +31,7 @@ a = Analysis(
         'webTools.window_manager.antigravity_bridge_manager',
         'run_desktop_strategy_bridge',
         'run_desktop_antigravity_bridge',
+        'desktop_bridge_thread_output',
         'desktop_strategy_agent',
         'desktop_antigravity_agent',
         'desktop_chat',

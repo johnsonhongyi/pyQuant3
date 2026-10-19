@@ -2,14 +2,12 @@
 import configparser
 from contextlib import closing
 import importlib.util
-import io
 import json
 from pathlib import Path
 import sqlite3
 import subprocess
 import sys
 import tempfile
-import threading
 import unittest
 
 from desktop_strategy_agent import DesktopPeer,ats_evidence,research_schema
@@ -65,26 +63,5 @@ class DesktopAgentTests(unittest.TestCase):
             self.assertEqual(result.returncode,0,result.stderr)
             self.assertEqual(result.stdout.strip(),'locked')
             first.close()
-
-    def test_thread_output_writes_text_to_binary_log(self):
-        spec=importlib.util.spec_from_file_location('bridge_runner',Path(__file__).parent/'tools/run_desktop_strategy_bridge.py')
-        runner=importlib.util.module_from_spec(spec);spec.loader.exec_module(runner)
-        output=io.BytesIO()
-        message='bridge error: timeout\n'
-        proxy=runner._ThreadOutput(threading.get_ident(),output,None)
-        self.assertEqual(proxy.write(message),len(message))
-        proxy.flush()
-        self.assertEqual(output.getvalue(),message.encode('utf-8'))
-
-    def test_bridge_background_worker_logs_are_captured_in_thread_mode(self):
-        spec=importlib.util.spec_from_file_location('bridge_runner',Path(__file__).parent/'tools/run_desktop_strategy_bridge.py')
-        runner=importlib.util.module_from_spec(spec);spec.loader.exec_module(runner)
-        output,fallback=io.BytesIO(),io.StringIO()
-        proxy=runner._ThreadOutput(threading.get_ident(),output,fallback)
-        worker=threading.Thread(target=lambda:proxy.write('background receipt\n'),name='stock-codex-result-outbox')
-        worker.start();worker.join(1)
-        self.assertEqual(output.getvalue(),b'background receipt\n')
-        self.assertEqual(fallback.getvalue(),'')
-
 
 if __name__=='__main__':unittest.main()

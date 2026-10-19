@@ -20,6 +20,7 @@ import time
 from urllib.request import HTTPRedirectHandler, Request, ProxyHandler, build_opener
 
 from PyQt6 import QtCore, QtGui, QtWidgets
+from .bridge_dialog_geometry import configure_bridge_dialog_geometry
 from .bridge_token_usage import agv_token_counts, token_usage_text
 
 DEFAULT_BACKEND = "http://192.168.50.60:20073"
@@ -174,7 +175,11 @@ def _agv_error_label(value) -> str:
     if key == "engine_unavailable":
         return "找不到 AGY CLI"
     if "jsondecodeerror" in key:
-        return "后台返回了无效 JSON"
+        return "后端响应不是有效 JSON"
+    if key == "typeerror":
+        return "本机参数类型错误"
+    if key == "valueerror":
+        return "本机数据格式错误"
     if "connectionrefusederror" in key:
         return "后端拒绝连接"
     if "remotedisconnected" in key:
@@ -190,19 +195,28 @@ def _agv_error_label(value) -> str:
     return raw.replace("_", " ") or "未知错误"
 
 
-def _agv_error_detail(value) -> str:
+def _agv_error_detail(value, primary_error="") -> str:
     if not isinstance(value, dict):
-        return " ".join(str(value or "").split())[:300]
+        detail = " ".join(str(value or "").split())[:300]
+        if "line 1 column 1 (char 0)" in detail.lower():
+            return "响应为空（JSON 解析位置 1:1）"
+        return detail
     parts = []
     kind = str(value.get("cause_type") or value.get("type") or "").lower()
     if kind == "connectionrefusederror":
-        parts.append("后端拒绝连接")
+        kind_text = "后端拒绝连接"
     elif kind in ("timeout", "timeouterror", "socket.timeout"):
-        parts.append("等待响应超时")
+        kind_text = "等待响应超时"
     elif kind == "remotedisconnected":
-        parts.append("后端主动关闭连接")
+        kind_text = "后端主动关闭连接"
+    else:
+        kind_text = ""
+    if kind_text and kind_text != primary_error:
+        parts.append(kind_text)
     message = str(value.get("message") or "").strip()
-    if message and message not in parts:
+    if "line 1 column 1 (char 0)" in message.lower():
+        message = "响应为空（JSON 解析位置 1:1）"
+    if message and message != primary_error and message not in parts:
         parts.append(message[:220])
     if value.get("server_message"):
         parts.append("后端原因：" + str(value["server_message"])[:120])
@@ -211,6 +225,16 @@ def _agv_error_detail(value) -> str:
         if item is not None and str(item).strip():
             parts.append(f"{label} {str(item)[:140]}")
     return "；".join(parts)[:520]
+
+
+def _agv_log_action(stage, operation) -> str:
+    if stage == "unified_job_wait" or operation == "next":
+        return "统一任务轮询"
+    if stage:
+        return _AGV_STAGE_LABELS.get(str(stage), str(stage).replace("_", " "))
+    return {"heartbeat": "后端心跳", "chat_claim": "领取对话任务", "strategy_claim": "领取策略任务"}.get(
+        str(operation), str(operation or "后台请求").replace("_", " ")
+    )
 
 
 def _format_agv_logs(raw_text: str, max_lines: int = 160) -> str:
@@ -238,38 +262,48 @@ def _format_agv_logs(raw_text: str, max_lines: int = 160) -> str:
                     timestamp = ""
                 status = str(payload.get("status") or "").strip()
                 if status:
-                    error_info = payload.get("error_detail") if isinstance(payload.get("error_detail"), dict) else {}
+                    raw_error_info = payload.get("error_detail")
+                    error_info = raw_error_info if isinstance(raw_error_info, dict) else (
+                        {"message": str(raw_error_info)} if raw_error_info else {}
+                    )
                     error_code = payload.get("error_code") or payload.get("error")
                     location_blocked = (str(error_code).upper() == "AGY_LOCATION_UNSUPPORTED"
                                         or "user location is not supported" in str(error_info.get("message", "")).lower())
-                    parts = [_status_label("failed" if location_blocked else status)]
                     if location_blocked:
-                        if str(error_code).upper() != "AGY_LOCATION_UNSUPPORTED":
-                            parts.append("原始码 " + str(error_code))
                         error_code = "AGY_LOCATION_UNSUPPORTED"
-                    if error_code:
-                        parts.append("错误：" + _agv_error_label(error_code))
                     stage = payload.get("stage")
-                    error_info = payload.get("error_detail") if isinstance(payload.get("error_detail"), dict) else {}
                     stage = stage or error_info.get("stage")
-                    if stage:
-                        parts.append("阶段 " + _AGV_STAGE_LABELS.get(str(stage), str(stage).replace("_", " ")))
                     operation = payload.get("operation") or error_info.get("operation")
-                    if operation:
-                        parts.append("操作 " + {"next": "领取后台任务", "heartbeat": "发送后端心跳"}.get(str(operation), str(operation)))
-                    for field, label in (("job_id", "任务"), ("thread_id", "会话"), ("port", "端口")):
-                        if payload.get(field):
-                            parts.append(label + " " + str(payload[field])[:64])
-                    detail = _agv_error_detail(error_info)
-                    if detail:
-                        parts.append("详情 " + detail)
                     if location_blocked:
-                        parts.append("可能原因：AGV未走预期代理、分流直连、出口地区被拒绝或账号地区条件受限")
-                        parts.append("处理建议：核对AGY进程实际代理与命中规则、实际出口及账号地区资格；更换模型或重启桥不能保证解决")
-                        parts.append("此任务不会自动重试；访问条件恢复后重新提交")
-                    elif payload.get("retry_after_seconds"):
-                        parts.append("将在 %s 秒后恢复检查（不代表原任务已重试）" % payload["retry_after_seconds"])
-                    message = "；".join(parts)
+                        message = "AGV 地区访问受限：检查代理出口和账号资格；条件恢复后重新提交任务"
+                    elif error_code:
+                        action = _agv_log_action(stage, operation)
+                        error = _agv_error_label(error_code)
+                        message = f"{action}失败：{error}"
+                        detail = _agv_error_detail(error_info, error)
+                        if detail and detail != error and error not in detail:
+                            message += "；" + detail
+                        for field, label in (("job_id", "任务"), ("thread_id", "会话")):
+                            if payload.get(field):
+                                message += f"；{label} {str(payload[field])[:64]}"
+                        backend = error_info.get("backend")
+                        if not backend and payload.get("backend"):
+                            backend = payload["backend"]
+                        if backend and str(backend) not in message:
+                            message += "；后端 " + str(backend)[:140]
+                        retry_seconds = payload.get("retry_after_seconds")
+                        if retry_seconds:
+                            if stage == "unified_job_wait" or operation == "next":
+                                message += f"；{retry_seconds} 秒后继续轮询队列，任务不会自动重跑"
+                            elif operation == "heartbeat" or stage in ("backend_heartbeat", "backend_ready_heartbeat"):
+                                message += f"；{retry_seconds} 秒后重试心跳"
+                            else:
+                                message += f"；{retry_seconds} 秒后继续检查"
+                    else:
+                        message = _status_label("failed" if location_blocked else status)
+                        for field, label in (("job_id", "任务"), ("thread_id", "会话"), ("port", "端口")):
+                            if payload.get(field):
+                                message += f"；{label} {str(payload[field])[:64]}"
                 else:
                     message = str(payload.get("message") or payload.get("detail") or "").strip()
                     if not message:
@@ -286,7 +320,7 @@ def _format_agv_logs(raw_text: str, max_lines: int = 160) -> str:
     return "\n".join(
         "[%s] %s%s" % (
             entry["timestamp"] or "时间未知（旧日志）", entry["message"],
-            f"（连续重复 {entry['count']} 次）" if entry["count"] > 1 else "",
+            f"（连续 {entry['count']} 次）" if entry["count"] > 1 else "",
         )
         for entry in entries
     ) or "暂无日志。"
@@ -307,6 +341,8 @@ class AntigravityBridgeController:
     """Controller for the independent Antigravity desktop bridge."""
     _thread_registry: dict[str, threading.Thread] = {}
     _thread_registry_lock = threading.Lock()
+    _restart_locks: dict[str, threading.Lock] = {}
+    _restart_locks_guard = threading.Lock()
 
     def __init__(self, project_root: str | Path | None = None):
         self.project_root = Path(os.path.abspath(os.fspath(project_root or Path.cwd())))
@@ -361,6 +397,106 @@ class AntigravityBridgeController:
         pending = stop_request.with_suffix(".pending")
         pending.write_text(str(reason), encoding="ascii")
         os.replace(pending, stop_request)
+
+    def _restart_owner_alive(self, mode: str) -> bool:
+        if self.task_info().get("running"):
+            return True
+        if mode == "thread":
+            key = str(self.runtime_path().resolve())
+            with self._thread_registry_lock:
+                thread = self._thread_registry.get(key)
+            return bool(thread and thread.is_alive())
+        try:
+            pid = int((self.runtime_path() / "bridge.pid").read_text(encoding="ascii").strip())
+        except (OSError, ValueError):
+            return False
+        status = _read_json(self.runtime_path() / "status.json")
+        try:
+            status_at = float(status.get("at") or 0)
+        except (TypeError, ValueError, OverflowError):
+            status_at = 0.0
+        return pid > 0 and _bridge_owner_is_alive(pid, self.runtime_path(), status_at, "process")
+
+    def restart_bridge(self, timeout: float = 630.0, progress_callback=None) -> str:
+        key = str(self.runtime_path().resolve())
+        with self._restart_locks_guard:
+            restart_lock = self._restart_locks.setdefault(key, threading.Lock())
+        if not restart_lock.acquire(blocking=False):
+            raise RuntimeError("Antigravity 桌面桥正在重启，请等待本次操作完成。")
+        try:
+            return self._restart_bridge_locked(timeout, progress_callback)
+        finally:
+            restart_lock.release()
+
+    def _restart_bridge_locked(self, timeout: float, progress_callback=None) -> str:
+        """Gracefully stop the current bridge, wait for its owner to exit, then start it again."""
+        info = self.task_info()
+        key = str(self.runtime_path().resolve())
+        with self._thread_registry_lock:
+            thread = self._thread_registry.get(key)
+        active_mode = "thread" if thread and thread.is_alive() else (
+            info.get("mode") if info.get("running") else self.run_mode()
+        )
+        active_mode = active_mode if active_mode in ("process", "thread") else self.run_mode()
+        if self._restart_owner_alive(active_mode):
+            if progress_callback:
+                progress_callback("正在请求旧桥停止…")
+            self._request_bridge_stop("manager-restart")
+            if progress_callback:
+                progress_callback("已发出停止请求，等待当前任务完成…")
+            deadline = time.monotonic() + max(1.0, float(timeout))
+            while self._restart_owner_alive(active_mode):
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("Antigravity 桌面桥仍在执行任务或退出中，未启动第二个实例；请等待后重试。")
+                time.sleep(0.25)
+            # Let the bridge release its runtime lock before starting a replacement.
+            time.sleep(0.35)
+            if progress_callback:
+                progress_callback("旧桥已停止。")
+        elif progress_callback:
+            progress_callback("旧桥未运行。")
+        previous_status = _read_json(self.runtime_path() / "status.json")
+        try:
+            previous_status_at = float(previous_status.get("at") or 0)
+        except (TypeError, ValueError, OverflowError):
+            previous_status_at = 0.0
+        if progress_callback:
+            progress_callback("正在启动新桥…")
+        self._start_bridge()
+        if progress_callback:
+            progress_callback("启动指令已发出，正在确认运行状态…")
+        self._wait_for_restart_startup(previous_status_at, min(30.0, float(timeout)))
+        if progress_callback:
+            progress_callback("新桥已就绪。")
+        return "Antigravity 桌面桥已重启"
+
+    def _wait_for_restart_startup(self, previous_status_at: float, timeout: float) -> None:
+        deadline = time.monotonic() + max(5.0, float(timeout))
+        latest_state = "等待启动状态"
+        while time.monotonic() < deadline:
+            status = _read_json(self.runtime_path() / "status.json")
+            try:
+                status_at = float(status.get("at") or 0)
+            except (TypeError, ValueError, OverflowError):
+                status_at = 0.0
+            if status_at > previous_status_at:
+                state = status.get("status")
+                latest_state = str(state or "未知状态")
+                if state in {"agent_starting", "ready", "analyzing"}:
+                    if self.task_info().get("running"):
+                        return
+                    raise RuntimeError("Antigravity 桌面桥报告启动，但对应线程或进程已退出")
+                if state == "degraded":
+                    detail = status.get("error_detail") if isinstance(status.get("error_detail"), dict) else {}
+                    stage = detail.get("stage") or status.get("stage") or "未知阶段"
+                    reason = detail.get("message") or status.get("error_code") or "未知错误"
+                    raise RuntimeError(f"Antigravity 桌面桥启动失败；阶段 {stage}；详情 {reason}")
+                if state == "stopped":
+                    raise RuntimeError("Antigravity 桌面桥启动后立即停止")
+            time.sleep(0.25)
+        raise RuntimeError(
+            f"Antigravity 桌面桥未在期限内进入运行状态；当前阶段 {latest_state}"
+        )
 
     def task_info(self) -> dict:
         command = self.bridge_command()
@@ -598,6 +734,8 @@ class AntigravityBridgeController:
         if operation == "stop":
             self._request_bridge_stop(str(time.time()))
             return "stop_requested"
+        if operation == "restart":
+            return self.restart_bridge()
         raise ValueError(f"unknown operation: {operation}")
 
     def start_if_enabled(self) -> str:
@@ -822,12 +960,14 @@ class AntigravityBridgeManagerDialog(QtWidgets.QDialog):
     def __init__(self, project_root: str | Path | None = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("🌟 Antigravity (AGV) 桌面桥管理器")
-        self.resize(1020, 760)
         self.setMinimumSize(850, 620)
         self.controller = AntigravityBridgeController(project_root)
         self._inventory_worker = None
+        self._restart_worker = None
+        self._restart_status_text = ""
         self._force_inventory_refresh = False
         self._build_ui()
+        configure_bridge_dialog_geometry(self, "AntigravityBridgeManagerDialog", 1020, 760)
         self.timer = QtCore.QTimer(self)
         self.timer.setInterval(4000)
         self.timer.timeout.connect(self.refresh_data)
@@ -873,6 +1013,10 @@ class AntigravityBridgeManagerDialog(QtWidgets.QDialog):
         self.btn_start = QtWidgets.QPushButton("启动桥")
         self.btn_start.clicked.connect(self._start_bridge)
         controls.addWidget(self.btn_start)
+        self.btn_restart = QtWidgets.QPushButton("重启桥")
+        self.btn_restart.setToolTip("请求当前桥停止后重新启动；正在运行的任务完成后执行。")
+        self.btn_restart.clicked.connect(self._restart_bridge)
+        controls.addWidget(self.btn_restart)
         self.btn_stop = QtWidgets.QPushButton("请求停止")
         self.btn_stop.clicked.connect(self._stop_bridge)
         controls.addWidget(self.btn_stop)
@@ -984,11 +1128,13 @@ class AntigravityBridgeManagerDialog(QtWidgets.QDialog):
             opener()
 
     def _run_mode_changed(self, idx: int):
+        self._restart_status_text = ""
         mode = self.cmb_run_mode.currentData()
         self.controller.set_run_mode(mode)
         self.refresh_data()
 
     def _start_bridge(self):
+        self._restart_status_text = ""
         try:
             self.controller.perform("start", run_mode=self.cmb_run_mode.currentData())
             QtWidgets.QMessageBox.information(self, "启动", "Antigravity 桌面桥启动指令已下发。")
@@ -996,7 +1142,42 @@ class AntigravityBridgeManagerDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, "启动失败", f"启动失败：{e}")
         self.refresh_data()
 
+    def _restart_bridge(self):
+        if self._restart_worker and self._restart_worker.isRunning():
+            return
+        try:
+            from .bridge_startup_manager import BridgeRestartWorker
+            worker = BridgeRestartWorker(self.controller, "antigravity", self)
+            self._restart_status_text = "正在检查桥状态…"
+            worker.progress.connect(self._restart_progress)
+            worker.result_ready.connect(self._restart_finished)
+            worker.finished.connect(self._clear_restart_worker)
+            worker.finished.connect(worker.deleteLater)
+            self._restart_worker = worker
+            self.btn_restart.setEnabled(False)
+            self.status_label.setText(self._restart_status_text)
+            worker.start()
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(self, "重启失败", f"无法启动重启任务：{type(exc).__name__}")
+
+    def _restart_finished(self, _bridge: str, success: bool, message: str):
+        self._restart_status_text = ("重启成功：" if success else "重启失败：") + message
+        self.status_label.setText(self._restart_status_text)
+        if not success:
+            QtWidgets.QMessageBox.warning(self, "桥接重启失败", message)
+        self.refresh_data()
+
+    def _restart_progress(self, _bridge: str, message: str):
+        self._restart_status_text = "重启：" + message
+        self.status_label.setText(self._restart_status_text)
+
+    def _clear_restart_worker(self):
+        if self._restart_worker and not self._restart_worker.isRunning():
+            self._restart_worker = None
+            QtCore.QTimer.singleShot(0, self.refresh_data)
+
     def _stop_bridge(self):
+        self._restart_status_text = ""
         self.controller.perform("stop")
         QtWidgets.QMessageBox.information(self, "停止", "停止请求已下发。")
         self.refresh_data()
@@ -1021,6 +1202,10 @@ class AntigravityBridgeManagerDialog(QtWidgets.QDialog):
         )
         self.status_label.setText("🟢 运行中" if running else "⚪ 未运行")
         self.status_label.setStyleSheet("color: #4ade80;" if running else "color: #94a3b8;")
+        restarting = bool(self._restart_worker and self._restart_worker.isRunning())
+        if self._restart_status_text:
+            self.status_label.setText(self._restart_status_text)
+        self.btn_restart.setEnabled(bool(info.get("exists")) and not restarting)
 
         config = self.controller._read_config(self.controller.runtime_path())
         status = info.get("status") or {}
@@ -1209,9 +1394,9 @@ class AntigravityBridgeManagerDialog(QtWidgets.QDialog):
 
     def closeEvent(self, event):
         self.timer.stop()
-        worker = self._inventory_worker
-        if worker and worker.isRunning() and not worker.wait(1000):
-            self.status_label.setText("后台桥名录读取尚未结束，请稍后关闭窗口。")
-            event.ignore()
-            return
+        for worker in (self._inventory_worker, self._restart_worker):
+            if worker and worker.isRunning() and not worker.wait(1000):
+                self.status_label.setText("后台操作尚未结束，请稍后关闭窗口。")
+                event.ignore()
+                return
         super().closeEvent(event)

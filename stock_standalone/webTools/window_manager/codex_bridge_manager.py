@@ -21,6 +21,7 @@ from pathlib import Path
 from urllib.request import HTTPRedirectHandler, Request, ProxyHandler, build_opener
 
 from PyQt6 import QtCore, QtGui, QtWidgets
+from .bridge_dialog_geometry import configure_bridge_dialog_geometry
 from .bridge_token_usage import token_usage_text
 
 
@@ -202,8 +203,11 @@ def _friendly_error_code(value) -> str:
         "cli_auth_required": "Codex 登录状态失效",
         "cli_network_error": "Codex 上游连接中断",
         "cli_model_unavailable": "所选 Codex 模型不可用",
+        "cli_bridge_stopped": "桥收到停止请求；当前 Codex 分析已中断",
+        "jsondecodeerror": "后端响应不是有效 JSON",
+        "typeerror": "本机参数类型错误", "valueerror": "本机数据格式错误",
         "provider_cooldown": "桥处于错误冷却期，暂不领取新任务",
-        "timeout": "请求超时", "timeouterror": "等待响应超时",
+        "timeout": "等待响应超时", "timeouterror": "等待响应超时",
         "model_timeout": "等待 Codex 响应超过任务时限，原因可能是排队、推理较慢或连接异常", "rpc_timeout": "Codex 引擎通信超时",
         "connectionerror": "连接失败", "connectionrefusederror": "连接被拒绝",
         "remotedisconnected": "后端主动关闭连接", "urlerror": "网络地址不可达",
@@ -228,7 +232,7 @@ def _friendly_error_code(value) -> str:
         return label + (f"（{raw}）" if key.startswith("cli_") or key in ("model_timeout", "rpc_timeout") else "")
     if key.startswith("cli_exit_code_"):
         return f"Codex 引擎异常结束，当前未取得具体原因，请查看详情（{raw}）"
-    for prefix, label in (("chat_result_http_", "对话回执接口返回 HTTP "), ("result_http_", "策略回执接口返回 HTTP "), ("heartbeat_http_", "桥心跳接口返回 HTTP "), ("chat_claim_http_", "任务领取接口返回 HTTP "), ("claim_http_", "任务领取接口返回 HTTP "), ("backend_register_http_", "桥注册接口返回 HTTP ")):
+    for prefix, label in (("chat_result_http_", "对话回执接口返回 HTTP "), ("result_http_", "策略回执接口返回 HTTP "), ("heartbeat_http_", "桥心跳接口返回 HTTP "), ("next_http_", "统一任务队列接口返回 HTTP "), ("unified_job_wait_http_", "统一任务队列接口返回 HTTP "), ("chat_claim_http_", "任务领取接口返回 HTTP "), ("claim_http_", "任务领取接口返回 HTTP "), ("backend_register_http_", "桥注册接口返回 HTTP ")):
         if key.startswith(prefix):
             return label + key[len(prefix):]
     for suffix, label in (("_oserror", "发生本机或网络 I/O 错误"), ("_timeout", "等待超时"), ("_url_error", "网络地址不可达"), ("_remote_disconnected", "连接被后端关闭")):
@@ -260,9 +264,12 @@ def _friendly_error_guidance(value) -> str:
     return f"可能原因：{cause}；处理建议：{action}"
 
 
-def _friendly_error_detail(value) -> str:
+def _friendly_error_detail(value, primary_error="") -> str:
     if not isinstance(value, dict):
-        return " ".join(str(value or "").split())[:260]
+        detail = " ".join(str(value or "").split())[:260]
+        if "line 1 column 1 (char 0)" in detail.lower():
+            return "响应为空（JSON 解析位置 1:1）"
+        return detail
     parts = []
     winerror = value.get("winerror")
     errno = value.get("errno")
@@ -273,20 +280,26 @@ def _friendly_error_detail(value) -> str:
         10060: "网络请求超时", 10061: "后端拒绝连接",
     }
     kind = str(value.get("cause_type") or value.get("type") or "").lower()
-    kind_labels = {"oserror":"系统 I/O 错误", "permissionerror":"文件访问被拒绝", "filenotfounderror":"文件或目录不存在", "connectionrefusederror":"后端拒绝连接", "connectionreseterror":"连接被重置", "remotedisconnected":"后端主动关闭连接", "urlerror":"网络地址不可达"}
+    kind_labels = {"oserror":"系统 I/O 错误", "permissionerror":"文件访问被拒绝", "filenotfounderror":"文件或目录不存在", "connectionrefusederror":"后端拒绝连接", "connectionreseterror":"连接被重置", "remotedisconnected":"后端主动关闭连接", "urlerror":"网络地址不可达", "typeerror":"本机参数类型错误", "valueerror":"本机数据格式错误", "jsondecodeerror":"JSON 解析失败"}
     if code in code_labels:
-        parts.append(code_labels[code])
+        kind_text = code_labels[code]
     elif kind in ("timeout", "timeouterror", "socket.timeout"):
-        parts.append("等待响应超时")
+        kind_text = "等待响应超时"
     elif kind in kind_labels:
-        parts.append(kind_labels[kind])
+        kind_text = kind_labels[kind]
     elif kind and kind not in ("valueerror", "runtimeerror"):
-        parts.append(kind.replace("error", "错误").replace("os", "系统"))
+        kind_text = kind.replace("error", "错误").replace("os", "系统")
+    else:
+        kind_text = ""
+    if kind_text and kind_text != primary_error and not (kind == "jsondecodeerror" and "json" in primary_error.lower()):
+        parts.append(kind_text)
     message = str(value.get("message") or "").strip()
+    if "line 1 column 1 (char 0)" in message.lower():
+        message = "响应为空（JSON 解析位置 1:1）"
     upstream_reason = str(value.get("upstream_reason") or "")
     if upstream_reason == "workspace routing discovery failed":
         parts.append("上游未能找到工作区对应的服务路由")
-    if message and message not in parts and not message.startswith(("CLI_", "MODEL_", "RPC_")):
+    if message and message != primary_error and message not in parts and not message.startswith(("CLI_", "MODEL_", "RPC_")):
         parts.append(message[:180])
     elapsed, budget = value.get("elapsed_ms"), value.get("timeout_budget_ms")
     if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool):
@@ -315,9 +328,21 @@ _STAGE_LABELS = {
     "thread_resume": "恢复 Codex 会话", "thread_start": "创建 Codex 会话",
     "thread_label": "标记 Codex 会话", "turn_start": "提交 Codex 请求",
     "codex_event": "等待 Codex 分析事件",
-    "codex_reply": "等待 Codex 回复", "result_cache": "保存本机回执",
+    "codex_reply": "等待 Codex 回复", "strategy_codex_turn": "运行 Codex 分析",
+    "result_cache": "保存本机回执",
     "result_writeback": "回写 Web 结果", "backend_register": "桥注册",
 }
+
+
+def _bridge_log_action(stage, operation) -> str:
+    if stage == "unified_job_wait" or operation == "next":
+        return "统一任务轮询"
+    if stage:
+        return _STAGE_LABELS.get(str(stage), str(stage).replace("_", " "))
+    return {
+        "heartbeat": "后端心跳", "strategy_job_claim": "领取策略任务",
+        "chat_job_claim": "领取对话任务", "next": "统一任务轮询",
+    }.get(str(operation), str(operation or "后台请求").replace("_", " "))
 
 
 def _format_bridge_log_entry(raw_line: str) -> tuple[str, str, str]:
@@ -340,33 +365,45 @@ def _format_bridge_log_entry(raw_line: str) -> tuple[str, str, str]:
     status = str(payload.get("status") or "").strip()
     error_code = payload.get("error_code") or payload.get("error")
     if status:
-        message = _status_label(status)
-        if error_code:
-            message += f"；错误：{_friendly_error_code(error_code)}"
-        details = []
-        if payload.get("port"):
-            details.append(f"端口 {payload['port']}")
-        if payload.get("job_id"):
-            details.append(f"任务 {payload['job_id']}")
-        if payload.get("thread_id"):
-            details.append(f"Thread {payload['thread_id']}")
-        error_info = payload.get("error_detail") if isinstance(payload.get("error_detail"), dict) else {}
+        raw_error_info = payload.get("error_detail")
+        error_info = raw_error_info if isinstance(raw_error_info, dict) else (
+            {"message": str(raw_error_info)} if raw_error_info else {}
+        )
         stage = payload.get("stage") or error_info.get("stage")
-        if stage:
-            details.append("阶段 " + _STAGE_LABELS.get(str(stage), str(stage)))
         operation = payload.get("operation") or error_info.get("operation")
-        if operation:
-            details.append("操作 " + str(operation))
-        error_detail = _friendly_error_detail(error_info)
-        if error_detail:
-            details.append("详情 " + error_detail)
-        guidance = _friendly_error_guidance(error_code)
-        if guidance:
-            details.append(guidance)
-        if payload.get("retry_after_seconds"):
-            details.append("将在 %s 秒后恢复检查（不代表原任务已重试）" % payload["retry_after_seconds"])
-        if details:
-            message += "；" + "；".join(details)
+        if error_code:
+            error = _friendly_error_code(error_code)
+            if str(error_code).strip().lower() == "cli_bridge_stopped":
+                message = "收到停止请求：当前 Codex 分析已中断"
+            else:
+                message = f"{_bridge_log_action(stage, operation)}失败：{error}"
+            error_detail = _friendly_error_detail(error_info, error)
+            if error_detail and error not in error_detail:
+                message += "；" + error_detail
+            guidance = _friendly_error_guidance(error_code)
+            if guidance:
+                message += "；" + guidance
+            retry_after = payload.get("retry_after_seconds")
+            if retry_after and str(error_code).strip().lower() != "cli_bridge_stopped":
+                if stage == "unified_job_wait" or operation == "next":
+                    message += f"；{retry_after} 秒后继续轮询队列，任务不会自动重跑"
+                elif operation == "heartbeat" or stage == "backend_ready_heartbeat":
+                    message += f"；{retry_after} 秒后重试心跳"
+                else:
+                    message += f"；{retry_after} 秒后继续检查"
+            for field, label in (("job_id", "任务"), ("thread_id", "会话")):
+                if payload.get(field):
+                    message += f"；{label} {str(payload[field])[:64]}"
+        else:
+            message = _status_label(status)
+            details = []
+            for field, label in (("port", "端口"), ("job_id", "任务"), ("thread_id", "会话")):
+                if payload.get(field):
+                    details.append(f"{label} {str(payload[field])[:64]}")
+            if stage:
+                details.append("阶段 " + _STAGE_LABELS.get(str(stage), str(stage).replace("_", " ")))
+            if details:
+                message += "；" + "；".join(details)
     else:
         message = str(payload.get("message") or payload.get("detail") or "").strip()
         if not message:
@@ -396,7 +433,7 @@ def _format_bridge_logs(raw_text: str, max_lines: int = 160) -> str:
     formatted = []
     for entry in entries:
         stamp = entry["timestamp"] or "时间未知（旧日志）"
-        repeat = f"（连续重复 {entry['count']} 次）" if entry["count"] > 1 else ""
+        repeat = f"（连续 {entry['count']} 次）" if entry["count"] > 1 else ""
         formatted.append(f"[{stamp}] {entry['message']}{repeat}")
     return "\n".join(formatted)
 
@@ -596,6 +633,8 @@ def _token_counts(root: Path, days: int = 7) -> dict:
 class BridgeController:
     _thread_registry: dict[str, threading.Thread] = {}
     _thread_registry_lock = threading.Lock()
+    _restart_locks: dict[str, threading.Lock] = {}
+    _restart_locks_guard = threading.Lock()
 
     def __init__(self, project_root: str | Path | None = None):
         self.project_root = Path(os.path.abspath(os.fspath(project_root or Path.cwd())))
@@ -1003,6 +1042,8 @@ class BridgeController:
                 raise RuntimeError("桥接代理尚未运行，无法请求优雅停止")
             self._request_bridge_stop("manager-request")
             return "已请求停止；当前任务完成后会退出"
+        if operation == "restart":
+            return self.restart_bridge()
         raise ValueError("unsupported bridge operation")
 
     def _request_bridge_stop(self, reason: str) -> None:
@@ -1011,6 +1052,106 @@ class BridgeController:
         pending = stop_request.with_suffix(".pending")
         pending.write_text(str(reason) + "\n", encoding="utf-8")
         os.replace(pending, stop_request)
+
+    def _restart_owner_alive(self, mode: str) -> bool:
+        if self.task_info().get("running"):
+            return True
+        if mode == "thread":
+            key = str(self.runtime_root).casefold()
+            with self._thread_registry_lock:
+                thread = self._thread_registry.get(key)
+            return bool(thread and thread.is_alive())
+        try:
+            pid = int((self.runtime_root / "bridge.pid").read_text(encoding="ascii").strip())
+        except (OSError, ValueError):
+            return False
+        status = _read_json(self.runtime_root / "status.json")
+        try:
+            status_at = float(status.get("at") or 0)
+        except (TypeError, ValueError, OverflowError):
+            status_at = 0.0
+        return pid > 0 and _bridge_owner_is_alive(pid, self.runtime_root, status_at, "process")
+
+    def restart_bridge(self, timeout: float = 630.0, progress_callback=None) -> str:
+        key = str(self.runtime_root).casefold()
+        with self._restart_locks_guard:
+            restart_lock = self._restart_locks.setdefault(key, threading.Lock())
+        if not restart_lock.acquire(blocking=False):
+            raise RuntimeError("Codex 桌面桥正在重启，请等待本次操作完成。")
+        try:
+            return self._restart_bridge_locked(timeout, progress_callback)
+        finally:
+            restart_lock.release()
+
+    def _restart_bridge_locked(self, timeout: float, progress_callback=None) -> str:
+        """Gracefully stop the current bridge, wait for its owner to exit, then start it again."""
+        task = self.task_info()
+        key = str(self.runtime_root).casefold()
+        with self._thread_registry_lock:
+            thread = self._thread_registry.get(key)
+        active_mode = "thread" if thread and thread.is_alive() else (
+            task.get("mode") if task.get("running") else self.run_mode()
+        )
+        active_mode = active_mode if active_mode in ("process", "thread") else self.run_mode()
+        if self._restart_owner_alive(active_mode):
+            if progress_callback:
+                progress_callback("正在请求旧桥停止…")
+            self._request_bridge_stop("manager-restart")
+            if progress_callback:
+                progress_callback("已发出停止请求，等待当前任务完成…")
+            deadline = time.monotonic() + max(1.0, float(timeout))
+            while self._restart_owner_alive(active_mode):
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("Codex 桌面桥仍在执行任务或退出中，未启动第二个实例；请等待后重试。")
+                time.sleep(0.25)
+            # Let the bridge release its runtime lock before starting a replacement.
+            time.sleep(0.35)
+            if progress_callback:
+                progress_callback("旧桥已停止。")
+        elif progress_callback:
+            progress_callback("旧桥未运行。")
+        previous_status = _read_json(self.runtime_root / "status.json")
+        try:
+            previous_status_at = float(previous_status.get("at") or 0)
+        except (TypeError, ValueError, OverflowError):
+            previous_status_at = 0.0
+        if progress_callback:
+            progress_callback("正在启动新桥…")
+        self._start_bridge()
+        if progress_callback:
+            progress_callback("启动指令已发出，正在确认运行状态…")
+        self._wait_for_restart_startup(previous_status_at, min(30.0, float(timeout)))
+        if progress_callback:
+            progress_callback("新桥已就绪。")
+        return "Codex 桌面桥已重启"
+
+    def _wait_for_restart_startup(self, previous_status_at: float, timeout: float) -> None:
+        deadline = time.monotonic() + max(5.0, float(timeout))
+        latest_state = "等待启动状态"
+        while time.monotonic() < deadline:
+            status = _read_json(self.runtime_root / "status.json")
+            try:
+                status_at = float(status.get("at") or 0)
+            except (TypeError, ValueError, OverflowError):
+                status_at = 0.0
+            if status_at > previous_status_at:
+                state = status.get("status")
+                latest_state = str(state or "未知状态")
+                if state in {"agent_starting", "ready", "analyzing"}:
+                    if self.task_info().get("running"):
+                        return
+                    raise RuntimeError("Codex 桌面桥报告启动，但对应线程或进程已退出")
+                if state == "degraded":
+                    detail = status.get("error_detail") if isinstance(status.get("error_detail"), dict) else {}
+                    stage = detail.get("stage") or status.get("stage") or "未知阶段"
+                    reason = detail.get("message") or status.get("error_code") or "未知错误"
+                    raise RuntimeError(f"Codex 桌面桥启动失败；阶段 {stage}；详情 {reason}")
+                if state == "stopped":
+                    raise RuntimeError("Codex 桌面桥启动后立即停止")
+            time.sleep(0.25)
+        raise RuntimeError(
+            f"Codex 桌面桥未在期限内进入运行状态；当前阶段 {latest_state}"
+        )
 
     def _start_bridge(self) -> None:
         command = self.bridge_command()
@@ -1146,6 +1287,7 @@ class _SnapshotWorker(QtCore.QThread):
 
 class _OperationWorker(QtCore.QThread):
     ready = QtCore.pyqtSignal(str, bool, str)
+    progress = QtCore.pyqtSignal(str)
 
     def __init__(self, controller: BridgeController, operation: str, enabled: bool | None = None, parent=None):
         super().__init__(parent)
@@ -1155,7 +1297,10 @@ class _OperationWorker(QtCore.QThread):
 
     def run(self):
         try:
-            message = self.controller.perform(self.operation, self.enabled)
+            if self.operation == "restart":
+                message = self.controller.restart_bridge(progress_callback=self.progress.emit)
+            else:
+                message = self.controller.perform(self.operation, self.enabled)
             self.ready.emit(self.operation, True, message)
         except Exception as exc:
             self.ready.emit(self.operation, False, f"{type(exc).__name__}: {str(exc)[:300]}")
@@ -1165,11 +1310,11 @@ class CodexBridgeManagerDialog(QtWidgets.QDialog):
     def __init__(self, project_root: str | Path | None = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Codex 桌面桥管理器")
-        self.resize(1020, 760)
         self.setMinimumSize(850, 620)
         self.controller = BridgeController(project_root)
         self._snapshot_worker = None
         self._operation_worker = None
+        self._operation_status_text = ""
         self._token_cache = None
         self._last_token_scan = 0.0
         self._records = []
@@ -1179,6 +1324,7 @@ class CodexBridgeManagerDialog(QtWidgets.QDialog):
         self._column_width_save_timer.setInterval(400)
         self._column_width_save_timer.timeout.connect(self._save_task_table_column_widths)
         self._build_ui()
+        configure_bridge_dialog_geometry(self, "CodexBridgeManagerDialog", 1020, 760)
         QtCore.QTimer.singleShot(0, self._initialize_task_table_column_widths)
         self.timer = QtCore.QTimer(self)
         self.timer.setInterval(4000)
@@ -1226,6 +1372,10 @@ class CodexBridgeManagerDialog(QtWidgets.QDialog):
         self.btn_start = QtWidgets.QPushButton("启动桥")
         self.btn_start.clicked.connect(lambda: self._start_operation("start"))
         controls.addWidget(self.btn_start)
+        self.btn_restart = QtWidgets.QPushButton("重启桥")
+        self.btn_restart.setToolTip("请求当前桥停止后重新启动；正在运行的任务完成后执行。")
+        self.btn_restart.clicked.connect(lambda: self._start_operation("restart"))
+        controls.addWidget(self.btn_restart)
         self.btn_stop = QtWidgets.QPushButton("请求停止")
         self.btn_stop.clicked.connect(self._request_stop)
         controls.addWidget(self.btn_stop)
@@ -1396,6 +1546,8 @@ class CodexBridgeManagerDialog(QtWidgets.QDialog):
         else:
             state_text = "运行器就绪 · 桥接已停止"
         self.status_label.setText(state_text)
+        if self._operation_status_text:
+            self.status_label.setText(self._operation_status_text)
         self.cmb_run_mode.blockSignals(True)
         mode_index = self.cmb_run_mode.findData(self.controller.run_mode())
         self.cmb_run_mode.setCurrentIndex(max(0, mode_index))
@@ -1407,6 +1559,7 @@ class CodexBridgeManagerDialog(QtWidgets.QDialog):
         self.cmb_run_mode.setEnabled(self._operation_worker is None)
         self.cmb_run_mode.blockSignals(False)
         self.btn_start.setEnabled(exists and not running and self._operation_worker is None)
+        self.btn_restart.setEnabled(exists and self._operation_worker is None)
         self.btn_stop.setEnabled(exists and running and self._operation_worker is None)
 
         config = snapshot.get("config") or {}
@@ -1627,12 +1780,15 @@ class CodexBridgeManagerDialog(QtWidgets.QDialog):
     def _start_operation(self, operation: str, enabled: bool | None = None):
         if self._operation_worker and self._operation_worker.isRunning():
             return
+        self._operation_status_text = "正在检查桥状态…" if operation == "restart" else ""
         worker = _OperationWorker(self.controller, operation, enabled, self)
         worker.ready.connect(self._operation_finished)
+        worker.progress.connect(self._operation_progress)
         worker.finished.connect(lambda current=worker: self._clear_operation_worker(current))
         worker.finished.connect(worker.deleteLater)
         self._operation_worker = worker
         self.btn_start.setEnabled(False)
+        self.btn_restart.setEnabled(False)
         self.btn_stop.setEnabled(False)
         worker.start()
 
@@ -1646,11 +1802,18 @@ class CodexBridgeManagerDialog(QtWidgets.QDialog):
             self._operation_worker = None
 
     def _operation_finished(self, operation: str, success: bool, message: str):
+        self._operation_status_text = (
+            ("重启成功：" if success else "重启失败：") + message
+            if operation == "restart" else message
+        )
+        self.status_label.setText(self._operation_status_text)
         if not success:
             QtWidgets.QMessageBox.warning(self, "桥接管理失败", message)
-        else:
-            self.status_label.setText(message)
         QtCore.QTimer.singleShot(250, self.refresh_data)
+
+    def _operation_progress(self, message: str):
+        self._operation_status_text = "重启：" + message
+        self.status_label.setText(self._operation_status_text)
 
     def closeEvent(self, event):
         self.timer.stop()

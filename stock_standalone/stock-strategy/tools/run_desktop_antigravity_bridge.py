@@ -13,7 +13,6 @@ from pathlib import Path
 import secrets
 import subprocess
 import sys
-import threading
 import time
 from types import SimpleNamespace
 from urllib.parse import urlsplit
@@ -51,34 +50,7 @@ for _path in (ROOT, APP_ROOT):
         sys.path.insert(0, str(_path))
 
 from desktop_strategy_agent import NoRedirect, DesktopPeer, _error_details, _peer_error_code
-
-
-class _ThreadOutput:
-    def __init__(self, owner_thread: int, stream, fallback):
-        self.owner_thread = owner_thread
-        self.stream = stream
-        self.fallback = fallback
-
-    def write(self, value):
-        owned = (threading.get_ident() == self.owner_thread
-                 or threading.current_thread().name.startswith('stock-agv-'))
-        target = self.stream if owned else self.fallback
-        if not target:
-            return len(value)
-        if target is self.stream and isinstance(value, str):
-            target.write(value.encode('utf-8', errors='replace'))
-            return len(value)
-        return target.write(value)
-
-    def flush(self):
-        owned = (threading.get_ident() == self.owner_thread
-                 or threading.current_thread().name.startswith('stock-agv-'))
-        target = self.stream if owned else self.fallback
-        if target:
-            target.flush()
-
-    def isatty(self) -> bool:
-        return False
+from desktop_bridge_thread_output import routed_thread_output
 
 
 def prepare(runtime: Path, backend: str, desktop_root: Path | None = None) -> tuple[Path, configparser.ConfigParser]:
@@ -294,14 +266,8 @@ def main(argv=None):
                 from desktop_antigravity_agent import main as run_agent
                 stage = 'agent_start'
                 status({'status': 'agent_starting', 'agent_pid': os.getpid(), 'port': registration['port']})
-                previous_stdout, previous_stderr = sys.stdout, sys.stderr
-                owner_thread = threading.get_ident()
-                sys.stdout = _ThreadOutput(owner_thread, output, previous_stdout)
-                sys.stderr = _ThreadOutput(owner_thread, output, previous_stderr)
-                try:
+                with routed_thread_output(output, 'stock-agv-'):
                     run_agent(agent_arguments)
-                finally:
-                    sys.stdout, sys.stderr = previous_stdout, previous_stderr
                 status({'status': 'stopped', 'agent_pid': os.getpid()})
             else:
                 stage = 'agent_start'

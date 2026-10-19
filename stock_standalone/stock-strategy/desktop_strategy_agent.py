@@ -654,7 +654,6 @@ def main(argv=None):
                     publisher=ProgressPublisher(peer,job,heartbeat,operation='lease')
                     def progress(thread_id):
                         publisher.check()
-                        if (runtime/'stop.request').is_file():raise ValueError('CLI_BRIDGE_STOPPED')
                         publisher.publish({'thread_id':thread_id,'model':model,'reasoning_effort':effort,'stage':'strategy_codex_turn'})
                     analysis_started=time.monotonic()
                     stage = "strategy_codex_turn"
