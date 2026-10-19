@@ -478,3 +478,12 @@
 - 原模板及 SHA-256 副本、可重放补丁工具保存在 InStock 既有外置 cache 备份目录。仅修改模板，不重建镜像、不重启容器。
 - 首次检查时运行中的 `run_web` 仍返回旧模板；已只重启 supervisor 的 `run_web`（`run_cron` 未动），新进程 PID 11505。实时页面响应现已包含 `__instockAdaptiveReturnsV1`，确认新模板已加载。
 - 未运行自动测试或登录浏览器 UI 验收；用户侧若仍显示旧布局需强制刷新页面（Ctrl+F5）。未做基准测试，性能收益尚无实测百分比。
+
+
+## 2026-10-19 AGV 模型及等级自适应发布
+
+- 目录以 agy models 为准，Claude 不再伪造 high/max，公布 auto 并省略 CLI --effort；Gemini 按实际变体适配，Web 合并模型家族。保持现网 API 契约，无 API 镜像/数据库迁移。
+- 子仓库 main b34afe91815f51570547b397569bcb4d8f1c2852；Web 发布 20261019041026，原子入口更新，45 资源验证；容器/镜像/挂载不变。回滚：bash /mnt/4TB/dockerf/stockstrategy/rollback/web-agv-20261019041026/rollback.sh。
+- 菜单7打包管理器已安装，SHA256 1a9d3bcd35f45ed10721252878972e8952d052c6513cd111a67e6a02ed0d7151；保留原程序备份、身份及偏好。AGV ready/online，22项Python测试通过。
+- 真实 Claude 任务08ae40f57eec92808a359ad481d8be57完成：桥6.50秒，输入10167/缓存9478/输出31，SSE正常。研究样本因无效rule_baseline引用保持失败，不降低证据校验。
+- 用户指定全局聊天 Gemini 3.8 Flash／Medium，PUT及读回通过。详情及限制见 docs/tasks/2026-10-19_0405_AGV模型推理等级修复与部署.md（主仓库）。
