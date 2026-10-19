@@ -172,6 +172,16 @@ def _agv_error_label(value) -> str:
         return "AGV 上游拒绝当前地区访问（AGY_LOCATION_UNSUPPORTED）"
     if key == "agy_eligibility_network_error":
         return "AGV 资格检查连接中断（AGY_ELIGIBILITY_NETWORK_ERROR）"
+    if key == 'agy_network_error':
+        return 'AGV 上游网络连接异常（AGY_NETWORK_ERROR）'
+    if key == 'agy_model_selection_unverified':
+        return 'AGV 模型/档位校验原因未确认（AGY_MODEL_SELECTION_UNVERIFIED）'
+    if key in ('agy_model_catalog_empty', 'engine_catalog_empty'):
+        return 'AGV 模型目录不可用；检查网络与目录状态，尚不能判定模型配置错误'
+    if key == 'agy_model_unavailable_refresh_required':
+        return '所选模型不在已加载目录中，请刷新模型设置（AGY_MODEL_UNAVAILABLE_REFRESH_REQUIRED）'
+    if key == 'agy_reasoning_effort_unsupported_refresh_required':
+        return '所选推理档位不在已加载目录中，请刷新模型设置（AGY_REASONING_EFFORT_UNSUPPORTED_REFRESH_REQUIRED）'
     if key == "engine_unavailable":
         return "找不到 AGY CLI"
     if "jsondecodeerror" in key:
@@ -275,7 +285,11 @@ def _format_agv_logs(raw_text: str, max_lines: int = 160) -> str:
                     stage = stage or error_info.get("stage")
                     operation = payload.get("operation") or error_info.get("operation")
                     if location_blocked:
-                        message = "AGV 地区访问受限：检查代理出口和账号资格；条件恢复后重新提交任务"
+                        message = 'AGV 地区访问受限（AGY_LOCATION_UNSUPPORTED）'
+                        original_code = payload.get('error_code') or payload.get('error')
+                        if original_code and str(original_code).upper() != 'AGY_LOCATION_UNSUPPORTED':
+                            message += '；原始码 ' + str(original_code)[:120]
+                        message += '；可能原因：代理出口或账号地区资格受限；处理建议：核对出口和账号资格，条件恢复后重新提交；此任务不会自动重试'
                     elif error_code:
                         action = _agv_log_action(stage, operation)
                         error = _agv_error_label(error_code)
@@ -283,6 +297,8 @@ def _format_agv_logs(raw_text: str, max_lines: int = 160) -> str:
                         detail = _agv_error_detail(error_info, error)
                         if detail and detail != error and error not in detail:
                             message += "；" + detail
+                        if str(error_code).upper() in ('AGY_NETWORK_ERROR', 'AGY_MODEL_SELECTION_UNVERIFIED'):
+                            message += '；处理建议：检查网络与模型目录；此任务不会自动重试，不自动更换模型或档位'
                         for field, label in (("job_id", "任务"), ("thread_id", "会话")):
                             if payload.get(field):
                                 message += f"；{label} {str(payload[field])[:64]}"

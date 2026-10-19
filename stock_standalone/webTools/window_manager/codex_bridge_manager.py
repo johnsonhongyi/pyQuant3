@@ -390,7 +390,7 @@ def _format_bridge_log_entry(raw_line: str) -> tuple[str, str, str]:
                 elif operation == "heartbeat" or stage == "backend_ready_heartbeat":
                     message += f"；{retry_after} 秒后重试心跳"
                 else:
-                    message += f"；{retry_after} 秒后继续检查"
+                    message += f"；{retry_after} 秒后继续检查（不代表原任务已重试）"
             for field, label in (("job_id", "任务"), ("thread_id", "会话")):
                 if payload.get(field):
                     message += f"；{label} {str(payload[field])[:64]}"

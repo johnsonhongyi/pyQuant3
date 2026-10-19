@@ -39,3 +39,23 @@ class BridgeErrorLabelsTests(unittest.TestCase):
 
     def test_unknown_error_is_preserved(self):
         self.assertIn("NEW ERROR", _friendly_error_code("NEW_ERROR"))
+
+    def test_location_error_already_classified_keeps_code_without_retry(self):
+        from webTools.window_manager.antigravity_bridge_manager import _format_agv_logs
+        text = _format_agv_logs(json.dumps({'status': 'failed', 'error_code': 'AGY_LOCATION_UNSUPPORTED',
+                                           'retry_after_seconds': 5}))
+        self.assertIn('AGY_LOCATION_UNSUPPORTED', text)
+        self.assertIn('此任务不会自动重试', text)
+        self.assertNotIn('原始码', text)
+        self.assertNotIn('5 秒', text)
+
+    def test_heartbeat_retry_is_distinguished_from_inference_replay(self):
+        _, text, _ = _format_bridge_log_entry(json.dumps({'status': 'degraded',
+            'error_code': 'CLI_NETWORK_ERROR', 'operation': 'heartbeat', 'retry_after_seconds': 5}))
+        self.assertIn('5 秒后重试心跳', text)
+        self.assertNotIn('5 秒后重试任务', text)
+
+    def test_queue_recovery_does_not_claim_original_task_was_retried(self):
+        _, text, _ = _format_bridge_log_entry(json.dumps({'status': 'degraded',
+            'error_code': 'CLI_NETWORK_ERROR', 'operation': 'next', 'retry_after_seconds': 5}))
+        self.assertIn('继续轮询队列，任务不会自动重跑', text)

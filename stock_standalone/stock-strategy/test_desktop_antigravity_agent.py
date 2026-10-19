@@ -86,12 +86,12 @@ class AntigravityChatTests(unittest.TestCase):
         error = agent._agy_result_failure({"status": "ERROR", "error": {
             "message": 'invalid model selection: effort unsupported; access_token=secret user@example.com "api_key":"private-key" Bearer bearer-secret'}})
         code, details = agent._chat_error_info(error)
-        self.assertEqual(code, "AGY_RESULT_ERROR")
-        self.assertIn("effort unsupported", details["message"])
-        self.assertNotIn("secret", details["message"])
-        self.assertNotIn("user@example.com", details["message"])
-        self.assertNotIn("private-key", details["message"])
-        self.assertNotIn("bearer-secret", details["message"])
+        self.assertEqual(code, "AGY_MODEL_SELECTION_UNVERIFIED")
+        self.assertIn("原因未确认", details["message"])
+        self.assertIn("effort unsupported", details['upstream_message'])
+        self.assertFalse(details['configuration_verified'])
+        for secret in ('secret', 'user@example.com', 'private-key', 'bearer-secret'):
+            self.assertNotIn(secret, json.dumps(details))
 
     def test_stream_json_chat_uses_codex_progress_contract_and_requested_effort(self):
         publisher_instances = []
