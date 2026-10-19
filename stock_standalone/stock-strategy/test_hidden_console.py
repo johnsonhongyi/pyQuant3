@@ -94,6 +94,54 @@ class HiddenConsoleTests(unittest.TestCase):
         child_pid = int(bytes(output).strip())
         self.assertFalse(psutil.pid_exists(child_pid))
 
+    def test_agy_descendant_explicit_console_stays_on_private_desktop(self):
+        from ats.llm.windows_cli_desktop import DesktopCLIProcess
+        probe = ("import ctypes,json;from ctypes import wintypes as w;u=ctypes.windll.user32;"
+            "u.GetThreadDesktop.restype=w.HANDLE;u.GetUserObjectInformationW.argtypes=[w.HANDLE,ctypes.c_int,ctypes.c_void_p,w.DWORD,ctypes.c_void_p];"
+            "h=u.GetThreadDesktop(ctypes.windll.kernel32.GetCurrentThreadId());b=ctypes.create_unicode_buffer(256);"
+            "assert u.GetUserObjectInformationW(h,2,b,512,None);print(json.dumps({'desktop':b.value}),flush=True)")
+        parent = probe + ";import subprocess,sys;r=subprocess.run([sys.executable,'-c',sys.argv[1]],creationflags=subprocess.CREATE_NEW_CONSOLE,stdout=subprocess.PIPE,check=True);sys.stdout.buffer.write(r.stdout)"
+        owners = []
+        def launch(command, **kwargs):
+            owner = DesktopCLIProcess([sys.executable, '-c', parent, probe], **kwargs)
+            owners.append(owner)
+            return owner
+        with tempfile.TemporaryDirectory() as folder, patch('ats.llm.windows_cli_desktop.DesktopCLIProcess', side_effect=launch):
+            result = run_bounded_cli(['agy.exe', 'models'], cwd=folder, stdin_bytes=b'',
+                                     timeout_seconds=5, hidden_console=True)
+        rows = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(rows[0]['desktop'].startswith('AGYBackground_'))
+        self.assertEqual(rows[0], rows[1])
+        self.assertIsNone(owners[0]._desktop)
+        self.assertIsNone(owners[0]._process)
+
+    def test_private_desktop_preserves_input_output_and_timeout_cleanup(self):
+        import psutil
+        from ats.llm.windows_cli_desktop import DesktopCLIProcess
+        scripts = ["import sys;sys.stdout.buffer.write(sys.stdin.buffer.read());sys.stderr.write('error')",
+            "import subprocess,sys,time;p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(20)']);print(p.pid,flush=True);time.sleep(20)"]
+        def launch(command, **kwargs):
+            return DesktopCLIProcess([sys.executable, '-c', scripts.pop(0)], **kwargs)
+        output = bytearray()
+        with tempfile.TemporaryDirectory() as folder, patch('ats.llm.windows_cli_desktop.DesktopCLIProcess', side_effect=launch):
+            result = run_bounded_cli(['agy.exe', 'models'], cwd=folder, stdin_bytes='中文 input'.encode(),
+                                     timeout_seconds=5, hidden_console=True)
+            self.assertEqual(result.stdout, '中文 input'.encode())
+            self.assertEqual(result.stderr, b'error')
+            with self.assertRaisesRegex(BoundedCLIError, 'CLI_TIMEOUT'):
+                run_bounded_cli(['agy.exe', 'models'], cwd=folder, stdin_bytes=b'',
+                    timeout_seconds=1, hidden_console=True, stdout_callback=output.extend)
+        self.assertFalse(psutil.pid_exists(int(output.strip())))
+
+    def test_private_desktop_start_failure_has_no_default_desktop_fallback(self):
+        with tempfile.TemporaryDirectory() as folder, patch('ats.llm.cli_process.subprocess.Popen',
+                side_effect=AssertionError('must not fall back to normal Popen')):
+            with self.assertRaisesRegex(BoundedCLIError, 'CLI_START_OR_IO_FAILED'):
+                run_bounded_cli([str(Path(folder) / 'missing' / 'agy.exe'), 'models'],
+                    cwd=folder, stdin_bytes=b'', timeout_seconds=5, hidden_console=True)
+
 
 if __name__ == "__main__":
     unittest.main()

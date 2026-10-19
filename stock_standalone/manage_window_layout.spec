@@ -51,6 +51,7 @@ a = Analysis(
         'ats.bounded_evaluation_store',
         'ats.llm.cli_paths',
         'ats.llm.cli_process',
+        'ats.llm.windows_cli_desktop',
         'ats.llm.codex_cli_backend',
         'sqlite3',
         'screeninfo', 
