@@ -156,11 +156,9 @@ def run_bounded_cli(
                 "bufsize": 0,
             }
             if os.name == "nt":
-                # A hidden console gives agent-spawned console helpers an
-                # existing console to inherit. NO_WINDOW only covers the root
-                # process and leaves its console handle unset.
-                kwargs["creationflags"] = (subprocess.CREATE_NEW_CONSOLE if hidden_console else
-                    subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW)
+                # CREATE_NEW_CONSOLE can activate the user's default terminal
+                # host despite SW_HIDE. Keep redirected CLI workers console-free.
+                kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                 startupinfo.wShowWindow = subprocess.SW_HIDE

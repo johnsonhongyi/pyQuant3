@@ -568,6 +568,7 @@ def _stop_antigravity_app(timeout: float = 5.0) -> bool:
                     stderr=subprocess.DEVNULL,
                     timeout=3.0,
                     check=False,
+                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
                 )
             except Exception:
                 pass
@@ -2042,7 +2043,9 @@ def fetch_antigravity_quotas(target_email: str = None, timeout: float = 0.8) -> 
     # 2. 获取监听端口 (通过 netstat 查找 LISTENING)
     pid_ports = {}
     try:
-        out = subprocess.check_output('netstat -ano', shell=True, text=True, errors='ignore')
+        out = subprocess.check_output(
+            ['netstat', '-ano'], shell=False, text=True, errors='ignore', timeout=3,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         for line in out.splitlines():
             if 'LISTENING' in line:
                 parts = line.strip().split()
@@ -2378,7 +2381,8 @@ def get_antigravity_cli_info() -> dict:
             capture_output=True,
             text=True,
             timeout=3,
-            shell=False
+            shell=False,
+            creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0),
         )
         if proc.returncode == 0 and proc.stdout:
             version_str = proc.stdout.strip().split("\n")[0].strip()
