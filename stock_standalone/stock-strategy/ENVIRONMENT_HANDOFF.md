@@ -487,3 +487,10 @@
 - 菜单7打包管理器已安装，SHA256 1a9d3bcd35f45ed10721252878972e8952d052c6513cd111a67e6a02ed0d7151；保留原程序备份、身份及偏好。AGV ready/online，22项Python测试通过。
 - 真实 Claude 任务08ae40f57eec92808a359ad481d8be57完成：桥6.50秒，输入10167/缓存9478/输出31，SSE正常。研究样本因无效rule_baseline引用保持失败，不降低证据校验。
 - 用户指定全局聊天 Gemini 3.8 Flash／Medium，PUT及读回通过。详情及限制见 docs/tasks/2026-10-19_0405_AGV模型推理等级修复与部署.md（主仓库）。
+
+
+## 2026-10-19 09:44 AGV资格检查EOF恢复
+
+- 资格检查头像GET EOF与推理档位无关；外层重试原先只恢复领取循环。现聊天/策略对尚无内容的eligibility EOF/reset/timeout最多原任务内重试一次，共享原超时预算，停止及已有输出不重试；持续失败返回AGY_ELIGIBILITY_NETWORK_ERROR。
+- 25项Python相关回归通过，菜单7构建并安装SHA256 0d4d143d7d707033cad91b331931f622344d0e37656ecd216d06ab46f12cf500；两桥ready，身份及偏好保留。旧包备份stock-strategy/backups/agv-model-20261019041026-094336，主仓库实现提交b8b0630e，未推送。
+- 无服务端/Web变更，不改历史失败记录；未模拟生产网络故障。详见主仓库docs/tasks/2026-10-19_0942_AGV资格检查EOF恢复.md。
