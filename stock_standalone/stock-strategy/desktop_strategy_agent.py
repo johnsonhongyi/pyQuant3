@@ -420,7 +420,7 @@ class AppServer:
                 if message.get("method") == "turn/completed" and event.get("turn", {}).get("id") == turn["id"]:
                     if event["turn"]["status"] != "completed":
                         from ats.llm.codex_cli_backend import CodexCLIBackend
-                        raise ValueError(CodexCLIBackend._classify_cli_exit(1,json.dumps(event["turn"].get("error") or {}).encode("utf-8")))
+                        raise CodexCLIBackend._turn_failure(event["turn"].get("error"))
                     proposal = json.loads(answer or "".join(chunks))
                     validated = validate_result(proposal, context)
                     completed = True
@@ -679,6 +679,7 @@ def main(argv=None):
             peer_error_streak=min(peer_error_streak+1,5) if isinstance(exc,OSError) else 0
             retry_seconds=min(60,5*(2**peer_error_streak)) if isinstance(exc,OSError) else 5
             error_detail=_error_details(exc)
+            error_detail.update(getattr(exc,"codex_diagnostic",{}))
             error_detail["stage"] = stage
             if app and app.error_detail and "cause" not in error_detail:
                 error_detail["cause"] = app.error_detail

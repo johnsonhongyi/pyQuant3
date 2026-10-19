@@ -19,6 +19,7 @@ class AntigravityChatTests(unittest.TestCase):
         failure = {"status": "ERROR", "error": "Eligibility check failed: failed to get profile picture: EOF"}
         success = {"status": "SUCCESS", "response": "ok"}
         cases = [(failure, False, 2), (failure, True, 1),
+                 ({"status":"ERROR", "error":"Eligibility check failed: User location is not supported: EOF"}, False, 1),
                  ({"status": "ERROR", "error": "invalid model selection"}, False, 1),
                  (success, False, 1)]
         for first, partial, expected_calls in cases:
@@ -75,6 +76,11 @@ class AntigravityChatTests(unittest.TestCase):
                         job_id="job", model="claude", effort="auto", prefix="agv-test-")
                 self.assertEqual(runner.call_count, 1)
                 wait.assert_not_called()
+
+    def test_location_denial_has_dedicated_error_code(self):
+        error = agent._agy_result_failure({"status":"ERROR", "error":"FAILED_PRECONDITION (code 400): User location is not supported for the API use."})
+        self.assertEqual(error.code,"AGY_LOCATION_UNSUPPORTED")
+        self.assertIn("location",agent._chat_error_info(error)[1]["message"])
 
     def test_upstream_result_error_retains_reason_without_credentials(self):
         error = agent._agy_result_failure({"status": "ERROR", "error": {

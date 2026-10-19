@@ -263,7 +263,9 @@ def _agy_result_failure(result: dict) -> BoundedCLIError:
         message = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", "[email]", message)
         error.agy_error_message = " ".join(message.split())[:640]
         normalized = error.agy_error_message.lower()
-        if ("eligibility check failed" in normalized
+        if "user location is not supported" in normalized:
+            error.code = "AGY_LOCATION_UNSUPPORTED"
+        elif ("eligibility check failed" in normalized
                 and any(token in normalized for token in (": eof", "unexpected eof", "connection reset", "timeout"))):
             error.code = "AGY_ELIGIBILITY_NETWORK_ERROR"
     return error
@@ -290,10 +292,8 @@ def _run_agy_stream(cmd, *, prompt_event, timeout, started, runtime, publisher, 
         stream.finish()
         result = stream.result_event or {}
         error = _agy_result_failure(result)
-        message = getattr(error, "agy_error_message", "").lower()
         transient = (str(result.get("status", "")).upper() in ("ERROR", "FAILED")
-                     and "eligibility check failed" in message
-                     and any(token in message for token in (": eof", "unexpected eof", "connection reset", "timeout")))
+                     and error.code == "AGY_ELIGIBILITY_NETWORK_ERROR")
         if (attempt or not transient or stream.content or stream.first_token_at is not None
                 or deadline - time.monotonic() < 15 or (runtime.parent / "stop.request").exists()):
             return completed, stream
@@ -549,7 +549,7 @@ def run_antigravity_chat(peer: DesktopPeer, job: dict, cli: str, runtime: Path, 
                 pass
             publisher = None
         error_code, error_detail = _chat_error_info(exc)
-        _emit_log({"status": "degraded", "error_code": error_code, "error_detail": error_detail,
+        _emit_log({"status": "failed" if error_code == "AGY_LOCATION_UNSUPPORTED" else "degraded", "error_code": error_code, "error_detail": error_detail,
                    "stage": "antigravity_chat_exec", "job_id": str(job_id)[:12],
                    "elapsed_ms": round((time.monotonic() - started) * 1000)})
         if result_saved:
@@ -762,13 +762,17 @@ def _run_agent_loop(peer, catalog, runtime, ledger, heartbeat, persist_status, o
             error_code = getattr(exc, "peer_code", "") or getattr(exc, "code", "")
             if not isinstance(error_code, str) or not error_code:
                 error_code = _peer_error_code(exc)
-            error_detail = {**_error_details(exc), "stage": stage}
+            error_detail = {**_chat_error_info(exc)[1], "stage": stage}
             detail = {"error_code": error_code, "stage": stage, "error_detail": error_detail,
                       "retry_after_seconds": retry_seconds}
             # Never report an outage by sending another heartbeat to the same
             # failed backend. Keep the worker, catalog and result outbox alive.
+            if error_code == "AGY_LOCATION_UNSUPPORTED":
+                detail.pop("retry_after_seconds", None)
+                detail["retryable"] = False
+                detail["poll_after_seconds"] = retry_seconds
             persist_status("degraded", detail)
-            _emit_log({"status": "degraded", **detail})
+            _emit_log({"status": "failed" if error_code == "AGY_LOCATION_UNSUPPORTED" else "degraded", **detail})
             last_ready_heartbeat = 0.0
             if once:
                 break

@@ -196,8 +196,15 @@ def _friendly_error_code(value) -> str:
         return ""
     key = raw.lower()
     labels = {
+        "cli_routing_discovery_failed": "Codex 工作区服务路由发现失败",
+        "cli_usage_limit": "Codex 使用额度已达上限",
+        "cli_rate_limit": "Codex 请求过于频繁",
+        "cli_auth_required": "Codex 登录状态失效",
+        "cli_network_error": "Codex 上游连接中断",
+        "cli_model_unavailable": "所选 Codex 模型不可用",
+        "provider_cooldown": "桥处于错误冷却期，暂不领取新任务",
         "timeout": "请求超时", "timeouterror": "等待响应超时",
-        "model_timeout": "Codex 响应超时", "rpc_timeout": "Codex 引擎通信超时",
+        "model_timeout": "等待 Codex 响应超过任务时限，原因可能是排队、推理较慢或连接异常", "rpc_timeout": "Codex 引擎通信超时",
         "connectionerror": "连接失败", "connectionrefusederror": "连接被拒绝",
         "remotedisconnected": "后端主动关闭连接", "urlerror": "网络地址不可达",
         "oserror": "本机或网络 I/O 失败", "permissionerror": "本机路径无权限",
@@ -217,7 +224,10 @@ def _friendly_error_code(value) -> str:
         "backend_register_url_error": "桥无法连接 Web 后端完成注册",
     }
     if key in labels:
-        return labels[key]
+        label = labels[key]
+        return label + (f"（{raw}）" if key.startswith("cli_") or key in ("model_timeout", "rpc_timeout") else "")
+    if key.startswith("cli_exit_code_"):
+        return f"Codex 引擎异常结束，当前未取得具体原因，请查看详情（{raw}）"
     for prefix, label in (("chat_result_http_", "对话回执接口返回 HTTP "), ("result_http_", "策略回执接口返回 HTTP "), ("heartbeat_http_", "桥心跳接口返回 HTTP "), ("chat_claim_http_", "任务领取接口返回 HTTP "), ("claim_http_", "任务领取接口返回 HTTP "), ("backend_register_http_", "桥注册接口返回 HTTP ")):
         if key.startswith(prefix):
             return label + key[len(prefix):]
@@ -226,6 +236,28 @@ def _friendly_error_code(value) -> str:
             stage = key[:-len(suffix)]
             return _STAGE_LABELS.get(stage, stage.replace("_", " ")) + "：" + label
     return raw.replace("_", " ")
+
+
+def _friendly_error_guidance(value) -> str:
+    key = str(value or "").strip().lower()
+    guidance = {
+        "cli_routing_discovery_failed": ("工作区路由服务暂不可用，或网络/代理访问异常", "稍后重试一次；持续失败时核对代理及Codex服务状态，保留任务编号排查"),
+        "cli_usage_limit": ("账号使用额度已耗尽或触发用量限制", "检查账号用量及恢复时间，等待额度恢复；反复重启不会解除限额"),
+        "cli_rate_limit": ("请求频率或并发触发上游限流", "等待冷却结束，减少并发后再试"),
+        "cli_auth_required": ("登录凭据过期、未登录或账号认证失效", "在Codex重新登录并确认账号可用，再重新发起任务"),
+        "cli_network_error": ("连接中断、代理不稳定或DNS/TLS通信异常", "检查网络与代理连通性，恢复后再试；不要据此更改模型配置"),
+        "model_timeout": ("排队过久、推理较慢、引擎无响应或连接异常，尚不能确定唯一原因", "先看分段计时、额度及连接状态；恢复后重试，按需降低推理等级；系统不会自动重复推理"),
+        "rpc_timeout": ("本机引擎繁忙、启动缓慢或进程通信无响应", "等待当前任务结束；持续无响应时在桥空闲后重启并检查引擎路径"),
+        "cli_model_unavailable": ("账号模型目录已变化或旧选择不可用", "刷新模型目录并重新选择可用模型"),
+        "provider_cooldown": ("此前发生限额、限流或认证错误，桥暂停领取任务", "先处理此前错误，等待冷却结束后再提交"),
+    }
+    if key.startswith("cli_exit_code_"):
+        cause, action = "引擎异常结束，当前信息不足以判断网络、认证或其他原因", "查看该任务上游错误详情；保留任务编号，不要仅凭退出码判定断网"
+    elif key in guidance:
+        cause, action = guidance[key]
+    else:
+        return ""
+    return f"可能原因：{cause}；处理建议：{action}"
 
 
 def _friendly_error_detail(value) -> str:
@@ -248,11 +280,21 @@ def _friendly_error_detail(value) -> str:
         parts.append("等待响应超时")
     elif kind in kind_labels:
         parts.append(kind_labels[kind])
-    elif kind:
+    elif kind and kind not in ("valueerror", "runtimeerror"):
         parts.append(kind.replace("error", "错误").replace("os", "系统"))
     message = str(value.get("message") or "").strip()
-    if message and message not in parts:
+    upstream_reason = str(value.get("upstream_reason") or "")
+    if upstream_reason == "workspace routing discovery failed":
+        parts.append("上游未能找到工作区对应的服务路由")
+    if message and message not in parts and not message.startswith(("CLI_", "MODEL_", "RPC_")):
         parts.append(message[:180])
+    elapsed, budget = value.get("elapsed_ms"), value.get("timeout_budget_ms")
+    if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool):
+        parts.append(f"已等待 {elapsed / 1000:.1f} 秒")
+    if isinstance(budget, (int, float)) and not isinstance(budget, bool):
+        parts.append(f"任务时限 {budget / 1000:.1f} 秒")
+    if type(value.get("received_content")) is bool:
+        parts.append("已收到部分输出" if value["received_content"] else "尚未收到回答内容")
     path = value.get("path") or value.get("path2")
     if path:
         parts.append("路径 " + str(path)[:220])
@@ -272,6 +314,7 @@ _STAGE_LABELS = {
     "app_server_start": "启动 Codex 引擎", "project_setup": "准备 Codex 工作区",
     "thread_resume": "恢复 Codex 会话", "thread_start": "创建 Codex 会话",
     "thread_label": "标记 Codex 会话", "turn_start": "提交 Codex 请求",
+    "codex_event": "等待 Codex 分析事件",
     "codex_reply": "等待 Codex 回复", "result_cache": "保存本机回执",
     "result_writeback": "回写 Web 结果", "backend_register": "桥注册",
 }
@@ -317,8 +360,11 @@ def _format_bridge_log_entry(raw_line: str) -> tuple[str, str, str]:
         error_detail = _friendly_error_detail(error_info)
         if error_detail:
             details.append("详情 " + error_detail)
+        guidance = _friendly_error_guidance(error_code)
+        if guidance:
+            details.append(guidance)
         if payload.get("retry_after_seconds"):
-            details.append("将在 %s 秒后重试" % payload["retry_after_seconds"])
+            details.append("将在 %s 秒后恢复检查（不代表原任务已重试）" % payload["retry_after_seconds"])
         if details:
             message += "；" + "；".join(details)
     else:

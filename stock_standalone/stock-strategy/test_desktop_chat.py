@@ -40,6 +40,30 @@ class ChatTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory,patch('desktop_strategy_agent.AppServer',return_value=self.app),patch('muse_research_threads.ensure_project',return_value='project'):
             run_chat(self.peer,self.job,'installed-engine',Path(directory),self.model,self.sidebar,self.db,Mock())
 
+    def test_failed_turn_keeps_routing_reason_and_closes_attempt(self):
+        self.app.event=lambda timeout: {'method':'turn/completed','params':{'threadId':THREAD,
+            'turn':{'id':'turn','status':'failed','error':{'message':'workspace routing discovery failed','codexErrorInfo':'other'}}}}
+        self.run_chat()
+        failures=[call.args[1] for call in self.peer.post.call_args_list if call.args[0]=='chat_result' and call.args[1].get('status')=='failed']
+        self.assertEqual(failures[-1]['result']['error_code'],'CLI_ROUTING_DISCOVERY_FAILED')
+        self.assertEqual(failures[-1]['result']['error_message'],'workspace routing discovery failed')
+        self.assertEqual(self.db.execute('SELECT state FROM chat_attempts').fetchone()[0],'failed')
+        self.assertTrue(self.app.closed)
+
+    def test_usage_limit_enters_cooldown_without_repeating_inference(self):
+        self.app.event=lambda timeout: {'method':'turn/completed','params':{'threadId':THREAD,
+            'turn':{'id':'turn','status':'failed','error':{'codexErrorInfo':'usageLimitExceeded'}}}}
+        self.run_chat()
+        self.assertGreater(float(self.db.execute("SELECT value FROM runtime WHERE key='cooldown_until'").fetchone()[0]),time.time())
+        self.assertEqual(sum(method=='turn/start' for method,_ in self.app.calls),1)
+
+    def test_structured_failures_do_not_leak_arbitrary_upstream_text(self):
+        from ats.llm.codex_cli_backend import CodexCLIBackend
+        error=CodexCLIBackend._turn_failure({'message':'private prompt token=secret','codexErrorInfo':'responseStreamDisconnected'})
+        self.assertEqual(str(error),'CLI_NETWORK_ERROR')
+        self.assertNotIn('secret',json.dumps(error.codex_diagnostic))
+        self.assertEqual(str(CodexCLIBackend._turn_failure({'message':'workspace routing discovery failed'})),'CLI_ROUTING_DISCOVERY_FAILED')
+
     def test_cancelled_lease_interrupts_native_turn_and_closes(self):
         error=HTTPError('http://localhost',409,'Conflict',{},io.BytesIO(b'{}'));error.peer_code='CHAT_CANCELLED';error.peer_operation='chat_result'
         def post(*args,**kwargs):
