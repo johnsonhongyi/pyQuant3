@@ -262,7 +262,48 @@ def _agy_result_failure(result: dict) -> BoundedCLIError:
         message = re.sub(r"(?i)((?:api[_-]?key|access[_-]?token|refresh[_-]?token|password)[\"']?\s*[:=]\s*[\"']?)[^\s&\"']+", r"\1[redacted]", message)
         message = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", "[email]", message)
         error.agy_error_message = " ".join(message.split())[:640]
+        normalized = error.agy_error_message.lower()
+        if ("eligibility check failed" in normalized
+                and any(token in normalized for token in (": eof", "unexpected eof", "connection reset", "timeout"))):
+            error.code = "AGY_ELIGIBILITY_NETWORK_ERROR"
     return error
+
+
+def _run_agy_stream(cmd, *, prompt_event, timeout, started, runtime, publisher, job_id, model, effort, prefix):
+    # Only retry pre-inference eligibility transport failures, never partial output
+    # or a completed inference. Both attempts share the original deadline.
+    deadline = started + timeout
+    for attempt in range(2):
+        stream = _AntigravityChatStream(publisher, job_id, model, effort)
+        remaining = deadline - time.monotonic()
+        if remaining <= 3:
+            raise BoundedCLIError("CLI_TIMEOUT")
+        command = list(cmd)
+        command[command.index("--print-timeout") + 1] = f"{max(1, int(remaining) - 3)}s"
+        with tempfile.TemporaryDirectory(prefix=prefix) as isolated_dir:
+            completed = run_bounded_cli(
+                command, cwd=isolated_dir, stdin_bytes=prompt_event.encode("utf-8"),
+                timeout_seconds=remaining, timeout_limit_seconds=180.0,
+                completion_predicate=lambda _: stream.result_event is not None,
+                stdout_callback=stream.feed, hidden_console=True,
+            )
+        stream.finish()
+        result = stream.result_event or {}
+        error = _agy_result_failure(result)
+        message = getattr(error, "agy_error_message", "").lower()
+        transient = (str(result.get("status", "")).upper() in ("ERROR", "FAILED")
+                     and "eligibility check failed" in message
+                     and any(token in message for token in (": eof", "unexpected eof", "connection reset", "timeout")))
+        if (attempt or not transient or stream.content or stream.first_token_at is not None
+                or deadline - time.monotonic() < 15 or (runtime.parent / "stop.request").exists()):
+            return completed, stream
+        _emit_log({"status": "retrying", "stage": "agy_eligibility_retry", "job_id": str(job_id)[:12],
+                   "error_code": error.code, "error_detail": {"message": getattr(error, "agy_error_message", "")},
+                   "retry_after_seconds": 1})
+        _wait_for_stop(runtime, 1)
+        if (runtime.parent / "stop.request").exists():
+            return completed, stream
+    return completed, stream
 
 
 def _resolve_cli_effort(model: str, requested, models: list[dict], fallback: str = "low") -> str:
@@ -441,18 +482,10 @@ def run_antigravity_chat(peer: DesktopPeer, job: dict, cli: str, runtime: Path, 
             prompt_event = json.dumps({"event": "user", "message": {"content": prompt}}, ensure_ascii=False) + "\n"
             publisher.publish({"content": "[Antigravity 正在分析...]\n",
                 "model": model, "reasoning_effort": effort, "stage": "model_start"})
-            stream = _AntigravityChatStream(publisher, job_id, model, effort)
             timings["turn_started_ms"] = round((time.monotonic() - started) * 1000)
-            # Frozen research evidence is self-contained. A directory outside the
-            # checkout avoids injecting ancestor AGENTS.md and project context.
-            with tempfile.TemporaryDirectory(prefix="agv-chat-") as scratch_dir:
-                completed = run_bounded_cli(
-                    cmd, cwd=scratch_dir, stdin_bytes=prompt_event.encode("utf-8"),
-                    timeout_seconds=timeout, timeout_limit_seconds=180.0,
-                    completion_predicate=lambda _: stream.result_event is not None,
-                    stdout_callback=stream.feed, hidden_console=True,
-                )
-            stream.finish()
+            completed, stream = _run_agy_stream(
+                cmd, prompt_event=prompt_event, timeout=timeout, started=started, runtime=runtime,
+                publisher=publisher, job_id=job_id, model=model, effort=effort, prefix="agv-chat-")
             if stream.actual_model and stream.actual_model != model:
                 raise BoundedCLIError("AGY_MODEL_CONFIGURATION_MISMATCH")
             if stream.result_event is None:
@@ -595,16 +628,10 @@ def run_antigravity_strategy(peer: DesktopPeer, job: dict, cli: str, runtime: Pa
     try:
         publisher.publish({"stage": "strategy_model_start", "model": model, "reasoning_effort": effort})
         prompt_event = json.dumps({"event": "user", "message": {"content": prompt}}, ensure_ascii=False) + "\n"
-        stream = _AntigravityChatStream(None, job_id, model, effort)
         turn_started = time.monotonic()
-        with tempfile.TemporaryDirectory(prefix="agv-strategy-") as isolated_dir:
-            completed = run_bounded_cli(
-                cmd, cwd=isolated_dir, stdin_bytes=prompt_event.encode("utf-8"),
-                timeout_seconds=_job_cli_timeout(job), timeout_limit_seconds=180.0,
-                completion_predicate=lambda _: stream.result_event is not None,
-                stdout_callback=stream.feed, hidden_console=True,
-            )
-        stream.finish()
+        completed, stream = _run_agy_stream(
+            cmd, prompt_event=prompt_event, timeout=_job_cli_timeout(job), started=started, runtime=runtime,
+            publisher=None, job_id=job_id, model=model, effort=effort, prefix="agv-strategy-")
         if stream.actual_model and stream.actual_model != model:
             raise BoundedCLIError("AGY_MODEL_CONFIGURATION_MISMATCH")
         publisher.check()

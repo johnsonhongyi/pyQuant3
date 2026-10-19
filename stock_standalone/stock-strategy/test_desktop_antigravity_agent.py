@@ -14,6 +14,68 @@ from desktop_bridge_runtime import ProgressPublisher
 
 
 class AntigravityChatTests(unittest.TestCase):
+    def test_eligibility_transport_retry_is_bounded_and_never_repeats_output(self):
+        import time
+        failure = {"status": "ERROR", "error": "Eligibility check failed: failed to get profile picture: EOF"}
+        success = {"status": "SUCCESS", "response": "ok"}
+        cases = [(failure, False, 2), (failure, True, 1),
+                 ({"status": "ERROR", "error": "invalid model selection"}, False, 1),
+                 (success, False, 1)]
+        for first, partial, expected_calls in cases:
+            with self.subTest(first=first, partial=partial), tempfile.TemporaryDirectory() as directory:
+                calls = []
+                def run(command, **kwargs):
+                    calls.append(kwargs["timeout_seconds"])
+                    if partial:
+                        kwargs["stdout_callback"](b'{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"partial"}}\n')
+                    event = first if len(calls) == 1 else success
+                    kwargs["stdout_callback"]((json.dumps({"event": "result", "result": event}) + "\n").encode())
+                    return SimpleNamespace(returncode=0)
+                with patch.object(agent, "run_bounded_cli", side_effect=run), \
+                     patch.object(agent, "_wait_for_stop"), patch.object(agent, "_emit_log"):
+                    _, stream = agent._run_agy_stream(
+                        ["agy", "--print-timeout", "87s"], prompt_event="prompt", timeout=90,
+                        started=time.monotonic(), runtime=Path(directory) / "agent", publisher=None,
+                        job_id="job", model="claude", effort="auto", prefix="agv-test-")
+                self.assertEqual(len(calls), expected_calls)
+                self.assertTrue(all(0 < value <= 90 for value in calls))
+                if expected_calls == 2:
+                    self.assertLessEqual(calls[1], calls[0])
+                    self.assertEqual(stream.result_event["status"], "SUCCESS")
+
+    def test_repeated_eligibility_failure_stops_after_two_attempts(self):
+        import time
+        with tempfile.TemporaryDirectory() as directory:
+            def run(command, **kwargs):
+                kwargs["stdout_callback"](b'{"event":"result","result":{"status":"ERROR","error":"Eligibility check failed: profile picture: EOF"}}\n')
+                return SimpleNamespace(returncode=0)
+            with patch.object(agent, "run_bounded_cli", side_effect=run) as runner, \
+                 patch.object(agent, "_wait_for_stop"), patch.object(agent, "_emit_log"):
+                _, stream = agent._run_agy_stream(
+                    ["agy", "--print-timeout", "87s"], prompt_event="prompt", timeout=90,
+                    started=time.monotonic(), runtime=Path(directory) / "agent", publisher=None,
+                    job_id="job", model="claude", effort="auto", prefix="agv-test-")
+            self.assertEqual(runner.call_count, 2)
+            self.assertEqual(agent._agy_result_failure(stream.result_event).code, "AGY_ELIGIBILITY_NETWORK_ERROR")
+
+    def test_eligibility_retry_respects_stop_and_remaining_budget(self):
+        import time
+        for stopped, age in [(True, 0), (False, 80)]:
+            with self.subTest(stopped=stopped), tempfile.TemporaryDirectory() as directory:
+                if stopped:
+                    (Path(directory) / "stop.request").touch()
+                def run(command, **kwargs):
+                    kwargs["stdout_callback"](b'{"event":"result","result":{"status":"ERROR","error":"Eligibility check failed: profile picture: EOF"}}\n')
+                    return SimpleNamespace(returncode=0)
+                with patch.object(agent, "run_bounded_cli", side_effect=run) as runner, \
+                     patch.object(agent, "_wait_for_stop") as wait:
+                    agent._run_agy_stream(
+                        ["agy", "--print-timeout", "87s"], prompt_event="prompt", timeout=90,
+                        started=time.monotonic() - age, runtime=Path(directory) / "agent", publisher=None,
+                        job_id="job", model="claude", effort="auto", prefix="agv-test-")
+                self.assertEqual(runner.call_count, 1)
+                wait.assert_not_called()
+
     def test_upstream_result_error_retains_reason_without_credentials(self):
         error = agent._agy_result_failure({"status": "ERROR", "error": {
             "message": 'invalid model selection: effort unsupported; access_token=secret user@example.com "api_key":"private-key" Bearer bearer-secret'}})
