@@ -21,6 +21,18 @@ def catalog():
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_location_denial_keeps_reason_without_retry_claim(self):
+        error=agent._agy_result_failure({"status":"ERROR","error":"User location is not supported for the API use."})
+        peer, persist=Mock(),Mock()
+        peer.post.return_value={"kind":"chat","job":{"id":"job"}}
+        with patch.object(agent,"run_antigravity_chat",side_effect=error), patch.object(agent,"_emit_log") as emit:
+            agent._run_agent_loop(peer,catalog(),Path("agent"),Mock(),Mock(),persist,once=True)
+        detail=persist.call_args.args[1]
+        self.assertFalse(detail["retryable"])
+        self.assertNotIn("retry_after_seconds",detail)
+        self.assertIn("location",detail["error_detail"]["message"])
+        self.assertEqual(emit.call_args.args[0]["status"],"failed")
+
     def test_stop_never_sends_an_unsupported_stopped_heartbeat(self):
         with tempfile.TemporaryDirectory() as folder:
             runtime = Path(folder) / "agent"
