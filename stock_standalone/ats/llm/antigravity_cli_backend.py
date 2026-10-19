@@ -25,6 +25,23 @@ _MAX_PROMPT_CHARS = 32_000
 _MAX_SCHEMA_BYTES = 64 * 1024
 
 
+def _agy_selection_failure_category(detail: str) -> str | None:
+    """Remote selection errors alone cannot prove local configuration is wrong."""
+    detail = detail.casefold()
+    if any(marker in detail for marker in (
+        'connection', 'deadline exceeded', 'timed out', 'timeout', 'network',
+        'unexpected eof', ': eof', 'tls handshake', 'proxyconnect', 'dial tcp',
+        'no such host', 'name resolution',
+    )) or detail.strip() == 'eof':
+        return 'NETWORK_FAILURE'
+    if any(marker in detail for marker in (
+        'invalid model', 'model selection', 'model is not recognized',
+        'model not found', 'unknown model', '--effort is not supported', 'effort unsupported',
+    )):
+        return 'MODEL_SELECTION_UNVERIFIED'
+    return None
+
+
 def matches_json_schema(value: Any, schema: Mapping[str, Any]) -> bool:
     """Validate the JSON Schema subset used by the bounded agent contracts."""
     return _json_schema_failure_code(value, schema) is None
@@ -315,16 +332,19 @@ class AntigravityCLIBackend:
     def _classify_result_failure(result_event: Mapping[str, Any]) -> str:
         status = result_event.get("status")
         error = result_event.get("error")
+        if isinstance(error, Mapping):
+            error = error.get('message')
         detail = error.lower() if isinstance(error, str) else ""
+        selection_failure = _agy_selection_failure_category(detail)
         denied = result_event.get("denied_actions")
         if isinstance(denied, list) and denied:
             category = "TOOL_ACTION_DENIED"
         elif any(token in detail for token in ("authentication", "not signed in", "credential", "login required")):
             category = "AUTH_REQUIRED"
-        elif any(token in detail for token in ("invalid model", "model selection", "model is not recognized")):
-            category = "MODEL_UNAVAILABLE"
         elif any(token in detail for token in ("access is denied", "permission denied", "failed to redirect output", "crash reporter")):
             category = "LOCAL_STORAGE_BLOCKED"
+        elif selection_failure:
+            category = selection_failure
         elif any(token in detail for token in ("connection", "deadline", "timed out", "network")):
             category = "NETWORK_FAILURE"
         elif any(token in detail for token in (
@@ -370,8 +390,11 @@ class AntigravityCLIBackend:
             "not logged in", "authentication required", "unauthorized",
         )):
             return "CLI_AUTH_REQUIRED"
-        if any(marker in text for marker in ("model not found", "unknown model")):
-            return "CLI_MODEL_UNAVAILABLE"
+        selection_failure = _agy_selection_failure_category(text)
+        if selection_failure == 'NETWORK_FAILURE':
+            return 'CLI_NETWORK_ERROR'
+        if selection_failure == 'MODEL_SELECTION_UNVERIFIED':
+            return 'CLI_MODEL_SELECTION_UNVERIFIED'
         return f"CLI_EXIT_CODE_{abs(int(returncode))}"
 
     @staticmethod

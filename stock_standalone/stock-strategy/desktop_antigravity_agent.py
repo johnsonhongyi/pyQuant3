@@ -52,7 +52,7 @@ from desktop_strategy_agent import (
     NoRedirect, DesktopPeer, _error_details, _peer_error_code, ats_evidence, research_schema
 )
 from follow_ai import digest, validate_result
-from ats.llm.antigravity_cli_backend import matches_json_schema, _coerce_structured_output
+from ats.llm.antigravity_cli_backend import matches_json_schema, _coerce_structured_output, _agy_selection_failure_category
 from ats.llm.cli_process import BoundedCLIError, run_bounded_cli
 from ats.llm.cli_paths import resolve_cli_path
 
@@ -244,6 +244,9 @@ def _chat_error_info(error: Exception):
     details = _error_details(root_error)
     if getattr(root_error, "agy_error_message", ""):
         details["message"] = root_error.agy_error_message
+    if getattr(root_error, 'agy_upstream_message', ''):
+        details['upstream_message'] = root_error.agy_upstream_message
+        details['configuration_verified'] = False
     if cause:
         details["callback_error_code"] = error.code
     return error_code, details
@@ -260,13 +263,20 @@ def _agy_result_failure(result: dict) -> BoundedCLIError:
         message = re.sub(r"(?i)bearer\s+\S+", "Bearer [redacted]", message)
         message = re.sub(r"(?i)((?:api[_-]?key|access[_-]?token|refresh[_-]?token|password)[\"']?\s*[:=]\s*[\"']?)[^\s&\"']+", r"\1[redacted]", message)
         message = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}", "[email]", message)
+        normalized = message.casefold()
         error.agy_error_message = " ".join(message.split())[:640]
-        normalized = error.agy_error_message.lower()
+        category = _agy_selection_failure_category(normalized)
         if "user location is not supported" in normalized:
             error.code = "AGY_LOCATION_UNSUPPORTED"
-        elif ("eligibility check failed" in normalized
-                and any(token in normalized for token in (": eof", "unexpected eof", "connection reset", "timeout"))):
+        elif "eligibility check failed" in normalized and category == 'NETWORK_FAILURE':
             error.code = "AGY_ELIGIBILITY_NETWORK_ERROR"
+        elif category == 'NETWORK_FAILURE':
+            error.code = 'AGY_NETWORK_ERROR'
+        elif category == 'MODEL_SELECTION_UNVERIFIED':
+            error.code = 'AGY_MODEL_SELECTION_UNVERIFIED'
+            error.agy_upstream_message = error.agy_error_message
+            error.agy_error_message = ('上游未能完成模型/档位校验；可能是网络、模型目录不可达或配置不支持，'
+                                       '当前原因未确认，请检查连接与目录，不要据此自动更换配置。')
     return error
 
 
