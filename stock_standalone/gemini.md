@@ -1,5 +1,18 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-20 17:45 【AGY会话模型路由自适应、Argon旗舰定价精算与分行排版优化】(`docs/tasks/2026-10-20_1745_AGY会话模型路由自适应与分行排版优化.md`, `tools/codex_token_stats.py`)
+- [x] **【客户端请求模型底层 Protobuf 深度还原】**：逆向提取 `conversations/*.db` 中 `gen_metadata` 二进制子字段 20（Subfield 20），建立 `AGY_ENUM_TO_REQ_MODEL` 权威映射表，彻底解决请求模型始终显示为默认 Flash 的痛点，精确呈现真实的单模型选择与会话中途模型切换；
+- [x] **【Gemini 4 Argon 旗舰定价补齐与费用精算纠偏】**：补充 `gemini-4-argon` / `gemini-4-argon-trial` 定价条目，优化模糊匹配优先级，修复原先误按 Flash 计算导致的近 80% 费用低估，精准纠偏为真实消费；
+- [x] **【模型切换分行对齐与后缀全环境规范精简】**：表格展示默认将 `(Medium)` $\rightarrow$ `(Med)`、`(Preview)` $\rightarrow$ `(Prev)`、`(Thinking)` $\rightarrow$ `(Think)` 规范精简；针对 ` ➔ ` 切换步骤自动切分多行展示并对齐指标列，消除终端横向超长折行；提供 `--compact` 紧凑排版支持。
+
+## 2026-10-20 17:25 【生产管理器崩溃诊断加固与闪退隐患根除闭环】(`docs/tasks/2026-10-20_1725_生产管理器闪退修复与全生命周期崩溃诊断加固.md`, `webTools/window_manager/manager_crash_diagnostics.py`, `webTools/manage_window_layout.py`, `webTools/window_manager/ui.py`, `sys_utils.py`, `tests/test_manager_crash_diagnostics.py`)
+- [x] Qt 消息处理器安全检查 stderr，并将 Critical/Fatal 写入 `crash.log` 与主日志，根治 `sys.stderr is None` 引发的 AttributeError 闪退；
+- [x] 接入主/子线程异常钩子（`sys.excepthook` / `threading.excepthook`）、`faulthandler` 原生崩溃堆栈落盘和启动/退出全生命周期审计记录；
+- [x] 主日志升级为 `RotatingFileHandler`（10MB x 5 backups）；加固 `ui.log` 跨线程安全自动转为 Qt 信号；消除 RamDisk 下 `Path.resolve()` 的 OSError 隐患与 Emoji/GBK 编码风险；
+- [x] 定向专项测试 7 项全绿通过，关联套件 14 项全绿通过；
+- [x] 成功重新编译单文件 EXE，按标准规范安全备份原文件并热替换生产环境 `D:\JohnsonProgram\instockMonitorTK\manage_window_layout.exe`，自检验证 100% 正常。
+
+
 ## 2026-10-20 14:40 【ATS退出收尾、窗口持久化与子进程回收全闭环落地方案】(`docs/tasks/2026-10-20_1440_ATS退出收尾与窗口持久化全闭环落地方案.md`, `tk_gui_modules/window_mixin.py`, `ats/ui/sbc_launcher.py`, `ats/ui/intraday_strategy_dialog.py`, `ats/ui/daily_limit_up_dialog.py`, `ats/ui/dragon_monitor.py`, `ats/ui/hot_sector_leaderboard.py`, `ats/ui/chart_widgets.py`, `ats/ui/main_window.py`, `run_sbc.py`, `ats/tdx_realtime_fetcher.py`)
 - [x] **【彻底消除 Windows 文件锁冲突（`tk_gui_modules/window_mixin.py`）】**：
     - 针对多窗口并发退出时 `save_window_position_qt_visual` 抢占同一 `.tmp` 临时文件触发 `[WinError 5] 拒绝访问` 痛点，引入基于进程 PID 与线程 ID 的唯一临时文件名 `f"{config_file_path}.{os.getpid()}.{threading.get_ident()}.tmp"`；

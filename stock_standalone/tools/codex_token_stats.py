@@ -61,6 +61,33 @@ def format_tokens(n):
     else:
         return f"{n:,}"
 
+def format_tokens_compact(n, compact=False):
+    """自适应格式化 Token，compact 模式下输出更紧凑的万/亿进制，避免长双括号撑爆表格列宽"""
+    if not compact:
+        return format_tokens(n)
+    if n >= 100_000_000:
+        return f"{n / 100_000_000:.2f}亿"
+    elif n >= 10_000:
+        return f"{n / 10_000:.2f}万"
+    else:
+        return f"{n:,}"
+
+def compact_model_display(name):
+    """自适应精简模型名称冗余后缀，兼顾可读性与终端紧凑性"""
+    if not name:
+        return ""
+    res = str(name)
+    replacements = [
+        ("(Medium)", "(Med)"),
+        ("(Thinking)", "(Think)"),
+        ("(Preview)", "(Prev)"),
+        ("(Tiered)", "(Tier)"),
+        ("(Default)", "(Def)"),
+    ]
+    for old, new in replacements:
+        res = res.replace(old, new)
+    return res
+
 def decode_protobuf(b):
     """
     轻量原生二进制 Protobuf 解码器 (无外部第三方库依赖)
@@ -140,6 +167,9 @@ def load_codex_model_metadata():
 
 # Google Antigravity / Gemini 模型官方友好显示名定义 (严格实事求是，底层写什么输出什么，绝不硬凑任何级别)
 AGY_MODEL_META = {
+    "gemini-4-argon-trial": {"display_name": "Gemini 4 Argon (Trial)"},
+    "gemini-4-argon": {"display_name": "Gemini 4 Argon"},
+    "gemini-4": {"display_name": "Gemini 4"},
     "gemini-3.8-flash": {"display_name": "Gemini 3.8 Flash"},
     "gemini-3.8-flash-tiered": {"display_name": "Gemini 3.8 Flash (Tiered)"},
     "gemini-3.8-flash-n": {"display_name": "Gemini 3.8 Flash (Preview)"},
@@ -152,11 +182,34 @@ AGY_MODEL_META = {
     "gemini-pro-default": {"display_name": "Gemini Pro (Default)"},
     "gemini-default": {"display_name": "Gemini (Default)"},
     "claude-opus-4-6-thinking": {"display_name": "Claude Opus 4.6 (Thinking)"},
+    "claude-opus-5-5": {"display_name": "Claude Opus 5.5"},
     "claude-sonnet-4-6": {"display_name": "Claude Sonnet 4.6"},
+    "claude-sonnet-5-5": {"display_name": "Claude Sonnet 5.5"},
+}
+
+# Google Antigravity 底层请求模型枚举映射 (从二进制与实机全量会话逆向提炼，严格实事求是自适应映射)
+AGY_ENUM_TO_REQ_MODEL = {
+    "MODEL_PLACEHOLDER_M418": "Gemini 4 Argon (Medium)",
+    "MODEL_PLACEHOLDER_M417": "Gemini 4 Argon",
+    "MODEL_PLACEHOLDER_M318": "Gemini 3.8 Flash (High)",
+    "MODEL_PLACEHOLDER_M319": "Gemini 3.8 Flash (Medium)",
+    "MODEL_PLACEHOLDER_M320": "Gemini 3.8 Flash (Low)",
+    "MODEL_PLACEHOLDER_M322": "Gemini 3.8 Flash (Tiered)",
+    "MODEL_PLACEHOLDER_M298": "Gemini 3.7 Flash",
+    "MODEL_PLACEHOLDER_M299": "Gemini 3.7 Flash",
+    "MODEL_PLACEHOLDER_M265": "Gemini 3.6 Flash",
+    "MODEL_PLACEHOLDER_M71": "Gemini 3.6 Flash",
+    "MODEL_PLACEHOLDER_M72": "Gemini 3.6 Flash",
+    "MODEL_PLACEHOLDER_M132": "Gemini 3 Flash (Alpha)",
+    "MODEL_PLACEHOLDER_M16": "Gemini 3.8 Flash (Preview)",
+    "MODEL_PLACEHOLDER_M36": "Gemini 3.1 Pro (Low)",
+    "MODEL_PLACEHOLDER_M26": "Claude Opus 4.6 (Thinking)",
+    "MODEL_PLACEHOLDER_M35": "Claude Sonnet 4.6",
+    "MODEL_PLACEHOLDER_M20": "Gemini (Default)",
 }
 
 def load_antigravity_client_model():
-    """实事求是读取用户在 ~/.gemini/antigravity-cli/settings.json 中配置的真实请求模型"""
+    """实事求是读取用户在 ~/.gemini/antigravity-cli/settings.json 中配置的全局请求模型作为保底回退"""
     p = os.path.expanduser("~/.gemini/antigravity-cli/settings.json")
     if os.path.exists(p):
         try:
@@ -189,13 +242,17 @@ MODEL_PRICING = {
     "gpt-4o": {"input": 2.50, "cache_read": 1.25, "cache_create": 2.50, "output": 10.00},
     "gpt-4o-mini": {"input": 0.15, "cache_read": 0.075, "cache_create": 0.15, "output": 0.60},
 
-    # --- Google Antigravity / Gemini 系列 ---
+    # --- Google Antigravity / Gemini 系列 (包含 Gemini 4 Argon 旗舰与多梯队模型) ---
+    "gemini-4-argon-trial": {"input": 1.25, "cache_read": 0.3125, "cache_create": 1.25, "output": 5.00},
+    "gemini-4-argon": {"input": 1.25, "cache_read": 0.3125, "cache_create": 1.25, "output": 5.00},
+    "gemini-4": {"input": 1.25, "cache_read": 0.3125, "cache_create": 1.25, "output": 5.00},
     "gemini-3.8-flash": {"input": 0.15, "cache_read": 0.0375, "cache_create": 0.15, "output": 0.60},
     "gemini-3.8-flash-tiered": {"input": 0.15, "cache_read": 0.0375, "cache_create": 0.15, "output": 0.60},
     "gemini-3.8-flash-n": {"input": 0.15, "cache_read": 0.0375, "cache_create": 0.15, "output": 0.60},
     "gemini-3.7-flash": {"input": 0.15, "cache_read": 0.0375, "cache_create": 0.15, "output": 0.60},
     "gemini-3.6-flash": {"input": 0.15, "cache_read": 0.0375, "cache_create": 0.15, "output": 0.60},
     "gemini-3-flash-a": {"input": 0.15, "cache_read": 0.0375, "cache_create": 0.15, "output": 0.60},
+    "gemini-2.5-flash-lite": {"input": 0.075, "cache_read": 0.01875, "cache_create": 0.075, "output": 0.30},
     "gemini-3.1-pro-low": {"input": 1.25, "cache_read": 0.3125, "cache_create": 1.25, "output": 5.00},
     "gemini-2.5-pro": {"input": 1.25, "cache_read": 0.3125, "cache_create": 1.25, "output": 5.00},
     "gemini-pro-default": {"input": 1.25, "cache_read": 0.3125, "cache_create": 1.25, "output": 5.00},
@@ -204,9 +261,11 @@ MODEL_PRICING = {
 
     # --- Anthropic Claude 系列 (Antigravity 路由支持) ---
     "claude-sonnet-4-6": {"input": 3.00, "cache_read": 0.30, "cache_create": 3.75, "output": 15.00},
+    "claude-sonnet-5-5": {"input": 3.00, "cache_read": 0.30, "cache_create": 3.75, "output": 15.00},
     "claude-3-7-sonnet": {"input": 3.00, "cache_read": 0.30, "cache_create": 3.75, "output": 15.00},
     "claude-3-5-sonnet": {"input": 3.00, "cache_read": 0.30, "cache_create": 3.75, "output": 15.00},
     "claude-opus-4-6-thinking": {"input": 15.00, "cache_read": 1.50, "cache_create": 18.75, "output": 75.00},
+    "claude-opus-5-5": {"input": 15.00, "cache_read": 1.50, "cache_create": 18.75, "output": 75.00},
     "claude-3-opus": {"input": 15.00, "cache_read": 1.50, "cache_create": 18.75, "output": 75.00},
 }
 
@@ -231,7 +290,7 @@ load_custom_pricing()
 def get_model_pricing(model_name):
     """
     智能解析模型名称并匹配其权威单价字典 (USD per 1M tokens)
-    支持前缀与关键词容错
+    支持前缀与关键词容错，严格区分旗舰模型(Argon/Pro)与轻量模型(Flash)
     """
     if not model_name:
         return DEFAULT_PRICING
@@ -254,6 +313,11 @@ def get_model_pricing(model_name):
         return MODEL_PRICING["gpt-6-astra"]
     elif "auto-review" in m_clean or "auto_review" in m_clean:
         return MODEL_PRICING["codex-auto-review"]
+    # 旗舰级 Gemini 4 Argon 优先匹配，防止误落入通用 Flash/Default
+    elif "argon" in m_clean or "gemini-4" in m_clean or "gemini 4" in m_clean:
+        return MODEL_PRICING["gemini-4-argon-trial"]
+    elif "flash-lite" in m_clean or "lite" in m_clean:
+        return MODEL_PRICING["gemini-2.5-flash-lite"]
     elif "flash" in m_clean:
         return MODEL_PRICING["gemini-3.8-flash"]
     elif "pro" in m_clean and ("gemini" in m_clean or "2.5" in m_clean or "3.1" in m_clean):
@@ -1086,14 +1150,23 @@ def get_codex_stats(days_back=7, show_recent_routes=10, target_date_arg=None, ta
 # =========================================================================
 # 适配器 2: Google Antigravity / Gemini 本地会话统计 (支持桌面端、IDE端与全量合并)
 # =========================================================================
-def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=None, target_model_arg=None, app_type="standalone", time_mode="active"):
+def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=None, target_model_arg=None, app_type="standalone", time_mode="active", compact=None):
     """
     解析本地 Google Antigravity / Gemini 会话记录与 Token 吞吐审计
     - app_type:
         'standalone': 扫描 ~/.gemini/antigravity (桌面独立端)
         'ide':        扫描 ~/.gemini/antigravity-ide (VS Code IDE端)
         'merged':     扫描并合并独立端与 IDE 端全部记录
+    - compact: 是否启用紧凑精简排版，None 时根据控制台宽度自动判定 (<175 自动开启)
     """
+    if compact is None:
+        try:
+            import shutil
+            term_w = shutil.get_terminal_size((160, 24)).columns
+            compact = (term_w < 175)
+        except Exception:
+            compact = False
+
     base_agy = os.path.expanduser("~/.gemini/antigravity")
     base_ide = os.path.expanduser("~/.gemini/antigravity-ide")
 
@@ -1223,6 +1296,7 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
             sess_gen_dur = 0.0
             sess_e2e_dur = 0.0
             sess_models = collections.Counter()
+            sess_req_models = []
             models_timeline = []
             cur_step_model = None
             sess_first_dt = None
@@ -1280,6 +1354,20 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
                                     if dk == 1: s = dv
                                     elif dk == 2: ns = dv
                                 stream_sec = s + ns / 1e9
+                            elif sf_num == 20 and sf_type == 'bytes':
+                                inner = decode_protobuf(sf_val)
+                                for ifn, iwt, iv in inner:
+                                    if ifn == 1:
+                                        try:
+                                            if iv.decode('utf-8', errors='ignore') == "model_enum":
+                                                for ifn2, iwt2, iv2 in inner:
+                                                    if ifn2 == 2:
+                                                        pe = iv2.decode('utf-8', errors='ignore')
+                                                        req_name = AGY_ENUM_TO_REQ_MODEL.get(pe, pe)
+                                                        if not sess_req_models or sess_req_models[-1] != req_name:
+                                                            sess_req_models.append(req_name)
+                                        except Exception:
+                                            pass
 
                         if not m_name:
                             m_name = "gemini-model"
@@ -1355,6 +1443,7 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
                         unique_models.append(m)
 
                 disp_names = [AGY_MODEL_META.get(m, {}).get("display_name", m) for m in unique_models]
+                sess_req_disp = " ➔ ".join(sess_req_models) if sess_req_models else client_req_model
 
                 if len(unique_models) == 0:
                     act_disp = "Unknown"
@@ -1362,8 +1451,14 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
                 elif len(unique_models) == 1:
                     act_disp = disp_names[0]
                     m0 = unique_models[0].lower()
-                    req_lower = client_req_model.lower()
-                    if ("3.8" in req_lower and "3.8" in m0) or (m0 in req_lower) or req_lower.startswith("auto"):
+                    req_lower = sess_req_disp.lower()
+                    if (("3.8" in req_lower and "3.8" in m0) or
+                        ("argon" in req_lower and "argon" in m0) or
+                        ("opus" in req_lower and "opus" in m0) or
+                        ("sonnet" in req_lower and "sonnet" in m0) or
+                        ("flash" in req_lower and "flash" in m0 and "argon" not in m0 and "pro" not in m0) or
+                        (m0 in req_lower) or
+                        req_lower.startswith("auto")):
                         route_status = "[MATCH]"
                     else:
                         route_status = "[REDIRECT]"
@@ -1391,7 +1486,7 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
                     "created_time": created_time_str,
                     "active_ts": active_ts,
                     "session_id": (f"{app_tag} " if app_type == "merged" else "") + conv_id[:12],
-                    "req_model": client_req_model,
+                    "req_model": sess_req_disp,
                     "actual_model": act_disp,
                     "status": route_status,
                     "total_tokens": sess_total_tokens,
@@ -1500,18 +1595,24 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
 
     if show_recent_routes > 0 and session_route_history:
         time_col_title = "活跃时间 (UTC+8)" if time_mode == "active" else "创建时间 (UTC+8)"
-        print(f"\n[*] 最近 {min(show_recent_routes, len(session_route_history))} 次交互会话实际路由与吐率追踪 (Session Route & Speed Audit):")
+        compact_badge = " [自适应精简排版]" if compact else ""
+        print(f"\n[*] 最近 {min(show_recent_routes, len(session_route_history))} 次交互会话实际路由与吐率追踪 (Session Route & Speed Audit){compact_badge}:")
+
+        req_w = 25 if compact else 26
+        act_w = 26 if compact else 28
+        tok_w = 14 if compact else 21
+
         cols_cfg = [
             (time_col_title, 14, "center"),
             ("Session ID", 18 if app_type == "merged" else 12, "center"),
-            ("客户端请求模型", 26, "left"),
-            ("服务端实际路由模型", 38, "left"),
+            ("客户端请求模型", req_w, "left"),
+            ("服务端实际路由模型", act_w, "left"),
             ("状态", 10, "center"),
-            ("总Token消耗", 21, "right"),
-            ("预估费用", 10, "right"),
-            ("缓存率", 8, "right"),
-            ("纯吐率", 11, "right"),
-            ("端到端吐率", 11, "right"),
+            ("总Token消耗", tok_w, "right"),
+            ("预估费用", 9 if compact else 10, "right"),
+            ("缓存率", 7 if compact else 8, "right"),
+            ("纯吐率", 10 if compact else 11, "right"),
+            ("端到端吐率", 10 if compact else 11, "right"),
         ]
 
         header_str = " | ".join(pad_cell(title, w, align) for title, w, align in cols_cfg)
@@ -1525,7 +1626,7 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
         session_route_history.sort(key=lambda x: x["active_ts"])
         recent_sessions = session_route_history[-show_recent_routes:]
         for r in reversed(recent_sessions):
-            tot_s = format_tokens(r["total_tokens"])
+            tot_s = format_tokens_compact(r["total_tokens"], compact=compact)
             cost_s = format_cost_cell(r.get("cost", 0.0))
             in_s = r["in_tokens"]
             c_s = r["cached_tokens"]
@@ -1533,20 +1634,56 @@ def get_antigravity_stats(days_back=7, show_recent_routes=10, target_date_arg=No
             gen_str = f"{r['gen_tps']:.1f} tok/s" if r['gen_tps'] > 0 else "--"
             e2e_str = f"{r['e2e_tps']:.1f} tok/s" if r['e2e_tps'] > 0 else "--"
 
-            row_vals = [
-                r["time"],
-                r["session_id"],
-                r["req_model"],
-                r["actual_model"],
-                r["status"],
-                tot_s,
-                cost_s,
-                f"{rate:.1f}%",
-                gen_str,
-                e2e_str
-            ]
-            row_line = " | ".join(pad_cell(val, w, align) for val, (_, w, align) in zip(row_vals, cols_cfg))
-            print(row_line)
+            # 默认统一应用模型后缀规范精简 (如 (Medium) -> (Med), (Preview) -> (Prev), (Thinking) -> (Think))
+            req_raw = compact_model_display(r["req_model"])
+            act_raw = compact_model_display(r["actual_model"])
+
+            # 按切换箭头 '➔' 拆分多模型步骤，分行对齐展示避免单行超长
+            req_parts = [p.strip() for p in req_raw.split("➔")]
+            act_parts = [p.strip() for p in act_raw.split("➔")]
+            max_sublines = max(len(req_parts), len(act_parts))
+
+            for line_idx in range(max_sublines):
+                if line_idx < len(req_parts):
+                    cur_req = req_parts[line_idx]
+                    req_txt = cur_req if line_idx == 0 else f" ➔ {cur_req}"
+                else:
+                    req_txt = ""
+
+                if line_idx < len(act_parts):
+                    cur_act = act_parts[line_idx]
+                    act_txt = cur_act if line_idx == 0 else f" ➔ {cur_act}"
+                else:
+                    act_txt = ""
+
+                if line_idx == 0:
+                    row_vals = [
+                        r["time"],
+                        r["session_id"],
+                        req_txt,
+                        act_txt,
+                        r["status"],
+                        tot_s,
+                        cost_s,
+                        f"{rate:.1f}%",
+                        gen_str,
+                        e2e_str
+                    ]
+                else:
+                    row_vals = [
+                        "",
+                        "",
+                        req_txt,
+                        act_txt,
+                        "",
+                        "",
+                        "",
+                        "",
+                        "",
+                        ""
+                    ]
+                row_line = " | ".join(pad_cell(val, w, align) for val, (_, w, align) in zip(row_vals, cols_cfg))
+                print(row_line)
 
         print(sep_str)
         time_meaning = (
@@ -1605,10 +1742,16 @@ if __name__ == "__main__":
         default="active",
         help="指定会话追踪表的时间展示维度: active (默认，显示最后活跃时间，单调递减) 或 created (显示首次创建时间)"
     )
+    parser.add_argument(
+        "--compact",
+        action="store_true",
+        help="开启精简紧凑排版模式 (模型后缀精简 + 紧凑Token显示，避免终端宽度不足导致折行错位)"
+    )
 
     args = parser.parse_args()
 
     time_mode = "created" if (args.created or args.time_mode == "created") else "active"
+    compact_flag = True if args.compact else None
 
     # 判定最终数据源 (显式指定参数 > 全量模式 > 默认 codex)
     if args.all or args.source == "all":
@@ -1631,7 +1774,8 @@ if __name__ == "__main__":
             target_date_arg=args.date,
             target_model_arg=args.model,
             app_type="ide",
-            time_mode=time_mode
+            time_mode=time_mode,
+            compact=compact_flag
         )
     elif chosen_source == "agy":
         get_antigravity_stats(
@@ -1640,7 +1784,8 @@ if __name__ == "__main__":
             target_date_arg=args.date,
             target_model_arg=args.model,
             app_type="standalone",
-            time_mode=time_mode
+            time_mode=time_mode,
+            compact=compact_flag
         )
     elif chosen_source == "gemini":
         get_antigravity_stats(
@@ -1649,7 +1794,8 @@ if __name__ == "__main__":
             target_date_arg=args.date,
             target_model_arg=args.model,
             app_type="merged",
-            time_mode=time_mode
+            time_mode=time_mode,
+            compact=compact_flag
         )
     elif chosen_source == "codex":
         get_codex_stats(
