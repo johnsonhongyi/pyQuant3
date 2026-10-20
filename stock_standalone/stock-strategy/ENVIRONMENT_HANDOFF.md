@@ -1,3 +1,9 @@
+## 2026-10-20 17:26 自动投研紧凑设置与记录分页
+
+- 按 `build-and-deploy.ps1 -AllowLayeredImageBuild` 发布 API/Web，版本 `20261020172617`；部署结果 `Deployment healthy`。回滚：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261020172617`。
+- 自动投研页现在只显示紧凑状态/模型/用量摘要并链接系统设置；设置抽屉整体收紧，自动投研历史默认折叠，20 条/页并可滚动翻页。只读验收页 1、2 均返回 20 条（总数 89）；健康与新前端资源均 HTTP 200。
+- 线上自动投研保留现有 `enabled=true`、`status=ready`；当日调用 0、Token 0。未手动触发模型任务或交易，本次未改动 Python worker、模拟账本、实盘交易或风控逻辑。源码提交 `ebfb0a1`；详情见 [任务记录](../docs/tasks/2026-10-20_1726_自动投研紧凑设置部署验收.md)。
+
 ## 2026-10-19 01:48 研究记录模型与强度分栏
 
 - 用户授权后按 `build-and-deploy.ps1 -AllowLayeredImageBuild` 发布，发布号 `20261019014846`；部署脚本返回 `Deployment healthy`。回滚：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261019014846`。
