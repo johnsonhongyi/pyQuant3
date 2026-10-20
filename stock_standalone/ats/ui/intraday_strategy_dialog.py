@@ -2004,6 +2004,11 @@ class SBCChartCanvas(QWidget):
         act_vol.triggered.connect(_cycle_vol)
         menu.addAction(act_vol)
 
+        if parent_win and hasattr(parent_win, '_on_shortcut_c_activated'):
+            act_auction = QAction("显示/隐藏集合竞价图 (C 键)", self)
+            act_auction.triggered.connect(parent_win._on_shortcut_c_activated)
+            menu.addAction(act_auction)
+
         # 5. 🔗 物理联动外部行情软件 (通达信/同花顺)
         if parent_win and hasattr(parent_win, '_trigger_linkage'):
             act_link = QAction(f"🔗 物理联动外部通达信/同花顺 (F 键)", self)
@@ -2388,6 +2393,8 @@ class SBCChartCanvas(QWidget):
             painter.end()
 
     def _draw_auction_overlay(self, painter, left, top, width):
+        if not getattr(self, "show_auction_chart", True):
+            return
         samples = getattr(self, "auction_samples", [])
         if not samples:
             return
@@ -2427,7 +2434,7 @@ class SBCChartCanvas(QWidget):
         scalar_keys = ("code", "period_mode", "_data_revision", "_zoom_start_idx", "_zoom_end_idx",
                        "_is_right_anchored", "_visible_bar_count", "selected_trade_id", "_vol_mode",
                        "open_price", "vwap", "high_price", "low_price", "target_sell_min", "target_sell_max",
-                       "channel_overlay_enabled", "auto_eval_enabled")
+                       "channel_overlay_enabled", "auto_eval_enabled", "market_phase")
         object_keys = ("channel_info", "multi_vwap_snapshot", "strategy_eval_result", "amplitude_info")
         ratio = self.devicePixelRatioF()
         token = (self.width(), self.height(), ratio, self.font().toString(),
@@ -2477,6 +2484,12 @@ class SBCChartCanvas(QWidget):
 
         op_ref = self.open_price if self.open_price > 1.0 else (prices[0] if len(prices) > 0 else 10.0)
 
+        auction_history = getattr(self, "market_phase", "") in ("auction_indicative", "auction_pending")
+        if auction_history:
+            # 竞价主图仍是历史成交线，不能用当天撮合/报价作为历史涨幅基准。
+            history_open = float(df_view.iloc[0].get("open", prices[0]))
+            op_ref = history_open if np.isfinite(history_open) and history_open > 0 else float(prices[0])
+
         # 🌟 真实全量价格候选收集：坚决不人为用 op_ref*1.70 硬截断暴涨新股/次新股/无涨跌幅标的！
         all_cands = []
         for p in prices:
@@ -2505,6 +2518,14 @@ class SBCChartCanvas(QWidget):
                     sig_p = float(sig.get("price", 0.0) if isinstance(sig, dict) else getattr(sig, "price", 0.0))
                     if sig_p > 0.001:
                         all_cands.append(sig_p)
+
+        if auction_history:
+            # 未成交竞价只在独立面板显示；历史主图按可见成交/VWAP缩放，
+            # 排除当天高低/开盘、目标价、跨日VWAP等异日参考价撑开纵轴。
+            all_cands = [float(value) for series in (prices, vwaps) for value in series
+                         if np.isfinite(value) and value > 0.001]
+            if np.isfinite(op_ref) and op_ref > 0.001:
+                all_cands.append(float(op_ref))
 
         if not all_cands:
             all_cands = [op_ref if op_ref > 0 else 10.0]
@@ -2861,6 +2882,8 @@ class SBCChartCanvas(QWidget):
                     ("10D", multi_vwap.vwap_10d if multi_vwap.complete_10d else None, "#B7FF3C"))
             for label, value, color in refs:
                 if label == current_ref or value is None or value <= 0:
+                    continue
+                if auction_history and not (min_p <= value <= max_p):
                     continue
                 y_ref = price_to_y(float(value))
                 painter.setPen(QPen(QColor(color), 1, Qt.PenStyle.DotLine))
@@ -5272,7 +5295,7 @@ class SBCIntradayChartDialog(QWidget):
         self.lbl_info.setFixedHeight(22)
         self.lbl_info.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.lbl_info.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-        self.lbl_info.setToolTip("💡 快捷键提示:\nA/D: 轮转切换看盘周期\n←/→: 微调查价光标\n1~9: 直选指定周期\nV: 切换成交量副图(折叠/放大)\n双击: 快速查价或在副图双击缩放成交量\nS: 开关底部实时阶段与风控日志\nF: 跨窗口/跨系统联动\nEsc: 退出十字查价光标或关闭\n图例: 青蓝线为现价，黄虚线为 VWAP 均价")
+        self.lbl_info.setToolTip("💡 快捷键提示:\nA/D: 轮转切换看盘周期\n←/→: 微调查价光标\n1~9: 直选指定周期\nC: 显示/隐藏集合竞价图\nV: 切换成交量副图(折叠/放大)\n双击: 快速查价或在副图双击缩放成交量\nS: 开关底部实时阶段与风控日志\nF: 跨窗口/跨系统联动\nEsc: 退出十字查价光标或关闭\n图例: 青蓝线为现价，黄虚线为 VWAP 均价")
         bottom_layout.addWidget(self.lbl_info, 1)
 
         # 快速切换代码下拉组合框 (支持手动输入/回车切换/右键自动粘贴/下拉历史回测标的)
@@ -5367,6 +5390,8 @@ class SBCIntradayChartDialog(QWidget):
         self._shortcut_d.activated.connect(self._on_shortcut_d_activated)
         self._shortcut_v = QShortcut(QKeySequence("V"), self)
         self._shortcut_v.activated.connect(self._on_shortcut_v_activated)
+        self._shortcut_c = QShortcut(QKeySequence("C"), self)
+        self._shortcut_c.activated.connect(self._on_shortcut_c_activated)
 
         # 🔍 挂载窗口级 Up、Down 快捷键，实现全场景免点击走势图缩放 (对齐通达信手感)
         self._shortcut_up = QShortcut(QKeySequence(Qt.Key.Key_Up), self)
@@ -6123,6 +6148,15 @@ class SBCIntradayChartDialog(QWidget):
         from ats.ui.styles import is_editing_text
         if not is_editing_text(self):
             self._on_vol_toggle_clicked()
+
+    def _on_shortcut_c_activated(self):
+        """C只切换竞价叠图，使用已加载轨迹，不触发网络或磁盘操作。"""
+        from ats.ui.styles import is_editing_text
+        if not is_editing_text(self) and getattr(self, "canvas", None) is not None:
+            self.canvas.show_auction_chart = not getattr(self.canvas, "show_auction_chart", True)
+            self.canvas.update()
+            if self.canvas.show_auction_chart and not getattr(self.canvas, "auction_samples", []):
+                self.lbl_info.setText("暂无当日已采集的集合竞价轨迹；C键关闭竞价图")
 
     def _on_vol_toggle_clicked(self):
         """点击工具栏成交量按钮：在 正常(开) -> 折叠(关) -> 放大 之间循环切换"""
@@ -7817,6 +7851,8 @@ class SBCIntradayChartDialog(QWidget):
         t_max = payload.get("t_max", 0.0)
         df_target = payload.get("df_target")
         canvas = getattr(self, "canvas", None)
+        if canvas is not None:
+            canvas.market_phase = payload.get("market_phase", "")
         if (df_target is None or df_target.empty) and canvas is not None:
             previous = getattr(canvas, "df_intraday", None)
             if (previous is not None and not previous.empty

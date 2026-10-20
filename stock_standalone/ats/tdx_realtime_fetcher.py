@@ -13,6 +13,7 @@ import sys
 import os
 import re
 import time
+import sqlite3
 import json
 import threading
 import concurrent.futures
@@ -3653,10 +3654,35 @@ class TDXRealtimeFetcher:
             "server_time": time.strftime("%H:%M:%S")
         }
 
+    def _auction_cache_samples(self, code, day):
+        """Called by snapshot fetch workers; shortcut rendering performs no I/O."""
+        from ats.auction_cache import load_samples
+        samples = getattr(self, "_auction_chart_samples", None)
+        if samples is None:
+            samples = self._auction_chart_samples = {}
+        entry = samples.get(code)
+        if entry is None or entry[0] != day:
+            restored = []
+            try:
+                restored = load_samples(code, day)
+            except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+                if not getattr(self, "_auction_cache_warned", False):
+                    logger.warning("[SBC竞价缓存] RAMDisk读取不可用，使用进程内存: %s", type(exc).__name__)
+                    self._auction_cache_warned = True
+            entry = samples[code] = (day, {item["time_only"]: item for item in restored})
+        return entry[1]
+
     def _record_auction_snapshot(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
         now = datetime.now()
         hm = now.strftime("%H:%M")
-        if not ("09:15" <= hm < "09:30") or not self.cache_pool.is_trading_day(now.strftime("%Y-%m-%d")):
+        day = now.strftime("%Y-%m-%d")
+        code = snapshot.get("code", "")
+        if not ("09:15" <= hm < "09:30"):
+            if hm >= "09:30":
+                with self._conn_lock:
+                    snapshot["auction_samples"] = [dict(item) for item in self._auction_cache_samples(code, day).values()]
+            return snapshot
+        if not self.cache_pool.is_trading_day(day):
             return snapshot
         code = snapshot.get("code", "")
         finalized = hm >= "09:25"
@@ -3676,17 +3702,26 @@ class TDXRealtimeFetcher:
             snapshot["open_price"] = price
             snapshot["price"] = snapshot["trade"] = price
         with self._conn_lock:
-            samples = getattr(self, "_auction_chart_samples", None)
-            if samples is None:
-                samples = self._auction_chart_samples = {}
-            entry = samples.get(code)
-            day = now.strftime("%Y-%m-%d")
-            if entry is None or entry[0] != day:
-                entry = samples[code] = (day, {})
+            samples = self._auction_cache_samples(code, day)
             if price > 0:
-                entry[1][hm] = {"date": day, "time_only": hm, "price": price,
-                                "kind": kind, "observed_at": now.strftime("%H:%M:%S")}
-            snapshot["auction_samples"] = [dict(item) for item in entry[1].values()]
+                samples[hm] = {"date": day, "time_only": hm, "price": price,
+                               "kind": kind, "observed_at": now.strftime("%H:%M:%S")}
+            snapshot["auction_samples"] = [dict(item) for _, item in sorted(samples.items())]
+            flushes = getattr(self, "_auction_cache_flushes", None)
+            if flushes is None:
+                flushes = self._auction_cache_flushes = {}
+            previous = flushes.get(code)
+            should_flush = price > 0 and (previous is None or previous[0] != day or
+                previous[1] != kind or time.monotonic() - previous[2] >= 5)
+            if should_flush:
+                try:
+                    from ats.auction_cache import save_samples
+                    save_samples(code, day, snapshot["auction_samples"])
+                except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+                    if not getattr(self, "_auction_cache_warned", False):
+                        logger.warning("[SBC竞价缓存] RAMDisk写入不可用，使用进程内存: %s", type(exc).__name__)
+                        self._auction_cache_warned = True
+                flushes[code] = (day, kind, time.monotonic())
         return snapshot
 
     def fetch_stock_snapshot(
