@@ -109,3 +109,9 @@ data/ipo_learning/shadow_observations.sqlite
 /tools/ac86u_clash/**/*.tar*
 /tools/ac86u_clash/**/*_ed25519
 .development/
+
+# 时序可交易信号引擎（feature/signal-timeline）
+!tests/test_signal_timeline.py
+!tests/test_signal_state_machine.py
+!tests/test_premarket_profile.py
+!tests/test_signal_integration.py

@@ -738,6 +738,21 @@ class GlobalConfig:
         self.co2int = self.get_with_writeback("general", "co2int", fallback=["ch_tc2", "ch_bc2", "ch_nod", "pdays","pbreak","obs_d"], value_type="list")
         self.ats_col = self.get_with_writeback("general", "ats_col", fallback=['ch_bc2'], value_type="list")
         self.ats_tdx_interval = self.get_with_writeback("general", "ats_tdx_interval", fallback=5.0, value_type="float")
+        # ── 时序可交易信号引擎参数（ats/signal_timeline.py、ats/signal_state_machine.py、ats/premarket_profile.py）──
+        # 说明：本引擎不追求高频，bar 长度 5/10/15 秒均可；所有判断挂在 bar 时间轴上而非调用次数上。
+        self.ats_signal_bar_seconds = self.get_with_writeback("general", "ats_signal_bar_seconds", fallback=15, value_type="int")
+        # DFall 宽表经 TK IPC 同步的默认节拍（秒）。不设置时 300 秒。
+        self.ats_df_sync_interval = self.get_with_writeback("general", "ats_df_sync_interval", fallback=300, value_type="int")
+        self.ats_signal_confirm_bars = self.get_with_writeback("general", "ats_signal_confirm_bars", fallback=2, value_type="int")
+        self.ats_signal_min_dwell_bars = self.get_with_writeback("general", "ats_signal_min_dwell_bars", fallback=2, value_type="int")
+        self.ats_signal_arm_dist_pct = self.get_with_writeback("general", "ats_signal_arm_dist_pct", fallback=1.2, value_type="float")
+        self.ats_signal_trail_start_pct = self.get_with_writeback("general", "ats_signal_trail_start_pct", fallback=2.5, value_type="float")
+        self.ats_signal_trail_gap_pct = self.get_with_writeback("general", "ats_signal_trail_gap_pct", fallback=1.2, value_type="float")
+        self.ats_signal_max_hold_bars = self.get_with_writeback("general", "ats_signal_max_hold_bars", fallback=80, value_type="int")
+        self.ats_signal_min_progress_pct = self.get_with_writeback("general", "ats_signal_min_progress_pct", fallback=1.0, value_type="float")
+        self.ats_signal_cooldown_bars = self.get_with_writeback("general", "ats_signal_cooldown_bars", fallback=8, value_type="int")
+        self.ats_signal_max_positions = self.get_with_writeback("general", "ats_signal_max_positions", fallback=8, value_type="int")
+        self.ats_signal_shadow_mode = self.get_with_writeback("general", "ats_signal_shadow_mode", fallback=True, value_type="bool")
         # Agent Hub 数据根目录：开发环境可指向独立工作区的 .agent_hub 所在目录。
         # fallback=""；为空时由 AgentHubDataEngine 自动识别源码根目录
         # （当前开发环境等价于 D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone）。
@@ -1107,6 +1122,19 @@ co2float: List[str] = CFG.co2float
 co2int: List[str] = CFG.co2int
 ats_col: List[str] = CFG.ats_col
 ats_tdx_interval: float = float(getattr(CFG, 'ats_tdx_interval', 5.0) or 5.0)
+# ── 时序可交易信号引擎（bar 时间轴驱动，非高频）──
+ats_signal_bar_seconds: int = int(getattr(CFG, 'ats_signal_bar_seconds', 15) or 15)
+ats_df_sync_interval: int = int(getattr(CFG, 'ats_df_sync_interval', 300) or 300)
+ats_signal_confirm_bars: int = int(getattr(CFG, 'ats_signal_confirm_bars', 2) or 2)
+ats_signal_min_dwell_bars: int = int(getattr(CFG, 'ats_signal_min_dwell_bars', 2) or 2)
+ats_signal_arm_dist_pct: float = float(getattr(CFG, 'ats_signal_arm_dist_pct', 1.2) or 1.2)
+ats_signal_trail_start_pct: float = float(getattr(CFG, 'ats_signal_trail_start_pct', 2.5) or 2.5)
+ats_signal_trail_gap_pct: float = float(getattr(CFG, 'ats_signal_trail_gap_pct', 1.2) or 1.2)
+ats_signal_max_hold_bars: int = int(getattr(CFG, 'ats_signal_max_hold_bars', 80) or 80)
+ats_signal_min_progress_pct: float = float(getattr(CFG, 'ats_signal_min_progress_pct', 1.0) or 1.0)
+ats_signal_cooldown_bars: int = int(getattr(CFG, 'ats_signal_cooldown_bars', 8) or 8)
+ats_signal_max_positions: int = int(getattr(CFG, 'ats_signal_max_positions', 8) or 8)
+ats_signal_shadow_mode: bool = bool(getattr(CFG, 'ats_signal_shadow_mode', True))
 agent_hub_path: str = str(
     getattr(CFG, 'agent_hub_path', r'D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock_standalone')
     or r'D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock_standalone'
