@@ -3937,11 +3937,29 @@ class ATSMainWindow(QMainWindow):
             self._next_auto_refresh_time = None
             if hasattr(self, 'update_timer') and self.update_timer:
                 self.update_timer.stop()
-            self.status_bar.showMessage("已关闭后台自动刷新，被动等待 TK 主进程推送 IPC 数据。")
-            logger.info("⏸️ [ATSMainWindow] 用户已关闭后台自动刷新，等待 TK 自动推送 IPC")
+            self.status_bar.showMessage("已关闭界面主动刷新，IPC 行情订阅及断线恢复仍在运行。")
+            logger.info("⏸️ [ATSMainWindow] 用户已关闭界面主动刷新；IPC订阅保活继续运行")
 
         if hasattr(self, '_refresh_statusbar_time_display'):
             self._refresh_statusbar_time_display()
+
+    def _maintain_ipc_subscription(self):
+        """Transport recovery is independent of UI refresh and never performs UI-thread I/O."""
+        if (not getattr(self, '_listener_started', False) or getattr(self, '_is_closing', False)
+                or getattr(self, '_is_exiting', False)):
+            return
+        now = time.time()
+        frame = getattr(self, 'current_df', None)
+        stale_after = 60.0 if frame is None or frame.empty else 600.0
+        if now - getattr(self, '_last_recv_t', 0) < stale_after:
+            return
+        if now - getattr(self, '_last_pipe_sync_t', 0) < 60.0:
+            return
+        self._last_pipe_sync_t = now
+        try:
+            self._request_full_sync_async()
+        except Exception as exc:
+            logger.warning('[IPC订阅保活] 排入后台请求失败: %s', type(exc).__name__)
 
     def on_heartbeat(self):
         # 0. 若未开启自动刷新，静默退出，不发起任何主动网络/管道轮询
@@ -4176,6 +4194,9 @@ class ATSMainWindow(QMainWindow):
                     linkage_callback=self._queue_linkage_quotes,
                 )
                 self._listener_started = True
+                self._ipc_subscription_timer = QTimer(self)
+                self._ipc_subscription_timer.timeout.connect(self._maintain_ipc_subscription)
+                self._ipc_subscription_timer.start(30000)
             except Exception as e:
                 print(f"[ATSMainWindow] start_realtime_listener 失败: {e}")
 

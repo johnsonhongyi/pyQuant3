@@ -52,6 +52,40 @@ def has_sync_consumer(vis_enabled, subscribers, temporary_ports):
     ))
 
 
+def request_immediate_ipc_sync(owner):
+    """One-shot refresh; subscriber ownership and market baselines remain unchanged."""
+    owner._force_full_sync_pending = True
+    for port, info in list(getattr(owner, '_stream_subscribers', {}).items()):
+        if info.get('subscribed', False):
+            setattr(owner, f'_force_sync_{port}', True)
+            setattr(owner, f'_force_sync_blocked_{port}', False)
+            setattr(owner, f'_awaiting_full_ack_{port}', None)
+    event = getattr(owner, '_send_df_wake_event', None)
+    if event is not None:
+        event.set()
+
+
+def recover_blocked_sync_ports(owner, now, is_work_time):
+    """Rearm subscribed ports after bounded ACK/connect backoff, independently of Vis."""
+    if not is_work_time:
+        return []
+    recovered = []
+    for port, info in list(getattr(owner, '_stream_subscribers', {}).items()):
+        if not (info.get('subscribed', False) and getattr(owner, f'_force_sync_{port}', False)
+                and getattr(owner, f'_force_sync_blocked_{port}', False)):
+            continue
+        last_try = getattr(owner, f'_last_full_try_{port}', info.get('last_try', 0.0))
+        failures = max(0, min(3, int(info.get('fail_count', 0))))
+        delay = min(300.0, 60.0 * (2 ** failures))
+        if now - last_try < delay:
+            continue
+        # Expired ACKs must not release the newly rearmed full baseline request.
+        setattr(owner, f'_awaiting_full_ack_{port}', None)
+        setattr(owner, f'_force_sync_blocked_{port}', False)
+        recovered.append(port)
+    return recovered
+
+
 def content_requires_send(previous, current, explicit_request=False):
     """Only changed content or a new request can enter serialization."""
     return bool(explicit_request or current is None or previous != current)

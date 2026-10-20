@@ -175,9 +175,12 @@ class IPCBridge:
                     source_version=body.get("source_version"),
                     sync_session=body.get("sync_session"),
                 )
-            send_code_via_pipe(feedback, logging.getLogger("ATS_Bridge"), pipe_name=PIPE_NAME_TK)
-        except Exception:
-            pass
+            ack_logger = logging.getLogger("ATS_Bridge")
+            if not send_code_via_pipe(feedback, ack_logger, pipe_name=PIPE_NAME_TK):
+                ack_logger.warning("[IPC ACK] 回传TK失败 port=26670 source_version=%s；等待订阅保活/发送端超时恢复", feedback.get("source_version"))
+        except Exception as exc:
+            import logging
+            logging.getLogger("ATS_Bridge").warning("[IPC ACK] 回传异常: %s", type(exc).__name__)
 
     def _handle_client(self, conn, data_callback, signal_callback,
                        linkage_callback=None):
