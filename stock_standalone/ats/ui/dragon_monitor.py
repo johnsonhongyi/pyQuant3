@@ -1254,7 +1254,7 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         self.hover_timer.stop()
         self.snap_timer.stop()
         main_app = self._get_main_app()
-        is_app_exiting = False
+        is_app_exiting = bool(os.environ.get("ATS_IS_CLOSING") == "1")
         if main_app:
             if not main_app.isVisible() or getattr(main_app, '_is_closing', False) or getattr(main_app, '_is_exiting', False):
                 is_app_exiting = True
@@ -1269,7 +1269,7 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
         if hasattr(self, 'hover_timer') and self.hover_timer and self.hover_timer.isActive():
             self.hover_timer.stop()
         main_app = self._get_main_app()
-        is_app_exiting = False
+        is_app_exiting = bool(os.environ.get("ATS_IS_CLOSING") == "1")
         if main_app:
             if not main_app.isVisible() or getattr(main_app, '_is_closing', False) or getattr(main_app, '_is_exiting', False):
                 is_app_exiting = True

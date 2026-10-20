@@ -159,7 +159,8 @@ def save_launcher_holdings_windows(force: bool = False, allow_empty: bool = Fals
                 # 必须为当前可见窗口，或者处于贴边收缩隐藏状态 (is_hidden_state=True)
                 if not w.isVisible() and not getattr(w, 'is_hidden_state', False) and not is_exiting:
                     continue
-                geo = w.normal_geometry if (getattr(w, 'is_hidden_state', False) and getattr(w, 'normal_geometry', None)) else (w.normal_geometry or w.geometry())
+                normal_geo = getattr(w, 'normal_geometry', None)
+                geo = normal_geo if (getattr(w, 'is_hidden_state', False) and normal_geo) else (normal_geo or w.geometry())
                 c = getattr(w, 'code', None)
                 cur_period = getattr(w, '_current_period_mode', '10d')
                 if c:
@@ -377,7 +378,13 @@ def quit_and_save_all_sbc_windows():
                 except Exception as close_exc:
                     print(f"[SBC Launcher] 关闭窗口 {getattr(window, 'code', '--')} 异常: {close_exc}")
                     saved = False
-            # 先停止窗口轮询并注销，再保存缓存，避免保存期间继续提交行情任务。
+            # 先停止窗口轮询与全局调度器，再保存缓存，避免保存期间后台线程继续拉取或写入行情任务。
+            try:
+                from ats.ui.intraday_strategy_dialog import SBCGlobalDispatcher
+                if getattr(SBCGlobalDispatcher, "_instance", None) is not None:
+                    SBCGlobalDispatcher._instance.stop()
+            except Exception:
+                pass
             saved = persist_sbc_runtime_caches() is not False and saved
             app.setProperty('_sbc_save_complete', saved)
             app.quit()
@@ -415,6 +422,12 @@ def _finish_sbc_packaged_shutdown(app, exit_code):
                 return False
             print('[SBC Shutdown] 盘中归档延后，待归档记录已安全保存至 SBC 恢复日志。', flush=True)
         _trace_sbc_shutdown('multiprocessing-drain')
+        try:
+            import linkage_service
+            if getattr(linkage_service, "global_manager", None) is not None:
+                linkage_service.global_manager.stop()
+        except Exception:
+            pass
         from ats.shutdown import reap_multiprocessing_children
         if not reap_multiprocessing_children(time.monotonic() + 5.0):
             return False
@@ -878,6 +891,10 @@ def main():
     def _on_keep_alive_and_orphan_check():
         request_path = os.environ.get('ATS_SBC_SHUTDOWN_PATH')
         if request_path and os.path.isfile(request_path):
+            try:
+                _keep_alive_timer.stop()
+            except Exception:
+                pass
             quit_and_save_all_sbc_windows()
             return
         if _parent_pid:

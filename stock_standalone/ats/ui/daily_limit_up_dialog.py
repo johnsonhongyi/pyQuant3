@@ -4101,7 +4101,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                     self.leave_ticks = 0
 
     def _get_main_app(self):
-        curr = self.parent() if hasattr(self, 'parent') else None
+        curr = getattr(self, '_py_parent', None) or (self.parent() if hasattr(self, 'parent') else None)
         from PyQt6.sip import isdeleted
         try:
             while curr:
@@ -4112,11 +4112,18 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             pass
         from PyQt6.QtWidgets import QApplication
         app = QApplication.instance()
-        if app and getattr(app, 'main_window', None) is not None:
+        if app:
+            if getattr(app, 'main_window', None) is not None:
+                try:
+                    mw = app.main_window
+                    if not isdeleted(mw) and mw.__class__.__name__ == 'ATSMainWindow':
+                        return mw
+                except Exception:
+                    pass
             try:
-                mw = app.main_window
-                if not isdeleted(mw) and mw.__class__.__name__ == 'ATSMainWindow':
-                    return mw
+                for widget in app.topLevelWidgets():
+                    if not isdeleted(widget) and widget.__class__.__name__ == 'ATSMainWindow':
+                        return widget
             except Exception:
                 pass
         return None
@@ -4163,7 +4170,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             ).start()
 
         main_app = self._get_main_app()
-        is_app_exiting = False
+        is_app_exiting = bool(os.environ.get("ATS_IS_CLOSING") == "1")
         if main_app:
             if not main_app.isVisible() or getattr(main_app, '_is_closing', False) or getattr(main_app, '_is_exiting', False):
                 is_app_exiting = True
@@ -4190,7 +4197,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             ).start()
 
         main_app = self._get_main_app()
-        is_app_exiting = False
+        is_app_exiting = bool(os.environ.get("ATS_IS_CLOSING") == "1")
         if main_app:
             if not main_app.isVisible() or getattr(main_app, '_is_closing', False) or getattr(main_app, '_is_exiting', False):
                 is_app_exiting = True

@@ -316,6 +316,21 @@ def _merge_ipc_frame(data, df_ipc, extra_cols):
                 if tag_cand and str(tag_cand).strip() not in ("", "--", "nan"):
                     data.at[idx, "bidding_tag"] = str(tag_cand)
 
+            # 8. 融合超短特异赛马与 SBC 连杀小企稳加速 / 过热未加速去弱出局信号
+            try:
+                from ats.ultra_short_anomaly_engine import UltraShortAnomalyEngine
+                h_item = UltraShortAnomalyEngine.get_instance().get_stock_item(code)
+                if h_item is not None:
+                    if h_item.horse_state in ("KEEP_STRONG_ACCEL", "HORSE_SURGE_EMERGE", "OVERHEAT_CULL_EXIT"):
+                        data.at[idx, "resonance"] = h_item.horse_label
+                        cur_btag = str(data.at[idx, "bidding_tag"]).strip() if "bidding_tag" in data.columns else ""
+                        if cur_btag in ("", "--", "nan", "None"):
+                            data.at[idx, "bidding_tag"] = h_item.base_label or h_item.horse_label
+                    elif h_item.horse_state == "STAGE_BASE_WATCH" and h_item.base_pattern != "NONE":
+                        data.at[idx, "resonance"] = h_item.base_label
+            except Exception:
+                pass
+
             updated_any = True
 
     return data
@@ -330,7 +345,7 @@ def _prepare_stock_table(data, fav_stocks, sh_pct, extra_cols, filter_type, sear
     # 分类筛选
     if "重点关注" in filter_type:
         df_filtered = df_filtered[df_filtered["code"].astype(str).str.zfill(6).isin(fav_stocks)]
-    elif "今日" in filter_type:
+    if "今日" in filter_type:
         df_filtered = df_filtered[
             (df_filtered["listing_date"].astype(str) == today_str) |
             (df_filtered["apply_date"].astype(str) == today_str)
@@ -343,6 +358,14 @@ def _prepare_stock_table(data, fav_stocks, sh_pct, extra_cols, filter_type, sear
         df_filtered = df_filtered[df_filtered["status"].str.contains("次新")]
     elif "待上市" in filter_type:
         df_filtered = df_filtered[df_filtered["status"].str.contains("待上市|即将上市")]
+
+    if "特异赛马" in filter_type:
+        res_s = df_filtered["resonance"].astype(str) if "resonance" in df_filtered.columns else pd.Series("", index=df_filtered.index)
+        bid_s = df_filtered["bidding_tag"].astype(str) if "bidding_tag" in df_filtered.columns else pd.Series("", index=df_filtered.index)
+        df_filtered = df_filtered[
+            res_s.str.contains("👑|🏇|🌱|⚠️|📈|🎯|⚡|🛡️|🚀|特异|赛马|连杀|企稳|过热", regex=True) |
+            bid_s.str.contains("👑|🏇|🌱|⚠️|📈|🎯|⚡|🛡️|🚀|特异|赛马|连杀|企稳|过热", regex=True)
+        ]
 
     # 搜索关键词过滤
     if search_txt:
@@ -512,8 +535,64 @@ class NewStockPanel(QWidget):
         saved_filter = load_config_node("ats_new_stock_tab_filter_enabled", load_config_node("ats_tab_filter_enabled", False))
         self.filter_enabled = parse_bool_config(saved_filter, default=False)
 
+        # 🏇 特异赛马去弱留强快筛开关 (一键点击选中，默认关闭)
+        saved_horse = load_config_node("ats_new_stock_horse_filter_enabled", False)
+        self.horse_filter_enabled = parse_bool_config(saved_horse, default=False)
+
         self._init_ui()
         self._start_system_lifecycle()
+
+    def toggle_horse_filter_state(self):
+        """切换新股次新特异赛马(去弱留强)点击快筛开关"""
+        self.horse_filter_enabled = not getattr(self, "horse_filter_enabled", False)
+        save_config_node("ats_new_stock_horse_filter_enabled", bool(self.horse_filter_enabled))
+        self._update_horse_button_ui()
+        self._apply_filter()
+
+    def _update_horse_button_ui(self):
+        if not hasattr(self, "btn_horse_filter"):
+            return
+        if getattr(self, "horse_filter_enabled", False):
+            self.btn_horse_filter.setText("🏇 特异赛马 (开)")
+            self.btn_horse_filter.setStyleSheet("""
+                QPushButton {
+                    background-color: #38240c;
+                    color: #ffd700;
+                    font-weight: bold;
+                    border: 1.5px solid #ffd700;
+                    border-radius: 3px;
+                    padding: 2px 7px;
+                    font-size: 8.5pt;
+                }
+                QPushButton:hover {
+                    background-color: #ffd700;
+                    color: #000000;
+                }
+            """)
+            self.btn_horse_filter.setToolTip(
+                "当前状态：【已开启】仅展示触发连杀小企稳高开加速、阶段点逆势试盘或盘中赛马突然冒头的新股次新标的 (点击可关闭)"
+            )
+        else:
+            self.btn_horse_filter.setText("🏇 特异赛马 (关)")
+            self.btn_horse_filter.setStyleSheet("""
+                QPushButton {
+                    background-color: #222228;
+                    color: #888888;
+                    font-weight: bold;
+                    border: 1px solid #44444f;
+                    border-radius: 3px;
+                    padding: 2px 7px;
+                    font-size: 8.5pt;
+                }
+                QPushButton:hover {
+                    background-color: #33333d;
+                    color: #ffd700;
+                    border-color: #ffd700;
+                }
+            """)
+            self.btn_horse_filter.setToolTip(
+                "当前状态：【已关闭】点击开启【特异赛马】去弱留强快筛 (锁定连杀小企稳加速/逆势底座/盘中赛马冒头标的)"
+            )
 
     def toggle_filter_state(self):
         """切换策略公式过滤状态并专属独立持久化"""
@@ -650,7 +729,7 @@ class NewStockPanel(QWidget):
 
         # 分类筛选 (支持 ⭐ 重点关注 与 🔥 今日申购/上市)
         self.combo_filter = QComboBox()
-        self.combo_filter.addItems(["全部标的", "⭐ 重点关注", "🔥 今日申购/上市", "🌟 首日(N)", "🚀 前5日(C)", "📈 次新股", "⏳ 待上市"])
+        self.combo_filter.addItems(["全部标的", "⭐ 重点关注", "🏇 特异赛马", "🔥 今日申购/上市", "🌟 首日(N)", "🚀 前5日(C)", "📈 次新股", "⏳ 待上市"])
         self.combo_filter.setStyleSheet("""
             QComboBox { background-color: #0f172a; color: #f8fafc; border: 1px solid #334155; border-radius: 3px; padding: 1px 2px; font-size: 8.5pt; min-width: 66px; max-width: 78px; }
             QComboBox QAbstractItemView { background-color: #0f172a; color: #f8fafc; selection-background-color: #1e293b; }
@@ -732,6 +811,12 @@ class NewStockPanel(QWidget):
         """)
         self.btn_open_ipo_detector.clicked.connect(self._on_open_ipo_detector_clicked)
         top_bar.addWidget(self.btn_open_ipo_detector)
+
+        # 🏇 特异赛马点击选中开关按钮 (与策略过滤并排，一键点击筛选)
+        self.btn_horse_filter = QPushButton()
+        self._update_horse_button_ui()
+        self.btn_horse_filter.clicked.connect(self.toggle_horse_filter_state)
+        top_bar.addWidget(self.btn_horse_filter)
 
         # 🎯 策略过滤持久化开关按钮
         self.btn_toggle_filter = QPushButton()
@@ -1279,8 +1364,11 @@ class NewStockPanel(QWidget):
         if ipc is not None:
             self._table_pending_ipc = ipc
         ipc = getattr(self, '_table_pending_ipc', None)
+        filter_mode_str = self.combo_filter.currentText()
+        if getattr(self, 'horse_filter_enabled', False) and "特异赛马" not in filter_mode_str:
+            filter_mode_str = f"{filter_mode_str}|特异赛马"
         args = (None, ipc[1] if ipc else self._last_ipc_sh_pct,
-                tuple(get_new_stock_extra_cols()), self.combo_filter.currentText(),
+                tuple(get_new_stock_extra_cols()), filter_mode_str,
                 self.search_edit.text().strip().lower(), fset,
                 self.sort_col, self.sort_order, self.selected_code)
         if not hasattr(self, '_table_prepare_lock'):

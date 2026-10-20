@@ -335,3 +335,149 @@ def test_recovery_failure_still_blocks_receipt_and_watchdog(monkeypatch, tmp_pat
     assert not run_sbc._finish_sbc_packaged_shutdown(SimpleNamespace(property=lambda key: True), 0)
     assert not receipt.exists()
     watchdog.assert_not_called()
+
+
+def test_selective_flush_skips_nonresident_validation_and_restored_seed_checkpoint(monkeypatch, tmp_path):
+    import copy
+    import pandas as pd
+    import ats.tdx_realtime_fetcher as tdx
+    from ats.compact_cache import read_cache_payload, write_cache_payload
+    from ats.new_stock_fetcher import NewStockFetcher
+
+    cache_path = str(tmp_path / 'ramdisk.pkl.z')
+    monkeypatch.setattr(tdx.TDXGlobalCachePool, '_get_ramdisk_cache_path', lambda self: cache_path)
+    monkeypatch.setattr(tdx.TDXGlobalCachePool, 'is_trading_day', classmethod(lambda cls, day=None: True))
+    monkeypatch.setattr(NewStockFetcher, '_instance', SimpleNamespace(_cached_ipo_dict={}))
+
+    today = tdx.datetime.now().strftime('%Y-%m-%d')
+    dates = pd.bdate_range('2026-09-23', periods=10).strftime('%Y-%m-%d').tolist()
+    recs = []
+    cum_v, cum_a = 0.0, 0.0
+    for d in dates:
+        for idx, hm in enumerate(('09:30', '10:30', '13:30', '15:00')):
+            v = 1000.0
+            a = 10000.0
+            cum_v += v
+            cum_a += a
+            recs.append({
+                'datetime': f'{d} {hm}', 'date': d, 'time_only': hm,
+                'open': 10.0, 'close': 10.0, 'high': 10.1, 'low': 9.9,
+                'vol': v, 'amount': a, 'bar_vol': v, 'bar_amt': a,
+                'cum_vol_shares': cum_v, 'cum_amt': cum_a,
+                'vwap': 10.0, 'vwap_1d': 10.0,
+            })
+    base_entry = {
+        'records': recs, 'date': today, 'days': 10,
+        'last_cum_vol': cum_v, 'last_cum_amt': cum_a, 'last_cum_pv': 0.0,
+        'updated_at': 100.0, '_cache_generation': 1,
+    }
+    payload = {
+        'date': today, 'version': 4, 'frozen': True,
+        'history_static_bars': {
+            '600108': copy.deepcopy(base_entry),
+            '600109': copy.deepcopy(base_entry),
+            '600110': copy.deepcopy(base_entry),
+        },
+        'incremental_intraday_pool': {},
+        'cache_generations': {'600108': 1, '600109': 1, '600110': 1},
+        'daily_metrics_cache': {'600109': {'date': today, 'metrics': {'ma5': 10.0}, 'updated_at': 100.0}},
+        'shares_cache': {'600110': (1000000.0, 100.0)},
+        'vwap_states': {},
+        'updated_at': 100.0,
+    }
+    with open(cache_path, 'wb') as f:
+        write_cache_payload(payload, f)
+
+    monkeypatch.setattr(tdx.TDXGlobalCachePool, '_validate_history_entry', lambda self, k, v, d: True)
+    monkeypatch.setattr(tdx.TDXGlobalCachePool, '_validate_and_repair_records',
+                        lambda self, r, d, days, k: (list(r), False))
+
+    selective = tdx.TDXGlobalCachePool(startup_codes=['600108'])
+    assert selective._history_static_bars['600108'].get('_from_ramdisk') is True
+
+    # 1. Restored static history from RamDisk must not trigger a redundant background flush on startup
+    df_seed = pd.DataFrame(recs)
+    selective.checkpoint_history_seed('600108', df_seed)
+    assert not selective._seed_flush_inflight
+    assert '600108' in selective._seed_flush_tokens
+
+    # 2. Selective flush must not re-validate non-resident codes (600109, 600110) or even unchanged resident 600108
+    validated_codes = []
+    def spy_validate(self, recs_in, today_in, days_in, code_in):
+        validated_codes.append(str(code_in).zfill(6))
+        return list(recs_in), False
+    monkeypatch.setattr(tdx.TDXGlobalCachePool, '_validate_and_repair_records', spy_validate)
+
+    selective._is_dirty = True
+    assert selective.flush_to_ramdisk(force=True, history_checkpoint=True)
+    assert validated_codes == []
+
+    saved = read_cache_payload(cache_path)
+    assert set(saved['history_static_bars']) == {'600108', '600109', '600110'}
+    assert '600109' in saved['daily_metrics_cache']
+    assert '600110' in saved['shares_cache']
+
+
+def test_save_launcher_holdings_windows_handles_missing_normal_geometry_and_concurrent_window_config(monkeypatch, tmp_path):
+    import json
+    import threading
+    import run_sbc
+    from PyQt6.QtCore import QRect
+    from tk_gui_modules.window_mixin import WindowMixin
+
+    cfg_path = tmp_path / 'sbc_holdings_layout.json'
+    monkeypatch.setattr(run_sbc, '_get_launcher_layout_cfg_path', lambda: str(cfg_path))
+    monkeypatch.setattr(run_sbc, '_is_restoring_holdings', False)
+    monkeypatch.setattr(run_sbc, '_last_save_holdings_time', 0.0)
+
+    class DummyHoldingsDialog:
+        def __init__(self, code):
+            self.code = code
+            self._is_closing = False
+            self.is_hidden_state = False
+            self._current_period_mode = '10d'
+            # Intentionally no `normal_geometry` attribute!
+        def isVisible(self):
+            return True
+        def geometry(self):
+            return QRect(100, 120, 640, 420)
+
+    import PyQt6.sip
+    win = DummyHoldingsDialog('301666')
+    monkeypatch.setattr(run_sbc, 'SBCIntradayChartDialog', DummyHoldingsDialog)
+    monkeypatch.setattr(PyQt6.sip, 'isdeleted', lambda w: False)
+    app = SimpleNamespace(
+        property=lambda key: True if key == 'is_app_exiting' else None,
+        topLevelWidgets=lambda: [win],
+    )
+    monkeypatch.setattr(run_sbc, 'QApplication', SimpleNamespace(
+        instance=lambda: app,
+        topLevelWidgets=lambda: [win],
+    ))
+    assert run_sbc.save_launcher_holdings_windows(force=True) is True
+    saved_layout = json.loads(cfg_path.read_text(encoding='utf-8'))
+    assert saved_layout['sbc_holdings_windows'][0]['code'] == '301666'
+
+    # Concurrent save_window_position_qt must use isolated temp files without collision
+    win_cfg = tmp_path / 'window_config.json'
+    class DummyHost(WindowMixin):
+        def _get_dpi_scale_factor(self):
+            return 1.0
+        def _get_config_file_path(self, file_path, scale):
+            return str(win_cfg)
+    host = DummyHost()
+    errors = []
+    def worker(idx):
+        try:
+            qwin = SimpleNamespace(geometry=lambda: QRect(10 * idx, 20 * idx, 500, 400))
+            host.save_window_position_qt(qwin, f'win_{idx}', str(win_cfg))
+        except Exception as exc:
+            errors.append(exc)
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5)
+    assert not errors
+    assert win_cfg.exists()
+    assert not list(tmp_path.glob('*.tmp'))

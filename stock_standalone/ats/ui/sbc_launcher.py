@@ -609,6 +609,13 @@ class SBCProcessManager:
                         pipe.close()
             except Exception:
                 pass
+            # 确保所有衍生子进程（包括 LinkageProcess）均已被彻底回收，杜绝后台孤儿句柄持有 _MEI 目录
+            for child in children:
+                try:
+                    if child.is_running():
+                        child.kill()
+                except Exception:
+                    pass
             alive = proc.poll() is None or any(child.is_running() for child in children)
             if alive:
                 logger.error("[SBCLauncher] 持仓盯盘进程退出未完成 PID=%s", proc.pid)
@@ -750,18 +757,16 @@ class SBCProcessManager:
 
     @staticmethod
     def _sbc_bootloader_children(proc):
-        """只识别同一 SBC 命令的 onefile 子进程，保留独立行情后端。"""
+        """识别归属于该 SBC 进程的所有衍生子进程（包含 onefile 工作子进程与 --multiprocessing-fork 子进程，坚决杜绝孤儿进程与 _MEI 锁）。"""
         if sys.platform != 'win32' or not is_packaged_env():
             return []
         try:
             import psutil
             expected_exe = os.path.normcase(os.path.abspath(proc.args[0]))
-            expected_args = list(proc.args[1:])
             matches = []
             for child in psutil.Process(proc.pid).children(recursive=True):
                 try:
-                    if (os.path.normcase(child.exe()) == expected_exe
-                            and child.cmdline()[1:] == expected_args):
+                    if os.path.normcase(child.exe()) == expected_exe:
                         matches.append(child)
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     continue
@@ -892,9 +897,9 @@ class SBCProcessManager:
         return success
 
     def get_running_codes(self) -> List[str]:
-        """获取当前正在运行的所有 SBC 子进程标的代码"""
+        """获取当前正在运行的所有 SBC 子进程标的代码（严格过滤内部关键字）"""
         self.cleanup_dead_processes()
-        return list(self._procs.keys())
+        return [str(k) for k in self._procs.keys() if len(str(k)) == 6 and str(k).isdigit()]
 
 
 # 暴露全局便捷调用接口

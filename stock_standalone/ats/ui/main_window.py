@@ -294,6 +294,24 @@ class LedgerUpdateWorker(QThread):
             if sh_pct == 0.0 and 'percent' in df_all.columns:
                 sh_pct = float(df_all['percent'].mean())
 
+            # ── 全底层超短特异赛马与市场温度周期去弱留强扫描 (SSOT, <2.5ms) ──
+            horse_engine = None
+            horse_report = {}
+            try:
+                from ats.ultra_short_anomaly_engine import UltraShortAnomalyEngine
+                horse_engine = UltraShortAnomalyEngine.get_instance()
+                focus_clean_for_horse = {
+                    (''.join(ch for ch in str(s) if ch.isdigit()).zfill(6) if any(ch.isdigit() for ch in str(s)) else str(s).strip())
+                    for s in all_codes if s
+                }
+                horse_report = horse_engine.analyze_universe(
+                    df_all,
+                    focus_codes=focus_clean_for_horse,
+                    sh_pct=sh_pct,
+                )
+            except Exception as e_horse:
+                logger.debug(f'[LedgerWorker] UltraShortAnomalyEngine error: {e_horse}')
+
             swing_rows = []
             alpha_signals = []  # [(code, name, pct_val, sh_pct, rs_val, resonance)]
 
@@ -488,6 +506,26 @@ class LedgerUpdateWorker(QThread):
                     else:
                         extra_vals.append('--')
 
+                if horse_engine is not None:
+                    h_item = horse_engine.get_stock_item(code_clean)
+                    if h_item is not None:
+                        if h_item.horse_state in ('KEEP_STRONG_ACCEL', 'HORSE_SURGE_EMERGE'):
+                            resonance = h_item.horse_label
+                            position = f'{h_item.action_advice}({position})' if position else h_item.action_advice
+                            reason = f'[{h_item.horse_label}·{h_item.base_label}] {h_item.reason} | {reason}'
+                            try:
+                                priority_val = f'{max(float(priority_val), h_item.total_score):.1f}'
+                            except Exception:
+                                pass
+                        elif h_item.horse_state == 'OVERHEAT_CULL_EXIT':
+                            resonance = h_item.horse_label
+                            state = f'⚠️过热未加速({state})'
+                            position = h_item.action_advice
+                            reason = f'[{h_item.horse_label}] {h_item.reason} | {reason}'
+                        elif h_item.horse_state == 'STAGE_BASE_WATCH' and h_item.base_pattern != 'NONE':
+                            resonance = h_item.base_label
+                            reason = f'[{h_item.base_label}] {h_item.reason} | {reason}'
+
                 swing_rows.append((
                     code, name, f'{latest_close:.2f}', state, dev_str, str(limit_ups), position,
                     first_seen, priority_val,
@@ -497,8 +535,15 @@ class LedgerUpdateWorker(QThread):
                     reason
                 ))
 
-                if resonance in ('逆市抗跌', '大盘共振'):
-                    alpha_signals.append((code, name, pct_val, sh_pct, rs_val, resonance))
+                if resonance in ('逆市抗跌', '大盘共振') or any(
+                    k in str(resonance) for k in ('赛马', '加速领跑', '连杀小企稳', '过热未加速')
+                ):
+                    alpha_label = resonance
+                    if horse_engine is not None:
+                        h_item = horse_engine.get_stock_item(code_clean)
+                        if h_item is not None and h_item.base_pattern != 'NONE' and h_item.base_label not in str(alpha_label):
+                            alpha_label = f'{resonance}·{h_item.base_label}'
+                    alpha_signals.append((code, name, pct_val, sh_pct, rs_val, alpha_label))
 
             # fav_rows (支持原始代码与6位标准化数字代码双向匹配)
             fav_clean_set = {(''.join(c for c in str(s) if c.isdigit()).zfill(6) if any(c.isdigit() for c in str(s)) else str(s).strip()) for s in self._fav_stocks}
@@ -518,6 +563,13 @@ class LedgerUpdateWorker(QThread):
                     t = getattr(e, 'tier', 'RADAR')
                     tier_counts[t] = tier_counts.get(t, 0) + 1
                 stats = {'tiers': tier_counts, 'today_new': getattr(self._signal_ledger, '_signal_count', 0)}
+
+            if horse_report:
+                t_sum = horse_report.get('temp_trend_summary', '')
+                em_c = int(horse_report.get('horse_emerge_count', 0)) + int(horse_report.get('keep_strong_count', 0))
+                cull_c = int(horse_report.get('overheat_cull_count', 0))
+                if t_sum:
+                    env_label = f'{env_label} | {t_sum} 🏇冒头:{em_c} ⚠️出局:{cull_c}'
 
             tier_info = stats.get('tiers', {})
             stats_str = (
@@ -572,6 +624,13 @@ class EquityPopDialog(QDialog):
     """资金曲线与大盘走势独立放大查看窗口"""
     def __init__(self, parent=None):
         super().__init__(parent)
+        try:
+            from PyQt6.QtWidgets import QApplication
+            app_inst = QApplication.instance()
+            if app_inst:
+                app_inst.main_window = self
+        except Exception:
+            pass
         self.setWindowTitle("📈 资金收益率曲线与全市场走势独立放大看板")
         self.resize(960, 640)
         self.setMinimumSize(720, 480)
@@ -6101,8 +6160,11 @@ class ATSMainWindow(QMainWindow):
         import json
         import time
         
-        # 仅在有意义的逆市/共振强信号时记录
-        if resonance not in ("逆市抗跌", "大盘共振"):
+        # 仅在有意义的逆市/共振强信号或超短特异赛马信号时记录
+        is_horse_signal = any(
+            k in str(resonance) for k in ("赛马", "加速领跑", "连杀小企稳", "过热未加速")
+        )
+        if not is_horse_signal and resonance not in ("逆市抗跌", "大盘共振"):
             return False
 
         today_date = _date or time.strftime("%Y-%m-%d")
@@ -6119,24 +6181,38 @@ class ATSMainWindow(QMainWindow):
             self._start_alpha_history_load()
             return False
 
-        # 检查是否重复：若当天已记录且当前涨跌幅未超过上次记录的 2.0% 以上（未发生重大突破），则直接跳过去重
+        # 检查是否重复：若当天已记录且当前涨跌幅未超过上次记录的 2.0% 以上（且非过热淘汰状态跳变），则直接跳过去重
+        is_cull_exit = "过热未加速" in str(resonance)
+        cull_notified_set = getattr(self, "_horse_cull_notified_codes", None)
+        if cull_notified_set is None:
+            cull_notified_set = set()
+            self._horse_cull_notified_codes = cull_notified_set
+
         last_pct = self._recorded_alpha_stocks.get(code)
-        if last_pct is not None and (pct_val - last_pct) < 2.0:
-            return False
+        if is_cull_exit:
+            if code in cull_notified_set:
+                return False
+            cull_notified_set.add(code)
+        else:
+            if last_pct is not None and (pct_val - last_pct) < 2.0:
+                return False
 
         # 更新内存记录
         self._recorded_alpha_stocks[code] = max(pct_val, last_pct if last_pct is not None else -999.0)
 
-        # 仅对暴拉偏离>=5.0%且偏离>=4.0%的排头黑马才触发系统 Toast 弹窗与语音 (杜绝刷屏)
-        # 🛡️ 铁壁防骚扰守卫：必须具备主流资金或真龙属性支持，彻底拦截无成交额的孤狼杂毛脉冲
-        if pct_val >= 5.0 and (pct_val - sh_pct) >= 4.0 and last_pct is None:
+        # 仅对暴拉偏离>=5.0%且偏离>=4.0%的排头黑马，或命中【超短特异赛马冒头 / SBC连杀企稳高开加速 / 过热淘汰】触发系统 Toast 弹窗与语音
+        should_trigger_toast = (
+            (is_horse_signal and (is_cull_exit or (pct_val >= 1.8 and last_pct is None)))
+            or (pct_val >= 5.0 and (pct_val - sh_pct) >= 4.0 and last_pct is None)
+        )
+        if should_trigger_toast:
             is_valid_for_alert = True
             try:
                 from ats.capital_dragon_engine import CapitalDragonEngine
                 cde = CapitalDragonEngine.get_instance()
-                if cde.is_isolated_trap(code):
+                if not is_horse_signal and cde.is_isolated_trap(code):
                     is_valid_for_alert = False  # 孤狼或破位诱多，坚决不报警
-                elif not cde.is_true_dragon(code):
+                elif not is_horse_signal and not cde.is_true_dragon(code):
                     # 非真龙标的，检查是否重点关注或成交额>=1.5亿
                     favs = self.signal_ledger.get_favorite_stocks_set()
                     if str(code).strip() not in favs:
@@ -6152,10 +6228,18 @@ class ATSMainWindow(QMainWindow):
                     from PyQt6.QtWidgets import QApplication
                     if QApplication.instance():
                         from ats.alert_notifier import AlertNotifier
+                        alert_reason = f"{resonance} | 现幅:{pct_val:+.2f}% (超额:{pct_val - sh_pct:+.2f}%)"
+                        try:
+                            from ats.ultra_short_anomaly_engine import UltraShortAnomalyEngine
+                            h_item = UltraShortAnomalyEngine.get_instance().get_stock_item(code)
+                            if h_item is not None and h_item.reason:
+                                alert_reason = f"{resonance} | {h_item.reason}"
+                        except Exception:
+                            pass
                         AlertNotifier().notify_special_signal(
                             code, name,
-                            reason=f"{resonance} | 暴拉偏离大盘: {pct_val - sh_pct:+.2f}%",
-                            score=90.0,
+                            reason=alert_reason,
+                            score=92.0 if is_horse_signal else 90.0,
                             parent=self
                         )
                 except Exception:
@@ -7605,6 +7689,14 @@ class ATSMainWindow(QMainWindow):
             import threading
             self._next_day_close_thread = threading.Thread(target=service.close, name="ATS-NextDayClose", daemon=False)
             self._next_day_close_thread.start()
+
+        # 优先显式回收通达信/同花顺联动进程，彻底断开 multiprocessing Queue feeder 线程
+        try:
+            import linkage_service
+            if getattr(linkage_service, "global_manager", None) is not None:
+                linkage_service.global_manager.stop()
+        except Exception:
+            pass
 
         # 0. 🚀【原子持久化打开的磁吸/监控窗口状态】：在子窗口被 close() 前优先保存 is_open: True
         try:

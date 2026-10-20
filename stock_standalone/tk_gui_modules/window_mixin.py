@@ -176,16 +176,28 @@ class WindowMixin:
                     logger.error(f"[save_window_position] 读取失败: {e}")
 
             data[window_name] = pos
-            tmp_file = config_file_path + ".tmp"
+            import threading, time
+            tmp_file = f"{config_file_path}.{os.getpid()}.{threading.get_ident()}.tmp"
             try:
                 with open(tmp_file, "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False, indent=4)
-
-                os.replace(tmp_file, config_file_path)
+                for _attempt in range(5):
+                    try:
+                        os.replace(tmp_file, config_file_path)
+                        break
+                    except PermissionError:
+                        if _attempt == 4:
+                            raise
+                        time.sleep(0.02 * (_attempt + 1))
                 logger.debug(f"[save_window_position] 已原子保存 {window_name}: {pos}")
             except Exception as e:
                 logger.error(f"[save_window_position] 原子保存失败: {e}")
-                if os.path.exists(tmp_file): os.remove(tmp_file)
+            finally:
+                if os.path.exists(tmp_file):
+                    try:
+                        os.remove(tmp_file)
+                    except OSError:
+                        pass
 
 
             logger.debug(f"[save_window_position] 已保存 {window_name}: {pos}")
@@ -484,10 +496,18 @@ class WindowMixin:
                     k: v for k, v in pos_dict.items() if k in ("x", "y", "width", "height")
                 }
 
-            tmp_file = config_file_path + ".tmp"
+            import threading
+            tmp_file = f"{config_file_path}.{os.getpid()}.{threading.get_ident()}.tmp"
             with open(tmp_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=4)
-            os.replace(tmp_file, config_file_path)
+            for _attempt in range(5):
+                try:
+                    os.replace(tmp_file, config_file_path)
+                    break
+                except PermissionError:
+                    if _attempt == 4:
+                        raise
+                    time.sleep(0.02 * (_attempt + 1))
 
             logger.info(f"✅ [save_all_windows_snapshot] 成功保存全量快照(槽位{slot}): {tag_label}, {len(monitor_list_data)} 条监控列表项")
         except Exception as e:
@@ -809,16 +829,28 @@ class WindowMixin:
                     logger.error(f"[save_window_position_qt] {config_file_path} 读取失败: {e}")
 
             data[window_name] = pos
-            tmp_file = config_file_path + ".tmp"
+            import threading, time
+            tmp_file = f"{config_file_path}.{os.getpid()}.{threading.get_ident()}.tmp"
             try:
                 with open(tmp_file, "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False, indent=4)
-
-                os.replace(tmp_file, config_file_path)
+                for _attempt in range(5):
+                    try:
+                        os.replace(tmp_file, config_file_path)
+                        break
+                    except PermissionError:
+                        if _attempt == 4:
+                            raise
+                        time.sleep(0.02 * (_attempt + 1))
                 logger.debug(f"[save_window_position_qt] 已原子保存 {window_name}: {pos}")
             except Exception as e:
                 logger.error(f"[save_window_position_qt] 原子保存失败: {e}")
-                if os.path.exists(tmp_file): os.remove(tmp_file)
+            finally:
+                if os.path.exists(tmp_file):
+                    try:
+                        os.remove(tmp_file)
+                    except OSError:
+                        pass
 
 
             logger.debug(f"[save_window_position_qt] {config_file_path} 已保存 {window_name}: {pos}")
@@ -889,22 +921,33 @@ class WindowMixin:
                     logger.error(f"[save_window_position_qt] {config_file_path} 读取失败: {e}")
 
             # [OPTIMIZE] 只有数据变化时才写盘
-            # [OPTIMIZE] 只有数据变化时才写盘
             if data_changed:
                 data[window_name] = pos
-                tmp_file = config_file_path + ".tmp"
+                import threading, time
+                tmp_file = f"{config_file_path}.{os.getpid()}.{threading.get_ident()}.tmp"
                 try:
                     with open(tmp_file, "w", encoding="utf-8") as f:
                         json.dump(data, f, ensure_ascii=False, indent=4)
-
-                    os.replace(tmp_file, config_file_path)
-                    logger.debug(f"[save_window_position_qt] {config_file_path} 已原子保存 {window_name}: {pos}")
+                    for _attempt in range(5):
+                        try:
+                            os.replace(tmp_file, config_file_path)
+                            break
+                        except PermissionError:
+                            if _attempt == 4:
+                                raise
+                            time.sleep(0.02 * (_attempt + 1))
+                    logger.debug(f"[save_window_position_qt_visual] {config_file_path} 已原子保存 {window_name}: {pos}")
                 except Exception as e:
-                    logger.error(f"[save_window_position_qt] 原子写入失败: {e}")
-                    if os.path.exists(tmp_file): os.remove(tmp_file)
+                    logger.error(f"[save_window_position_qt_visual] 原子写入失败: {e}")
+                finally:
+                    if os.path.exists(tmp_file):
+                        try:
+                            os.remove(tmp_file)
+                        except OSError:
+                            pass
             else:
 
-                logger.debug(f"[save_window_position_qt] {config_file_path} 跳过保存 {window_name}: 数据未变化")
+                logger.debug(f"[save_window_position_qt_visual] {config_file_path} 跳过保存 {window_name}: 数据未变化")
                 
         except Exception as e:
             logger.error(f"[save_window_position_qt] 失败: {e}")
