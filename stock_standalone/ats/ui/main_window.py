@@ -3950,7 +3950,16 @@ class ATSMainWindow(QMainWindow):
             return
         now = time.time()
         frame = getattr(self, 'current_df', None)
-        stale_after = 60.0 if frame is None or frame.empty else 600.0
+        has_frame = frame is not None and not frame.empty
+        # Preserve the original after-hours rule: only cold-start baseline recovery.
+        if has_frame:
+            try:
+                if not cct.get_work_time():
+                    return
+            except Exception as exc:
+                logger.warning('[IPC订阅保活] 交易时段判定失败，暂停本次请求: %s', type(exc).__name__)
+                return
+        stale_after = 600.0 if has_frame else 60.0
         if now - getattr(self, '_last_recv_t', 0) < stale_after:
             return
         if now - getattr(self, '_last_pipe_sync_t', 0) < 60.0:
@@ -4666,9 +4675,12 @@ class ATSMainWindow(QMainWindow):
         def request():
             try:
                 from data_utils import send_code_via_pipe, PIPE_NAME_TK
-                send_code_via_pipe({"cmd": "REQ_FULL_SYNC", "port": 26670}, logger=logger, pipe_name=PIPE_NAME_TK)
+                delivered = send_code_via_pipe({"cmd": "REQ_FULL_SYNC", "port": 26670,
+                    "subscribe": True, "client_name": "ATS_Terminal"}, logger=logger, pipe_name=PIPE_NAME_TK)
+                if not delivered:
+                    logger.warning("[IPC订阅保活] 全量同步请求未送达TK，等待下次保活重试")
             except Exception as err:
-                logger.debug(f"[ATS] 行情同步请求失败: {err}")
+                logger.warning("[IPC订阅保活] 全量同步请求发送失败: %s", type(err).__name__)
             finally:
                 self._pipe_sync_busy = False
         import threading
