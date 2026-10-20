@@ -4566,6 +4566,14 @@ class MainWindow(QMainWindow, WindowMixin):
         if hasattr(self.kline_plot, 'vb') and hasattr(self.kline_plot.vb, 'mouseDoubleClickEvent'):
             self.kline_plot.vb.mouseDoubleClickEvent = lambda ev: ev.accept()
 
+        # Scene mouseClickEvent only receives clicks, not right-button drags.
+        original_kline_click = self.kline_plot.vb.mouseClickEvent
+        def _kline_click(event):
+            if not self._handle_kline_reset_click(event):
+                original_kline_click(event)
+        self.kline_plot.vb.mouseClickEvent = _kline_click
+        self.kline_widget.setToolTip("右键单击：还原100%默认视图；Shift+右键：图表菜单；右键拖拽：保留原缩放操作")
+
         # ⭐ 安装 ViewBox 守护钩子 (锁定 X 轴, Y 轴自动)
         # self._install_viewbox_guard(self.kline_plot)
         # --- 添加重置按钮 (只添加一次) ---
@@ -16359,15 +16367,21 @@ class MainWindow(QMainWindow, WindowMixin):
                     scene_pos = self.kline_widget.mapToScene(pos)
                     if self._on_kline_double_clicked(scene_pos):
                         return True
-            elif event.type() == QEvent.Type.MouseButtonPress:
-                if event.button() == Qt.MouseButton.RightButton:
-                    # 在 K 线图上右键点击：若当前处于锁定状态，则解除锁定并重置为自动跟随光标
-                    k_win = getattr(self, 'kline_detail_win', None)
-                    if k_win and getattr(k_win, 'auto_close_disabled', False):
-                        k_win.reset_to_auto_follow()
-                        return True
 
         return super().eventFilter(watched, event)
+
+    def _handle_kline_reset_click(self, event):
+        """Restore normal K-line zoom without reloading data; Shift keeps the native menu."""
+        if (event.button() != Qt.MouseButton.RightButton
+                or event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
+            return False
+        self._manual_view_lock = False
+        detail = getattr(self, 'kline_detail_win', None)
+        if detail and getattr(detail, 'auto_close_disabled', False):
+            detail.reset_to_auto_follow()
+        self._reset_kline_view(force=True)
+        event.accept()
+        return True
 
     def _on_kline_double_clicked(self, scene_pos):
         """
