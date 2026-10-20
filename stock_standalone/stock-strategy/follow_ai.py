@@ -54,8 +54,10 @@ def evidence_context(state, now):
 
 def enqueue(db, state, now, question="", force=False, stage=None):
     import auto_follow as af
-    policy = state.get("ai_settings", DEFAULT_AI)
-    if not policy.get("enabled") or not policy.get("node_id") or not policy.get("workspace_id"):
+    from auto_research_policy import selection
+    policy, status = selection(db, now)
+    state['auto_research_status'] = status
+    if policy is None:
         return None
     pending = db.execute("SELECT id,context FROM ai_jobs WHERE node_id=? AND workspace_id=? AND status IN ('queued','running') AND expires_at>? LIMIT 1",
                          (policy["node_id"], policy["workspace_id"], now.isoformat())).fetchone()
@@ -64,13 +66,14 @@ def enqueue(db, state, now, question="", force=False, stage=None):
             return None
         return pending[0]
     prior = state.get("ai_last_requested_at")
-    if not force and prior and (now - af.stamp(prior)).total_seconds() < policy.get("interval_seconds", 900):
+    if prior and (now - af.stamp(prior)).total_seconds() < policy.get("interval_seconds", 900):
         return None
     context = evidence_context(state, now)
     phase = stage or ("interactive" if question else "post_close_review" if now.strftime("%H:%M") >= "15:35" else
                       "premarket" if now.strftime("%H:%M") < "09:30" else "intraday")
     context["workflow_stage"] = phase
     context["ai_runtime"] = {"model": policy.get("model", "gpt-6-luna"), "reasoning_effort": policy.get("reasoning_effort", "medium")}
+    context['auto_research_revision'] = policy.get('revision', 0)
     if not force and phase != "intraday" and state.get("ai_phase_requested") == phase + ":" + context["trade_date"]:
         return None
     if db.execute("SELECT COUNT(*) FROM ai_jobs WHERE node_id=? AND workspace_id=? AND status IN ('queued','running') AND expires_at>?",

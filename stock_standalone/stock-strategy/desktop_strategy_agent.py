@@ -360,6 +360,7 @@ class AppServer:
     def analyze(self, job, thread_id=None, model="gpt-6-luna", progress=None, effort="medium"):
         # A bounded evidence snapshot per job avoids repeatedly replaying full market history.
         thread_id = None
+        self.strategy_token_usage = {}
         budget=300
         if job.get('expires_at'):
             budget=min(budget,max(0,(datetime.fromisoformat(job['expires_at'].replace('Z','+00:00'))-datetime.now(timezone.utc)).total_seconds()))
@@ -405,6 +406,14 @@ class AppServer:
                 event = message.get("params", {})
                 if event.get("threadId") != thread_id:
                     continue
+                if message.get('method') == 'thread/tokenUsage/updated':
+                    usage = (event.get('tokenUsage') or {}).get('last') or {}
+                    self.strategy_token_usage = {k: v for k, v in usage.items() if k in
+                        ('totalTokens', 'inputTokens', 'cachedInputTokens', 'outputTokens', 'reasoningOutputTokens')
+                        and type(v) is int and v >= 0}
+                    budget = job.get('token_budget')
+                    if budget and self.strategy_token_usage.get('totalTokens', 0) >= budget:
+                        raise ValueError('CLI_TOKEN_BUDGET_EXCEEDED')
                 if message.get("method") == "item/agentMessage/delta":
                     chunks.append(event.get("delta", ""))
                     answer_bytes+=len(chunks[-1].encode('utf-8'))
@@ -420,6 +429,7 @@ class AppServer:
                     validated = validate_result(proposal, context)
                     completed = True
                     result={"proposal": validated, "thread_id": thread_id,
+                            "token_usage": self.strategy_token_usage,
                             "provider": "codex-app-server", "model": started["model"], "reasoning_effort": started["reasoningEffort"],
                             "configuration_confirmed": True, "tool_audit": self.tool_audit[-30:]}
                     try:publish_summary(self,job,result)
@@ -682,6 +692,8 @@ def main(argv=None):
                 ledger.execute("INSERT OR REPLACE INTO runtime VALUES('cooldown_until',?)",(str(time.time()+(30 if isinstance(exc,TimeoutError) else 300)),));ledger.commit()
             if job and not result_ready:
                 failure={"error_code": code, "provider": "codex-app-server"}
+                if app:
+                    failure['token_usage'] = getattr(app, 'strategy_token_usage', {})
                 if app and app.active_thread:
                     from muse_research_threads import thread_title
                     failure.update(thread_id=app.active_thread,thread_title=thread_title(job,status='失败：'+code),project_id=getattr(app,'project_id',None))

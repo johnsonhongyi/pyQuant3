@@ -19,7 +19,7 @@ def main():
     target.mkdir(parents=True, exist_ok=False)
     service = target / "source" / "easy-stock-service"
     service.mkdir(parents=True)
-    for name in ("auto_follow.py", "follow_research.py", "follow_ai.py", "test_auto_follow.py", "test_follow_research.py", "test_follow_ai.py", "stockstrategy-auto-follow.service"):
+    for name in ("auto_follow.py", "follow_research.py", "follow_ai.py", "auto_research_policy.py", "test_auto_follow.py", "test_follow_research.py", "test_follow_ai.py", "test_auto_research_policy.py", "stockstrategy-auto-follow.service"):
         shutil.copyfile(ROOT / name, target / name)
     for name in ("daily_review.py", "market_cache.py", "market_network.py", "data_store.py", "trading_calendar.py"):
         shutil.copyfile(ROOT / "source" / "easy-stock-service" / name, service / name)
