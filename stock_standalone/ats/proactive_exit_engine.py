@@ -14,6 +14,7 @@ ProactiveExitEngine — 8层递进式主动出局引擎（防守端核心）
   Layer 6: 量价背离出局 (Volume-Price Divergence)
   Layer 7: 大级别 MA5d 拐头 (Multi-Timeframe Rollover)
   Layer 8: VWAP 破位最后防线 (Final Safety Net)
+  + [超短温度周期防御] 冷跟单·过热未加速即出局 (Cold Follow Overheat Culling)
 """
 
 import time
@@ -58,6 +59,10 @@ class PositionWatchItem:
     is_reversal_protected: bool = False   # 是否处于底抬高企稳+VWAP位移反转结构保护中
     higher_low_stop: float = 0.0          # 底抬高关键防守线 (Higher Low 次低点)
 
+    # 💥 [NEW] 市场温度周期感知：冷跟单/过热未加速去弱出局状态
+    entry_market_temp: float = 0.0        # 介入/异动跟单时的市场温度(°C)
+    was_cold_anomaly: bool = False        # 是否为冰点/低温期(<=48°C)逆势异动跟单标的
+
 
 @dataclass
 class ExitAction:
@@ -91,9 +96,12 @@ class ProactiveExitEngine:
         prev_day_high: float = 0.0,
         vwap_yesterday: float = 0.0,
         intraday_high_before: float = 0.0,
+        entry_market_temp: float = 0.0,
+        was_cold_anomaly: bool = False,
     ) -> PositionWatchItem:
         """注册持仓进入 8 层主动出局守护池"""
         t = entry_time if entry_time is not None else time.time()
+        is_cold = bool(was_cold_anomaly or (0.0 < float(entry_market_temp) <= 48.0))
         item = PositionWatchItem(
             code=code,
             entry_time=t,
@@ -107,6 +115,8 @@ class ProactiveExitEngine:
             price_history=[entry_price],
             volume_history=[],
             timestamps=[t],
+            entry_market_temp=float(entry_market_temp),
+            was_cold_anomaly=is_cold,
         )
         self._positions[code] = item
         logger.debug(f"[{code}] 成功注册进 ProactiveExitEngine 8层守护池 (成本价: {entry_price:.2f}元)")
@@ -148,6 +158,13 @@ class ProactiveExitEngine:
         # 💥 [NEW] TradePlan / 反转结构持仓保护上下文注入与次低点止损更新
         if ctx.get("is_reversal_structure", False):
             pos.is_reversal_protected = True
+
+        if ctx.get("was_cold_anomaly", False):
+            pos.was_cold_anomaly = True
+        if float(ctx.get("entry_market_temp", 0.0) or 0.0) > 0 and pos.entry_market_temp <= 0:
+            pos.entry_market_temp = float(ctx.get("entry_market_temp", 0.0))
+            if pos.entry_market_temp <= 48.0:
+                pos.was_cold_anomaly = True
 
         # 更新持仓最高价与极值 (确保保本推移能够感知当前 Tick 突破)
         if price > pos.highest_price:
@@ -208,6 +225,14 @@ class ProactiveExitEngine:
                     timestamp=now,
                 ))
 
+            # 💥 [NEW] 市场温度从冷到热感知：冷跟单在市场过热(>=60°C)时未加速即主动去弱出局
+            if not t10_leader_hold:
+                action = self._eval_overheat_no_acceleration(
+                    pos, price, vwap_today, volume_ratio, ctx, now
+                )
+                if action:
+                    return self._record_action(pos, action)
+
             # 2. 依次按优先级评估 8 层守护
             # Layer 1: 时间衰减
             if not t10_leader_hold:
@@ -265,6 +290,79 @@ class ProactiveExitEngine:
             # 清仓后由调度器或外层调用 unregister_position
             pass
         return action
+
+    # -------------------------------------------------------------------------
+    # 💥 [NEW] 温度周期防守：冷跟单在市场过热时未加速即主动出局
+    # -------------------------------------------------------------------------
+    def _eval_overheat_no_acceleration(
+        self,
+        pos: PositionWatchItem,
+        current_price: float,
+        vwap_today: float,
+        volume_ratio: float,
+        ctx: Dict[str, Any],
+        now: float,
+    ) -> Optional[ExitAction]:
+        """
+        核心逻辑：
+        在市场温度从冷(<48°C)向热(>=60°C)演进过程中，
+        低温期逆势异动跟单的个股如果到了市场情绪高潮/过热阶段仍未走出主升加速（滞涨、冲高回落或跌破均价线），
+        说明先手溢价耗尽且资金已在高潮期切换至新冒头标的，一旦市场退潮该股将首当其冲补跌，必须果断去弱出局。
+        """
+        market_temp = float(ctx.get("market_temp", 0.0) or 0.0)
+        horse_state = str(ctx.get("horse_state", "") or "")
+        is_cold_entry = bool(
+            pos.was_cold_anomaly
+            or (0.0 < pos.entry_market_temp <= 48.0)
+            or horse_state == "OVERHEAT_CULL_EXIT"
+        )
+        if not is_cold_entry:
+            return None
+
+        temp_delta = (market_temp - pos.entry_market_temp) if pos.entry_market_temp > 0 else 0.0
+        is_overheated = (
+            market_temp >= 60.0
+            or (market_temp >= 55.0 and temp_delta >= 10.0)
+            or horse_state == "OVERHEAT_CULL_EXIT"
+        )
+        if not is_overheated:
+            return None
+
+        gain_pct = (current_price - pos.entry_price) / pos.entry_price * 100.0 if pos.entry_price > 0 else 0.0
+        intraday_high = max(float(ctx.get("high", pos.highest_price) or pos.highest_price), current_price)
+        drop_from_high = (intraday_high - current_price) / intraday_high * 100.0 if intraday_high > 0 else 0.0
+        is_limit_up = bool(ctx.get("is_limit_up", False))
+        is_accelerating = bool(
+            ctx.get("is_accelerating", False)
+            or is_limit_up
+            or (gain_pct >= 4.0 and current_price >= vwap_today * 0.998 and drop_from_high < 1.5)
+        )
+        if is_accelerating:
+            return None
+
+        below_vwap = vwap_today > 0 and current_price < vwap_today * 0.998
+        stagnant = (gain_pct < 2.5 and (below_vwap or drop_from_high >= 1.5 or volume_ratio < 0.95))
+        if horse_state == "OVERHEAT_CULL_EXIT" or below_vwap or stagnant:
+            entry_t_str = f"{pos.entry_market_temp:.1f}°C" if pos.entry_market_temp > 0 else "低温期"
+            curr_t_str = f"{market_temp:.1f}°C" if market_temp > 0 else "过热区"
+            action_type = "EXIT_ALL" if (below_vwap or gain_pct <= 0.5 or pos.reduce_count > 0) else "REDUCE_HALF"
+            size_pct = 1.0 if action_type == "EXIT_ALL" else 0.5
+            return ExitAction(
+                code=pos.code,
+                rule_id="exit_overheat_no_accel",
+                rule_name="过热未加速出局(冷跟单去弱留强)",
+                layer=2,
+                action_type=action_type,
+                size_pct=size_pct,
+                trigger_price=current_price,
+                reason=(
+                    f"冷跟单标的({entry_t_str}介入)在市场升温至过热({curr_t_str})时"
+                    f"未能晋级加速(当前收益{gain_pct:+.2f}%/回撤{drop_from_high:.1f}%)"
+                    f"{'且跌破分时均线' if below_vwap else ''}，执行去弱留强主动出局"
+                ),
+                timestamp=now,
+            )
+        return None
 
     # -------------------------------------------------------------------------
     # Layer 1: 时间衰减止损

@@ -61,6 +61,38 @@ class CompactBarRecords(Sequence):
             row[key] = value
         return row
 
+    def __iter__(self):
+        size = self._size
+        if size == 0:
+            return iter(())
+        col_specs = []
+        any_mask = False
+        for key, (data, kind, mask) in self._columns.items():
+            if isinstance(kind, tuple):
+                values = [kind[int(idx)] for idx in data.tolist()]
+            elif kind is not None:
+                values = data.tolist()
+            else:
+                values = list(data)
+            if mask is not None:
+                any_mask = True
+                unpacked = np.unpackbits(mask, count=size).tolist()
+            else:
+                unpacked = None
+            col_specs.append((key, values, unpacked))
+        if not any_mask:
+            keys = tuple(key for key, _, _ in col_specs)
+            return (dict(zip(keys, row_vals)) for row_vals in zip(*(vals for _, vals, _ in col_specs)))
+        def _iter_masked():
+            for i in range(size):
+                row = {}
+                for key, values, unpacked in col_specs:
+                    if unpacked is not None and unpacked[i]:
+                        continue
+                    row[key] = values[i]
+                yield row
+        return _iter_masked()
+
     def __eq__(self, other):
         if not isinstance(other, Sequence) or len(self) != len(other):
             return False

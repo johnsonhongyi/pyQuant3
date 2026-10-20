@@ -1,5 +1,39 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-20 14:40 【ATS退出收尾、窗口持久化与子进程回收全闭环落地方案】(`docs/tasks/2026-10-20_1440_ATS退出收尾与窗口持久化全闭环落地方案.md`, `tk_gui_modules/window_mixin.py`, `ats/ui/sbc_launcher.py`, `ats/ui/intraday_strategy_dialog.py`, `ats/ui/daily_limit_up_dialog.py`, `ats/ui/dragon_monitor.py`, `ats/ui/hot_sector_leaderboard.py`, `ats/ui/chart_widgets.py`, `ats/ui/main_window.py`, `run_sbc.py`, `ats/tdx_realtime_fetcher.py`)
+- [x] **【彻底消除 Windows 文件锁冲突（`tk_gui_modules/window_mixin.py`）】**：
+    - 针对多窗口并发退出时 `save_window_position_qt_visual` 抢占同一 `.tmp` 临时文件触发 `[WinError 5] 拒绝访问` 痛点，引入基于进程 PID 与线程 ID 的唯一临时文件名 `f"{config_file_path}.{os.getpid()}.{threading.get_ident()}.tmp"`；
+    - 增加 5 次指数退避原子替换重试循环与安全清理机制，彻底杜绝文件锁死锁；
+- [x] **【SBC 子进程深度回收与孤儿进程彻底终结（`ats/ui/sbc_launcher.py`, `ats/ui/main_window.py`, `run_sbc.py`）】**：
+    - 升级 `_sbc_bootloader_children` 深度遍历子孙进程树，穿透识别主进程、`--sbc-hold` 及 `linkage_service` 派生的 `--multiprocessing-fork` 孤儿进程，强杀超时进程时确保所有子孙进程全部被清空；
+    - 过滤 `get_running_codes()` 严格要求 6 位数字代码，杜绝 `__holdings_launcher__` 等内部标识污染窗口配置；
+    - 在 ATS 主窗口 `_complete_shutdown` 与 SBC `_finish_sbc_packaged_shutdown` 中显式停止 `linkage_service.global_manager`，回收句柄，彻底消除 PyInstaller 运行时目录锁定 `[PYI-10576:WARNING] Failed to remove temporary directory: G:\Temp\_MEI*`；
+- [x] **【子窗口退出持久化反误设与分时配置防清空闭环】**：
+    - 修复 `daily_limit_up_dialog.py`、`dragon_monitor.py`、`hot_sector_leaderboard.py`、`chart_widgets.py` 的主窗口探测链与 `ATS_IS_CLOSING` 退出标记判断，系统退出时强制保持 `is_open: True`，确保下次启动完美还原所有打开窗口；
+    - 修复 `intraday_strategy_dialog.py` 的 `save_all_open_sbc_windows()`：ATS 进程内列表为空时不抹除已有合法代码记录，退出期间跳过单窗口冗余高频磁盘/注册表写盘；
+    - 清理本地与生产目录中 `config/intraday_ui_layout.json` 的非法污染项；
+- [x] **【增量分时盘中覆盖对齐死循环修复（`ats/tdx_realtime_fetcher.py`）】**：
+    - 放行当天盘中未收盘时段，修复分时覆盖未达 14:50 导致的每 7 秒触发 `[AutoRepair] 301666 增量分时覆盖不完整` 缓存驱逐重拉死循环；
+- [x] **【全套单元与回归测试 100% 纯绿】**：
+    - `test_sbc_safe_group_shutdown.py` (24/24)、`test_ats_shutdown_exit.py` (18/18)、`test_runtime_shutdown_archive.py` (8/8)、`test_ultra_short_anomaly_horse_race.py` (4/4) 纯绿通过。
+
+
+## 2026-10-20 11:58 【ATS全底层超短特异挖掘、SBC多日分时连杀小企稳高开加速与温度周期赛马去弱留强闭环】(`docs/tasks/2026-10-20_1105_ATS全底层超短特异挖掘与温度周期赛马去弱留强落地方案.md`, `ats/ultra_short_anomaly_engine.py`, `ats/proactive_exit_engine.py`, `ats/capital_dragon_engine.py`, `ats/ui/capital_dragon_panel.py`, `ats/ui/favorite_panel.py`, `ats/ui/new_stock_panel.py`, `ats/ui/chart_widgets.py`, `ats/ui/main_window.py`, `tests/test_ultra_short_anomaly_horse_race.py`)
+- [x] **【超短特异结构挖掘与 SBC 多日分时缓存直连穿透（`ats/ultra_short_anomaly_engine.py`）】**：
+    - 构建全底层向量化超短挖掘引擎 `UltraShortAnomalyEngine`，零拷贝复用 `df_all` 宽表 30+ 预计算列与 `OpeningBubbleEngine`、`VolumeProfiler`、`GlobalFavoriteManager`；
+    - 直连内存常驻 `TDXGlobalCachePool`（`_history_static_bars` / `_incremental_intraday_pool` / `_daily_metrics_cache`）与 `SBCIndicatorCache`（`ch_supp` 通道支撑 / `rev` 反转位），零网络 I/O 识别 **`📈 连杀小企稳·高开加速` (`STRUCT_SBC_KILL_STABILIZE_ACCEL`)**、**`🛡️ 阶段点高开杀跌·深V收红` (`STRUCT_HIGH_OPEN_KILL_REBOUND`)**、**`⚡ 冲高回落·温和放量试盘` (`STRUCT_SPIKE_PULLBACK_MILD_VOL`)**，精准复现 `688689 银河微电`、`300299 富春股份`（上周成功案例：连杀至支撑/反转位小级别企稳异动 + 次日高开跨过反转线与多日均价线加速）及 `300571 平治信息` 实盘结构；
+- [x] **【市场温度从冷到热动态感知与“冷盘跟单、过热未加速即出局”闭环】**：
+    - 实现 `MarketTemperatureCycleTracker`（0~100℃ 实时温度、ΔT 升温斜率、`COLD -> WARMING -> OVERHEAT` 状态机），并在 `DistributionBarChart` 实时渲染温度周期趋势；
+    - 锁定冷盘（`< 48℃`）异动种子（`was_cold_anomaly=True`）；当市场进入过热期（`>= 60℃` 或 ΔT >= +10℃）时，若冷盘跟单标的未能突破颈线加速（滞涨、冲高回落或破分时均线），立即打标 `⚠️ 过热未加速·出局` (`OVERHEAT_CULL_EXIT`)，并联动 `ProactiveExitEngine` 触发 `exit_overheat_no_accel` 主动防守平仓；
+- [x] **【聚焦三大实战核心模块无缝赋能（不冗余新建重型弹窗）】**：
+    - **重点关注 (`FavoritePanel`)**：新增 `🏇 特异赛马 (开/关)` 一键去弱留强过滤按钮与顶部温度/冒头/淘汰实时徽章，策略列优先高亮展示 SBC 连杀企稳加速、赛马冒头与过热出局原因；
+    - **资金主线与龙头中枢 (`CapitalDragonEngine` / `CapitalDragonPanel`)**：新增 `🏇 特异赛马先锋` 角色晋升通道，豁免常规诱多拦截，并对过热未加速标的自动降级；
+    - **新股次新股 (`NewStockPanel`)**：IPC 帧合并自动注入特异赛马标签，在策略过滤旁补齐独立的 `🏇 特异赛马 (关/开)` 一键点击选中按钮；
+    - **SBC盯盘窗口 (`SBCIntradayChartDialog`)**：实现顶部异动时刻高亮横幅（去除冗余前缀，精简显示突破价位与均线，支持按键盘 `X` 快捷键或点击 `[✕ 关 (X)]` 极速关闭）与画布呼吸脉冲闪烁提醒，严格保持原标题栏纯净不跳动；
+- [x] **【极限性能与自动化回归验证】**：
+    - 采用 `.to_numpy(dtype=np.float64, copy=False)` 零拷贝提取、股票池签名缓存与 `__slots__` 状态槽，5500 只全市场股票单帧扫描仅需毫秒级；
+    - `pytest tests/test_ultra_short_anomaly_horse_race.py -v` 4 项专项单测 100% 纯绿通过，`py_compile` 0 语法错误，所有文件严格保持 UTF-8（无 BOM）编码。
+
 ## 2026-10-18 23:39 【AGV进度回调修复与发布后现场状态】
 - `CLI_OUTPUT_CALLBACK_FAILED` 根因是模型初始化前进度回执携带非 UUID 的临时会话 ID，被后端拒绝；源码已改为收到并校验 AGY `conversation_id` 后才附带会话 ID，并保留底层回调错误，相关离线回归通过。
 - Web/API 发布号 `20261018232904`，部署健康门禁通过；线上 API health、Web 首页、主入口和个股分析 bundle 均 HTTP 200。资源包含账号管理入口与两桥 provider 标识；回滚命令见 `stock-strategy/ENVIRONMENT_HANDOFF.md`。

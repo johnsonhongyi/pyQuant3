@@ -695,7 +695,7 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         self.snap_timer.stop()
         
         main_app = self._get_main_app()
-        is_app_exiting = False
+        is_app_exiting = bool(os.environ.get("ATS_IS_CLOSING") == "1")
         if main_app:
             if not main_app.isVisible() or getattr(main_app, '_is_closing', False) or getattr(main_app, '_is_exiting', False):
                 is_app_exiting = True
@@ -711,7 +711,7 @@ class DistributionDetailsDialog(QDialog, WindowMixin):
         if hasattr(self, 'hover_timer') and self.hover_timer and self.hover_timer.isActive():
             self.hover_timer.stop()
         main_app = self._get_main_app()
-        is_app_exiting = False
+        is_app_exiting = bool(os.environ.get("ATS_IS_CLOSING") == "1")
         if main_app:
             if not main_app.isVisible() or getattr(main_app, '_is_closing', False) or getattr(main_app, '_is_exiting', False):
                 is_app_exiting = True
@@ -2085,8 +2085,16 @@ class DistributionBarChart(QWidget):
             down = stats_dict.get("down", 0)
             flat = stats_dict.get("flat", 0)
             avg = stats_dict.get("avg", 0.0)
+            cycle_tag = ""
+            try:
+                from ats.ultra_short_anomaly_engine import UltraShortAnomalyEngine
+                eng = UltraShortAnomalyEngine.get_instance()
+                if eng.temp_tracker.total_count > 0:
+                    cycle_tag = f" ({eng.temp_tracker.get_trend_arrow_text()})"
+            except Exception:
+                pass
             self.stats_label.setText(
-                f"🔥 市场温度: {temp:.1f}℃ | 🔺 上涨: {up} 家 | 🔻 下跌: {down} 家 | 平盘: {flat} 家 | 均幅: {avg:+.2f}%"
+                f"🔥 市场温度: {temp:.1f}℃{cycle_tag} | 🔺 上涨: {up} 家 | 🔻 下跌: {down} 家 | 平盘: {flat} 家 | 均幅: {avg:+.2f}%"
             )
 
 

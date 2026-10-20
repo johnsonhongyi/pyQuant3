@@ -4873,7 +4873,7 @@ class SBCGlobalDispatcher(QObject):
     def _publish_subscription_cache(self):
         """Serve newly opened windows even while the quote worker is blocked on network IO."""
         try:
-            while True:
+            while not self._stop_event.is_set():
                 with self._lock:
                     subscriptions = [(code, mode) for _, code, mode in self._subscribers.values()]
                     revision = self._subscription_revision
@@ -5248,6 +5248,56 @@ class SBCIntradayChartDialog(QWidget):
 
         layout.addLayout(tb_layout)
 
+        # 1.5 ⚡ SBC 异动时刻窗口级注意力提醒横幅 (平时隐藏0占高，触发特异加速/B点企稳/过热出局时高亮闪烁提醒)
+        self._last_attention_sig = None
+        self._acked_attention_sig = None
+        self._border_pulse_step = 0
+        self._border_pulse_colors = ("#ffd700", "#ff1744")
+        self._border_pulse_timer = QTimer(self)
+        self._border_pulse_timer.setInterval(420)
+        self._border_pulse_timer.timeout.connect(self._on_border_pulse_tick)
+
+        self.sbc_attention_banner = QFrame(self)
+        self.sbc_attention_banner.setFixedHeight(26)
+        self.sbc_attention_banner.setVisible(False)
+        banner_lay = QHBoxLayout(self.sbc_attention_banner)
+        banner_lay.setContentsMargins(8, 2, 6, 2)
+        banner_lay.setSpacing(6)
+
+        self.lbl_sbc_attention = QLabel("")
+        self.lbl_sbc_attention.setStyleSheet("font-size: 9pt; font-weight: bold; color: #ffd700; background: transparent; border: none;")
+        banner_lay.addWidget(self.lbl_sbc_attention, 1)
+
+        self.btn_ack_attention = QPushButton("✕ 关 (X)")
+        self.btn_ack_attention.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_ack_attention.setFixedHeight(20)
+        self.btn_ack_attention.setToolTip("快捷键: X 键\n• 关闭/隐藏当前异动提示横幅")
+        self.btn_ack_attention.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(15, 23, 42, 190);
+                color: #e2e8f0;
+                border: 1px solid #64748b;
+                border-radius: 3px;
+                padding: 0px 6px;
+                font-size: 8pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #ef4444;
+                color: #ffffff;
+                border-color: #ffffff;
+            }
+        """)
+        self.btn_ack_attention.clicked.connect(self._ack_sbc_attention_banner)
+        banner_lay.addWidget(self.btn_ack_attention)
+        try:
+            from PyQt6.QtGui import QKeySequence, QShortcut
+            self.shortcut_ack_attention = QShortcut(QKeySequence(Qt.Key.Key_X), self)
+            self.shortcut_ack_attention.activated.connect(self._ack_sbc_attention_banner)
+        except Exception:
+            pass
+        layout.addWidget(self.sbc_attention_banner)
+
         # 2. 实盘走势图画布
         self.canvas = SBCChartCanvas(self)
         self.canvas.code = self.code
@@ -5289,13 +5339,13 @@ class SBCIntradayChartDialog(QWidget):
         bottom_layout.setContentsMargins(2, 0, 2, 0)
         bottom_layout.setSpacing(6)
 
-        self.lbl_info = QLabel("💡 提示: A/D 轮转周期, ←/→ 移动查价, 1~9 直选, V 切换量, 双击查价/缩放量, S 开关日志, F 联动, Esc 退出光标/关闭。青蓝线现价, 黄虚线VWAP。")
+        self.lbl_info = QLabel("💡 提示: A/D 轮转周期, ←/→ 移动查价, 1~9 直选, V 切换量, X 关异动提示, S 开关日志, F 联动, Esc 退出光标/关闭。青蓝线现价, 黄虚线VWAP。")
         self.lbl_info.setStyleSheet("color: #888899; font-size: 8.5pt;")
         self.lbl_info.setWordWrap(False)
         self.lbl_info.setFixedHeight(22)
         self.lbl_info.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.lbl_info.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-        self.lbl_info.setToolTip("💡 快捷键提示:\nA/D: 轮转切换看盘周期\n←/→: 微调查价光标\n1~9: 直选指定周期\nC: 显示/隐藏集合竞价图\nV: 切换成交量副图(折叠/放大)\n双击: 快速查价或在副图双击缩放成交量\nS: 开关底部实时阶段与风控日志\nF: 跨窗口/跨系统联动\nEsc: 退出十字查价光标或关闭\n图例: 青蓝线为现价，黄虚线为 VWAP 均价")
+        self.lbl_info.setToolTip("💡 快捷键提示:\nA/D: 轮转切换看盘周期\n←/→: 微调查价光标\n1~9: 直选指定周期\nC: 显示/隐藏集合竞价图\nV: 切换成交量副图(折叠/放大)\nX: 一键关闭当前异动提示横幅\n双击: 快速查价或在副图双击缩放成交量\nS: 开关底部实时阶段与风控日志\nF: 跨窗口/跨系统联动\nEsc: 退出十字查价光标或关闭\n图例: 青蓝线为现价，黄虚线为 VWAP 均价")
         bottom_layout.addWidget(self.lbl_info, 1)
 
         # 快速切换代码下拉组合框 (支持手动输入/回车切换/右键自动粘贴/下拉历史回测标的)
@@ -5992,6 +6042,13 @@ class SBCIntradayChartDialog(QWidget):
             self._on_rearrange_windows_clicked()
             event.accept()
             return
+        elif key == Qt.Key.Key_X and not (modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+            from ats.ui.styles import is_editing_text
+            if not is_editing_text(self):
+                if hasattr(self, "sbc_attention_banner") and self.sbc_attention_banner.isVisible():
+                    self._ack_sbc_attention_banner()
+                    event.accept()
+                    return
         elif key == Qt.Key.Key_Up:
             is_alt = is_alt_modifier_active(event)
             if is_alt:
@@ -6610,7 +6667,9 @@ class SBCIntradayChartDialog(QWidget):
             self.snap_timer.stop()
         if hasattr(self, '_geo_save_timer') and self._geo_save_timer:
             self._geo_save_timer.stop()
-        self._do_save_sbc_geometry()
+        # 集中退出期间由全局 save_launcher_holdings_windows / save_all_open_sbc_windows 统一落盘，跳过高开销的单窗重复写盘
+        if not is_app_exiting and not _is_ats_shutting_down():
+            self._do_save_sbc_geometry()
 
         # 从全局打开字典注销当前实例，彻底断开强引用，避免后台幽灵存活
         c_clean = getattr(self, "code", "")
@@ -7989,6 +8048,193 @@ class SBCIntradayChartDialog(QWidget):
             message = "显示最近行情，正在更新行情与策略…" if payload.get("is_cached_preview") else "行情已加载，正在更新策略与指标…"
             self.lbl_info.setText(message)
 
+        # ⚡ 实时评估并触发 SBC 异动时刻窗口级注意力提醒 (横幅高亮 + 窗口外框脉冲闪烁 + 标题栏动态标识)
+        try:
+            self._evaluate_and_update_sbc_attention(
+                op=op, p=p, vw=vw, hi=hi, lo=lo, sigs=sigs,
+                multi_vwap_snapshot=multi_vwap_snapshot,
+                channel_info=getattr(self.canvas, "channel_info", None) if hasattr(self, "canvas") else None,
+            )
+        except Exception as e_att:
+            logger.debug(f"[SBC] attention evaluate error: {e_att}")
+
+    def _ack_sbc_attention_banner(self):
+        """手动收起当前已确认的 SBC 异动提醒横幅并停止外框闪烁"""
+        self._acked_attention_sig = getattr(self, "_last_attention_sig", None)
+        if hasattr(self, "sbc_attention_banner") and self.sbc_attention_banner:
+            self.sbc_attention_banner.setVisible(False)
+        if hasattr(self, "_border_pulse_timer") and self._border_pulse_timer.isActive():
+            self._border_pulse_timer.stop()
+        if hasattr(self, "canvas") and self.canvas:
+            self.canvas.setStyleSheet("")
+
+    def _on_border_pulse_tick(self):
+        """窗口画布外框呼吸脉冲闪烁提醒，帮助操盘手在多窗口平铺时一眼锁定异动窗口"""
+        if not hasattr(self, "canvas") or not self.canvas:
+            self._border_pulse_timer.stop()
+            return
+        self._border_pulse_step += 1
+        if self._border_pulse_step > 10:
+            self._border_pulse_timer.stop()
+            c_primary = self._border_pulse_colors[0]
+            self.canvas.setStyleSheet(f"border: 1.5px solid {c_primary}; border-radius: 3px;")
+            return
+        c_now = self._border_pulse_colors[self._border_pulse_step % 2]
+        w_px = 2 if (self._border_pulse_step % 2 == 0) else 1
+        self.canvas.setStyleSheet(f"border: {w_px}px solid {c_now}; border-radius: 3px;")
+
+    def _evaluate_and_update_sbc_attention(
+        self,
+        op: float,
+        p: float,
+        vw: float,
+        hi: float,
+        lo: float,
+        sigs: list,
+        multi_vwap_snapshot: Any = None,
+        channel_info: Optional[Dict[str, Any]] = None,
+    ):
+        """
+        【⚡ SBC 盯盘异动时刻窗口级注意力提醒引擎】
+        结合 UltraShortAnomalyEngine、SBC 支撑/反转位、多日均价线与分时 B/S 信号，
+        在窗口顶部弹出醒目横幅、触发画布边框脉冲呼吸闪烁及窗口标题栏状态提醒。
+        """
+        if not hasattr(self, "sbc_attention_banner") or self.sbc_attention_banner is None:
+            return
+        code_clean = str(self.code).zfill(6)
+        st_name = get_cached_stock_name(code_clean)
+
+        # 1. 查询超短特异赛马与 SBC 多日分时缓存引擎
+        h_item = None
+        sbc_meta = None
+        try:
+            from ats.ultra_short_anomaly_engine import UltraShortAnomalyEngine
+            eng = UltraShortAnomalyEngine.get_instance()
+            h_item = eng.get_stock_item(code_clean)
+            today_str = datetime.now().strftime("%Y-%m-%d")
+            sbc_meta = eng._inspect_sbc_intraday_cache(code_clean, today_str)
+        except Exception:
+            pass
+
+        ch_info = channel_info or SBCIndicatorCache.get(code_clean, "day") or {}
+        ch_supp = float(ch_info.get("ch_supp", 0.0) or 0.0)
+        rev_line = float(ch_info.get("rev", 0.0) or 0.0)
+        vwap_5d = float(getattr(multi_vwap_snapshot, "vwap_5d", 0.0) or 0.0) if multi_vwap_snapshot else 0.0
+
+        last_sig = sigs[-1] if sigs else None
+        last_sig_act = str(last_sig.get("action", "")).lower() if isinstance(last_sig, dict) else ""
+        last_sig_price = float(last_sig.get("price", p) or p) if isinstance(last_sig, dict) else p
+        last_sig_label = str(last_sig.get("label", "") or last_sig.get("reason", "")) if isinstance(last_sig, dict) else ""
+
+        level = ""
+        banner_html = ""
+        sig_key = None
+
+        if h_item is not None and h_item.horse_state in ("KEEP_STRONG_ACCEL", "HORSE_SURGE_EMERGE"):
+            level = "SURGE"
+            banner_html = (
+                f"🚨 <b>{h_item.horse_label}</b> | "
+                f"<font color='#ffd700'>{h_item.base_label}</font> | "
+                f"{h_item.reason} (现价 <b>{p:.2f}</b> / 均线 {vw:.2f})"
+            )
+            sig_key = (code_clean, "SURGE", h_item.horse_state, h_item.base_pattern)
+        elif sbc_meta and sbc_meta.get("hit") and op > 0 and p >= max(op * 0.995, vw):
+            level = "SURGE"
+            banner_html = (
+                f"📈 <b>连杀小企稳·高开加速</b> | 今开 <b>{op:.2f}</b> 现价 <b>{p:.2f}</b> (站稳均线 {vw:.2f})"
+            )
+            sig_key = (code_clean, "SBC_KILL_ACCEL", round(op, 1))
+        elif rev_line > 0 and p >= rev_line and op < rev_line * 1.015 and p >= vw > 0:
+            level = "SURGE"
+            v5_str = f" & 5日均线 {vwap_5d:.2f}" if (vwap_5d > 0 and p >= vwap_5d) else ""
+            banner_html = (
+                f"🚀 <b>突破反转线 <font color='#38bdf8'>{rev_line:.2f}</font> 加速</b> | "
+                f"现价 <b>{p:.2f}</b> 站稳分时均线 {vw:.2f}{v5_str}"
+            )
+            sig_key = (code_clean, "REV_BREAK", round(rev_line, 2))
+        elif last_sig_act == "buy":
+            level = "BUY_STABILIZE"
+            supp_note = f" (贴近支撑 {ch_supp:.2f})" if (ch_supp > 0 and abs(last_sig_price - ch_supp) / ch_supp <= 0.025) else ""
+            banner_html = (
+                f"🎯 <b>分时B点点火</b> @ <b>{last_sig_price:.2f}元</b>{supp_note} | 现价 <b>{p:.2f}</b>"
+            )
+            sig_key = (code_clean, "BUY_SIG", round(last_sig_price, 2), len(sigs))
+        elif h_item is not None and h_item.base_pattern != "NONE" and h_item.horse_state == "STAGE_BASE_WATCH":
+            level = "BUY_STABILIZE"
+            banner_html = (
+                f"🛡️ <b>{h_item.base_label}</b> | 关注突破颈线 <b>{h_item.neck_price:.2f}元</b> 加速"
+            )
+            sig_key = (code_clean, "BASE_WATCH", h_item.base_pattern)
+        elif ch_supp > 0 and lo <= ch_supp * 1.012 and p >= max(ch_supp, vw) and vw > 0:
+            level = "BUY_STABILIZE"
+            banner_html = (
+                f"🛡️ <b>回踩支撑 <font color='#00ff88'>{ch_supp:.2f}</font> 企稳</b> | "
+                f"低点 <b>{lo:.2f}</b> 承接拉回均线，现价 <b>{p:.2f}</b>"
+            )
+            sig_key = (code_clean, "SUPP_REBOUND", round(ch_supp, 2))
+        elif h_item is not None and h_item.horse_state == "OVERHEAT_CULL_EXIT":
+            level = "EXIT_WARN"
+            banner_html = (
+                f"⚠️ <b>过热未加速·去弱出局</b> | {h_item.reason}，建议防守"
+            )
+            sig_key = (code_clean, "OVERHEAT_CULL")
+        elif last_sig_act == "sell":
+            level = "EXIT_WARN"
+            banner_html = (
+                f"⚠️ <b>分时S点离场防守</b> @ <b>{last_sig_price:.2f}元</b> | 现价 <b>{p:.2f}</b>"
+            )
+            sig_key = (code_clean, "SELL_SIG", round(last_sig_price, 2), len(sigs))
+
+        if not level:
+            self.sbc_attention_banner.setVisible(False)
+            return
+
+        if sig_key == getattr(self, "_acked_attention_sig", None):
+            return
+
+        self.lbl_sbc_attention.setText(banner_html)
+        if level == "SURGE":
+            self.sbc_attention_banner.setStyleSheet("""
+                QFrame {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #4a153b, stop:0.5 #5c240e, stop:1 #2a1225);
+                    border: 1.5px solid #ffd700;
+                    border-radius: 4px;
+                }
+            """)
+            self._border_pulse_colors = ("#ffd700", "#ff1744")
+        elif level == "BUY_STABILIZE":
+            self.sbc_attention_banner.setStyleSheet("""
+                QFrame {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0f3828, stop:0.5 #183b32, stop:1 #102420);
+                    border: 1.5px solid #00ff88;
+                    border-radius: 4px;
+                }
+            """)
+            self._border_pulse_colors = ("#00ff88", "#ffd700")
+        else:
+            self.sbc_attention_banner.setStyleSheet("""
+                QFrame {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #451212, stop:0.5 #521b12, stop:1 #2b1010);
+                    border: 1.5px solid #ff5252;
+                    border-radius: 4px;
+                }
+            """)
+            self._border_pulse_colors = ("#ff5252", "#ff9100")
+
+        self.sbc_attention_banner.setVisible(True)
+
+        if sig_key != getattr(self, "_last_attention_sig", None):
+            self._last_attention_sig = sig_key
+            self._border_pulse_step = 0
+            if not self._border_pulse_timer.isActive():
+                self._border_pulse_timer.start()
+            try:
+                app = QApplication.instance()
+                if app is not None and self.isVisible():
+                    app.alert(self, 3500)
+            except Exception:
+                pass
+
     def reload_chart(self, is_timer_tick: bool = False, force_sync: bool = False,
                      preloaded: Optional[Dict[str, Any]] = None):
         # 保持输入框与当前标的代码+名称同步 (非编辑输入状态下)
@@ -8985,7 +9231,8 @@ def save_all_open_sbc_windows():
                         pass
 
                 existing_c = {item["code"] for item in active_list}
-                for c in running_codes:
+                valid_running_codes = [str(c).zfill(6) for c in running_codes if str(c).isdigit() and len(str(c)) == 6]
+                for c in valid_running_codes:
                     if c not in existing_c:
                         old_item = old_open_items.get(c, {})
                         s_geo = subproc_geos.get(c)
@@ -9047,7 +9294,12 @@ def save_all_open_sbc_windows():
             return res
 
         active_list = _sort_items_spatial(active_list)
-        data["sbc_open_windows"] = active_list
+        # 🛡️ 防冲刷守卫：若当前探测窗口列表为空，但历史配置中已存在有效窗口，且未声明显式清空，保留历史记录
+        if not active_list and data.get("sbc_open_windows"):
+            valid_existing = [it for it in data["sbc_open_windows"] if isinstance(it, dict) and str(it.get("code", "")).isdigit()]
+            if valid_existing:
+                active_list = valid_existing
+        data["sbc_open_windows"] = [it for it in active_list if str(it.get("code", "")).isdigit() and len(str(it.get("code", ""))) == 6]
         data["initialized"] = True
         if "sbc_period_modes" not in data:
             data["sbc_period_modes"] = {}

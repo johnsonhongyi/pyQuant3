@@ -11,7 +11,7 @@ import time
 from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 
-from ats.persistence_lock import directory_write_lock
+from ats.persistence_lock import directory_write_lock, DirectoryBusy
 
 MAX_DATABASE_BYTES = 100 * 1024 * 1024
 ARCHIVE_INTERVAL = 30 * 60
@@ -421,6 +421,10 @@ def _archive_loop(runtime, local, file_limit=None):
             if time.monotonic() - closing_since < ARCHIVE_SETTLE_SECONDS:
                 continue
             _archive_one(runtime, local, file_limit)
+        except DirectoryBusy:
+            if time.monotonic() - last_error >= 300:
+                last_error = time.monotonic()
+                logger.info('Linkage closing archive deferred (directory busy); runtime state retained on RAMDisk')
         except Exception:
             if time.monotonic() - last_error >= 300:
                 last_error = time.monotonic()
@@ -429,16 +433,19 @@ def _archive_loop(runtime, local, file_limit=None):
 
 def _reclaim_runtime(runtime):
     """Bounded background reclamation on RAMDisk, never a full intraday VACUUM."""
-    with directory_write_lock(str(runtime.parent), timeout=0.05):
-        marker = runtime.parent / (runtime.name + '.reclaim_time')
-        if marker.exists() and time.time() - marker.stat().st_mtime < RECLAIM_INTERVAL:
-            return
-        marker.touch()
-        with closing(sqlite3.connect(str(runtime), timeout=0.05)) as connection:
-            if connection.execute('PRAGMA auto_vacuum').fetchone()[0] != 2:
+    try:
+        with directory_write_lock(str(runtime.parent), timeout=0.05):
+            marker = runtime.parent / (runtime.name + '.reclaim_time')
+            if marker.exists() and time.time() - marker.stat().st_mtime < RECLAIM_INTERVAL:
                 return
-            pages = connection.execute('PRAGMA page_count').fetchone()[0]
-            free_pages = connection.execute('PRAGMA freelist_count').fetchone()[0]
-            if free_pages >= RECLAIM_PAGES and free_pages >= pages // 5:
-                connection.execute('PRAGMA incremental_vacuum(%d)' % RECLAIM_PAGES).fetchall()
-                connection.commit()
+            marker.touch()
+            with closing(sqlite3.connect(str(runtime), timeout=0.05)) as connection:
+                if connection.execute('PRAGMA auto_vacuum').fetchone()[0] != 2:
+                    return
+                pages = connection.execute('PRAGMA page_count').fetchone()[0]
+                free_pages = connection.execute('PRAGMA freelist_count').fetchone()[0]
+                if free_pages >= RECLAIM_PAGES and free_pages >= pages // 5:
+                    connection.execute('PRAGMA incremental_vacuum(%d)' % RECLAIM_PAGES).fetchall()
+                    connection.commit()
+    except (DirectoryBusy, TimeoutError, sqlite3.OperationalError):
+        return

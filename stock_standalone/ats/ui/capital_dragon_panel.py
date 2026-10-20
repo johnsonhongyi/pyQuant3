@@ -269,6 +269,10 @@ class CapitalDragonPanel(QWidget):
         saved_filter = load_config_node(PERSIST_KEY_DRAGON_FILTER, False)
         self.filter_enabled = parse_bool_config(saved_filter, default=False)
 
+        # 🏇 特异赛马去弱留强快筛开关 (一键点击选中，默认关闭)
+        saved_horse = load_config_node("ats_dragon_horse_filter_enabled", False)
+        self.horse_filter_enabled = parse_bool_config(saved_horse, default=False)
+
         # 🐉 全资金主线模块自动更新持久化开关 (专属独立持久化，默认开启)
         saved_auto_update = load_config_node(PERSIST_KEY_DRAGON_AUTO_UPDATE, True)
         self.auto_update_enabled = parse_bool_config(saved_auto_update, default=True)
@@ -354,9 +358,11 @@ class CapitalDragonPanel(QWidget):
         toolbar_layout.setContentsMargins(0, 0, 0, 0)
         toolbar_layout.setSpacing(6)
 
-        self.lbl_stats = QLabel("🐉 龙头已就位: 0 只")
+        self.lbl_stats = ClickableLabel("🐉 龙头已就位: 0 只")
         self.lbl_stats.setStyleSheet("color: #00ff88; font-weight: bold; font-size: 9.5pt;")
+        self.lbl_stats.setCursor(Qt.CursorShape.PointingHandCursor)
         self.lbl_stats.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.lbl_stats.clicked.connect(self.toggle_horse_filter_state)
         toolbar_layout.addWidget(self.lbl_stats)
 
         toolbar_layout.addStretch()
@@ -411,6 +417,12 @@ class CapitalDragonPanel(QWidget):
         self.btn_open_miner.setToolTip("打开板块轮动前排引导与资金主线回踩启动深挖工作台")
         self.btn_open_miner.clicked.connect(self._on_click_miner)
         toolbar_layout.addWidget(self.btn_open_miner)
+
+        # 🏇 特异赛马点击选中开关按钮 (与策略过滤并排，一键点击筛选)
+        self.btn_horse_filter = QPushButton()
+        self._update_horse_button_ui()
+        self.btn_horse_filter.clicked.connect(self.toggle_horse_filter_state)
+        toolbar_layout.addWidget(self.btn_horse_filter)
 
         # 🎯 策略过滤持久化开关按钮
         self.btn_toggle_filter = QPushButton()
@@ -1011,12 +1023,28 @@ class CapitalDragonPanel(QWidget):
                     return 1, 1
                 return 2, 999
 
+            horse_only = getattr(self, 'horse_filter_enabled', False)
+            source_dragons = (
+                self._last_report.get("dragon_records_all", dragons)
+                if (horse_only and self._last_report)
+                else dragons
+            )
+
             matched_records = []
-            for d in dragons:
+            for d in source_dragons:
                 c_clean = _clean_code(d.get('code', ''))
                 tier, _ = _get_dragon_record_tier(d)
                 if tier != 0 and fset is not None and c_clean not in fset:
                     continue
+                if horse_only and tier != 0:
+                    role_s = str(d.get('role', ''))
+                    act_s = str(d.get('action_type', ''))
+                    rsn_s = str(d.get('reason', ''))
+                    is_hp = bool(d.get('is_horse_pioneer', False)) or any(
+                        kw in (role_s + act_s + rsn_s) for kw in ("赛马", "特异", "连杀", "深V", "试盘")
+                    )
+                    if not is_hp or "过热未加速" in (role_s + act_s):
+                        continue
                 if filter_text:
                     extra_vals_str = " ".join(str(d.get("extra_cols", {}).get(ec, d.get(ec, ""))) for ec in getattr(self, 'extra_cols', []))
                     match_str = f"{d.get('code', '')} {d.get('name', '')} {d.get('role', '')} {d.get('sector', '')} {d.get('action_type', '')} {d.get('reason', '')} {extra_vals_str}".lower()
@@ -1119,6 +1147,8 @@ class CapitalDragonPanel(QWidget):
                     role_col = "#ff1744"
                 elif "容量" in role:
                     role_col = "#ffd700"
+                elif "赛马" in role:
+                    role_col = "#ff9100"
                 elif "先锋" in role:
                     role_col = "#00e676"
                 self._set_or_update_cell(
@@ -1209,13 +1239,16 @@ class CapitalDragonPanel(QWidget):
                     )
                 buy_fg = "#38bdf8"
                 buy_bg = None
-                if "双加速" in buy_type:
+                if "过热未加速" in buy_type:
+                    buy_fg = "#ff5252"
+                    buy_bg = QColor(70, 20, 20, 180)
+                elif "双加速" in buy_type:
                     buy_fg = "#FFD700"
                     buy_bg = QColor(80, 20, 60, 180)
-                elif "缺口加速" in buy_type:
+                elif "缺口加速" in buy_type or "特异加速" in buy_type:
                     buy_fg = "#FF55BB"
                     buy_bg = QColor(50, 15, 45, 160)
-                elif "光脚加速" in buy_type:
+                elif "光脚加速" in buy_type or "赛马" in buy_type:
                     buy_fg = "#FFAA00"
                     buy_bg = QColor(60, 35, 10, 160)
                 elif "主升" in buy_type or "先锋" in buy_type or "龙头" in buy_type:
@@ -1319,6 +1352,13 @@ class CapitalDragonPanel(QWidget):
             else:
                 count_str = f"<b>{len(matched_records)}</b> 只"
 
+            horse_cnt = self._last_report.get('horse_pioneer_count', 0) if self._last_report else 0
+            cull_cnt = self._last_report.get('overheat_cull_count', 0) if self._last_report else 0
+            temp_summary = self._last_report.get('temp_trend_summary', '') if self._last_report else ''
+            horse_str = f" | 🏇赛马:{horse_cnt}" if horse_cnt > 0 else ""
+            cull_str = f" ⚠️过热未加速:{cull_cnt}" if cull_cnt > 0 else ""
+            temp_str = f" | {temp_summary}" if temp_summary else ""
+
             full_stats_text = (
                 f"🐉 龙头已就位: {count_str} "
                 f"(空间龙: {sp_cnt} | "
@@ -1326,6 +1366,7 @@ class CapitalDragonPanel(QWidget):
                 f"主线先锋: {pn_cnt})"
                 f"{focus_str}"
                 f"{accel_str}"
+                f"{horse_str}{cull_str}{temp_str}"
             )
             clean_tooltip = (
                 f"🐉 龙头已就位统计:\n"
@@ -1480,6 +1521,58 @@ class CapitalDragonPanel(QWidget):
 
         t = threading.Thread(target=_async_manual_worker, daemon=True)
         t.start()
+
+    def toggle_horse_filter_state(self):
+        """切换特异赛马(去弱留强)点击快筛开关"""
+        self.horse_filter_enabled = not getattr(self, 'horse_filter_enabled', False)
+        save_config_node("ats_dragon_horse_filter_enabled", bool(self.horse_filter_enabled))
+        self._update_horse_button_ui()
+        self._apply_filter()
+
+    def _update_horse_button_ui(self):
+        if not hasattr(self, 'btn_horse_filter'):
+            return
+        if getattr(self, 'horse_filter_enabled', False):
+            self.btn_horse_filter.setText("🏇 特异赛马 (开)")
+            self.btn_horse_filter.setStyleSheet("""
+                QPushButton {
+                    background-color: #38240c;
+                    color: #ffd700;
+                    font-weight: bold;
+                    border: 1.5px solid #ffd700;
+                    border-radius: 3px;
+                    padding: 2px 8px;
+                    font-size: 8.5pt;
+                }
+                QPushButton:hover {
+                    background-color: #ffd700;
+                    color: #000000;
+                }
+            """)
+            self.btn_horse_filter.setToolTip(
+                "当前状态：【已开启】仅保留【🏇 特异赛马先锋】与连杀小企稳加速标的，自动剔除过热未加速淘汰股 (点击可关闭)"
+            )
+        else:
+            self.btn_horse_filter.setText("🏇 特异赛马 (关)")
+            self.btn_horse_filter.setStyleSheet("""
+                QPushButton {
+                    background-color: #222228;
+                    color: #888888;
+                    font-weight: bold;
+                    border: 1px solid #44444f;
+                    border-radius: 3px;
+                    padding: 2px 8px;
+                    font-size: 8.5pt;
+                }
+                QPushButton:hover {
+                    background-color: #33333d;
+                    color: #ffd700;
+                    border-color: #ffd700;
+                }
+            """)
+            self.btn_horse_filter.setToolTip(
+                "当前状态：【已关闭】点击开启【🏇 特异赛马】去弱留强过滤 (也可直接点击左侧 🏇赛马 统计文字切换)"
+            )
 
     def toggle_filter_state(self):
         """切换策略公式过滤状态并专属独立持久化"""

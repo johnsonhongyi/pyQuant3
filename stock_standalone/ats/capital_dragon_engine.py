@@ -165,12 +165,18 @@ def compute_dragon_buy_type_sort_score(
     is_gap = is_gap_accel or ("缺口加速" in act)
     is_open_low = is_open_low_accel or ("光脚加速" in act)
 
-    if is_dual:
+    if "过热未加速" in act:
+        base = 1500.0
+    elif is_dual:
         base = 90000.0
     elif is_gap:
         base = 70000.0
+    elif "特异加速" in act:
+        base = 62000.0
     elif is_open_low:
         base = 55000.0
+    elif "赛马突然冒头" in act or "赛马先锋" in act:
+        base = 48000.0
     elif any(k in act for k in ("领涨龙头", "主升趋势加速", "主线率先冲关", "启动首板", "锁仓换手")):
         base = 40000.0
     elif any(k in act for k in ("通道支撑企稳", "高位分歧低吸", "顺应主线共振")):
@@ -840,6 +846,22 @@ class CapitalDragonEngine:
         # 按资金强度降序排列，取 Top 5 核心主线
         top_sectors.sort(key=lambda x: x["strength_score"], reverse=True)
 
+        # 3.5 全底层超短特异形态、SBC分时缓存与市场温度周期赛马扫描 (SSOT, <2.5ms)
+        horse_engine = None
+        horse_report = {}
+        try:
+            from ats.ultra_short_anomaly_engine import UltraShortAnomalyEngine
+            horse_engine = UltraShortAnomalyEngine.get_instance()
+            main_sec_names = {ts["name"] for ts in top_sectors[:5] if ts.get("name")}
+            horse_report = horse_engine.analyze_universe(
+                df,
+                mainline_sectors=main_sec_names,
+                sh_pct=sh_pct,
+                now_ts=now,
+            )
+        except Exception as e_horse:
+            logger.debug(f"[CapitalDragonEngine] UltraShortAnomalyEngine error: {e_horse}")
+
         # 4. 全市场龙头多维角色精准画像 (True Dragon Hierarchy)
         dragon_records = []
         dragon_codes_set = set()
@@ -906,13 +928,20 @@ class CapitalDragonEngine:
             is_channel_down = (dff2 < -5.0 and dff3 < -5.0 and ma20_val > 0 and price_val < ma20_val * 0.95)
 
             is_idx = is_major_index(code_str, name_str) or is_index_or_fund(code_str, name_str) or final_sec == "综合指数/ETF"
+            horse_item = horse_engine.get_stock_item(code_str) if (horse_engine and not is_idx) else None
+            is_horse_emerging = bool(
+                horse_item
+                and horse_item.horse_state in ("KEEP_STRONG_ACCEL", "HORSE_SURGE_EMERGE")
+                and (horse_item.base_pattern != "NONE" or horse_item.is_focus_pool)
+                and horse_item.total_score >= 58.0
+            )
 
-            # ── 💡 铁壁拦截：孤狼脉冲与破位诱多 (核心指数免受个股拦截) ──
-            if not is_idx and is_channel_down and not matched_main_sec and not is_limit_up:
+            # ── 💡 铁壁拦截：孤狼脉冲与破位诱多 (核心指数与阶段底特异赛马标的免受误杀) ──
+            if not is_idx and is_channel_down and not matched_main_sec and not is_limit_up and not is_horse_emerging:
                 trap_codes_set.add(code_str)
                 continue  # 破位诱多，彻底剔除
 
-            if not is_idx and amt_yi < 0.8 and not is_limit_up and (not matched_main_sec or pct_val < 3.0):
+            if not is_idx and amt_yi < 0.8 and not is_limit_up and not is_horse_emerging and (not matched_main_sec or pct_val < 3.0):
                 # 成交额不足 8000 万且无板块无涨停的边缘杂毛
                 trap_codes_set.add(code_str)
                 continue
@@ -992,6 +1021,17 @@ class CapitalDragonEngine:
                 action_tip = "跟随核心主线放量上攻，注意高抛低吸"
                 reason = f"所属【{matched_main_sec}】主流赛道放量走强 (成交{amt_yi:.1f}亿, 涨幅+{pct_val:.1f}%)"
 
+            # 6. 【🏇 特异赛马先锋】：连续杀跌小级别企稳异动后，今日高开/破反转线突然冒头的特异潜力股
+            elif is_horse_emerging and pct_val >= 1.8:
+                dragon_role = "🏇 特异赛马先锋"
+                role_priority = 88 if horse_item.horse_state == "KEEP_STRONG_ACCEL" else 82
+                yh_ref = horse_item.yesterday_high if horse_item.yesterday_high > 0 else round(price_val * 0.985, 2)
+                buy_zone = f"{round(min(yh_ref, price_val), 2)} ~ {price_val:.2f}"
+                stop_loss = round(horse_item.support_price * 0.98, 2) if horse_item.support_price > 0 else round(price_val * 0.96, 2)
+                base_action = horse_item.horse_label
+                action_tip = f"[{horse_item.action_advice}] 连续杀跌小级别企稳+今日破反转线赛马冒头，去弱留强"
+                reason = horse_item.reason
+
             if is_idx and not dragon_role:
                 dragon_role = "🛡️ 趋势容量中军"
                 role_priority = 98
@@ -1007,6 +1047,18 @@ class CapitalDragonEngine:
             if dragon_role:
                 dragon_codes_set.add(code_str)
                 vr_val = float(vol_ratio_s.loc[idx]) if idx in vol_ratio_s.index else 1.0
+
+                # 结合超短特异赛马与市场温度周期去弱留强状态增强
+                if horse_item:
+                    if horse_item.horse_state == "OVERHEAT_CULL_EXIT":
+                        base_action = f"⚠️过热未加速·{base_action}"
+                        role_priority = max(12, role_priority - 35)
+                        action_tip = f"[{horse_item.action_advice}] 冷跟单在高温期未加速，严防退潮补跌"
+                        reason = f"【⚠️过热未加速·去弱出局】{horse_item.reason} | {reason}"
+                    elif horse_item.horse_state in ("KEEP_STRONG_ACCEL", "HORSE_SURGE_EMERGE") and dragon_role != "🏇 特异赛马先锋":
+                        if horse_item.base_pattern != "NONE":
+                            role_priority += 6
+                            reason = f"【{horse_item.horse_label}·{horse_item.base_label}】{reason}"
 
                 # 结合分时结构形态加速能力融合买点类型 (对齐龙头突击与天梯: 👑双加速·👑 领涨龙头 / 🚀缺口加速·👑 领涨龙头 等)
                 if accel_tag:
@@ -1080,6 +1132,9 @@ class CapitalDragonEngine:
                     "is_open_low_accel": is_open_low_accel,
                     "is_top35_amt": (code_str in top_35_amt_codes),
                     "is_index": is_idx,
+                    "horse_state": horse_item.horse_state if horse_item else "NORMAL",
+                    "horse_label": horse_item.horse_label if horse_item else "",
+                    "horse_score": round(horse_item.total_score, 1) if horse_item else 0.0,
                     "extra_cols": extra_dict
                 }
                 for ec, val in extra_dict.items():
@@ -1162,7 +1217,13 @@ class CapitalDragonEngine:
             "dual_accel_count": sum(1 for r in dragon_records_converged if "双加速" in r.get("accel_tag", "")),
             "gap_accel_count": sum(1 for r in dragon_records_converged if "缺口加速" in r.get("accel_tag", "")),
             "open_low_count": sum(1 for r in dragon_records_converged if "光脚加速" in r.get("accel_tag", "")),
-            "accel_total_count": sum(1 for r in dragon_records_converged if r.get("accel_tag"))
+            "accel_total_count": sum(1 for r in dragon_records_converged if r.get("accel_tag")),
+            "horse_race_summary": horse_report,
+            "horse_pioneer_count": sum(1 for r in dragon_records_converged if "赛马" in r.get("role", "") or r.get("horse_state") in ("KEEP_STRONG_ACCEL", "HORSE_SURGE_EMERGE")),
+            "overheat_cull_count": int(horse_report.get("overheat_cull_count", 0)) if horse_report else 0,
+            "market_temp": float(horse_report.get("market_temp", 50.0)) if horse_report else 50.0,
+            "temp_regime_label": str(horse_report.get("temp_regime_label", "")) if horse_report else "",
+            "temp_trend_summary": str(horse_report.get("temp_trend_summary", "")) if horse_report else ""
         }
 
         with self._cache_lock:
