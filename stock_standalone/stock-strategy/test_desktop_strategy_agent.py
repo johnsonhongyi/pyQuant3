@@ -9,12 +9,47 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from desktop_strategy_agent import DesktopPeer,ats_evidence,research_schema
 from follow_ai import RESPONSE_SCHEMA
 
 
 class DesktopAgentTests(unittest.TestCase):
+    def test_strategy_usage_is_recorded_and_budget_interrupts_without_model_call(self):
+        from desktop_strategy_agent import AppServer
+        from follow_ai import digest
+        context={'stocks':[], 'trade_date':'2026-10-20'}
+        proposal={'market_view':'fixture','rotation_view':'fixture','answer':'fixture','plans':[]}
+        for budget, expected_error in ((1000, True),(2000, False)):
+            app=AppServer.__new__(AppServer);app.tool_audit=[]
+            calls=[]
+            def request(method, arguments, **kwargs):
+                calls.append(method)
+                if method=='thread/start': return {'thread':{'id':'thread'},'model':'gpt-6-luna','reasoningEffort':'low'}
+                if method=='turn/start': return {'turn':{'id':'turn'}}
+                return {}
+            app.request=request
+            events=iter([
+                {'method':'thread/tokenUsage/updated','params':{'threadId':'thread','tokenUsage':{'last':{'totalTokens':1200,'inputTokens':1100,'outputTokens':100}}}},
+                {'method':'item/completed','params':{'threadId':'thread','item':{'type':'agentMessage','text':json.dumps(proposal)}}},
+                {'method':'turn/completed','params':{'threadId':'thread','turn':{'id':'turn','status':'completed'}}},
+            ])
+            app.event=lambda timeout: next(events)
+            job={'id':'fixture','context':context,'evidence_hash':digest(context),'token_budget':budget}
+            with patch.object(app,'readonly_overrides',return_value={}), \
+                 patch('muse_research_threads.ensure_project',return_value='project'), \
+                 patch('muse_research_threads.thread_title',return_value='fixture'), \
+                 patch('muse_research_threads.research_prompt',return_value='fixture'), \
+                 patch('muse_research_threads.publish_summary'):
+                if expected_error:
+                    with self.assertRaisesRegex(ValueError,'CLI_TOKEN_BUDGET_EXCEEDED'):
+                        app.analyze(job,model='gpt-6-luna',effort='low')
+                    self.assertIn('turn/interrupt',calls)
+                else:
+                    result=app.analyze(job,model='gpt-6-luna',effort='low')
+                    self.assertEqual(result['token_usage']['totalTokens'],1200)
+
     def test_per_job_schema_restricts_exact_symbols_without_mutating_global(self):
         first=research_schema({'stocks':[{'symbol':'002343.SZ','name':'慈文传媒'}]})
         second=research_schema({'stocks':[{'symbol':'603533.SH'}]})

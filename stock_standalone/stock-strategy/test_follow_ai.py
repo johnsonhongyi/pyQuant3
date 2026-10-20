@@ -16,6 +16,11 @@ class AIFollowTests(unittest.TestCase):
         ai.init_ai(self.db)
         self.state = af.initial()
         self.state["ai_settings"] = {**ai.DEFAULT_AI, "enabled": True, "node_id": "desktop-test", "workspace_id": "workspace-test"}
+        self.db.executescript('CREATE TABLE automatic_research_policy(id INTEGER PRIMARY KEY,body TEXT); CREATE TABLE desktop_chat_config(id INTEGER PRIMARY KEY,body TEXT);')
+        from auto_research_policy import DEFAULT
+        self.db.execute('INSERT INTO automatic_research_policy VALUES(1,?)', (json.dumps({**DEFAULT, 'enabled': True}),))
+        self.db.execute('INSERT INTO desktop_chat_config VALUES(1,?)', (json.dumps({'provider':'codex_desktop','node_id':'desktop-test','workspace_id':'workspace-test','model':'gpt-6-luna','reasoning_effort':'low'}),))
+        self.db.execute('INSERT INTO ai_desktop VALUES(?,?,?,?,?)', ('desktop-test','workspace-test',NOW.isoformat(),'ready',json.dumps({'capabilities':['strategy_research'],'models':[{'id':'gpt-6-luna','efforts':['low']}]})))
         self.state["candidates"] = [{"symbol": "600001.SH", "name": "synthetic", "route": "theme_trend"}]
         self.context = ai.evidence_context(self.state, NOW)
         self.proposal = {"market_view": "synthetic", "rotation_view": "missing", "answer": "test only",
@@ -28,6 +33,7 @@ class AIFollowTests(unittest.TestCase):
 
     def test_disabled_default_does_not_enqueue(self):
         self.state.pop("ai_settings")
+        self.db.execute('DELETE FROM automatic_research_policy')
         self.assertIsNone(ai.enqueue(self.db, self.state, NOW))
 
     def test_bridge_settings_preserve_cadence_and_frozen_jobs(self):
@@ -93,19 +99,19 @@ class AIFollowTests(unittest.TestCase):
         ai.sync_ai(self.db, self.state, NOW)
         self.assertNotIn("ai_latest", self.state)
         self.assertEqual(self.state["ai"]["jobs"][0]["status"], "invalid_result")
+        self.state.pop('ai_last_requested_at', None)
         another = ai.enqueue(self.db, self.state, NOW, question="synthetic", force=True)
         ai.sync_ai(self.db, self.state, NOW + timedelta(minutes=11))
         self.assertEqual(self.db.execute("SELECT status FROM ai_jobs WHERE id=?", (another,)).fetchone()[0], "expired")
 
-    def test_execution_automatically_enqueues_one_review_without_interval_delay(self):
+    def test_execution_review_cannot_bypass_configured_interval(self):
         self.state['ai_last_requested_at'] = NOW.isoformat()
         self.state['closed'] = [{'symbol':'600001.SH','pnl':10}]
         ai.schedule_workflow(self.db,self.state,NOW,Calendar)
         rows=self.db.execute('SELECT context FROM ai_jobs').fetchall()
-        self.assertEqual(len(rows),1)
-        self.assertEqual(json.loads(rows[0][0])['workflow_stage'],'execution_review')
+        self.assertEqual(len(rows),0)
         ai.schedule_workflow(self.db,self.state,NOW+timedelta(seconds=60),Calendar)
-        self.assertEqual(self.db.execute('SELECT COUNT(*) FROM ai_jobs').fetchone()[0],1)
+        self.assertEqual(self.db.execute('SELECT COUNT(*) FROM ai_jobs').fetchone()[0],0)
 
     def test_completed_review_never_overwrites_entry_admission(self):
         self.state['ai_latest']={'id':'entry-job','created_at':NOW.isoformat()}
@@ -122,7 +128,7 @@ class AIFollowTests(unittest.TestCase):
         self.assertEqual(self.state['ai']['jobs'][0]['status'],'invalid_result')
 
     def test_valid_entry_waiting_for_ai_triggers_one_fresh_research_job(self):
-        self.state['ai_last_requested_at']=(NOW-timedelta(minutes=5)).isoformat()
+        self.state['ai_last_requested_at']=(NOW-timedelta(minutes=16)).isoformat()
         self.state['events']=[{'at':NOW.isoformat(),'action':'AI_DECISION','decision':{'reason':'AI proposal missing or expired'}}]
         ai.schedule_workflow(self.db,self.state,NOW,Calendar)
         row=self.db.execute('SELECT context FROM ai_jobs').fetchone()
