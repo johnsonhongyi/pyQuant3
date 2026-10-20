@@ -9064,13 +9064,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             ("Vis", self.vis_var)
         ]
         
-        # 💥 修正：使用 ttk.Checkbutton 替代 tk.Checkbutton
+        # 💥 修正：使用 ttk.Checkbutton 替代 tk.Checkbutton；Vis 单独走 _on_vis_toggle 确保手动切换可靠触发即时推送
         for text, var in checkbuttons_info:
+            cb_cmd = self._on_vis_toggle if text == "Vis" else self.update_linkage_status
             cb = ttk.Checkbutton(
                 frame_right, 
                 text=text, 
                 variable=var, 
-                command=self.update_linkage_status,
+                command=cb_cmd,
             )
             self.right_control_widgets[text] = cb
 
@@ -10753,7 +10754,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                             # 差分或全量只要未物理发送，下一次必须先重建该端口的全量基线。
                                             setattr(self, f'_force_sync_{port}', True)
                                             setattr(self, f'_force_sync_blocked_{port}', False)
-                                        elif has_daily_update and not is_work_time:
+                                        elif has_daily_update and not is_work_time and not is_forced_port:
                                             deferred_port_sync.add(port)
 
                                 # ⚡ [IPC 动态临时端口] 单次拉取
@@ -11067,10 +11068,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def _on_vis_toggle(self):
         """Only a user Vis checkbox action requests one extra IPC refresh."""
+        curr_vis = self.vis_var.get() if getattr(self, 'vis_var', None) else getattr(self, '_vis_enabled_cache', True)
+        if curr_vis:
+            logger.info("[send_df] User manually ENABLED visualization -> schedule FULL SYNC")
+        else:
+            logger.info("[send_df] User manually DISABLED visualization -> schedule FULL SYNC")
         # A manual choice overrides any pending temporary resample restoration.
         self.last_vis_var_status = None
         request_immediate_ipc_sync(self)
         self.update_linkage_status()
+        if hasattr(self, 'save_ui_states'):
+            self.save_ui_states()
 
     def update_linkage_status(self):
         global tip_var_status_flag

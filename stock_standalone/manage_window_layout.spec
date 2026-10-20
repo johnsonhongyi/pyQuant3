@@ -29,6 +29,7 @@ a = Analysis(
         'webTools.window_manager.agent_hub_ui',
         'webTools.window_manager.codex_bridge_manager',
         'webTools.window_manager.antigravity_bridge_manager',
+        'webTools.window_manager.manager_crash_diagnostics',
         'run_desktop_strategy_bridge',
         'run_desktop_antigravity_bridge',
         'desktop_bridge_thread_output',

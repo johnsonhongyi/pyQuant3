@@ -186,3 +186,40 @@ def test_async_subscription_send_failure_is_logged_and_busy_state_is_released(mo
     assert not threads[0].is_alive() and not obj._pipe_sync_busy
     assert commands[0]["subscribe"] and commands[0]["port"]==26670
     logs.warning.assert_called_once()
+
+
+def test_main_window_vis_checkbutton_binds_to_on_vis_toggle():
+    tree = ast.parse(Path("instock_MonitorTK.py").read_text(encoding="utf-8"))
+    matches = [
+        ast.unparse(n) for n in ast.walk(tree)
+        if isinstance(n, ast.Assign) and "cb_cmd" in ast.unparse(n.targets) and "_on_vis_toggle" in ast.unparse(n.value)
+    ]
+    assert len(matches) >= 1, "Vis checkbutton must bind cb_cmd with _on_vis_toggle in main window"
+    assert "text == 'Vis'" in matches[0] or 'text == "Vis"' in matches[0]
+
+
+def test_request_immediate_ipc_sync_resets_backoff_and_clears_deferred_set():
+    obj = owner()
+    obj._deferred_port_sync = {26670, 26671}
+    obj._last_full_try_26670 = 123456.78
+    request_immediate_ipc_sync(obj)
+    assert obj._force_full_sync_pending is True
+    assert obj._force_sync_26670 is True
+    assert obj._force_sync_blocked_26670 is False
+    assert obj._last_full_try_26670 == 0.0
+    assert 26670 not in obj._deferred_port_sync
+    # Unsubscribed port 26671 remains in deferred set
+    assert 26671 in obj._deferred_port_sync
+
+
+def test_send_df_after_hours_forced_port_not_pushed_to_deferred_sync():
+    tree = ast.parse(Path("instock_MonitorTK.py").read_text(encoding="utf-8"))
+    # Verify the direct elif branch guarding deferred_port_sync includes not is_forced_port
+    direct_guards = []
+    for n in ast.walk(tree):
+        if isinstance(n, ast.If):
+            for stmt in n.body:
+                if isinstance(stmt, ast.Expr) and "deferred_port_sync.add(port)" in ast.unparse(stmt):
+                    direct_guards.append(ast.unparse(n.test))
+    assert len(direct_guards) >= 1
+    assert "not is_forced_port" in direct_guards[0]

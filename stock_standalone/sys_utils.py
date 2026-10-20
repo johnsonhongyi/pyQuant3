@@ -2,6 +2,7 @@
 import os
 import sys
 import json
+import time
 import configparser
 import threading
 from typing import Optional, Any, Dict, List
@@ -44,12 +45,25 @@ def setup_qt_clean_environment():
         def _qt_clean_message_handler(mode, context, message):
             if any(k in message for k in ("DirectWrite", "CreateFontFaceFromHDC", "QFontDef", "Fixedsys", "Terminal")):
                 return
-            if mode == QtMsgType.QtWarningMsg:
-                sys.stderr.write(f"[Qt Warning] {message}\n")
-            elif mode == QtMsgType.QtCriticalMsg:
-                sys.stderr.write(f"[Qt Critical] {message}\n")
-            elif mode == QtMsgType.QtFatalMsg:
-                sys.stderr.write(f"[Qt Fatal] {message}\n")
+            tag = "[Qt Warning]" if mode == QtMsgType.QtWarningMsg else (
+                "[Qt Critical]" if mode == QtMsgType.QtCriticalMsg else (
+                    "[Qt Fatal]" if mode == QtMsgType.QtFatalMsg else None
+                )
+            )
+            if not tag:
+                return
+            line = f"{tag} {message}\n"
+            if mode in (QtMsgType.QtCriticalMsg, QtMsgType.QtFatalMsg):
+                try:
+                    with open("crash.log", "a", encoding="utf-8", errors="replace") as f:
+                        f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {line}")
+                except Exception:
+                    pass
+            if sys.stderr and hasattr(sys.stderr, "write"):
+                try:
+                    sys.stderr.write(line)
+                except Exception:
+                    pass
 
         qInstallMessageHandler(_qt_clean_message_handler)
     except Exception:

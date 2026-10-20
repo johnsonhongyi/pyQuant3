@@ -192,28 +192,13 @@ class WindowMixin:
 
 
 import logging
+from . import core
+from .manager_crash_diagnostics import setup_manager_logger, ManagerDiagnostics
 
-# 初始化标准日志记录器
-logger = logging.getLogger("WindowManager")
-if not logger.handlers:
-    logger.setLevel(logging.INFO)
-    
-    # 控制台 Handler
-    console_handler = logging.StreamHandler(sys.stdout)
-    formatter = logging.Formatter('[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)d): %(message)s', datefmt='%m-%d %H:%M:%S')
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-    
-    # 文件 Handler (写入当前目录下的 window_layout.log)
-    try:
-        from . import core
-        log_dir = core.get_app_root()
-        log_file = os.path.join(log_dir, "window_layout.log")
-        file_handler = logging.FileHandler(log_file, encoding='utf-8')
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-    except Exception as e:
-        print(f"[WARN] Failed to setup file handler for window_layout.log: {e}", file=sys.stderr)
+# 初始化带轮转 (10MB x 5 backups) 与原生崩溃诊断的安全日志记录器
+_app_root = core.get_app_root()
+ManagerDiagnostics.get_instance(_app_root).install()
+logger = setup_manager_logger(_app_root)
 
 
 
@@ -4233,6 +4218,11 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         except Exception:
             pass
         try:
+            from .manager_crash_diagnostics import ManagerDiagnostics
+            ManagerDiagnostics.get_instance().record_lifecycle("UI_FORCE_QUIT", {"trigger": "force_quit"})
+        except Exception:
+            pass
+        try:
             QApplication.instance().quit()
         except Exception:
             pass
@@ -4273,6 +4263,11 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 if hasattr(self, '_ag_sync_worker') and self._ag_sync_worker:
                     self._ag_sync_worker.stop()
             except:
+                pass
+            try:
+                from .manager_crash_diagnostics import ManagerDiagnostics
+                ManagerDiagnostics.get_instance().record_lifecycle("UI_CLOSE_EVENT", {"trigger": "closeEvent"})
+            except Exception:
                 pass
             event.accept()
 
@@ -5329,7 +5324,14 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             QMessageBox.warning(self, "开机自启注册表设置失败", msg)
 
     def log(self, text: str):
-        """输出一条日志"""
+        """输出一条日志 (包含跨线程安全自动路由)"""
+        # 🛡️ 跨线程安全保护：如果当前调用不在 Qt GUI 主线程，自动转为 log_signal 信号由主线程排队执行，彻底根治非主线程操作 QWidget 导致的 Access Violation 闪退
+        app = QApplication.instance()
+        if app and QtCore.QThread.currentThread() != app.thread():
+            if hasattr(self, "log_signal"):
+                self.log_signal.emit(text)
+            return
+
         self.log_output.append(f"[{QtCore.QTime.currentTime().toString('hh:mm:ss')}] {text}")
         try:
             scrollbar = self.log_output.verticalScrollBar()
@@ -8062,6 +8064,14 @@ def main(hide_window: bool = False):
         except Exception as exc:
             logger.error("Manager exit Antigravity bridge cleanup failed: %s", type(exc).__name__)
 
+    def _audit_manager_about_to_quit():
+        try:
+            from .manager_crash_diagnostics import ManagerDiagnostics
+            ManagerDiagnostics.get_instance().record_lifecycle("ABOUT_TO_QUIT", {"trigger": "QApplication.aboutToQuit"})
+        except Exception:
+            pass
+
+    app.aboutToQuit.connect(_audit_manager_about_to_quit)
     app.aboutToQuit.connect(shutdown_codex_bridge_with_manager)
     app.aboutToQuit.connect(shutdown_antigravity_bridge_with_manager)
     app.setStyle('Fusion')
@@ -8212,7 +8222,13 @@ def main(hide_window: bool = False):
     else:
         window._force_show_and_top()
         
-    sys.exit(app.exec())
+    exit_code = app.exec()
+    try:
+        from .manager_crash_diagnostics import ManagerDiagnostics
+        ManagerDiagnostics.get_instance().shutdown(exit_source="APP_EXEC_RETURN", exit_code=exit_code)
+    except Exception:
+        pass
+    sys.exit(exit_code)
 
 if __name__ == "__main__":
     main()
