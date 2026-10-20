@@ -1,5 +1,13 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-20 18:05 【Vis手动触发推送与盘后全量同步闭环修复】(`docs/tasks/2026-10-20_1805_Vis手动触发推送与盘后全量同步闭环修复.md`, `instock_MonitorTK.py`, `tk_frame_fingerprint.py`, `tests/test_ipc_subscription_recovery.py`)
+- [x] 修复主界面工具栏（`frame_right`）Vis Checkbutton 遗漏绑定 `_on_vis_toggle` 的问题，确保无论手动打开还是手动关闭 Vis 均可靠触发即时推送；
+- [x] 增强 `_on_vis_toggle` 用户操作日志记录与 UI 状态持久化（`save_ui_states`）；
+- [x] 加固 `request_immediate_ipc_sync` 显式语义：重置端口全量退避时间戳 `_last_full_try_{port} = 0.0`，并从 `_deferred_port_sync` 延迟集合中清除该端口，消灭 10s 时间窗抑制；
+- [x] 修复 `send_df` 中盘后未发送端口误入 `deferred_port_sync` 的逻辑漏洞（补充 `and not is_forced_port`），确保盘后显式推送端到端闭环；
+- [x] 编写专项单元测试验证 UI 绑定、盘后无版本变动显式放行与连续操作退避重置，39项回归套件全绿通过。
+
+
 ## 2026-10-20 17:45 【AGY会话模型路由自适应、Argon旗舰定价精算与分行排版优化】(`docs/tasks/2026-10-20_1745_AGY会话模型路由自适应与分行排版优化.md`, `tools/codex_token_stats.py`)
 - [x] **【客户端请求模型底层 Protobuf 深度还原】**：逆向提取 `conversations/*.db` 中 `gen_metadata` 二进制子字段 20（Subfield 20），建立 `AGY_ENUM_TO_REQ_MODEL` 权威映射表，彻底解决请求模型始终显示为默认 Flash 的痛点，精确呈现真实的单模型选择与会话中途模型切换；
 - [x] **【Gemini 4 Argon 旗舰定价补齐与费用精算纠偏】**：补充 `gemini-4-argon` / `gemini-4-argon-trial` 定价条目，优化模糊匹配优先级，修复原先误按 Flash 计算导致的近 80% 费用低估，精准纠偏为真实消费；

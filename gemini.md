@@ -1,5 +1,21 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](stock_standalone/design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-20 18:05 【Vis手动触发推送与盘后全量同步闭环修复】(`stock_standalone/docs/tasks/2026-10-20_1805_Vis手动触发推送与盘后全量同步闭环修复.md`, `stock_standalone/instock_MonitorTK.py`, `stock_standalone/tk_frame_fingerprint.py`, `stock_standalone/tests/test_ipc_subscription_recovery.py`)
+- [x] 修复主界面工具栏（`frame_right`）Vis Checkbutton 遗漏绑定 `_on_vis_toggle` 的问题，确保无论手动打开还是手动关闭 Vis 均可靠触发即时推送；
+- [x] 增强 `_on_vis_toggle` 用户操作日志记录与 UI 状态持久化（`save_ui_states`）；
+- [x] 加固 `request_immediate_ipc_sync` 显式语义：重置端口全量退避时间戳 `_last_full_try_{port} = 0.0`，并从 `_deferred_port_sync` 延迟集合中清除该端口，消灭 10s 时间窗抑制；
+- [x] 修复 `send_df` 中盘后未发送端口误入 `deferred_port_sync` 的逻辑漏洞（补充 `and not is_forced_port`），确保盘后显式推送端到端闭环；
+- [x] 编写专项单元测试验证 UI 绑定、盘后无版本变动显式放行与连续操作退避重置，39项回归套件全绿通过。
+
+
+## 2026-10-20 17:25 【生产管理器崩溃诊断加固与闪退隐患根除闭环】(`stock_standalone/docs/tasks/2026-10-20_1725_生产管理器闪退修复与全生命周期崩溃诊断加固.md`, `stock_standalone/webTools/window_manager/manager_crash_diagnostics.py`, `stock_standalone/webTools/manage_window_layout.py`, `stock_standalone/webTools/window_manager/ui.py`, `stock_standalone/sys_utils.py`, `stock_standalone/tests/test_manager_crash_diagnostics.py`)
+- [x] Qt 消息处理器安全检查 stderr，并将 Critical/Fatal 写入 `crash.log` 与主日志，根治 `sys.stderr is None` 引发的 AttributeError 闪退；
+- [x] 接入主/子线程异常钩子（`sys.excepthook` / `threading.excepthook`）、`faulthandler` 原生崩溃堆栈落盘和启动/退出全生命周期审计记录；
+- [x] 主日志升级为 `RotatingFileHandler`（10MB x 5 backups）；加固 `ui.log` 跨线程安全自动转为 Qt 信号；消除 RamDisk 下 `Path.resolve()` 的 OSError 隐患与 Emoji/GBK 编码风险；
+- [x] 定向专项测试 7 项全绿通过，关联套件 14 项全绿通过；
+- [x] 成功重新编译单文件 EXE，按标准规范安全备份原文件并热替换生产环境 `D:\JohnsonProgram\instockMonitorTK\manage_window_layout.exe`，自检验证 100% 正常。
+
+
 ## 2026-10-18 23:39 【AGV进度回调修复与发布后现场状态】
 - `CLI_OUTPUT_CALLBACK_FAILED` 根因是模型初始化前进度回执携带非 UUID 的临时会话 ID，被后端拒绝；源码已改为收到并校验 AGY `conversation_id` 后才附带会话 ID，并保留底层回调错误，相关离线回归通过。
 - Web/API 发布号 `20261018232904`，部署健康门禁通过；线上 API health、Web 首页、主入口和个股分析 bundle 均 HTTP 200。资源包含账号管理入口与两桥 provider 标识；回滚命令见 `stock_standalone/stock-strategy/ENVIRONMENT_HANDOFF.md`。

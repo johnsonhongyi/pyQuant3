@@ -67,6 +67,21 @@ def get_app_root() -> str:
 
     return calculated_root
 
+_startup_app_root = get_app_root()
+_is_desktop_bridge_worker = (
+    os.environ.get('PYQUANT3_CODEX_BRIDGE_WORKER') == '1'
+    or os.environ.get('PYQUANT3_ANTIGRAVITY_BRIDGE_WORKER') == '1'
+    or '--codex-bridge-worker' in sys.argv[1:]
+    or '--antigravity-bridge-worker' in sys.argv[1:]
+)
+if not _is_desktop_bridge_worker:
+    try:
+        from window_manager.manager_crash_diagnostics import ManagerDiagnostics
+        ManagerDiagnostics.get_instance(_startup_app_root).install()
+    except Exception:
+        pass
+
+
 
 def attach_to_parent_console() -> bool:
     """
@@ -411,3 +426,8 @@ if __name__ == '__main__':
         else:
             print(f"[Tips] 提示: 方案 '{rec_name}' 暂无任何窗口移动规则。")
             print("如需添加新窗口或录入屏幕，请直接双击运行本程序（或不在命令行加任何参数）。\n")
+        try:
+            from window_manager.manager_crash_diagnostics import ManagerDiagnostics
+            ManagerDiagnostics.get_instance().shutdown(exit_source="CLI_COMPLETE", exit_code=0 if success else 1)
+        except Exception:
+            pass

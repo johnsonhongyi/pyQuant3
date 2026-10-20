@@ -85,7 +85,10 @@ class AntigravityCatalog:
             return bool(self.models and self.engine)
         path = self.cli_override or resolve_cli_path("", "agy")
         if path and Path(path).is_file():
-            engine = str(Path(path).resolve())
+            try:
+                engine = str(Path(path).resolve())
+            except OSError:
+                engine = str(Path(path).absolute())
             if engine != self.engine:
                 self.models = []
                 self.fetched_at = 0.0

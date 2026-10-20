@@ -79,6 +79,7 @@ data/ipo_learning/shadow_observations.sqlite
 !tests/test_system_linkage_quotes.py
 !tests/test_system_linkage_gateway.py
 !tests/test_system_linkage_context.py
+!tests/test_manager_crash_diagnostics.py
 /system_linkage.key
 /system_linkage.sqlite3
 # The nested stock-strategy checkout owns its own Git history.

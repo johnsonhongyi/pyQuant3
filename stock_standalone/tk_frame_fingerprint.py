@@ -57,11 +57,15 @@ def request_immediate_ipc_sync(owner):
     """One-shot refresh; subscriber ownership and market baselines remain unchanged."""
     with getattr(owner, '_ipc_sync_state_lock', nullcontext()):
         owner._force_full_sync_pending = True
+        deferred = getattr(owner, '_deferred_port_sync', None)
         for port, info in list(getattr(owner, '_stream_subscribers', {}).items()):
             if info.get('subscribed', False):
                 setattr(owner, f'_force_sync_{port}', True)
                 setattr(owner, f'_force_sync_blocked_{port}', False)
                 setattr(owner, f'_awaiting_full_ack_{port}', None)
+                setattr(owner, f'_last_full_try_{port}', 0.0)
+                if isinstance(deferred, set):
+                    deferred.discard(port)
         event = getattr(owner, '_send_df_wake_event', None)
         if event is not None:
             event.set()
