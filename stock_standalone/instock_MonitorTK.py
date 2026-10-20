@@ -39,6 +39,7 @@ pd.set_option('display.float_format', '{:.2f}'.format)
 from tk_frame_fingerprint import (
     frame_fingerprint, same_fingerprint, needs_full_for_null_or_rows, full_ack_matches,
     is_new_trade_snapshot, has_sync_consumer, content_requires_send, send_content_fingerprint,
+    recover_blocked_sync_ports, request_immediate_ipc_sync,
 )
 import numpy as np
 import win32api
@@ -10131,6 +10132,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     next_linkage_quote_send = now_linkage + 10.0
                 vis_enabled = getattr(self, '_vis_enabled_cache', True)
                 is_work_time_now = cct.get_work_time()
+                for recovered_port in recover_blocked_sync_ports(self, time.time(), is_work_time_now):
+                    logger.warning('[IPC恢复] Port=%s 全量确认/连接等待已超时，重新发送最新全量基线（独立于Vis）', recovered_port)
                 deferred_port_sync = getattr(self, '_deferred_port_sync', None)
                 if not isinstance(deferred_port_sync, set):
                     deferred_port_sync = set()
@@ -10565,7 +10568,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     }
 
                     # ======================================================
-                    if self.viz_conn is not None and self.qt_process is not None and self.qt_process.is_alive() and not sent:
+                    if vis_enabled and self.viz_conn is not None and self.qt_process is not None and self.qt_process.is_alive() and not sent:
                         pipe_send_start = time.perf_counter()
                         try:
                             # ⭐ [STABILITY] Pipe 发送前检查，防止缓冲区满导致此线程永久阻塞
@@ -11097,24 +11100,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if (last_vis is True) and (curr_vis is False):
             logger.debug("[send_df] User manually DISABLED visualization")
 
-            # 清空上一帧缓存，避免下次误走 diff
-            if hasattr(self, 'df_ui_prev'):
-                del self.df_ui_prev
+            # 额外推送一次；订阅归属、共享基线及版本不受Vis控制。
+            request_immediate_ipc_sync(self)
 
-            self._df_first_send_done = False
-            self._last_send_df_hash = None
-            self.sync_version = 0
-            self._force_full_sync_pending = False
-            
         # ---------- 用户手动重新开启可视化 ----------
         elif (last_vis is False) and (curr_vis is True):
             logger.info("[send_df] User manually ENABLED visualization -> schedule FULL SYNC")
-
-            self._force_full_sync_pending = True
-
-            # 立即唤醒 send_df 线程
-            if hasattr(self, '_send_df_wake_event'):
-                self._send_df_wake_event.set()
+            request_immediate_ipc_sync(self)
 
         # 更新状态快照
         self.last_vis_var_status = curr_vis
