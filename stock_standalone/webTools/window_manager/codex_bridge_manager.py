@@ -1100,9 +1100,19 @@ class BridgeController:
             if progress_callback:
                 progress_callback("已发出停止请求，等待当前任务完成…")
             deadline = time.monotonic() + max(1.0, float(timeout))
+            # 优雅停止宽限期：超时后强杀卡死的桥接进程树，避免重启永久等待
+            grace_deadline = time.monotonic() + min(20.0, max(1.0, float(timeout)))
+            forced = False
             while self._restart_owner_alive(active_mode):
-                if time.monotonic() >= deadline:
+                now = time.monotonic()
+                if now >= deadline:
                     raise RuntimeError("Codex 桌面桥仍在执行任务或退出中，未启动第二个实例；请等待后重试。")
+                if active_mode == "process" and not forced and now >= grace_deadline:
+                    forced = True
+                    if progress_callback:
+                        progress_callback("旧桥未响应停止请求，正在强制终止…")
+                    self._force_kill_bridge()
+                    deadline = min(deadline, time.monotonic() + 15.0)
                 time.sleep(0.25)
             # Let the bridge release its runtime lock before starting a replacement.
             time.sleep(0.35)
@@ -1253,6 +1263,11 @@ class BridgeController:
         return "已随管理器启动 Codex 桌面桥"
 
 
+    def _force_kill_bridge(self) -> None:
+        from .bridge_force_stop import collect_bridge_pids, force_kill_pids
+        status = _read_json(self.runtime_path() / "status.json")
+        force_kill_pids(collect_bridge_pids(self.runtime_path(), status))
+
     def shutdown_for_manager_exit(self) -> None:
         """Request a graceful bridge stop when configured (thread mode is tied to this process)."""
         task = self.task_info()
@@ -1268,6 +1283,11 @@ class BridgeController:
         if active_mode == "thread" and owner_pid and owner_pid != os.getpid():
             return
         self._request_bridge_stop("manager-exit")
+        if active_mode != "thread":
+            # 给桥 3 秒优雅退出，仍存活则强杀，避免管理器无法退出
+            from .bridge_force_stop import wait_until
+            if not wait_until(lambda: self._restart_owner_alive("process"), 3.0):
+                self._force_kill_bridge()
 
 
 class _SnapshotWorker(QtCore.QThread):
