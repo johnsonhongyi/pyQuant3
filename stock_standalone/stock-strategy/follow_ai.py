@@ -144,6 +144,11 @@ def sync_ai(db, state, now):
     db.execute("UPDATE ai_jobs SET status='expired' WHERE status IN ('queued','running') AND expires_at<=?", (now.isoformat(),))
     try:
         db.execute("UPDATE automatic_research_runs SET usage_known=1, total_tokens=COALESCE(total_tokens, 0) WHERE usage_known=0 AND job_id IN (SELECT id FROM ai_jobs WHERE status IN ('expired','failed','cancelled','completed'))")
+        db.execute("DELETE FROM ai_jobs WHERE status IN ('expired', 'cancelled') AND id NOT IN (SELECT id FROM ai_jobs WHERE status IN ('expired', 'cancelled') ORDER BY created_at DESC LIMIT 3)")
+        cutoff_7d = (now - timedelta(days=7)).isoformat()
+        db.execute("DELETE FROM ai_jobs WHERE status='completed' AND created_at < ?", (cutoff_7d,))
+        cutoff_30d = (now - timedelta(days=30)).date().isoformat()
+        db.execute("DELETE FROM automatic_research_runs WHERE day < ?", (cutoff_30d,))
     except Exception:
         pass
     policy = state.get("ai_settings", DEFAULT_AI)
