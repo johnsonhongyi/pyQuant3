@@ -1,5 +1,11 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-21 12:15 【双桥重启后自动跟单降级与投研中断根治部署】(`docs/tasks/2026-10-21_1215_双桥重启后自动跟单降级与投研中断根治部署.md`, `stock-strategy/auto_follow.py`, `stock-strategy/auto_research_policy.py`, `stock-strategy/package-auto-follow.py`, `stock-strategy/test_auto_follow.py`, `stock-strategy/test_auto_research_policy.py`)
+- [x] **题材时滞与连板候选解耦（根除“数据异常，已降级”死锁）**：将 `candidates()` 中对 `overview`（开盘啦题材轮动）的强校验升级为优雅降级判断，题材日频跨日或时滞时仅略过题材领涨股，绝不牵连当日真实梯队的 13 只高标连板股，主循环状态立即同步避免时序踩踏；
+- [x] **Go RFC3339Nano 纳秒时间戳兼容性加固**：在 `auto_research_policy.py` 中引入对 Go 9位小数纳秒时间戳的微秒级截断处理，彻底修复 Python 3.9 环境下 `datetime.fromisoformat()` 崩溃导致策略状态永久为 `policy_unavailable` 的问题；
+- [x] **打包工具 RAMDisk 路径解析加固**：在 `package-auto-follow.py` 中对 Windows 内存盘环境下的 `Path.resolve()` 异常增加 `absolute()` 保底；
+- [x] **自动化测试与标准流程部署闭环**：43 项全量 Python 单元测试 100% 纯绿秒级通过；严格遵循操作手册打包并部署发布号 `20261021121356`，远端 SHA256 校验与 37 项 preflight 门禁全绿通过；线上 API 确认 `online: true`、`cycle_status: "outside_session"`（午休等待交易时段）、`desktop_online: true`、`desktop_status: "ready"`，成功恢复当日连板股生成。
+
 ## 2026-10-21 10:25 【SBC异动横幅与集合竞价Alt联动关闭优化】(`docs/tasks/2026-10-21_1025_SBC异动横幅与集合竞价Alt联动关闭优化.md`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_alt_close_linkage.py`)
 - [x] **【严格遵守禁止自行打包铁律】**：遵循用户指示，严禁在开发流程中擅自调用 PyInstaller 编译，所有打包统筹移交既有标准打包工具；
 - [x] **【SBC 顶部异动提醒横幅 Alt 联动关闭与快捷键释放】**：

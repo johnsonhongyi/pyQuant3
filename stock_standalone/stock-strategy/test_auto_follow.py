@@ -160,6 +160,20 @@ class FollowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "today"):
             af.candidates(ladder, overview, NOW, "2026-10-13")
 
+    def test_stale_or_carry_forward_overview_preserves_ladder_candidates(self):
+        ladder_meta = {"source": "test", "stale": False, "fetched_at": NOW.isoformat()}
+        ladder = {"meta": ladder_meta, "current": {"trade_date": "2026-10-14"},
+                  "previous": {"trade_date": "2026-10-13", "levels": [{"stocks": [
+                      {"symbol": "600001.SH", "name": "连板样本", "streak": 2}]}]}}
+        stale_overview = {"meta": {"source": "theme-radar:fusion", "stale": True, "carry_forward": True,
+                                   "trade_date": "2026-10-13", "fetched_at": NOW.isoformat()},
+                          "data": [{"theme": "stale_theme", "change_percent": 5, "rising_nodes": 3, "falling_nodes": 0,
+                                    "leader_stocks": [{"symbol": "000002.SZ", "name": "过期龙头"}]}]}
+        pool = af.candidates(ladder, stale_overview, NOW, "2026-10-13")
+        self.assertEqual(len(pool), 1)
+        self.assertEqual(pool[0]["symbol"], "600001.SH")
+        self.assertEqual(pool[0]["route"], "limit_up")
+
     def test_native_backend_emotion_requires_coverage_and_freshness(self):
         payload = {"data": {"intraday": {"stale": False, "trade_date": "2026-10-14",
                    "updated_at": NOW.isoformat(), "status": "高位震荡", "risk_score": 20,

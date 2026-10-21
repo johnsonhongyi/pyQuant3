@@ -1,3 +1,9 @@
+## 2026-10-21 12:15 自动跟单与投研时滞降级根治部署
+
+- 部署按 `deploy-auto-follow.sh` 规范执行，发布号 `20261021121356`；归档包 SHA256 `9d0c7cb4a53d24a40e0fed14cce366bd3b54b34eece0d23e913a98fa4071c3c1`。远端 Preflight 隔离验收通过，37 项回归测试全绿通过；`stockstrategy-auto-follow.service` 热重载，PID `3027069`，`NRestarts=0`。回滚命令：若需回滚至上一版本 `20261020165513`，执行 `ln -sfn /mnt/4TB/dockerf/stockstrategy/auto-follow/releases/20261020165513 /mnt/4TB/dockerf/stockstrategy/auto-follow/current && systemctl restart stockstrategy-auto-follow.service`。
+- 根因闭环：修复开盘啦日频轮动数据时滞导致 `candidates()` 抛出 `CYCLE_ERROR` 全盘毙掉连板候选的级联死锁漏洞；修复 Python 3.9 解析 Go RFC3339Nano 9位纳秒时间戳导致自动投研策略状态永久为 `policy_unavailable` 的兼容性问题。
+- 部署后只读核验：API `/api/v1/auto-follow` 返回 `online: true`、`cycle_status: "outside_session"`、`desktop_online: true`、`desktop_status: "ready"`；候选股池成功恢复产出当日真实连板股 13 只；告别“数据异常，已降级”，状态随午休正常显示“等待交易时段”。详情见 [任务记录](../docs/tasks/2026-10-21_1215_双桥重启后自动跟单降级与投研中断根治部署.md)。
+
 ## 2026-10-20 17:26 自动投研紧凑设置与记录分页
 
 - 按 `build-and-deploy.ps1 -AllowLayeredImageBuild` 发布 API/Web，版本 `20261020172617`；部署结果 `Deployment healthy`。回滚：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261020172617`。

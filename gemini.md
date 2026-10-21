@@ -1,5 +1,11 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](stock_standalone/design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-21 12:15 【双桥重启后自动跟单降级与投研中断根治部署】(`stock_standalone/docs/tasks/2026-10-21_1215_双桥重启后自动跟单降级与投研中断根治部署.md`, `stock_standalone/stock-strategy/auto_follow.py`, `stock_standalone/stock-strategy/auto_research_policy.py`, `stock_standalone/stock-strategy/package-auto-follow.py`, `stock_standalone/stock-strategy/test_auto_follow.py`, `stock_standalone/stock-strategy/test_auto_research_policy.py`)
+- [x] **题材时滞与连板候选解耦（根除“数据异常，已降级”死锁）**：将 `candidates()` 中对 `overview`（开盘啦题材轮动）的强校验升级为优雅降级判断，题材日频跨日或时滞时仅略过题材领涨股，绝不牵连当日真实梯队的 13 只高标连板股，主循环状态立即同步避免时序踩踏；
+- [x] **Go RFC3339Nano 纳秒时间戳兼容性加固**：在 `auto_research_policy.py` 中引入对 Go 9位小数纳秒时间戳的微秒级截断处理，彻底修复 Python 3.9 环境下 `datetime.fromisoformat()` 崩溃导致策略状态永久为 `policy_unavailable` 的问题；
+- [x] **打包工具 RAMDisk 路径解析加固**：在 `package-auto-follow.py` 中对 Windows 内存盘环境下的 `Path.resolve()` 异常增加 `absolute()` 保底；
+- [x] **自动化测试与标准流程部署闭环**：43 项全量 Python 单元测试 100% 纯绿秒级通过；严格遵循操作手册打包并部署发布号 `20261021121356`，远端 SHA256 校验与 37 项 preflight 门禁全绿通过；线上 API 确认 `online: true`、`cycle_status: "outside_session"`（午休等待交易时段）、`desktop_online: true`、`desktop_status: "ready"`，成功恢复当日连板股生成。
+
 ## 2026-10-20 18:05 【Vis手动触发推送与盘后全量同步闭环修复】(`stock_standalone/docs/tasks/2026-10-20_1805_Vis手动触发推送与盘后全量同步闭环修复.md`, `stock_standalone/instock_MonitorTK.py`, `stock_standalone/tk_frame_fingerprint.py`, `stock_standalone/tests/test_ipc_subscription_recovery.py`)
 - [x] 修复主界面工具栏（`frame_right`）Vis Checkbutton 遗漏绑定 `_on_vis_toggle` 的问题，确保无论手动打开还是手动关闭 Vis 均可靠触发即时推送；
 - [x] 增强 `_on_vis_toggle` 用户操作日志记录与 UI 状态持久化（`save_ui_states`）；

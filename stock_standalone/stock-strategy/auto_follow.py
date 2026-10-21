@@ -158,25 +158,31 @@ def candidates(ladder, overview, now, previous_day, settings=None):
                 continue
             result[code] = {"symbol": code, "name": stock["name"], "route": "limit_up",
                             "theme": stock.get("primary_theme"), "streak": stock["streak"]}
-    fresh(overview["meta"], now, 1800)
-    # Dynamic hot themes, deterministic ranking; no LLM-generated order instruction.
-    themes = sorted(overview["data"], key=lambda t: number(t.get("change_percent", 0)), reverse=True)
-    if settings.get("theme_ids"):
-        themes = [t for t in themes if t["theme"] in settings["theme_ids"]]
-    for theme in themes[:3] if settings.get("theme_trend", True) else []:
-        if number(theme.get("change_percent", 0)) <= 0 or theme.get("rising_nodes", 0) <= theme.get("falling_nodes", 0):
-            continue
-        for stock in theme.get("leader_stocks", [])[:5]:
-            try:
-                code = symbol(stock["symbol"])
-            except ValueError:
+    overview_ok = False
+    try:
+        fresh(overview.get("meta", {}), now, 1800)
+        overview_ok = True
+    except (KeyError, ValueError, TypeError):
+        overview_ok = False
+    if overview_ok and settings.get("theme_trend", True):
+        # Dynamic hot themes, deterministic ranking; no LLM-generated order instruction.
+        themes = sorted(overview.get("data", []), key=lambda t: number(t.get("change_percent", 0)), reverse=True)
+        if settings.get("theme_ids"):
+            themes = [t for t in themes if t["theme"] in settings["theme_ids"]]
+        for theme in themes[:3]:
+            if number(theme.get("change_percent", 0)) <= 0 or theme.get("rising_nodes", 0) <= theme.get("falling_nodes", 0):
                 continue
-            result.setdefault(code, {"symbol": code, "name": stock["name"], "route": "theme_trend",
-                                     "theme": theme["theme"], "streak": 0})
-            if not result[code].get("theme"):
-                # The same stock can be both a ladder candidate and a verified
-                # leader in today's eligible theme; preserve that attribution.
-                result[code]["theme"] = theme["theme"]
+            for stock in theme.get("leader_stocks", [])[:5]:
+                try:
+                    code = symbol(stock["symbol"])
+                except ValueError:
+                    continue
+                result.setdefault(code, {"symbol": code, "name": stock["name"], "route": "theme_trend",
+                                         "theme": theme["theme"], "streak": 0})
+                if not result[code].get("theme"):
+                    # The same stock can be both a ladder candidate and a verified
+                    # leader in today's eligible theme; preserve that attribution.
+                    result[code]["theme"] = theme["theme"]
     return sorted(result.values(), key=lambda s: (-s["streak"], s["symbol"]))[:20]
 
 
@@ -397,8 +403,8 @@ def cycle(state, cfg, api, now, calendar, sentiment, external_kill, clock=None, 
     state["last_scan_at"] = (clock() if clock else now).isoformat()
     state["themes"] = [{"id": t["theme"], "name": t["name"], "change_percent": t.get("change_percent"),
                         "rising_nodes": t.get("rising_nodes"), "falling_nodes": t.get("falling_nodes"),
-                        "source": overview["meta"].get("source"), "snapshot_at": overview["meta"].get("fetched_at")}
-                       for t in overview["data"]]
+                        "source": overview.get("meta", {}).get("source"), "snapshot_at": overview.get("meta", {}).get("fetched_at")}
+                       for t in overview.get("data", [])]
     previous_plans = {c["symbol"]: c.get("plan") for c in state.get("candidates", [])}
     state["candidates"] = pool
     for c in pool:
@@ -558,6 +564,7 @@ def main():
                         # Commit completed exits and their evidence even if entry data failed.
                         event(state, now, "CYCLE_ERROR", reason=str(exc))
                         result = "degraded"
+                    state["cycle_status"] = result
                 if os.environ.get("EASY_STOCK_FOLLOW_RESEARCH") == "1" and not args.kill:
                     from follow_research import refresh_research
                     try:

@@ -15,7 +15,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
     args = parser.parse_args()
-    target = args.directory.resolve()
+    try:
+        target = args.directory.resolve()
+    except OSError:
+        target = args.directory.absolute()
     target.mkdir(parents=True, exist_ok=False)
     service = target / "source" / "easy-stock-service"
     service.mkdir(parents=True)
