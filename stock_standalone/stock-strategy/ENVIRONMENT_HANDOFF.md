@@ -1,3 +1,24 @@
+## 2026-10-21 17:35 自动AI投研过期任务全自动清理淘汰与常驻结算恢复功能部署上线
+
+- 按 `build-and-deploy.ps1 -AllowLayeredImageBuild` 发布 Web/API，发布号 `20261021173321`；部署状态 `Deployment healthy`。回滚命令：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261021173321`。
+- 根因分析与功能闭环：
+  1. **全自动任务瘦身与数据清理机制**：
+     - 排查确权任务长期运行后大量超时 `expired` 和取消记录在数据库中持续堆积（达到 103 条以上），导致前端渲染刷屏与卡顿；
+     - Go 后端（`automatic_research.go`）与 Python 策略（`follow_ai.py`）双端在状态轮询与对账事务生命周期中引入自动清理机制：
+       - `expired` / `cancelled` 任务自动滑动窗口淘汰，保留最近 3 条用于排查，其余历史过期任务全自动物理清理；
+       - 超过 7 天的已完成（`completed`）历史任务全自动清理；
+       - 超过 30 天的用量账本（`automatic_research_runs`）全自动清理；
+     - 抽象 `dbExecer` 统一承接 `*sql.DB` 与 `*sql.Tx`，消除 SQLite 事务内直接调 `db.Exec` 引发的 30 秒写锁互锁隐患；
+  2. **常驻结算与恢复操作入口（UX优化）**：
+     - 将原仅在 `unsettled` 异常态下显现的【结算并恢复】按钮改为**常驻展示**（有未结算时呈现高亮琥珀色警示，正常时呈现标准对账恢复按钮，随时可点击对账与恢复），解决秒级自愈导致用户找不到入口的困惑；
+     - 抽屉面板历史记录栏增加【一键处理结算并恢复】；“分析任务与回传”卡片头部新增【清理过期记录】快捷按钮，且前端渲染时对过期任务做数量限制，只展示最新 3 条；
+  3. 提交记录：子项目库提交 `9c11b79`。
+- 部署后核验：
+  - 远端容器启动后，自动清理即时生效，任务总数由 103 条快速降至 60 条，过期堆积任务被全自动清除；
+  - 线上 API `/api/v1/ai/auto-research` 状态为 `ready`，`unsettled_runs: 0`；
+  - 调用 `POST /api/v1/ai/auto-research/settle` 验证通过，返回 HTTP 200；
+  - 前端静态分包加载正常（`index-BN2AWz1u.js`），页面呈现清爽干净，最新 Antigravity 桌面代理生成的策略提案已成功渲染。详情见 [任务记录](../docs/tasks/2026-10-21_1735_过期任务自动淘汰清理与投研常驻结算上线.md)。
+
 ## 2026-10-21 16:45 自动AI投研用量未结算永久暂停根治与一键结算恢复功能部署上线
 
 - 按 `build-and-deploy.ps1 -AllowLayeredImageBuild` 发布 Web/API，发布号 `20261021164131`；部署状态 `Deployment healthy`。回滚命令：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261021164131`。
