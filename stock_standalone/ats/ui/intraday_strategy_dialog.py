@@ -572,6 +572,35 @@ class SBCChartCanvas(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
+        # ⚡ [NEW] 集合竞价小关闭按钮 (浮动停靠在竞价面板左上角，支持 Alt+点击 全局联动关闭)
+        try:
+            from PyQt6.QtWidgets import QToolButton
+            self.btn_close_auction = QToolButton(self)
+            self.btn_close_auction.setText("✕")
+            self.btn_close_auction.setFixedSize(15, 15)
+            self.btn_close_auction.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.btn_close_auction.setToolTip("快捷键: C 键\n• 单击: 关闭集合竞价图\n• Alt+单击 / Alt+C: 联动关闭所有窗口竞价图")
+            self.btn_close_auction.setStyleSheet("""
+                QToolButton {
+                    background-color: rgba(15, 23, 42, 220);
+                    color: #94a3b8;
+                    border: 1px solid #475569;
+                    border-radius: 7px;
+                    font-size: 8pt;
+                    font-weight: bold;
+                    padding: 0px;
+                }
+                QToolButton:hover {
+                    background-color: #ef4444;
+                    color: #ffffff;
+                    border-color: #ffffff;
+                }
+            """)
+            self.btn_close_auction.clicked.connect(self._on_auction_close_btn_clicked)
+            self.btn_close_auction.hide()
+        except Exception:
+            self.btn_close_auction = None
+
     def _extract_intraday_bar_volumes(self, df_view: pd.DataFrame) -> np.ndarray:
         """
         【📊 分时图成交量副图 (VOL) 独立 Bar 增量提取与拆分算法】
@@ -2392,24 +2421,55 @@ class SBCChartCanvas(QWidget):
         finally:
             painter.end()
 
+    def _on_auction_close_btn_clicked(self):
+        """响应点击集合竞价左侧的小关闭按钮 (支持 Alt+点击 联动关闭所有窗口竞价图)"""
+        is_alt = is_alt_modifier_active()
+        if is_alt:
+            dlg = getattr(self, 'parent_dialog', None) or getattr(self, 'dialog', None) or self.parent()
+            if dlg and hasattr(dlg, 'set_all_sbc_auction_visible'):
+                dlg.set_all_sbc_auction_visible(False)
+            else:
+                self.show_auction_chart = False
+                if getattr(self, 'btn_close_auction', None):
+                    self.btn_close_auction.hide()
+                self.update()
+        else:
+            self.show_auction_chart = False
+            if getattr(self, 'btn_close_auction', None):
+                self.btn_close_auction.hide()
+            self.update()
+
     def _draw_auction_overlay(self, painter, left, top, width):
         if not getattr(self, "show_auction_chart", True):
+            if getattr(self, 'btn_close_auction', None):
+                self.btn_close_auction.hide()
             return
         samples = getattr(self, "auction_samples", [])
         if not samples:
+            if getattr(self, 'btn_close_auction', None):
+                self.btn_close_auction.hide()
             return
         latest = samples[-1]
         finalized = latest.get("kind") == "auction_open"
         color = QColor("#00e5ff" if finalized else "#ffbb55")
         panel_w = min(320, max(160, width - 20))
         x, y = int(left + width - panel_w - 8), int(top + 6)
+
+        # ⚡ 动态对齐更新集合竞价关闭按钮位置 (停靠在面板左上角)
+        if getattr(self, 'btn_close_auction', None):
+            self.btn_close_auction.move(x + 5, y + 4)
+            if not self.btn_close_auction.isVisible():
+                self.btn_close_auction.show()
+            self.btn_close_auction.raise_()
+
         painter.save()
         try:
             painter.fillRect(x, y, panel_w, 74, QColor(12, 18, 30, 235))
             painter.setPen(QPen(color, 1))
             painter.setFont(QFont("Microsoft YaHei", 9))
             title = "09:25 成交/开盘" if finalized else "虚拟撮合（未成交）"
-            painter.drawText(x + 6, y + 16, f"{title} {float(latest['price']):.2f}")
+            # 向右预留 22px，给左侧的小关闭按钮留出舒适空间
+            painter.drawText(x + 24, y + 16, f"{title} {float(latest['price']):.2f}")
             values = [float(item["price"]) for item in samples]
             low, high = min(values), max(values)
             span = max(high - low, max(values[-1] * 0.001, 0.01))
@@ -5271,7 +5331,7 @@ class SBCIntradayChartDialog(QWidget):
         self.btn_ack_attention = QPushButton("✕ 关 (X)")
         self.btn_ack_attention.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_ack_attention.setFixedHeight(20)
-        self.btn_ack_attention.setToolTip("快捷键: X 键\n• 关闭/隐藏当前异动提示横幅")
+        self.btn_ack_attention.setToolTip("快捷键: X 键 (单窗收起)\n• 单击: 收起当前窗口异动提示横幅\n• Alt+单击 / Alt+X: 联动收起所有窗口异动横幅")
         self.btn_ack_attention.setStyleSheet("""
             QPushButton {
                 background-color: rgba(15, 23, 42, 190);
@@ -6042,10 +6102,14 @@ class SBCIntradayChartDialog(QWidget):
             self._on_rearrange_windows_clicked()
             event.accept()
             return
-        elif key == Qt.Key.Key_X and not (modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+        elif key == Qt.Key.Key_X:
             from ats.ui.styles import is_editing_text
             if not is_editing_text(self):
-                if hasattr(self, "sbc_attention_banner") and self.sbc_attention_banner.isVisible():
+                if is_alt_modifier_active(event):
+                    self._ack_all_sbc_attention_banners()
+                    event.accept()
+                    return
+                elif hasattr(self, "sbc_attention_banner") and self.sbc_attention_banner.isVisible():
                     self._ack_sbc_attention_banner()
                     event.accept()
                     return
@@ -6126,10 +6190,9 @@ class SBCIntradayChartDialog(QWidget):
                     self.canvas.update()
             event.accept()
             return
-        # 💡 [NEW] 快捷键全部退出并持久化：Ctrl+Shift+Q 或 Alt+Escape 或 Alt+X
+        # 💡 [NEW] 快捷键全部退出并持久化：Ctrl+Shift+Q 或 Alt+Escape
         if (key == Qt.Key.Key_Q and (modifiers & Qt.KeyboardModifier.ControlModifier) and (modifiers & Qt.KeyboardModifier.ShiftModifier)) or \
-           (key == Qt.Key.Key_Escape and (modifiers & Qt.KeyboardModifier.AltModifier)) or \
-           (key == Qt.Key.Key_X and (modifiers & Qt.KeyboardModifier.AltModifier)):
+           (key == Qt.Key.Key_Escape and (modifiers & Qt.KeyboardModifier.AltModifier)):
             if self.is_ats_sbc_mode():
                 logger.info("ℹ️ [SBC快捷键] 当前处于 ATS 模式，忽略 Alt+全部关闭功能，仅安全关闭当前窗口。")
                 self.close()
@@ -6207,13 +6270,19 @@ class SBCIntradayChartDialog(QWidget):
             self._on_vol_toggle_clicked()
 
     def _on_shortcut_c_activated(self):
-        """C只切换竞价叠图，使用已加载轨迹，不触发网络或磁盘操作。"""
+        """C只切换竞价叠图，使用已加载轨迹，不触发网络或磁盘操作 (支持 Alt+C 联动切换全部窗口)。"""
         from ats.ui.styles import is_editing_text
         if not is_editing_text(self) and getattr(self, "canvas", None) is not None:
-            self.canvas.show_auction_chart = not getattr(self.canvas, "show_auction_chart", True)
-            self.canvas.update()
-            if self.canvas.show_auction_chart and not getattr(self.canvas, "auction_samples", []):
-                self.lbl_info.setText("暂无当日已采集的集合竞价轨迹；C键关闭竞价图")
+            if is_alt_modifier_active():
+                target_state = not getattr(self.canvas, "show_auction_chart", True)
+                self.set_all_sbc_auction_visible(target_state)
+            else:
+                self.canvas.show_auction_chart = not getattr(self.canvas, "show_auction_chart", True)
+                if getattr(self.canvas, 'btn_close_auction', None):
+                    self.canvas.btn_close_auction.setVisible(self.canvas.show_auction_chart and bool(getattr(self.canvas, "auction_samples", [])))
+                self.canvas.update()
+                if self.canvas.show_auction_chart and not getattr(self.canvas, "auction_samples", []):
+                    self.lbl_info.setText("暂无当日已采集的集合竞价轨迹；C键关闭竞价图")
 
     def _on_vol_toggle_clicked(self):
         """点击工具栏成交量按钮：在 正常(开) -> 折叠(关) -> 放大 之间循环切换"""
@@ -8058,8 +8127,8 @@ class SBCIntradayChartDialog(QWidget):
         except Exception as e_att:
             logger.debug(f"[SBC] attention evaluate error: {e_att}")
 
-    def _ack_sbc_attention_banner(self):
-        """手动收起当前已确认的 SBC 异动提醒横幅并停止外框闪烁"""
+    def _do_ack_single_attention_banner(self):
+        """单窗口收起当前已确认的 SBC 异动提醒横幅并停止外框闪烁"""
         self._acked_attention_sig = getattr(self, "_last_attention_sig", None)
         if hasattr(self, "sbc_attention_banner") and self.sbc_attention_banner:
             self.sbc_attention_banner.setVisible(False)
@@ -8067,6 +8136,79 @@ class SBCIntradayChartDialog(QWidget):
             self._border_pulse_timer.stop()
         if hasattr(self, "canvas") and self.canvas:
             self.canvas.setStyleSheet("")
+
+    def _ack_sbc_attention_banner(self):
+        """手动收起当前已确认的 SBC 异动提醒横幅 (支持 Alt+点击 批量联动收起全部窗口横幅)"""
+        if is_alt_modifier_active():
+            self._ack_all_sbc_attention_banners()
+        else:
+            self._do_ack_single_attention_banner()
+
+    def _ack_all_sbc_attention_banners(self):
+        """【⚡ 全局联动收起所有 SBC 窗口的异动提醒横幅】
+        当操盘手按住 Alt 点击 '✕ 关 (X)' 按钮或按下 Alt+X 时调用：
+        瞬间遍历所有存活的 SBC 窗口，批量隐藏异动横幅并停止呼吸闪烁。
+        """
+        count = 0
+        mgr = SBCWindowMemoryManager.get_instance()
+        active_dialogs = mgr.get_active_dialogs()
+        seen_ptrs = set()
+        for dlg in active_dialogs:
+            try:
+                if dlg and hasattr(dlg, '_do_ack_single_attention_banner'):
+                    dlg._do_ack_single_attention_banner()
+                    seen_ptrs.add(id(dlg))
+                    count += 1
+            except Exception:
+                pass
+        try:
+            for w in QApplication.topLevelWidgets():
+                if isinstance(w, SBCIntradayChartDialog) and id(w) not in seen_ptrs:
+                    try:
+                        if hasattr(w, '_do_ack_single_attention_banner'):
+                            w._do_ack_single_attention_banner()
+                            count += 1
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        logger.info("⚡ [SBC全局联动] 已批量收起全部 %d 个已打开窗口的异动提醒横幅！", count)
+
+    def set_all_sbc_auction_visible(self, visible: bool):
+        """【⚡ 全局联动设置所有 SBC 窗口集合竞价图的可见性】
+        当操盘手按住 Alt 点击竞价关闭按钮或按下 Alt+C 时调用。
+        """
+        count = 0
+        mgr = SBCWindowMemoryManager.get_instance()
+        active_dialogs = mgr.get_active_dialogs()
+        seen_ptrs = set()
+        for dlg in active_dialogs:
+            try:
+                if dlg and hasattr(dlg, 'canvas') and dlg.canvas:
+                    dlg.canvas.show_auction_chart = bool(visible)
+                    if getattr(dlg.canvas, 'btn_close_auction', None):
+                        dlg.canvas.btn_close_auction.setVisible(bool(visible) and bool(getattr(dlg.canvas, "auction_samples", [])))
+                    dlg.canvas.update()
+                    seen_ptrs.add(id(dlg))
+                    count += 1
+            except Exception:
+                pass
+        try:
+            for w in QApplication.topLevelWidgets():
+                if isinstance(w, SBCIntradayChartDialog) and id(w) not in seen_ptrs:
+                    try:
+                        if hasattr(w, 'canvas') and w.canvas:
+                            w.canvas.show_auction_chart = bool(visible)
+                            if getattr(w.canvas, 'btn_close_auction', None):
+                                w.canvas.btn_close_auction.setVisible(bool(visible) and bool(getattr(w.canvas, "auction_samples", [])))
+                            w.canvas.update()
+                            count += 1
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        action_str = "显示" if visible else "关闭"
+        logger.info("⚡ [SBC全局联动] 已批量%s全部 %d 个已打开窗口的集合竞价图！", action_str, count)
 
     def _on_border_pulse_tick(self):
         """窗口画布外框呼吸脉冲闪烁提醒，帮助操盘手在多窗口平铺时一眼锁定异动窗口"""

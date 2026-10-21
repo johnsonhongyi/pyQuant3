@@ -28,23 +28,33 @@ logger = LoggerFactory.getLogger(name="AlertManager")
 _VOICE_WORKER_DEBUG_ENABLED = False
 
 def normalize_speech_text(text: str) -> str:
-    """语音文本标准化"""
+    """语音文本标准化：严格仅保留中英文、数字与安全标点，过滤所有 Emoji 与特殊符号"""
     text = str(text)
     text = text.replace('%', '百分之')
     text = re.sub(r'(?<!\d)-(\d+(\.\d+)?)', r'负\1', text)
     text = re.sub(r'(?<!\d)\+(\d+(\.\d+)?)', r'正\1', text)
     text = re.sub(r'(\d+)\.(\d+)', r'\1点\2', text)
+    # 白名单保留中文、字母、数字、常用标点
+    text = re.sub(r'[^\w\s\u4e00-\u9fa5，。！、]', ' ', text)
+    # 限制单条语音最多 60 个字符，避免长时间占用声卡
+    text = ' '.join(text.split())[:60]
     return text
 
-def _speak_sapi(speaker, text, stop_event, interrupt_event=None):
-    """Keep COM calls on the voice thread and permit shutdown to cancel speech."""
+_cached_valid_audio_output_idx = None
+
+def _speak_sapi(speaker, text, stop_event, interrupt_event=None, max_timeout=8.0):
+    """Keep COM calls on the voice thread with a hard deadline to prevent deadlocks."""
     if stop_event.is_set():
         return
     speaker.Speak(text, 1)  # SVSFlagsAsync
+    deadline = time.monotonic() + max_timeout
     while not speaker.WaitUntilDone(50):
-        if stop_event.is_set() or (interrupt_event is not None and interrupt_event.is_set()):
-            speaker.Speak('', 3)  # SVSFlagsAsync | SVSFPurgeBeforeSpeak
-            speaker.WaitUntilDone(200)
+        if time.monotonic() > deadline or stop_event.is_set() or (interrupt_event is not None and interrupt_event.is_set()):
+            try:
+                speaker.Speak('', 3)  # SVSFlagsAsync | SVSFPurgeBeforeSpeak
+                speaker.WaitUntilDone(150)
+            except Exception:
+                pass
             return
 
 
@@ -236,22 +246,17 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
                     is_voice_on = False
                     worker_log("Voice disabled in state, skipping pyttsx3 init")
 
+                global _cached_valid_audio_output_idx
                 sp_voice_success = False
                 if is_voice_on:
                     try:
                         import win32com.client
-                        
-                        # [CORE] 直接使用 SAPI.SpVoice 直连，避免 pyttsx3 的 Event 触发 GIL/thread state NULL 崩溃
                         speaker = win32com.client.Dispatch("SAPI.SpVoice")
                         
-                        # 转换 rate 和 volume
-                        # pyttsx3 的 rate 200 为正常。SpVoice 的 Rate 范围是 -10 到 10，默认为 0。
-                        # 进行映射：cct.voice_rate 默认为 220。映射公式: (rate - 200) // 20
                         v_rate = getattr(cct, 'voice_rate', 220)
                         sp_rate = max(-10, min(10, (v_rate - 200) // 20))
                         speaker.Rate = sp_rate
                         
-                        # pyttsx3 的 volume 1.0 为最大。SpVoice 的 Volume 范围是 0 到 100。
                         v_vol = getattr(cct, 'voice_volume', 1.2)
                         sp_vol = max(0, min(100, int(v_vol * 100)))
                         speaker.Volume = sp_vol
@@ -259,9 +264,35 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
                         if feedback_queue and key:
                             try: feedback_queue.put(('START', key))
                             except: pass
+
+                        # 优先绑定已知有效的音频输出设备
+                        if _cached_valid_audio_output_idx is not None:
+                            try:
+                                outputs = speaker.GetAudioOutputs()
+                                if _cached_valid_audio_output_idx < outputs.Count:
+                                    speaker.AudioOutput = outputs.Item(_cached_valid_audio_output_idx)
+                            except Exception:
+                                pass
                             
                         if not stop_event.is_set():
-                            _speak_sapi(speaker, safe_msg, stop_event, interrupt_event)
+                            try:
+                                _speak_sapi(speaker, safe_msg, stop_event, interrupt_event)
+                                sp_voice_success = True
+                            except Exception as ex_dev:
+                                worker_log(f"SpVoice default audio output failed ({ex_dev}), auto-scanning outputs...")
+                                outputs = speaker.GetAudioOutputs()
+                                for idx in range(outputs.Count):
+                                    if idx == _cached_valid_audio_output_idx:
+                                        continue
+                                    try:
+                                        speaker.AudioOutput = outputs.Item(idx)
+                                        _speak_sapi(speaker, safe_msg, stop_event, interrupt_event)
+                                        _cached_valid_audio_output_idx = idx
+                                        worker_log(f"SpVoice switched to valid AudioOutput [{idx}]: {outputs.Item(idx).GetDescription()}")
+                                        sp_voice_success = True
+                                        break
+                                    except Exception as ex_try:
+                                        worker_log(f"SpVoice AudioOutput [{idx}] failed: {ex_try}")
                             
                         last_speech_end_ts = time.time()
                         
@@ -270,44 +301,11 @@ def _voice_worker(q: Queue, stop_event: threading.Event, interrupt_event: thread
                             except: pass
                             
                         del speaker
-                        sp_voice_success = True
-                        worker_log("SpVoice Utterance finished successfully.")
+                        if sp_voice_success:
+                            worker_log("SpVoice Utterance finished successfully.")
                     except Exception as ex:
-                        worker_log(f"Direct SpVoice speak failed: {ex}, falling back to pyttsx3")
+                        worker_log(f"SpVoice cycle error: {ex}")
                         sp_voice_success = False
-
-                if not sp_voice_success and pyttsx3 and is_voice_on and not stop_event.is_set():
-                    # [FIX] 强行清除 pyttsx3 的缓存引擎，确保每次独立实例化
-                    if hasattr(pyttsx3, '_activeEngines'):
-                        # [SAFETY] 仅在真的有活跃引擎时才清理，减少对 GIL 的冲击
-                        if pyttsx3._activeEngines:
-                            pyttsx3._activeEngines.clear()
-                    
-                    engine = pyttsx3.init()
-                    engine.setProperty('rate', getattr(cct, 'voice_rate', 220))
-                    engine.setProperty('volume', getattr(cct, 'voice_volume', 1.2))
-                    
-                    # [FIX] 不再使用引擎级别的 callback 来强行 interrupt。
-                    # SAPI5 强行 stop 容易触发底层死锁并导致全局 GIL 锁死（进而引发 Tk 假死）！
-                    # 我们让每条短消息正常读完，若收到中断，外层队列会自动跳过后续播报。
-
-                    if feedback_queue and key:
-                        try: feedback_queue.put(('START', key))
-                        except: pass
-
-                    if not interrupt_event.is_set():
-                        engine.say(safe_msg)
-                        engine.runAndWait()
-                    last_speech_end_ts = time.time() # [FIX] Update completion time
-                    
-                    # 播放结束
-                    if feedback_queue and key:
-                        try: feedback_queue.put(('END', key))
-                        except: pass
-
-                    # 安全回收
-                    del engine
-                    worker_log("Utterance finished.")
             except Exception as e:
                 worker_log(f"Engine Cycle Error: {e}")
                 logger.exception("Voice playback failed for %s", key)
