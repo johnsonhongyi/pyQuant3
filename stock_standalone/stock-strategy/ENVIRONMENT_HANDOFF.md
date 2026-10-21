@@ -1,3 +1,15 @@
+## 2026-10-21 14:18 自动跟单自定义个股前端可视化与后端全链路部署上线
+
+- 按 `build-and-deploy.ps1 -AllowLayeredImageBuild` 发布 Web/API，发布号 `20261021141525`；部署状态 `Deployment healthy`。回滚命令：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261021141525`。
+- 本地构建与交付：
+  1. `easy-stock-web`：在“跟随范围”设置卡片中补充“手动自定义个股”可视化输入框、添加按钮与药丸标签列表（含 ✕ 快捷移除），支持输入 6 位代码自动补全 `.SH`/`.SZ` 并加入待保存配置；候选股票过滤下拉框增加“手动添加”路径选项；
+  2. `easy-stock-analysis/backend`：Go 后端 `autoFollowCommand` 中解除对 `ManualSymbols` 强校验拦截，支持同步与持久化 `manual_symbols`；
+  3. `source` 仓库提交 `132dede`；Vite 生产打包通过（`dist/assets/index-BxYLd3fh.js`、`dist/assets/AutoFollowWorkspace-B_ym907y.js`），Go 后端单元测试 100% 通过。
+- 部署后核验：
+  - 线上 API `/api/v1/auto-follow` 返回 `settings.manual_symbols: ['688787.SH']`；
+  - 候选股列表中包含标的 `688787.SH`，标记路径 `route: "manual"`，连板数 `streak: 99`，状态由量化门禁实时计算；
+  - 浏览器端静态资源与 HTML 均更新为最新分包，页面上可直接可视化添加和移除自定义个股。
+
 ## 2026-10-21 13:50 手动个股添加、科创板20cm适配与高频扫描降频部署
 
 - 部署按 `deploy-auto-follow.sh` 规范执行，发布号 `20261021135011`；归档包 SHA256 `ecebc0f4221cc5b03b1eacef2b045939416af7f4f4088bce9be9177406d050cc`。远端 Preflight 隔离验收通过，40 项回归测试全绿通过；`stockstrategy-auto-follow.service` 热重载，PID `3048953`，`NRestarts=0`。回滚命令：若需回滚至上一版本 `20261021121356`，执行 `ln -sfn /mnt/4TB/dockerf/stockstrategy/auto-follow/releases/20261021121356 /mnt/4TB/dockerf/stockstrategy/auto-follow/current && systemctl restart stockstrategy-auto-follow.service`。

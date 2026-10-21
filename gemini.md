@@ -1,5 +1,13 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](stock_standalone/design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-21 14:18 【自动跟单自定义个股前端可视化、科创板20cm适配与高频扫描降频部署闭环】(`stock_standalone/stock-strategy/source/easy-stock-web/src/components/AutoFollowWorkspace.tsx`, `stock_standalone/stock-strategy/source/easy-stock-analysis/backend/internal/httpapi/auto_follow.go`, `stock_standalone/stock-strategy/auto_follow.py`, `stock_standalone/docs/tasks/2026-10-21_1350_自动跟单手动个股添加科创板适配与时滞刷屏根治.md`)
+- [x] **Web 前端可视化自定义个股入口补齐**：在 `AutoFollowWorkspace.tsx` 的“跟随范围”卡片中新增“手动自定义个股”代码输入框、添加按钮与已选股票药丸标签列表（支持 ✕ 一键移除），输入 6 位代码自动格式化 `.SH`/`.SZ`；并在强势股跟踪 Tab 的路径下拉框中增加“手动添加”筛选选项；
+- [x] **Go 后端反序列化对齐放行**：在 `autoFollowCommand` 的 `settings` 结构体中扩充 `ManualSymbols []string`，严格校验股票代码格式及长度（最多 30 只），放行前端提交并消除 `DisallowUnknownFields()` 导致的 400 拦截；
+- [x] **Python 策略引擎手动标的与科创板 20cm 全链路适配**：放行 688/300 标的，以最高优先级（`streak=99`）注入候选池；适配科创板/创业板 20% 涨停限制、P4 涨幅上限（14.0%）与 VWAP 偏离容差（1.045）；
+- [x] **扫描时滞刷屏根治与合理降频**：情绪时滞校验由 660 秒放宽至 1800 秒并优雅降级，彻底根治 `CYCLE_ERROR: source snapshot expired` 异常刷屏；主循环默认等待间隔由 60 秒优化为理性的 180 秒（3 分钟），对齐 5 分钟 K 线走完心智；
+- [x] **688787（海天瑞声）全链路量化回测验证**：验证在 P4/P25/P8 量化风控下，10-19/10-20 成功拦截左侧超跌与空头陷阱，10-21 今日 11:15 放量突破 110.88 时满足 3 根量价齐升，成功在 112.20 元触发买入，捕捉随后冲高至 119.30 元（+6.3%）主升浪；
+- [x] **全链路双端部署上线与线上核验通过**：子项目提交 `132dede`，主策略打包部署 `20261021135011`，Web/API 构建部署 `20261021141525`，API `/api/v1/auto-follow` 确认 `manual_symbols: ['688787.SH']` 实时生效，前端静态资源 100% 刷新加载。
+
 ## 2026-10-21 12:15 【双桥重启后自动跟单降级与投研中断根治部署】(`stock_standalone/docs/tasks/2026-10-21_1215_双桥重启后自动跟单降级与投研中断根治部署.md`, `stock_standalone/stock-strategy/auto_follow.py`, `stock_standalone/stock-strategy/auto_research_policy.py`, `stock_standalone/stock-strategy/package-auto-follow.py`, `stock_standalone/stock-strategy/test_auto_follow.py`, `stock_standalone/stock-strategy/test_auto_research_policy.py`)
 - [x] **题材时滞与连板候选解耦（根除“数据异常，已降级”死锁）**：将 `candidates()` 中对 `overview`（开盘啦题材轮动）的强校验升级为优雅降级判断，题材日频跨日或时滞时仅略过题材领涨股，绝不牵连当日真实梯队的 13 只高标连板股，主循环状态立即同步避免时序踩踏；
 - [x] **Go RFC3339Nano 纳秒时间戳兼容性加固**：在 `auto_research_policy.py` 中引入对 Go 9位小数纳秒时间戳的微秒级截断处理，彻底修复 Python 3.9 环境下 `datetime.fromisoformat()` 崩溃导致策略状态永久为 `policy_unavailable` 的问题；
