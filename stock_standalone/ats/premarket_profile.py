@@ -224,7 +224,10 @@ class PreMarketProfile:
         support_today = _get(row, ("support_today", "support_next"), 0.0, positive=True)
         ptop = _get(row, ("ptop", "MainU"), 0.0, positive=True)
 
-        trigger_line = resist_today or nhigh or (close * 1.02 if close > 0 else 0.0)
+        raw_trigger = resist_today or nhigh or (close * 1.02 if close > 0 else 0.0)
+        # 触发线不得低于当前价：若盘前已站上阻力，把触发线抬到当前价上方 0.2%。
+        # 否则 (trigger - price) 恒为负，状态机永远进不了 ARMED，高开突破会全天无信号。
+        trigger_line = max(raw_trigger, close * 1.002) if close > 0 else raw_trigger
         defend_line = support_today or nlow or (close * 0.97 if close > 0 else 0.0)
 
         space_pct = 6.0

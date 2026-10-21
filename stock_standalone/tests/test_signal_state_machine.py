@@ -211,7 +211,7 @@ class UntradableTest(unittest.TestCase):
 class LedgerTest(unittest.TestCase):
     def test_mfe_uses_entry_bar_high(self):
         led = PositionLedger(8)
-        pos = led.open(ctx(0, 10.0, high=10.3, low=9.9), "TEST")
+        pos = led.open("600000", ctx(0, 10.0, high=10.3, low=9.9), "TEST")
         self.assertIsNotNone(pos)
         self.assertAlmostEqual(pos.mfe_pct, 3.0, places=2)
         self.assertAlmostEqual(pos.mae_pct, -1.0, places=2)
@@ -219,7 +219,7 @@ class LedgerTest(unittest.TestCase):
     def test_mfe_not_polluted_by_pre_entry_high(self):
         """进场前的高点不得计入 MFE：账本从开仓那一刻起算。"""
         led = PositionLedger(8)
-        pos = led.open(ctx(0, 10.0, high=10.1, low=9.9), "TEST")
+        pos = led.open("600000", ctx(0, 10.0, high=10.1, low=9.9), "TEST")
         led.mark(ctx(1, 10.2, high=10.4, low=10.0))
         self.assertAlmostEqual(pos.mfe_pct, 4.0, places=2)   # (10.4-10)/10
 
@@ -230,16 +230,19 @@ class LedgerTest(unittest.TestCase):
         self.assertTrue(led.is_open("600000"))
 
         m2 = SignalStateMachine("000001", _params(max_positions=1), led)
-        b2 = _arm(m2, 0)
-        m2.step(ctx(b2, 11.05, pct=3.0, code="000001"))
-        m2.step(ctx(b2 + 1, 11.06, pct=3.1, code="000001"))
+        # 注意：ctx.code 必须与 machine.code 一致，否则会被 CODE_MISMATCH 守卫拒绝
+        m2.step(ctx(0, 10.90, code="000001"))
+        m2.step(ctx(1, 10.90, code="000001"))
+        self.assertEqual(m2.state, SignalState.ARMED.value)
+        m2.step(ctx(2, 11.05, pct=3.0, code="000001"))
+        m2.step(ctx(3, 11.06, pct=3.1, code="000001"))
         self.assertEqual(m2.state, SignalState.ARMED.value)   # 账本满，不进场
         self.assertFalse(led.is_open("000001"))
         self.assertTrue(any(d["type"] == "LEDGER_FULL" for d in m2.diagnostics()))
 
     def test_summary(self):
         led = PositionLedger(8)
-        led.open(ctx(0, 10.0), "T")
+        led.open("600000", ctx(0, 10.0), "T")
         led.close("600000", ctx(5, 11.0), "TRAIL_STOP")
         s = led.summary()
         self.assertEqual(s["n_open"], 0)
@@ -250,10 +253,10 @@ class LedgerTest(unittest.TestCase):
 class WeakStrongTest(unittest.TestCase):
     def test_ranker_prefers_fast_mfe_growth(self):
         led = PositionLedger(8)
-        a = led.open(ctx(0, 10.0, code="600000"), "T")
+        a = led.open("600000", ctx(0, 10.0, code="600000"), "T")
         a.mfe_pct = 6.0
         a.last_bar = 10          # 10 bar 涨 6% -> 0.6/bar
-        b = led.open(ctx(0, 20.0, code="000001"), "T")
+        b = led.open("000001", ctx(0, 20.0, code="000001"), "T")
         b.mfe_pct = 2.0
         b.last_bar = 40          # 40 bar 涨 2% -> 0.05/bar
         ranked = WeakStrongRanker.rank([a, b])
@@ -262,10 +265,10 @@ class WeakStrongTest(unittest.TestCase):
 
     def test_suggest_swap_returns_weakest(self):
         led = PositionLedger(8)
-        a = led.open(ctx(0, 10.0, code="600000"), "T")
+        a = led.open("600000", ctx(0, 10.0, code="600000"), "T")
         a.mfe_pct = 6.0
         a.last_bar = 10
-        b = led.open(ctx(0, 20.0, code="000001"), "T")
+        b = led.open("000001", ctx(0, 20.0, code="000001"), "T")
         b.mfe_pct = 0.5
         b.last_bar = 40
         weakest = WeakStrongRanker.suggest_swap([a, b], incoming_score=99.0)

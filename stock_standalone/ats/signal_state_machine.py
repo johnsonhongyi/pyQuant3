@@ -86,6 +86,7 @@ EXIT_REASON_LABELS: Dict[str, str] = {
     "STRUCT_BREAK": "↘ 结构破位(高降低降)",
     "TIME_STOP": "⏱ 时间止损(超预算无进展)",
     "TEMP_EBB": "🌊 市场退潮",
+    "ORPHAN_RECONCILE": "🧹 孤儿仓位对账清理",
 }
 
 _ACTIVE_STATES = {
@@ -137,6 +138,10 @@ class SignalParams:
     min_alpha_pct: float = 0.0
     above_ratio_need: float = 0.5
     arm_confirm_bars: int = 2
+    # 跳空直通：开盘即站上触发线时允许 DORMANT -> TRIGGERED，但追高幅度受此限制
+    gap_max_pct: float = 3.0
+    # ARMED 僵死阈值：距触发线超过 arm_dist_pct 的该倍数则退回 DORMANT
+    arm_stale_multiple: float = 3.0
 
     @classmethod
     def from_cct(cls) -> "SignalParams":
@@ -165,6 +170,8 @@ class SignalParams:
         p.cooldown_bars = _get("ats_signal_cooldown_bars", p.cooldown_bars, int)
         p.max_positions = _get("ats_signal_max_positions", p.max_positions, int)
         p.shadow_mode = bool(_get("ats_signal_shadow_mode", p.shadow_mode, bool))
+        p.gap_max_pct = _get("ats_signal_gap_max_pct", p.gap_max_pct, float)
+        p.arm_stale_multiple = _get("ats_signal_arm_stale_multiple", p.arm_stale_multiple, float)
         return p
 
     def derive_for(self, vol_budget_pct: float, board_limit_pct: float = 10.0) -> "SignalParams":
@@ -284,6 +291,8 @@ class Position:
     exit_price: float = 0.0
     exit_reason: str = ""
     realized_pct: float = 0.0
+    # 分段加权收益：按 trims 的减仓价与剩余仓位的平仓价加权，口径与实盘一致
+    realized_pct_weighted: float = 0.0
     peak_price: float = 0.0
 
     @property
@@ -321,10 +330,38 @@ class Position:
             "exit_reason": self.exit_reason,
             "exit_reason_label": EXIT_REASON_LABELS.get(self.exit_reason, self.exit_reason),
             "realized_pct": round(self.realized_pct, 2),
+            "realized_pct_weighted": round(self.realized_pct_weighted, 2),
             "is_open": self.is_open,
             "n_adds": len(self.adds),
             "n_trims": len(self.trims),
         }
+
+
+def _weighted_realized(pos: Position) -> float:
+    """按减仓明细 + 剩余仓位加权计算真实收益率（%）。
+
+    修正口径：``realized_pct`` 是"全仓单一平仓价"，若中途减过仓会失真；
+    本函数按每笔减仓的比例与价格、以及剩余仓位的平仓价分段加权。
+    """
+    if pos.entry_price <= 0:
+        return 0.0
+    trimmed = 0.0
+    acc = 0.0
+    for t in pos.trims:
+        try:
+            frac = float(t.get("fraction", 0.0) or 0.0)
+            px = float(t.get("price", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        frac = max(0.0, min(1.0, frac))
+        if frac <= 0.0 or px <= 0.0:
+            continue
+        trimmed += frac
+        acc += frac * (px / pos.entry_price - 1.0) * 100.0
+    remaining = max(0.0, 1.0 - trimmed)
+    if remaining > 0.0 and pos.exit_price > 0:
+        acc += remaining * (pos.exit_price / pos.entry_price - 1.0) * 100.0
+    return acc
 
 
 class PositionLedger:
@@ -354,10 +391,12 @@ class PositionLedger:
         return list(self._closed)
 
     # -- 变更 ---------------------------------------------------------------
-    def open(self, ctx: SignalContext, reason: str,
+    def open(self, code: str, ctx: SignalContext, reason: str,
              stop_price: float = 0.0, target_price: float = 0.0) -> Optional[Position]:
-        code = str(ctx.code).strip()
-        if code in self._open or not self.can_open():
+        """开仓。``code`` 必须显式传入（不得从 ctx 取键），
+        否则会与 ``trim/close`` 使用的 machine.code 不一致，造成持仓泄漏。"""
+        code = str(code).strip()
+        if not code or code in self._open or not self.can_open():
             return None
         pos = Position(
             code=code,
@@ -441,18 +480,39 @@ class PositionLedger:
         pos.last_price = float(ctx.price)
         if pos.entry_price > 0:
             pos.realized_pct = (pos.exit_price - pos.entry_price) / pos.entry_price * 100.0
+            pos.realized_pct_weighted = _weighted_realized(pos)
         self._closed.append(pos)
         return pos
 
+    def reconcile(self, active_codes) -> List[str]:
+        """对账：清掉不属于任何活跃机器的仓位，返回被清掉的代码。
+
+        兜底持仓泄漏（键不一致、上游拼装错误），避免孤儿仓位永久占用名额、
+        把系统伪装成"仓位已满"。
+        """
+        active = {str(c).strip() for c in (active_codes or ())}
+        orphans = [c for c in list(self._open.keys()) if c not in active]
+        for c in orphans:
+            pos = self._open.pop(c)
+            pos.exit_bar = pos.last_bar
+            pos.exit_ts = time.time()
+            pos.exit_price = pos.last_price
+            pos.exit_reason = "ORPHAN_RECONCILE"
+            if pos.entry_price > 0 and pos.last_price > 0:
+                pos.realized_pct = (pos.last_price / pos.entry_price - 1.0) * 100.0
+                pos.realized_pct_weighted = _weighted_realized(pos)
+            self._closed.append(pos)
+        return orphans
+
     def summary(self) -> Dict[str, Any]:
         closed = list(self._closed)
-        wins = [p for p in closed if p.realized_pct > 0]
+        wins = [p for p in closed if p.realized_pct_weighted > 0]
         return {
             "n_open": len(self._open),
             "n_closed": len(closed),
             "win_rate": round(len(wins) / len(closed) * 100.0, 1) if closed else 0.0,
             "avg_realized_pct": round(
-                sum(p.realized_pct for p in closed) / len(closed), 2
+                sum(p.realized_pct_weighted for p in closed) / len(closed), 2
             ) if closed else 0.0,
             "avg_holding_bars": round(
                 sum(p.holding_bars for p in closed) / len(closed), 1
@@ -486,7 +546,11 @@ class SignalStateMachine:
         self._events: Deque[TransitionEvent] = deque(maxlen=max(16, int(event_max)))
         self._diagnostics: Deque[Dict[str, Any]] = deque(maxlen=200)
         self._position: Optional[Position] = None
-        self._ledger = ledger
+        # 账本必选：没有账本就无法记录持仓与止损位，状态机会"只进不出"卡在 HOLDING。
+        # 传 None 时自动建一个独立账本，宁可容量独立也不要退化成无止损。
+        self._ledger = ledger if ledger is not None else PositionLedger(
+            getattr(self.params, "max_positions", 8)
+        )
         self._last_exit_bar: int = -9999
         self._entry_bar: int = -1
         self._trim_done: bool = False
@@ -516,6 +580,14 @@ class SignalStateMachine:
     def step(self, ctx: SignalContext) -> Optional[TransitionEvent]:
         """推进一步。同一 ``bar_id`` 重复调用只刷新持仓，不重复判决（幂等）。"""
         if ctx is None or ctx.bar_id is None or ctx.bar_id < 0:
+            return None
+        # 防串味：ctx.code 与机器 code 不一致时拒绝推进。
+        # 否则会 mark 到别人的持仓，并在账本里开出关不掉的孤儿仓位（永久占名额）。
+        if str(ctx.code).strip() != self.code:
+            self._diagnostics.append({
+                "bar_id": ctx.bar_id, "code": self.code, "type": "CODE_MISMATCH",
+                "ctx_code": str(ctx.code).strip(),
+            })
             return None
         if self._ledger is not None:
             self._ledger.mark(ctx)
@@ -604,6 +676,18 @@ class SignalStateMachine:
             and ctx.alpha_today >= p.min_alpha_pct
             and struct != Structure.LH_LL.value
         )
+        # 跳空直通：开盘即站上触发线（价格在触发线上方），ARMED 永远不可达，
+        # 必须允许 DORMANT 直接进场，否则高开突破全天无信号。追高幅度受 gap_max_pct 限制。
+        cond["gap_trigger"] = bool(
+            st == SignalState.DORMANT.value
+            and ctx.tradable
+            and ctx.trigger_line > 0 and price > ctx.trigger_line
+            and price <= ctx.trigger_line * (1.0 + max(0.0, p.gap_max_pct) / 100.0)
+            and ctx.vol_confirm >= p.trigger_vol_thresh
+            and ctx.above_ratio >= p.above_ratio_need
+            and ctx.alpha_today >= p.min_alpha_pct
+            and struct != Structure.LH_LL.value
+        )
         cond["arm"] = bool(
             st == SignalState.DORMANT.value
             and ctx.tradable
@@ -612,11 +696,17 @@ class SignalStateMachine:
             and struct != Structure.LH_LL.value
             and (ctx.defend_line <= 0 or price >= ctx.defend_line)
         )
+        # ARMED 僵死：价格已远离触发线（超过 arm_dist 的 N 倍）却仍挂着"逼近触发"
         cond["arm_invalid"] = bool(
             st == SignalState.ARMED.value
             and (
                 struct == Structure.LH_LL.value
                 or (ctx.defend_line > 0 and price > 0 and price < ctx.defend_line)
+                or (
+                    ctx.trigger_line > 0 and price > 0
+                    and (ctx.trigger_line - price) / ctx.trigger_line * 100.0
+                    > p.arm_dist_pct * max(1.0, p.arm_stale_multiple)
+                )
             )
         )
         cond["rearm"] = bool(
@@ -664,6 +754,12 @@ class SignalStateMachine:
             return (SignalState.TRIGGERED.value, "BREAK_TRIGGER",
                     "突破触发线 %.3f，量能%.2fx，站线比例%.0f%%，超额%+.2f%%"
                     % (ctx.trigger_line, ctx.vol_confirm, ctx.above_ratio * 100.0, ctx.alpha_today))
+        if hit["gap_trigger"]:
+            return (SignalState.TRIGGERED.value, "GAP_BREAK_TRIGGER",
+                    "开盘即站上触发线 %.3f(高于%.2f%%，追高上限%.1f%%)，量能%.2fx，站线%.0f%%，超额%+.2f%%"
+                    % (ctx.trigger_line,
+                       (price - ctx.trigger_line) / ctx.trigger_line * 100.0,
+                       p.gap_max_pct, ctx.vol_confirm, ctx.above_ratio * 100.0, ctx.alpha_today))
         if hit["arm"]:
             return (SignalState.ARMED.value, "ARM_APPROACH",
                     "距触发线 %.3f 仅 %.2f%%，结构%s，进入待触发"
@@ -671,6 +767,13 @@ class SignalStateMachine:
                        (ctx.trigger_line - price) / ctx.trigger_line * 100.0,
                        ctx.struct_value))
         if hit["arm_invalid"]:
+            dist_pct = 0.0
+            if ctx.trigger_line > 0 and price > 0:
+                dist_pct = (ctx.trigger_line - price) / ctx.trigger_line * 100.0
+            if dist_pct > p.arm_dist_pct * max(1.0, p.arm_stale_multiple):
+                return (SignalState.DORMANT.value, "ARM_STALE",
+                        "距触发线 %.3f 已 %.2f%%（超过 %.1f 倍逼近阈值），退回静默"
+                        % (ctx.trigger_line, dist_pct, p.arm_stale_multiple))
             return (SignalState.DORMANT.value, "ARM_INVALID",
                     "结构转弱或跌破防守线 %.3f，退回静默" % ctx.defend_line)
         if hit["rearm"]:
@@ -684,7 +787,8 @@ class SignalStateMachine:
 
     def _hit(self, name: str, cond: bool) -> bool:
         need = 1
-        if name in ("arm", "trigger", "accel", "struct_break", "time_stop", "temp_ebb", "arm_invalid", "rearm"):
+        if name in ("arm", "trigger", "gap_trigger", "accel", "struct_break",
+                    "time_stop", "temp_ebb", "arm_invalid", "rearm"):
             need = max(1, int(self.params.confirm_bars))
         elif name in ("hard_stop", "accel_stop", "trail_stop"):
             need = 1   # 止损不等待确认
@@ -728,7 +832,8 @@ class SignalStateMachine:
         if target == SignalState.TRIGGERED.value and self._ledger is not None:
             stop = max(ctx.defend_line or 0.0, (ctx.vwap or 0.0) * 0.985)
             target_price = ctx.trigger_line * 1.06 if ctx.trigger_line > 0 else 0.0
-            pos = self._ledger.open(ctx, reason_code, stop_price=stop, target_price=target_price)
+            pos = self._ledger.open(self.code, ctx, reason_code,
+                                    stop_price=stop, target_price=target_price)
             if pos is None:
                 # 账本满：不进场，保持 ARMED（不产生假信号）
                 self._diagnostics.append({

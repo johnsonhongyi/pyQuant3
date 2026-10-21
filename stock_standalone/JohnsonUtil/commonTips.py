@@ -753,6 +753,10 @@ class GlobalConfig:
         self.ats_signal_cooldown_bars = self.get_with_writeback("general", "ats_signal_cooldown_bars", fallback=8, value_type="int")
         self.ats_signal_max_positions = self.get_with_writeback("general", "ats_signal_max_positions", fallback=8, value_type="int")
         self.ats_signal_shadow_mode = self.get_with_writeback("general", "ats_signal_shadow_mode", fallback=True, value_type="bool")
+        # 跳空直通：开盘即站上触发线时允许直接进场，追高幅度上限（%）
+        self.ats_signal_gap_max_pct = self.get_with_writeback("general", "ats_signal_gap_max_pct", fallback=3.0, value_type="float")
+        # ARMED 僵死：距触发线超过 arm_dist_pct 的该倍数则退回 DORMANT
+        self.ats_signal_arm_stale_multiple = self.get_with_writeback("general", "ats_signal_arm_stale_multiple", fallback=3.0, value_type="float")
         # Agent Hub 数据根目录：开发环境可指向独立工作区的 .agent_hub 所在目录。
         # fallback=""；为空时由 AgentHubDataEngine 自动识别源码根目录
         # （当前开发环境等价于 D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock_standalone）。
@@ -1135,6 +1139,8 @@ ats_signal_min_progress_pct: float = float(getattr(CFG, 'ats_signal_min_progress
 ats_signal_cooldown_bars: int = int(getattr(CFG, 'ats_signal_cooldown_bars', 8) or 8)
 ats_signal_max_positions: int = int(getattr(CFG, 'ats_signal_max_positions', 8) or 8)
 ats_signal_shadow_mode: bool = bool(getattr(CFG, 'ats_signal_shadow_mode', True))
+ats_signal_gap_max_pct: float = float(getattr(CFG, 'ats_signal_gap_max_pct', 3.0) or 3.0)
+ats_signal_arm_stale_multiple: float = float(getattr(CFG, 'ats_signal_arm_stale_multiple', 3.0) or 3.0)
 agent_hub_path: str = str(
     getattr(CFG, 'agent_hub_path', r'D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock_standalone')
     or r'D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock_standalone'
