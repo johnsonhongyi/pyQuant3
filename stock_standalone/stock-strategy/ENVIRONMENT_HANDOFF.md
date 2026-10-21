@@ -1,3 +1,13 @@
+## 2026-10-21 13:50 手动个股添加、科创板20cm适配与高频扫描降频部署
+
+- 部署按 `deploy-auto-follow.sh` 规范执行，发布号 `20261021135011`；归档包 SHA256 `ecebc0f4221cc5b03b1eacef2b045939416af7f4f4088bce9be9177406d050cc`。远端 Preflight 隔离验收通过，40 项回归测试全绿通过；`stockstrategy-auto-follow.service` 热重载，PID `3048953`，`NRestarts=0`。回滚命令：若需回滚至上一版本 `20261021121356`，执行 `ln -sfn /mnt/4TB/dockerf/stockstrategy/auto-follow/releases/20261021121356 /mnt/4TB/dockerf/stockstrategy/auto-follow/current && systemctl restart stockstrategy-auto-follow.service`。
+- 根因与功能闭环：
+  1. 支持手动添加个股（`symbol()` 放行 688/300，`candidates()` 注入 `manual_symbols` 并赋予 streak=99 最高优先级，控制协议支持 `manual_symbols` / `add_symbol` / `remove_symbol`）；
+  2. 科创板/创业板 20cm 涨停判定（1.20）与涨幅偏离上限自适应（P4 涨幅上限 14.0%，VWAP 偏离上限 1.045），消除主板 10% 规则误杀；
+  3. 彻底根治 `source snapshot expired` 异常刷屏（`backend_market` 情绪时滞放宽至 1800 秒并优雅降级）；
+  4. 默认扫描频率由过于频繁的 60 秒优化为理性的 180 秒（3分钟），对齐 5 分钟 K 线走完心智。
+- 部署后核验：线上执行 `--add-symbol 688787` 成功生效，候选池扩容至 14 只，`688787.SH` 成功进驻；决策日志异常刷屏彻底停止，平稳以 3 分钟为周期输出 `completed`。详情见 [任务记录](../docs/tasks/2026-10-21_1350_自动跟单手动个股添加科创板适配与时滞刷屏根治.md)。
+
 ## 2026-10-21 12:15 自动跟单与投研时滞降级根治部署
 
 - 部署按 `deploy-auto-follow.sh` 规范执行，发布号 `20261021121356`；归档包 SHA256 `9d0c7cb4a53d24a40e0fed14cce366bd3b54b34eece0d23e913a98fa4071c3c1`。远端 Preflight 隔离验收通过，37 项回归测试全绿通过；`stockstrategy-auto-follow.service` 热重载，PID `3027069`，`NRestarts=0`。回滚命令：若需回滚至上一版本 `20261020165513`，执行 `ln -sfn /mnt/4TB/dockerf/stockstrategy/auto-follow/releases/20261020165513 /mnt/4TB/dockerf/stockstrategy/auto-follow/current && systemctl restart stockstrategy-auto-follow.service`。

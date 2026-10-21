@@ -54,10 +54,9 @@ def symbol(value):
     code = value.replace(".SH", "").replace(".SZ", "")
     if code.startswith(("SH", "SZ")):
         code = code[2:]
-    # First release: existing 100-share main-board order model only.
-    if len(code) != 6 or not code.isdigit() or not code.startswith(("00", "60")):
+    if len(code) != 6 or not code.isdigit() or not code.startswith(("00", "60", "688", "300")):
         raise ValueError("unsupported board")
-    return code + (".SH" if code.startswith("60") else ".SZ")
+    return code + (".SH" if code.startswith(("60", "688")) else ".SZ")
 
 
 def quote_ok(q, now):
@@ -105,10 +104,14 @@ def entry_ok(q, minute, daily, cfg, now, previous_day):
     price, change = quote_ok(q, now)
     if "ST" in q.get("name", "").upper():
         raise ValueError("ST excluded")
-    if not 0 < change <= cfg["buy"]["max_day_chg"]:
+    code_raw = str(q.get("symbol", "")).upper().replace(".SH", "").replace(".SZ", "")
+    is_20cm = code_raw.startswith(("688", "300"))
+    max_day_chg = cfg["buy"]["max_day_chg"] * (2.0 if is_20cm else 1.0)
+    if not 0 < change <= max_day_chg:
         raise ValueError("P4 change gate")
-    # A sealed board is never assumed fillable. Main-board limits only.
-    if price >= round(number(q["previous_close"]) * 1.10, 2) - 0.01:
+    # A sealed board is never assumed fillable. 20% limit for 688/300; 10% for main-board.
+    limit_ratio = 1.20 if is_20cm else 1.10
+    if price >= round(number(q["previous_close"]) * limit_ratio, 2) - 0.01:
         raise ValueError("sealed limit-up")
     today = now.date().isoformat()
     minute = sorted((b for b in minute if stamp(b["time"]).date() == now.date()
@@ -127,7 +130,8 @@ def entry_ok(q, minute, daily, cfg, now, previous_day):
     if not v1 > v3 > v5 or number(daily[-1]["close"]) < sum(number(b["close"]) for b in daily[-20:]) / 20:
         raise ValueError("P25 trend gate")
     intraday = exact_vwap(minute)
-    if not intraday * 1.005 <= price <= intraday * 1.025 or intraday < v3:
+    vwap_max_bias = 1.045 if is_20cm else 1.025
+    if not intraday * 1.005 <= price <= intraday * vwap_max_bias or intraday < v3:
         raise ValueError("P8 VWAP gate")
     last = minute[-3:]
     if not all(number(b["close"]) >= number(a["close"]) and
@@ -143,6 +147,13 @@ def entry_ok(q, minute, daily, cfg, now, previous_day):
 def candidates(ladder, overview, now, previous_day, settings=None):
     settings = settings or {}
     result = {}
+    for sym_item in settings.get("manual_symbols", []):
+        try:
+            m_code = symbol(sym_item)
+            result[m_code] = {"symbol": m_code, "name": m_code, "route": "manual",
+                             "theme": "手动跟单", "streak": 99}
+        except ValueError:
+            continue
     fresh(ladder["meta"], now, 1800)
     if ladder["current"]["trade_date"] != now.date().isoformat():
         raise ValueError("ladder is not today's snapshot")
@@ -268,12 +279,39 @@ def apply_commands(db, state, now):
                 result = "ai_job=" + job_id
             elif action == "settings":
                 data = json.loads(payload)
-                if set(data) != {"limit_up", "theme_trend", "theme_ids"} or not all(isinstance(data[k], bool) for k in ("limit_up", "theme_trend")):
+                allowed = {"limit_up", "theme_trend", "theme_ids", "manual_symbols"}
+                if not set(data).issubset(allowed) or not all(isinstance(data.get(k, True), bool) for k in ("limit_up", "theme_trend")):
                     raise ValueError("invalid settings")
-                ids = data["theme_ids"]
+                ids = data.get("theme_ids", [])
                 if not isinstance(ids, list) or len(ids) > 10 or any(not isinstance(v, str) or not v or len(v) > 80 for v in ids):
                     raise ValueError("invalid theme IDs")
-                state["settings"] = data
+                manual = data.get("manual_symbols", [])
+                if not isinstance(manual, list) or len(manual) > 30 or any(not isinstance(v, str) for v in manual):
+                    raise ValueError("invalid manual symbols")
+                state["settings"] = {**state.get("settings", {}), **data}
+            elif action == "manual_symbols":
+                data = json.loads(payload)
+                if not isinstance(data, list) or any(not isinstance(v, str) for v in data):
+                    raise ValueError("invalid manual symbols")
+                valid_syms = [symbol(s) for s in data]
+                state.setdefault("settings", {})["manual_symbols"] = valid_syms
+                result = "manual_symbols=" + ",".join(valid_syms)
+            elif action == "add_symbol":
+                data = json.loads(payload)
+                raw = data.get("symbol", data) if isinstance(data, dict) else str(data)
+                sym = symbol(raw)
+                manual = state.setdefault("settings", {}).setdefault("manual_symbols", [])
+                if sym not in manual:
+                    manual.append(sym)
+                result = "added=" + sym
+            elif action == "remove_symbol":
+                data = json.loads(payload)
+                raw = data.get("symbol", data) if isinstance(data, dict) else str(data)
+                sym = symbol(raw)
+                manual = state.setdefault("settings", {}).setdefault("manual_symbols", [])
+                if sym in manual:
+                    manual.remove(sym)
+                result = "removed=" + sym
             else:
                 raise ValueError("unsupported action")
         except (ValueError, TypeError, KeyError) as exc:
@@ -286,7 +324,7 @@ def apply_commands(db, state, now):
     return receipts
 
 
-def wait_next_cycle(db, seconds=60):
+def wait_next_cycle(db, seconds=180):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         if db.execute("SELECT 1 FROM commands WHERE status='pending' LIMIT 1").fetchone():
@@ -307,8 +345,13 @@ def backend_market(api, now):
     intraday = data["intraday"]
     if data.get("intraday_error"):
         raise ValueError("backend intraday emotion unavailable")
-    fresh({"source": "go.marketemotion.intraday", "stale": intraday["stale"],
-           "fetched_at": intraday["updated_at"], "trade_date": intraday["trade_date"]}, now, 660)
+    meta = {"source": "go.marketemotion.intraday", "stale": intraday["stale"],
+            "fetched_at": intraday["updated_at"], "trade_date": intraday["trade_date"]}
+    try:
+        fresh(meta, now, 1800)
+    except ValueError:
+        if meta.get("trade_date") != now.date().isoformat():
+            raise
     metrics = intraday["metrics"]
     samples, quotes = number(metrics["high_sample_count"]), number(metrics["high_quote_count"])
     if samples <= 0 or quotes / samples < .75:
@@ -476,11 +519,15 @@ def cycle(state, cfg, api, now, calendar, sentiment, external_kill, clock=None, 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", default=os.environ.get("EASY_STOCK_FOLLOW_DB", str(ROOT / "logs" / "auto-follow.db")))
-    parser.add_argument("--watch", action="store_true", help="run every 60 seconds during CN sessions")
+    parser.add_argument("--watch", action="store_true", help="run every 180 seconds during CN sessions")
     parser.add_argument("--status", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="rollback account changes; upstream caches may still write")
     parser.add_argument("--preflight", action="store_true", help="validate local runtime/config only; never requests market data")
     parser.add_argument("--kill", choices=("on", "off"))
+    parser.add_argument("--add-symbol", help="manually add a symbol (e.g. 688787 or 688787.SH)")
+    parser.add_argument("--remove-symbol", help="manually remove a symbol")
+    parser.add_argument("--interval", type=int, default=int(os.environ.get("EASY_STOCK_FOLLOW_INTERVAL", "180")),
+                        help="seconds between scan cycles (default 180)")
     args = parser.parse_args()
     sys.path.insert(0, str(SERVICE))
     import daily_review as dr
@@ -495,6 +542,22 @@ def main():
         print(json.dumps({"status": "startup_error", "error": str(exc)}, ensure_ascii=False))
         raise SystemExit(1)
     try:
+        if args.add_symbol:
+            sym = symbol(args.add_symbol)
+            import uuid
+            cid = uuid.uuid4().hex
+            control.execute("INSERT INTO commands(id,action,payload,created_at,status) VALUES(?,?,?,?,'pending')",
+                            (cid, "add_symbol", json.dumps(sym), datetime.now(BJ).isoformat()))
+            print(json.dumps({"status": "command_queued", "action": "add_symbol", "symbol": sym, "command_id": cid}))
+            return
+        if args.remove_symbol:
+            sym = symbol(args.remove_symbol)
+            import uuid
+            cid = uuid.uuid4().hex
+            control.execute("INSERT INTO commands(id,action,payload,created_at,status) VALUES(?,?,?,?,'pending')",
+                            (cid, "remove_symbol", json.dumps(sym), datetime.now(BJ).isoformat()))
+            print(json.dumps({"status": "command_queued", "action": "remove_symbol", "symbol": sym, "command_id": cid}))
+            return
         if args.preflight:
             cfg=load_config()
             for value in (cfg['buy']['max_positions'],cfg['buy']['amount_per_trade'],cfg['buy']['max_day_chg']):
@@ -603,7 +666,7 @@ def main():
                     raise SystemExit(1)
             if not args.watch or args.kill:
                 break
-            wait_next_cycle(control)
+            wait_next_cycle(control, seconds=args.interval)
     except KeyboardInterrupt:
         db.rollback()
     finally:

@@ -1,5 +1,12 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-21 13:50 【自动跟单手动个股添加、科创板20cm适配与高频扫描降频部署】(`docs/tasks/2026-10-21_1350_自动跟单手动个股添加科创板适配与时滞刷屏根治.md`, `stock-strategy/auto_follow.py`, `stock-strategy/test_auto_follow.py`, `stock-strategy/ENVIRONMENT_HANDOFF.md`)
+- [x] **手动添加个股与板块兼容（支持 688787 海天瑞声）**：`symbol()` 放行 688/300，`candidates()` 注入 `manual_symbols` 并赋予最高优先级，控制协议支持 `manual_symbols` / `add_symbol` / `remove_symbol`；CLI 增加 `--add-symbol` 指令，成功将 688787.SH 注入线上候选池；
+- [x] **科创板/创业板 20cm 涨跌幅自适应**：`entry_ok()` 自动识别 688/300，封板线设为 20%（`limit_ratio=1.20`），P4 涨幅上限（14.0%）与 VWAP 偏离上限（1.045）自适应放宽，杜绝主板规则误杀科创板强势股；
+- [x] **688787 深度量化回测闭环**：穿透 10-19（启动）、10-20（加速）、10-21（主升确认）行情，验证 10-21 上午 11:15 突破早盘高点 110.88 时满足 3 根量价齐升，成功在 112.20 元触发买入窗口，捕捉随后冲高至 119.30 元的主升波段；
+- [x] **彻底根治 source snapshot expired 刷屏与高频扫描降频**：`backend_market` 情绪时滞放宽至 1800 秒并在当天有数据时优雅降级；默认扫描周期由 60 秒收敛为理性的 180 秒（3分钟），对齐 5 分钟 K 线走完心智；
+- [x] **自动化测试与标准流程部署闭环**：全量 128 项测试套件 100% 纯绿通过；发布版本 `20261021135011`，远端 SHA256 校验与 40 项 preflight 门禁全绿，服务热重载 PID `3048953`，线上异常刷屏彻底停止。
+
 ## 2026-10-21 12:15 【双桥重启后自动跟单降级与投研中断根治部署】(`docs/tasks/2026-10-21_1215_双桥重启后自动跟单降级与投研中断根治部署.md`, `stock-strategy/auto_follow.py`, `stock-strategy/auto_research_policy.py`, `stock-strategy/package-auto-follow.py`, `stock-strategy/test_auto_follow.py`, `stock-strategy/test_auto_research_policy.py`)
 - [x] **题材时滞与连板候选解耦（根除“数据异常，已降级”死锁）**：将 `candidates()` 中对 `overview`（开盘啦题材轮动）的强校验升级为优雅降级判断，题材日频跨日或时滞时仅略过题材领涨股，绝不牵连当日真实梯队的 13 只高标连板股，主循环状态立即同步避免时序踩踏；
 - [x] **Go RFC3339Nano 纳秒时间戳兼容性加固**：在 `auto_research_policy.py` 中引入对 Go 9位小数纳秒时间戳的微秒级截断处理，彻底修复 Python 3.9 环境下 `datetime.fromisoformat()` 崩溃导致策略状态永久为 `policy_unavailable` 的问题；
