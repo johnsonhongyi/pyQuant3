@@ -1,9 +1,18 @@
 """Automatic research admission; independent of paper execution/risk policy."""
 import json
+import re
 import sqlite3
 from datetime import datetime
 
 DEFAULT = {"enabled": False, "interval_seconds": 900, "daily_max_runs": 3, "daily_token_budget": 300000}
+
+
+def _parse_iso(value):
+    value = str(value).replace("Z", "+00:00")
+    # Go RFC3339Nano fractions exceed Python 3.9's microsecond parser.
+    value = re.sub(r"(\d{2}:\d{2}:\d{2})\.(\d+)([+-]\d{2}:\d{2})$",
+                   lambda m: m[1] + "." + m[2][:6].ljust(6, "0") + m[3], value)
+    return datetime.fromisoformat(value)
 
 
 def selection(db, now):
@@ -24,7 +33,7 @@ def selection(db, now):
                          (node, workspace)).fetchone()
         if not row or row[0] not in ('ready', 'analyzing'):
             return None, 'model_unavailable'
-        age = (now - datetime.fromisoformat(row[1].replace('Z', '+00:00'))).total_seconds()
+        age = (now - _parse_iso(row[1])).total_seconds()
         detail = json.loads(row[2])
         if not isinstance(detail, dict) or not isinstance(detail.get('models'), list):
             return None, 'model_unavailable'

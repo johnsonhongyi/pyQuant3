@@ -54,3 +54,12 @@ class AutomaticResearchPolicyTests(unittest.TestCase):
             self.db.execute('UPDATE ai_desktop SET detail=?',(json.dumps(detail),))
             self.assertIsNone(ai.enqueue(self.db,self.state,NOW))
             self.assertEqual(self.state['auto_research_status'],'model_unavailable')
+
+    def test_nanosecond_heartbeat_parsed_successfully(self):
+        self.enable()
+        self.db.execute("UPDATE ai_desktop SET heartbeat='2026-10-21T03:53:57.128216038Z'")
+        from datetime import datetime
+        test_now = datetime.fromisoformat('2026-10-21T03:54:10+00:00')
+        identity = ai.enqueue(self.db, self.state, test_now)
+        self.assertIsNotNone(identity)
+        self.assertEqual(self.state['auto_research_status'], 'ready')
