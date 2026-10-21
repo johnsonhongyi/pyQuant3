@@ -142,6 +142,10 @@ def validate_result(result, context):
 def sync_ai(db, state, now):
     import auto_follow as af
     db.execute("UPDATE ai_jobs SET status='expired' WHERE status IN ('queued','running') AND expires_at<=?", (now.isoformat(),))
+    try:
+        db.execute("UPDATE automatic_research_runs SET usage_known=1, total_tokens=COALESCE(total_tokens, 0) WHERE usage_known=0 AND job_id IN (SELECT id FROM ai_jobs WHERE status IN ('expired','failed','cancelled','completed'))")
+    except Exception:
+        pass
     policy = state.get("ai_settings", DEFAULT_AI)
     rows = db.execute("SELECT id,status,question,created_at,finished_at,result,evidence_hash,trade_date,context FROM ai_jobs WHERE node_id=? AND workspace_id=? ORDER BY created_at DESC LIMIT 20",
                       (policy.get("node_id", ""), policy.get("workspace_id", ""))).fetchall()
