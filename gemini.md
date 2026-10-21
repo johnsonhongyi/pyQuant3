@@ -1,5 +1,16 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](stock_standalone/design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-21 17:35 【自动AI投研过期任务全自动清理淘汰与常驻结算恢复部署闭环】(`stock_standalone/stock-strategy/source/easy-stock-analysis/backend/internal/httpapi/automatic_research.go`, `stock_standalone/stock-strategy/source/easy-stock-web/src/components/FollowAIWorkspace.tsx`, `stock_standalone/stock-strategy/source/easy-stock-web/src/components/AutomaticResearchSettingsPanel.tsx`, `stock_standalone/stock-strategy/follow_ai.py`, `stock_standalone/docs/tasks/2026-10-21_1735_过期任务自动淘汰清理与投研常驻结算上线.md`)
+- [x] **过期任务持续膨胀根因穿透**：排查确权任务在因超时/异常标为 `expired` 后未设滑动窗口淘汰，在数据库中持续累积至 100+ 条，导致前端“分析任务与回传”卡片被历史过期记录刷屏，产生卡顿与认知干扰；
+- [x] **轻量级全自动数据瘦身与清理闭环（Automatic Data Cleanup）**：
+  - Go 后端（`automatic_research.go`）与 Python 策略引擎（`follow_ai.py`）双端对齐：在主事务与状态评估生命周期中自动执行清理 SQL；
+  - `expired`/`cancelled` 任务自动按时间倒序淘汰，仅保留最近 3 条用于排查，历史过期任务自动物理清除；已完成（`completed`）任务自动清理 7 天前旧数据，Token 账本（`runs`）自动清理 30 天前旧记录；
+  - 抽象 `dbExecer` 统一承载 `*sql.DB` 与 `*sql.Tx`，彻底根除 SQLite 事务内直接调 `db.Exec` 引发的 30 秒写锁互锁隐患；
+- [x] **Web 前端常驻操作与列表呈现优化（UX 升级）**：
+  - 投研看板摘要区顶部操作栏（红圈位置）将【结算并恢复】升级为**常驻按钮**（随时可点击对账与恢复，存在未结算时呈高亮琥珀色警示），解决秒级自愈后按钮不显现的困惑；
+  - “分析任务与回传”卡片头部新增 **【清理过期记录】** 快捷操作，并在前端限制过期记录最多仅渲染 3 条，彻底净化列表；
+- [x] **自动化测试与生产上线闭环**：全量 Go/Python 测试纯绿通过；Docker 构建部署发布号 `20261021173321`，远端任务数由 103 条骤降至 60 条，过期堆积任务全量清除；调用结算端点返回 200，线上状态 `ready`，最新桌面 Antigravity 策略提案正常回传展示。
+
 ## 2026-10-21 16:45 【自动AI投研用量未结算永久暂停根治与一键结算恢复部署闭环】(`stock_standalone/stock-strategy/source/easy-stock-analysis/backend/internal/httpapi/automatic_research.go`, `stock_standalone/stock-strategy/source/easy-stock-web/src/components/AutomaticResearchSettingsPanel.tsx`, `stock_standalone/stock-strategy/follow_ai.py`, `stock_standalone/docs/tasks/2026-10-21_1645_自动AI投研用量未结算永久暂停修复与一键结算恢复上线.md`)
 - [x] **未结算永久挂起根因穿透**：排查确权任务在因模型超时/CLI报错/租约过期导致 `status='expired'/'failed'` 终态时，`automatic_research_runs` 永久保留 `usage_known=0`，使系统永久返回 `usage_unsettled`（用量未结算·已暂停）并永久拦截后续任务；
 - [x] **双端自愈对账机制落地（Automatic Recovery）**：Go 后端在状态评估与任务认领时自动执行 `autoReconcileResearchRuns`，清理超时租约并将终态任务对账为 `usage_known=1, total_tokens=0`；Python 策略引擎在 `follow_ai.py` 循环中补充防御性对账，彻底消除未结算死锁；
