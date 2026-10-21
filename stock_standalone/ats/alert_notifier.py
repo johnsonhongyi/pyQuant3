@@ -585,18 +585,29 @@ class AlertNotifier(QObject if HAS_PYQT else object):
 
     def _stop_voice_workers(self, deadline):
         """Background shutdown drain; never create a voice singleton to stop it."""
+        wait_sec = min(0.8, max(0.0, deadline - time.monotonic()))
         with self._voice_lock:
             workers = list(self._voice_threads)
+            self._voice_threads.clear()
         for worker in workers:
-            worker.join(timeout=max(0.0, deadline - time.monotonic()))
+            try:
+                worker.join(timeout=wait_sec)
+            except Exception:
+                pass
         import sys
         module = sys.modules.get('alert_manager')
         manager_class = getattr(module, 'AlertManager', None)
         manager = getattr(manager_class, '_instance', None)
         if manager is not None:
-            manager.stop()
-            workers.extend([manager.process, getattr(manager, '_feedback_thread', None)])
-        return not any(worker is not None and worker.is_alive() for worker in workers)
+            try:
+                manager.stop()
+                workers.extend([manager.process, getattr(manager, '_feedback_thread', None)])
+            except Exception:
+                pass
+        lingering = [w.name for w in workers if w is not None and w.is_alive()]
+        if lingering:
+            logger.warning("[AlertNotifier] 退出时部分语音守护线程未在时限内退出 (将随进程退出自动释放): %s", lingering)
+        return True
         
     def _init_tray(self):
         if not HAS_PYQT:
@@ -1183,7 +1194,15 @@ class AlertNotifier(QObject if HAS_PYQT else object):
                 logger.warning(f"ShowMessage failed: {e}")
 
         # 3. 触发语音播报 (受 is_voice_enabled 控制)
-        if "全仓轮动" in reason:
+        if "过热未加速" in reason or "出局" in reason:
+            voice_text = f"过热未加速出局警报，{name}，防退潮补跌主动出局"
+        elif "连杀小企稳" in reason or "高开加速" in reason:
+            voice_text = f"连杀企稳高开加速买点，{name}，反转起爆"
+        elif "阶段高开杀跌" in reason or "深V收红" in reason or "深V" in reason:
+            voice_text = f"阶段深V特异承接买点，{name}，洗盘完毕反弹"
+        elif "冲高回落" in reason or "放量试盘" in reason:
+            voice_text = f"冲高回落放量试盘，{name}，主力温和吸筹"
+        elif "全仓轮动" in reason:
             voice_text = f"全仓轮动换马指令，{name}，100%全仓接力超级领头羊"
         elif "首发吸筹" in reason or "首发上市" in reason:
             voice_text = f"首日上市绝杀买点，{name}，均线惜售全天黄金吸筹点"
@@ -1216,7 +1235,10 @@ class AlertNotifier(QObject if HAS_PYQT else object):
         elif "缺口加速" in reason:
             voice_text = f"缺口加速买点，{name}，跳空高开未补缺"
         else:
-            voice_text = f"特异买点 {name}，{reason}"
+            import re
+            clean_reason = re.sub(r'[^\w\s\u4e00-\u9fa5，。！、]', ' ', str(reason))
+            clean_reason = ' '.join(clean_reason.split())[:20]
+            voice_text = f"特异信号，{name}，{clean_reason}"
         if self.is_voice_enabled():
             self._speak_text(voice_text)
         else:

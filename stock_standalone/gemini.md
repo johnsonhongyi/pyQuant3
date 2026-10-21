@@ -1,5 +1,35 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-21 10:25 【SBC异动横幅与集合竞价Alt联动关闭优化】(`docs/tasks/2026-10-21_1025_SBC异动横幅与集合竞价Alt联动关闭优化.md`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_alt_close_linkage.py`)
+- [x] **【严格遵守禁止自行打包铁律】**：遵循用户指示，严禁在开发流程中擅自调用 PyInstaller 编译，所有打包统筹移交既有标准打包工具；
+- [x] **【SBC 顶部异动提醒横幅 Alt 联动关闭与快捷键释放】**：
+    - 针对顶部告警横幅的 `✕ 关 (X)` 按钮，增加 Alt 修饰键检测（`is_alt_modifier_active()` 与 `Qt.KeyboardModifier.AltModifier`）；
+    - 普通点击仅收起当前窗口横幅；按住 Alt 点击或键盘按下 `Alt+X` 联动批量收起当前所有已打开 SBC 窗口的异动提醒横幅与脉冲动画；
+    - 彻底解除原 `Alt+X` 关联全量退出的冲突绑定，对齐系统其它 Alt 联动心智；
+- [x] **【集合竞价面板左侧增设关闭微按钮与 Alt 全局联动】**：
+    - 在图表右上角集合竞价叠图（`09:25 成交/开盘` 浮层）左上角新增 15x15 精致无边框关闭微按钮 `✕`（悬停红底白字高亮），竞价文字向右微调避让；
+    - 竞价浮层隐藏时按钮自动同步隐藏；普通点击仅关闭当前窗口竞价叠图；
+    - 按住 Alt 点击或键盘按下 `Alt+C` 触发全局所有已打开 SBC 窗口联动关闭/翻转竞价叠图（`set_all_sbc_auction_visible`）；
+- [x] **【全套自动化回归测试 100% 纯绿】**：
+    - 新增 `tests/test_sbc_alt_close_linkage.py` 专项覆盖单窗关闭与 Alt 联动关闭两组共 4 大分支，2 项单测全绿；
+    - 退出收尾与语音告警综合套件 52 项测试全绿通过。
+
+
+## 2026-10-21 10:00 【语音报警死锁根治与ATS退出阻塞消除全闭环】(`docs/tasks/2026-10-21_1000_语音报警死锁根治与ATS退出阻塞消除全闭环.md`, `alert_manager.py`, `ats/alert_notifier.py`, `tests/test_alert_voice_deadlock_and_shutdown.py`)
+- [x] **【超短特异赛马精练短语音模板与文本正则白名单安全清洗】**：
+    - 针对昨日新增超短赛马信号落入 `else` 导致拼接 150 字长文本与 Emoji 冲击 SAPI 的隐患，在 `ats/alert_notifier.py` 补充“过热未加速出局”、“连杀企稳高开加速”、“阶段深V收红”、“冲高回落放量试盘”等 3~5 秒精简纯中文语音模板；
+    - 引入正则白名单清洗（仅保留汉字、英文字母、数字与常用中文标点），彻底剥离 Emoji、特殊符号并截断至 20~60 字符，消除声卡超长占用；
+- [x] **【SAPI 多声卡自适应智能遍历与 pyttsx3 死锁彻底根除（`alert_manager.py`）】**：
+    - 深入剖析实机副屏 HDMI 接口（`SyncMaster`）断开或驱动未注册引发 `0x80045006: SPERR_UNINITIALIZED 没有注册类` 根因；引入 `speaker.GetAudioOutputs()` 自动遍历探测与缓存，秒级自适应切换至可用声卡（如主屏 `LG HDR 4K` 或 Realtek 扬声器）；
+    - 彻底移除在子线程中调用 `pyttsx3.init().runAndWait()` 的死锁回退逻辑，杜绝 Windows COM 事件循环假死；
+    - `_speak_sapi` 增加 8 秒硬超时门禁（Hard Deadline），超时立即 purge 丢弃，杜绝音频驱动死等挂起；
+- [x] **【ATS 退出收尾守护线程优雅放行】**：
+    - 在 `_stop_voice_workers` 中将语音线程等待时间收敛至 0.8 秒；
+    - 守护线程作为 daemon 线程在超时未退出时打 warning 并返回 `True`，坚决不阻断主窗口关闭和核心数据持久化，消灭 `['voice cleanup: drain failed']` 弹窗拦截；
+- [x] **【全套自动化回归测试 100% 纯绿】**：
+    - 新增 `tests/test_alert_voice_deadlock_and_shutdown.py` 专项单测，56 项回归测试纯绿通过。
+
+
 ## 2026-10-20 18:05 【Vis手动触发推送与盘后全量同步闭环修复】(`docs/tasks/2026-10-20_1805_Vis手动触发推送与盘后全量同步闭环修复.md`, `instock_MonitorTK.py`, `tk_frame_fingerprint.py`, `tests/test_ipc_subscription_recovery.py`)
 - [x] 修复主界面工具栏（`frame_right`）Vis Checkbutton 遗漏绑定 `_on_vis_toggle` 的问题，确保无论手动打开还是手动关闭 Vis 均可靠触发即时推送；
 - [x] 增强 `_on_vis_toggle` 用户操作日志记录与 UI 状态持久化（`save_ui_states`）；
