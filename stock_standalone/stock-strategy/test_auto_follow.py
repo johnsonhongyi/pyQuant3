@@ -257,5 +257,48 @@ class FollowTests(unittest.TestCase):
                 account.close();control.close()
 
 
+    def test_symbol_supports_kc_and_cy_boards(self):
+        self.assertEqual(af.symbol("688787"), "688787.SH")
+        self.assertEqual(af.symbol("688787.SH"), "688787.SH")
+        self.assertEqual(af.symbol("sh688787"), "688787.SH")
+        self.assertEqual(af.symbol("300059"), "300059.SZ")
+        self.assertEqual(af.symbol("300059.SZ"), "300059.SZ")
+        self.assertEqual(af.symbol("sz300059"), "300059.SZ")
+
+    def test_manual_symbols_in_candidates(self):
+        ladder = {"current": {"trade_date": "2026-10-14"}, "previous": {"trade_date": "2026-10-13", "levels": []},
+                  "meta": {"source": "test", "stale": False, "fetched_at": NOW.isoformat()}}
+        overview = {"meta": {"source": "test", "stale": False, "fetched_at": NOW.isoformat()}, "data": []}
+        settings = {"manual_symbols": ["688787.SH", "000001.SZ"]}
+        pool = af.candidates(ladder, overview, NOW, "2026-10-13", settings)
+        symbols = [c["symbol"] for c in pool]
+        self.assertIn("688787.SH", symbols)
+        self.assertIn("000001.SZ", symbols)
+        self.assertEqual(pool[0]["route"], "manual")
+        self.assertEqual(pool[0]["streak"], 99)
+
+    def test_commands_add_and_remove_manual_symbol(self):
+        state = af.initial()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            control = af.connect_control(Path(temp_dir) / "account.db")
+            try:
+                control.execute("INSERT INTO commands(id,action,payload,created_at) VALUES('c1','add_symbol',?,?)",
+                                (json.dumps("688787"), NOW.isoformat()))
+                af.apply_commands(control, state, NOW)
+                self.assertEqual(state["settings"].get("manual_symbols"), ["688787.SH"])
+
+                control.execute("INSERT INTO commands(id,action,payload,created_at) VALUES('c2','remove_symbol',?,?)",
+                                (json.dumps("688787.SH"), NOW.isoformat()))
+                af.apply_commands(control, state, NOW)
+                self.assertEqual(state["settings"].get("manual_symbols"), [])
+
+                control.execute("INSERT INTO commands(id,action,payload,created_at) VALUES('c3','manual_symbols',?,?)",
+                                (json.dumps(["688787", "600001"]), NOW.isoformat()))
+                af.apply_commands(control, state, NOW)
+                self.assertEqual(state["settings"].get("manual_symbols"), ["688787.SH", "600001.SH"])
+            finally:
+                control.close()
+
+
 if __name__ == "__main__":
     unittest.main()
