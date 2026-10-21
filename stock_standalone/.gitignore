@@ -118,3 +118,4 @@ data/ipo_learning/shadow_observations.sqlite
 !tests/test_signal_state_machine.py
 !tests/test_premarket_profile.py
 !tests/test_signal_integration.py
+!tests/test_signal_regressions.py

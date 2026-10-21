@@ -456,6 +456,25 @@ class TimelineHub:
         for s in self._series.values():
             s.reset()
 
+    def apply_bar_seconds(self, bar_seconds: int) -> bool:
+        """运行期切换 bar 长度。
+
+        盘中热改会让 ``bar_id`` 的映射整体平移，旧环缓冲里的 bar_id 全部错位，
+        窗口会取到错位的 bar 而**不报错**。因此这里强制清空时间轴。
+        状态机与账本不受影响（它们只记 bar_id 的差值，不依赖绝对编号）。
+
+        Returns:
+            True 表示确实发生了切换。
+        """
+        bs = max(1, int(bar_seconds or DEFAULT_BAR_SECONDS))
+        if bs == self.clock.bar_seconds:
+            return False
+        self.clock = BarClock(bs)
+        for s in self._series.values():
+            s.bar_seconds = bs
+            s.reset()
+        return True
+
     # -- 写入 ---------------------------------------------------------------
     def series(self, code: str) -> TrackSeries:
         c = str(code).strip()
