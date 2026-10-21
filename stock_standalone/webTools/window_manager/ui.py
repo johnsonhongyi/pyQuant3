@@ -8052,6 +8052,7 @@ def main(hide_window: bool = False):
 
     def shutdown_codex_bridge_with_manager():
         try:
+            getattr(window, "_codex_bridge_watchdog", None) and window._codex_bridge_watchdog.stop()
             from .codex_bridge_manager import BridgeController
             BridgeController(core.get_app_root()).shutdown_for_manager_exit()
         except Exception as exc:
@@ -8059,6 +8060,7 @@ def main(hide_window: bool = False):
 
     def shutdown_antigravity_bridge_with_manager():
         try:
+            getattr(window, "_antigravity_bridge_watchdog", None) and window._antigravity_bridge_watchdog.stop()
             from .antigravity_bridge_manager import AntigravityBridgeController
             AntigravityBridgeController(core.get_app_root()).shutdown_for_manager_exit()
         except Exception as exc:
@@ -8148,6 +8150,9 @@ def main(hide_window: bool = False):
             bridge_status_timer.timeout.connect(report_bridge_status)
             bridge_status_timer.start()
             window._codex_bridge_status_timer = bridge_status_timer
+            from .bridge_watchdog import BridgeWatchdog
+            window._codex_bridge_watchdog = BridgeWatchdog("Codex", controller, window.log)
+            window._codex_bridge_watchdog.start()
         except Exception as exc:
             logger.warning("管理器启动 Codex 桌面桥失败：%s", type(exc).__name__)
             window.log(f"[Codex 桌面桥] 初始化失败（{type(exc).__name__}），请查看桥接面板状态。")
@@ -8208,6 +8213,9 @@ def main(hide_window: bool = False):
             agv_status_timer.timeout.connect(report_agv_status)
             agv_status_timer.start()
             window._antigravity_bridge_status_timer = agv_status_timer
+            from .bridge_watchdog import BridgeWatchdog
+            window._antigravity_bridge_watchdog = BridgeWatchdog("Antigravity", controller, window.log)
+            window._antigravity_bridge_watchdog.start()
         except Exception as exc:
             logger.warning("管理器启动 Antigravity 桌面桥失败：%s", type(exc).__name__)
             window.log(f"[Antigravity 桌面桥] 初始化失败（{type(exc).__name__}），请查看桥接面板状态。")
