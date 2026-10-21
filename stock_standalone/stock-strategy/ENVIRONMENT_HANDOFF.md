@@ -1,3 +1,20 @@
+## 2026-10-21 16:45 自动AI投研用量未结算永久暂停根治与一键结算恢复功能部署上线
+
+- 按 `build-and-deploy.ps1 -AllowLayeredImageBuild` 发布 Web/API，发布号 `20261021164131`；部署状态 `Deployment healthy`。回滚命令：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261021164131`。
+- 根因分析与功能闭环：
+  1. **永久挂起根因穿透**：当自动投研任务因模型超时、CLI报错或断网过期（`status='expired'/'failed'`）未上报 token 用量时，`automatic_research_runs` 永久保留 `usage_known=0`，导致 `automaticResearchState` 永久输出 `usage_unsettled`（用量未结算·已暂停），`claimAutomaticResearch` 永久拦截后续任务；
+  2. **双端自愈对账机制（Automatic Recovery）**：
+     - Go 后端在状态查询与任务认领时自动执行 `autoReconcileResearchRuns`，将已超时租约置为 `expired`，并将所有终态（`expired`, `failed`, `cancelled`, `completed`）未结算任务自动对账标记为 `usage_known=1, total_tokens=0`；
+     - Python 策略引擎在 `follow_ai.py` 的 `sync_ai` 循环中增加防御性终态对账，彻底消除永久死锁；
+  3. **一键结算恢复功能（Direct Manual Settle & Resume）**：
+     - 后端提供 `POST /api/v1/ai/auto-research/settle` 接口，管理员可一键强制结算所有挂起记录；
+     - 前端在“自动 AI 投研”摘要区顶部操作栏（红圈位置）新增醒目的 **【结算并恢复】** 按钮，并在设置面板“历史用量”区域新增 **【一键处理结算并恢复】** 按钮；
+  4. 提交记录：子项目库提交 `7d42fb0`，主库提交 `57bd7407`。
+- 部署后核验：
+  - 线上 API `/api/v1/ai/auto-research` 自动恢复自愈：`status: "ready"`，`unsettled_runs: 0`；
+  - 调用 `POST /api/v1/ai/auto-research/settle` 验证返回 HTTP 200，状态维持 `ready`；
+  - 前端静态分包加载正常，刷新页面即展现“可运行”与恢复按钮。
+
 ## 2026-10-21 14:18 自动跟单自定义个股前端可视化与后端全链路部署上线
 
 - 按 `build-and-deploy.ps1 -AllowLayeredImageBuild` 发布 Web/API，发布号 `20261021141525`；部署状态 `Deployment healthy`。回滚命令：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261021141525`。

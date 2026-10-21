@@ -1,5 +1,13 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](stock_standalone/design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-21 16:45 【自动AI投研用量未结算永久暂停根治与一键结算恢复部署闭环】(`stock_standalone/stock-strategy/source/easy-stock-analysis/backend/internal/httpapi/automatic_research.go`, `stock_standalone/stock-strategy/source/easy-stock-web/src/components/AutomaticResearchSettingsPanel.tsx`, `stock_standalone/stock-strategy/follow_ai.py`, `stock_standalone/docs/tasks/2026-10-21_1645_自动AI投研用量未结算永久暂停修复与一键结算恢复上线.md`)
+- [x] **未结算永久挂起根因穿透**：排查确权任务在因模型超时/CLI报错/租约过期导致 `status='expired'/'failed'` 终态时，`automatic_research_runs` 永久保留 `usage_known=0`，使系统永久返回 `usage_unsettled`（用量未结算·已暂停）并永久拦截后续任务；
+- [x] **双端自愈对账机制落地（Automatic Recovery）**：Go 后端在状态评估与任务认领时自动执行 `autoReconcileResearchRuns`，清理超时租约并将终态任务对账为 `usage_known=1, total_tokens=0`；Python 策略引擎在 `follow_ai.py` 循环中补充防御性对账，彻底消除未结算死锁；
+- [x] **一键结算恢复端到端功能闭环（Direct Manual Settle & Resume）**：
+  - Go 后端新增 `POST /api/v1/ai/auto-research/settle` 接口，一键重置并强制结算所有挂起记录；
+  - React Web 前端在用户标注的摘要区顶部操作栏（系统设置按钮旁）增加琥珀色 **【结算并恢复】** 按钮，并在设置面板用量区增加 **【一键处理结算并恢复】** 按钮；
+- [x] **自动化测试与生产上线闭环**：全量 Go/Python 测试纯绿通过（新增对账单测）；Docker 构建部署发布号 `20261021164131`，线上状态立即自愈恢复为 `status: "ready"`（可运行）、`unsettled_runs: 0`，接口与页面端到端验证通过。
+
 ## 2026-10-21 14:18 【自动跟单自定义个股前端可视化、科创板20cm适配与高频扫描降频部署闭环】(`stock_standalone/stock-strategy/source/easy-stock-web/src/components/AutoFollowWorkspace.tsx`, `stock_standalone/stock-strategy/source/easy-stock-analysis/backend/internal/httpapi/auto_follow.go`, `stock_standalone/stock-strategy/auto_follow.py`, `stock_standalone/docs/tasks/2026-10-21_1350_自动跟单手动个股添加科创板适配与时滞刷屏根治.md`)
 - [x] **Web 前端可视化自定义个股入口补齐**：在 `AutoFollowWorkspace.tsx` 的“跟随范围”卡片中新增“手动自定义个股”代码输入框、添加按钮与已选股票药丸标签列表（支持 ✕ 一键移除），输入 6 位代码自动格式化 `.SH`/`.SZ`；并在强势股跟踪 Tab 的路径下拉框中增加“手动添加”筛选选项；
 - [x] **Go 后端反序列化对齐放行**：在 `autoFollowCommand` 的 `settings` 结构体中扩充 `ManualSymbols []string`，严格校验股票代码格式及长度（最多 30 只），放行前端提交并消除 `DisallowUnknownFields()` 导致的 400 拦截；
