@@ -1,3 +1,19 @@
+## 2026-10-23 00:55 用户管理加固与普通用户Safari刷屏死循环根除部署上线
+
+- 按 `build-and-deploy.ps1 -AllowLayeredImageBuild` 发布 Web/API，发布号 `20261023005301`；部署状态 `Deployment healthy: release=20261023005301, url=http://192.168.50.60:20073`。回滚命令：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261023005301`。
+- 根因分析与功能闭环：
+  1. **普通用户登录后 Safari 疯狂刷屏闪烁根除**：
+     - 普通用户登录后，页面组件拉取只读联动信息 `GET /api/v1/linkage/targets`；原后端误将该只读接口限制为必须管理员（`u.Admin == true`），返回 401 Unauthorized；
+     - 前端拦截器收到 401 触发 `stock-auth-required`，旧代码盲目清空 `status` 导致整棵 React 渲染树卸载重建，形成无限 401 重载死循环；
+     - **修复措施**：后端放行已登录 Web 用户只读查看联动 targets 等信息，写操作限制管理员且未授权返回 403 Forbidden；前端优化为静默核验 session，杜绝暴力卸载，并加入 3 秒防抖；
+  2. **消除登录页用户名信息泄露**：
+     - 彻底清除登录输入框占位符中遗留的示例用户名（`如 johnson / lili`），恢复标准纯净的 `请输入用户名`，杜绝用户名枚举与信息泄露风险；
+  3. 提交记录：子项目库提交 `f9adc67`。
+- 部署后核验：
+  - 线上 API `/api/health` HTTP 200 返回 `ok: True`；
+  - 容器日志确认 `linkage/targets` 401 刷屏死循环彻底消失，服务平稳运行；
+  - 详情见 [任务记录](../docs/tasks/2026-10-23_0040_用户管理全功能修复与密码登录加固闭环.md)。
+
 ## 2026-10-23 00:40 用户管理全功能修复(CRUD)+密码可见性与登录容错加固部署上线
 
 - 按 `build-and-deploy.ps1 -AllowLayeredImageBuild` 发布 Web/API，发布号 `20261023003714`；部署状态 `Deployment healthy: release=20261023003714, url=http://192.168.50.60:20073`。回滚命令：`bash /root/johnson/stock-strategy/docker/rollback-prebuilt.sh 20261023003714`。
