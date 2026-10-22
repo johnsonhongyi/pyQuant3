@@ -101,10 +101,18 @@ def test_table_headers_dynamic_adaptation():
     new_headers_3d = get_new_stock_table_headers(extra_cols=extra_cols, base_day=3)
     assert 'DFF(3D)' in new_headers_3d
 
-    # 资金主线与龙头中枢 (CapitalDragonEngine / CapitalDragonPanel) - 还原为原逻辑，表头严格为 涨幅%
-    dragon_headers = get_dragon_table_headers(extra_cols=[])
-    assert '涨幅%' in dragon_headers
-    assert '涨幅%(2D)' not in dragon_headers
+    # 资金主线与龙头中枢 (CapitalDragonEngine / CapitalDragonPanel) - 基础列严格锁定为原版 涨幅%，自定义列对齐 DFF(2D)
+    dragon_headers_1d = get_dragon_table_headers(extra_cols=['dff', 'ch_bc2'], base_day=1)
+    assert '涨幅%' in dragon_headers_1d
+    assert '涨幅%(2D)' not in dragon_headers_1d
+    assert 'DFF' in dragon_headers_1d
+    assert 'DFF(2D)' not in dragon_headers_1d
+
+    dragon_headers_2d = get_dragon_table_headers(extra_cols=['dff', 'ch_bc2'], base_day=2)
+    assert '涨幅%' in dragon_headers_2d
+    assert '涨幅%(2D)' not in dragon_headers_2d
+    assert 'DFF(2D)' in dragon_headers_2d
+    assert 'DFF' not in dragon_headers_2d
 
 
 def test_worker_view_calculation_and_signal_isolation():
