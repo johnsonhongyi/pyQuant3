@@ -511,6 +511,7 @@ class SBCChartCanvas(QWidget):
         self.channel_info_code = ""
         self.channel_info_period = ""
         self.channel_overlay_enabled = True
+        self.show_gap_channels: bool = True  # 🌟 通达信同款跳空缺口通道带 (灰白半透明通道，动态阶梯回补，补回多少减少多少)
         self.amplitude_info = {}  # 📊 存储标的近 5 日振幅高低与活跃度指标 (均振、极值、每日明细)
         self._amplitude_fetching_codes = set()
         self._amplitude_retry_after = {}
@@ -887,6 +888,13 @@ class SBCChartCanvas(QWidget):
                 parent_win._on_rearrange_windows_clicked()
             event.accept()
             return
+        elif key == Qt.Key.Key_G and not (event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+            from ats.ui.styles import is_editing_text
+            if not is_editing_text(self):
+                self.show_gap_channels = not getattr(self, 'show_gap_channels', True)
+                self.update()
+                event.accept()
+                return
         elif key == Qt.Key.Key_Up:
             is_alt = is_alt_modifier_active(event)
             if is_alt:
@@ -2038,6 +2046,14 @@ class SBCChartCanvas(QWidget):
             act_auction.triggered.connect(parent_win._on_shortcut_c_activated)
             menu.addAction(act_auction)
 
+        gap_enabled = getattr(self, 'show_gap_channels', True)
+        act_gap = QAction(f"🔲 开关跳空缺口通道带 [当前: {'开' if gap_enabled else '关'}] (G 键)", self)
+        def _toggle_gap():
+            self.show_gap_channels = not getattr(self, 'show_gap_channels', True)
+            self.update()
+        act_gap.triggered.connect(_toggle_gap)
+        menu.addAction(act_gap)
+
         # 5. 🔗 物理联动外部行情软件 (通达信/同花顺)
         if parent_win and hasattr(parent_win, '_trigger_linkage'):
             act_link = QAction(f"🔗 物理联动外部通达信/同花顺 (F 键)", self)
@@ -2494,7 +2510,7 @@ class SBCChartCanvas(QWidget):
         scalar_keys = ("code", "period_mode", "_data_revision", "_zoom_start_idx", "_zoom_end_idx",
                        "_is_right_anchored", "_visible_bar_count", "selected_trade_id", "_vol_mode",
                        "open_price", "vwap", "high_price", "low_price", "target_sell_min", "target_sell_max",
-                       "channel_overlay_enabled", "auto_eval_enabled", "market_phase")
+                       "channel_overlay_enabled", "auto_eval_enabled", "market_phase", "show_gap_channels")
         object_keys = ("channel_info", "multi_vwap_snapshot", "strategy_eval_result", "amplitude_info")
         ratio = self.devicePixelRatioF()
         token = (self.width(), self.height(), ratio, self.font().toString(),
@@ -2866,6 +2882,13 @@ class SBCChartCanvas(QWidget):
         # 🛡️ 严格视口裁切保护：确保折线与均价线绝不出界穿透顶部工具栏
         painter.save()
         painter.setClipRect(int(margin_left), int(margin_top), int(chart_w), int(chart_h))
+
+        # 🌟 绘制通达信同款跳空缺口通道带 (灰白半透明通道带，动态阶梯回补，置于折线/均线下方)
+        if getattr(self, "show_gap_channels", True):
+            self._draw_gap_channels_intraday(
+                painter, margin_left, margin_top, chart_w, chart_h,
+                min_p, max_p, time_to_x, price_to_y, df_view, prices, times, op_ref
+            )
 
         # 绘制 VWAP 均价线 (金黄虚线)
         if len(vwaps) > 1:
@@ -3491,10 +3514,10 @@ class SBCChartCanvas(QWidget):
         if df_view.empty:
             return
 
-        opens = df_view['open'].astype(float).values
-        closes = df_view['close'].astype(float).values
-        highs = df_view['high'].astype(float).values
-        lows = df_view['low'].astype(float).values
+        closes = df_view['close'].astype(float).values if 'close' in df_view.columns else np.zeros(len(df_view))
+        opens = df_view['open'].astype(float).values if 'open' in df_view.columns else closes
+        highs = df_view['high'].astype(float).values if 'high' in df_view.columns else closes
+        lows = df_view['low'].astype(float).values if 'low' in df_view.columns else closes
         vols = df_view['vol'].astype(float).values if 'vol' in df_view.columns else np.zeros(len(df_view))
         times = list(df_view.index.astype(str))
 
@@ -3643,6 +3666,14 @@ class SBCChartCanvas(QWidget):
                     y_fib = k_to_y(f_val)
                     painter.setPen(QPen(f_col, 1, Qt.PenStyle.DotLine))
                     painter.drawLine(fib_start_x, int(y_fib), fib_end_x, int(y_fib))
+
+        # 1.1 🌟 绘制通达信同款跳空缺口通道带 (灰白半透明通道带，动态阶梯回补，置于蜡烛图与均线下方)
+        if getattr(self, "show_gap_channels", True):
+            self._draw_gap_channels_kline(
+                painter, margin_left, margin_top, chart_w, main_h,
+                min_p, max_p, k_to_x, k_to_y, bar_w, n, start_i, end_i, total_n,
+                highs, lows
+            )
 
         # 2. 🌟 绘制通达信自动通道三轨 (从波段起点开始，三轨各自独立平滑延伸，Qt 视口自动裁切，绝不掐断整条通道)
         if len(ch_up) > 1 and len(ch_dn) > 1 and local_chan_start < n:
@@ -4437,6 +4468,394 @@ class SBCChartCanvas(QWidget):
             painter.setFont(QFont("Microsoft YaHei", 9, QFont.Weight.Bold))
             supp_info = f"📈 上涨支撑 (斜率:{ch_supp_slope_deg:.1f}°) | 偏离:{ch_supp_pos:+.2f}% | 周期:{ch_supp_days}"
             painter.drawText(margin_left + 8, curr_y_offset, supp_info)
+
+    @staticmethod
+    def _calculate_gaps_engine(
+        highs: np.ndarray,
+        lows: np.ndarray,
+        candidates: List[Tuple[int, float, float]],
+        min_gap_abs: float = 0.005,
+    ) -> List[Dict[str, Any]]:
+        """
+        通达信同款跳空缺口生命周期与阶梯回补引擎 (DRY 核心算法)
+        
+        Args:
+            highs: 每步最高价数组 (长度 N)
+            lows: 每步最低价数组 (长度 N)
+            candidates: 缺口产生候选点列表 [(start_idx, prev_high, prev_low), ...]
+            min_gap_abs: 最小有效跳空绝对值 (默认 0.005 元，过滤浮点数精度抖动)
+            
+        Returns:
+            List[Dict[str, Any]]: 缺口列表，每个缺口包含 segments 分段及回补状态
+        """
+        n = len(highs)
+        if n < 1 or not candidates:
+            return []
+
+        gaps = []
+        for start_idx, prev_high, prev_low in candidates:
+            if start_idx < 0 or start_idx >= n:
+                continue
+
+            if prev_high <= 0 or prev_low <= 0:
+                continue
+
+            curr_h = float(highs[start_idx])
+            curr_l = float(lows[start_idx])
+            if curr_h <= 0 or curr_l <= 0:
+                continue
+
+            # 1. 向上跳空缺口 (UP GAP): 当前最低价高于前一个周期的最高价
+            if curr_l > prev_high + min_gap_abs:
+                gap_low = float(prev_high)
+                gap_high = float(curr_l)
+                run_low = gap_low
+                run_high = gap_high
+                seg_start = start_idx
+                segments = []
+                is_closed = False
+                close_idx = -1
+
+                # 向后追踪后续各时间步的下杀侵蚀
+                for j in range(start_idx + 1, n):
+                    b_low = float(lows[j])
+                    if b_low <= 0:
+                        continue
+
+                    if b_low < run_high:
+                        if b_low <= run_low + 0.001:
+                            # 缺口被完全打穿回补！
+                            segments.append((seg_start, j, run_low, run_high))
+                            is_closed = True
+                            close_idx = j
+                            break
+                        else:
+                            # 缺口被部分回补，通道截断收窄
+                            if j > seg_start:
+                                segments.append((seg_start, j, run_low, run_high))
+                                run_high = b_low
+                                seg_start = j
+                            else:
+                                run_high = min(run_high, b_low)
+
+                if not is_closed and seg_start <= n - 1:
+                    segments.append((seg_start, n - 1, run_low, run_high))
+
+                if segments:
+                    gaps.append({
+                        "type": "UP",
+                        "init_low": gap_low,
+                        "init_high": gap_high,
+                        "start_idx": start_idx,
+                        "is_closed": is_closed,
+                        "close_idx": close_idx,
+                        "segments": segments,
+                    })
+
+            # 2. 向下跳空缺口 (DOWN GAP): 当前最高价低于前一个周期的最低价
+            elif curr_h < prev_low - min_gap_abs:
+                gap_low = float(curr_h)
+                gap_high = float(prev_low)
+                run_low = gap_low
+                run_high = gap_high
+                seg_start = start_idx
+                segments = []
+                is_closed = False
+                close_idx = -1
+
+                # 向后追踪后续各时间步的冲高侵蚀
+                for j in range(start_idx + 1, n):
+                    b_high = float(highs[j])
+                    if b_high <= 0:
+                        continue
+
+                    if b_high > run_low:
+                        if b_high >= run_high - 0.001:
+                            # 缺口被完全反弹回补！
+                            segments.append((seg_start, j, run_low, run_high))
+                            is_closed = True
+                            close_idx = j
+                            break
+                        else:
+                            # 缺口被部分回补，通道截断收窄
+                            if j > seg_start:
+                                segments.append((seg_start, j, run_low, run_high))
+                                run_low = b_high
+                                seg_start = j
+                            else:
+                                run_low = max(run_low, b_high)
+
+                if not is_closed and seg_start <= n - 1:
+                    segments.append((seg_start, n - 1, run_low, run_high))
+
+                if segments:
+                    gaps.append({
+                        "type": "DOWN",
+                        "init_low": gap_low,
+                        "init_high": gap_high,
+                        "start_idx": start_idx,
+                        "is_closed": is_closed,
+                        "close_idx": close_idx,
+                        "segments": segments,
+                    })
+
+        return gaps
+
+    def _compute_kline_gaps(self, highs: np.ndarray, lows: np.ndarray) -> List[Dict[str, Any]]:
+        """计算 K 线序列中的全部跳空缺口与回补生命周期"""
+        n = len(highs)
+        if n < 2:
+            return []
+        candidates = []
+        for i in range(1, n):
+            h_prev = float(highs[i - 1])
+            l_prev = float(lows[i - 1])
+            if h_prev > 0 and l_prev > 0:
+                candidates.append((i, h_prev, l_prev))
+        return self._calculate_gaps_engine(highs, lows, candidates, min_gap_abs=0.005)
+
+    def _compute_intraday_gaps(
+        self,
+        df_view: pd.DataFrame,
+        highs: np.ndarray,
+        lows: np.ndarray,
+        times: List[str],
+        op_ref: float = 0.0,
+    ) -> List[Dict[str, Any]]:
+        """计算分时走势中的多日日间跳空缺口与单日首跳缺口"""
+        n = len(highs)
+        if n < 1:
+            return []
+
+        # 1. 提取各交易日切分
+        dates_list = []
+        if "date" in df_view.columns:
+            dates_list = list(df_view["date"].astype(str))
+        else:
+            for t in times:
+                parts = str(t).split()
+                dates_list.append(parts[0] if len(parts) > 1 else str(t)[:10])
+
+        day_ranges = []  # [(date_str, start_idx, end_idx), ...]
+        if dates_list:
+            cur_d = dates_list[0]
+            cur_start = 0
+            for idx, d in enumerate(dates_list):
+                if d != cur_d:
+                    day_ranges.append((cur_d, cur_start, idx - 1))
+                    cur_d = d
+                    cur_start = idx
+            day_ranges.append((cur_d, cur_start, len(dates_list) - 1))
+
+        candidates = []
+        # 2. 多日日间跳空 (Day k 开盘最低/高与 Day k-1 全天极值对比)
+        if len(day_ranges) > 1:
+            for k in range(1, len(day_ranges)):
+                prev_s, prev_e = day_ranges[k - 1][1], day_ranges[k - 1][2]
+                curr_s = day_ranges[k][1]
+                p_hi = float(np.max(highs[prev_s:prev_e + 1]))
+                p_lo = float(np.min(lows[prev_s:prev_e + 1]))
+                if p_hi > 0 and p_lo > 0:
+                    candidates.append((curr_s, p_hi, p_lo))
+
+        # 3. 单日首点跳空 (开盘相对昨收基准价 op_ref)
+        if op_ref > 0.01 and n > 0:
+            first_h = float(highs[0])
+            first_l = float(lows[0])
+            if first_h > 0 and first_l > 0 and abs(first_l - op_ref) > 0.005 and abs(first_h - op_ref) > 0.005:
+                candidates.append((0, op_ref, op_ref))
+
+        return self._calculate_gaps_engine(highs, lows, candidates, min_gap_abs=0.005)
+
+    def _draw_gap_channels_kline(
+        self,
+        painter: QPainter,
+        margin_left: int,
+        margin_top: int,
+        chart_w: int,
+        main_h: int,
+        min_p: float,
+        max_p: float,
+        k_to_x: Any,
+        k_to_y: Any,
+        bar_w: float,
+        n: int,
+        start_i: int,
+        end_i: int,
+        total_n: int,
+        highs: np.ndarray,
+        lows: np.ndarray,
+    ):
+        """通达信同款 K 线跳空缺口通道带渲染 (灰白半透明、动态阶梯回补、价格区间标签)"""
+        if self.df_intraday is not None and not self.df_intraday.empty and "high" in self.df_intraday.columns and "low" in self.df_intraday.columns:
+            all_highs = self.df_intraday["high"].astype(float).values
+            all_lows = self.df_intraday["low"].astype(float).values
+        else:
+            all_highs = highs
+            all_lows = lows
+
+        gaps = self._compute_kline_gaps(all_highs, all_lows)
+        if not gaps:
+            return
+
+        painter.save()
+        painter.setClipRect(int(margin_left), int(margin_top), int(chart_w), int(main_h))
+
+        brush_up = QBrush(QColor(180, 200, 225, 42))  # 向上缺口：灰白带淡冷蓝
+        pen_up = QPen(QColor(205, 220, 240, 95), 1, Qt.PenStyle.DashLine)
+
+        brush_dn = QBrush(QColor(195, 195, 215, 42))  # 向下缺口：灰白带淡紫
+        pen_dn = QPen(QColor(215, 215, 235, 95), 1, Qt.PenStyle.DashLine)
+
+        font_label = QFont("Consolas", 8, QFont.Weight.Normal)
+        painter.setFont(font_label)
+        fm = painter.fontMetrics()
+        th = fm.height()
+
+        for gap in gaps:
+            is_up = (gap["type"] == "UP")
+            brush_cur = brush_up if is_up else brush_dn
+            pen_cur = pen_up if is_up else pen_dn
+            is_closed = gap["is_closed"]
+
+            for seg_idx, (g_start, g_end, s_low, s_high) in enumerate(gap["segments"]):
+                if g_end < start_i or g_start > end_i:
+                    continue
+                if s_high < min_p or s_low > max_p:
+                    continue
+
+                if g_start <= start_i:
+                    x1 = float(margin_left)
+                else:
+                    l_start = g_start - start_i
+                    x1 = float(k_to_x(l_start) - bar_w / 2.0)
+
+                is_last_open_seg = (not is_closed) and (seg_idx == len(gap["segments"]) - 1)
+                if is_last_open_seg or g_end >= end_i:
+                    x2 = float(margin_left + chart_w)
+                else:
+                    l_end = g_end - start_i
+                    x2 = float(k_to_x(l_end) + bar_w / 2.0)
+
+                if x2 <= x1 + 1.0:
+                    continue
+
+                y_top = float(k_to_y(s_high))
+                y_bottom = float(k_to_y(s_low))
+                band_h = abs(y_bottom - y_top)
+
+                rect_band = QRectF(x1, y_top, x2 - x1, band_h)
+                painter.fillRect(rect_band, brush_cur)
+
+                painter.setPen(pen_cur)
+                painter.drawLine(int(x1), int(y_top), int(x2), int(y_top))
+                painter.drawLine(int(x1), int(y_bottom), int(x2), int(y_bottom))
+
+                text_str = f"{s_low:.2f}-{s_high:.2f}"
+                tw = fm.horizontalAdvance(text_str)
+                if (x2 - x1) >= tw + 6:
+                    tx = max(float(margin_left + 4), float(x1 + 4))
+                    if band_h >= 13.0:
+                        ty = y_top + (band_h + th) / 2.0 - 2.0
+                    else:
+                        ty = y_top - 2.0
+
+                    bg_rect = QRectF(tx - 2, ty - th + 2, tw + 4, th)
+                    painter.fillRect(bg_rect, QColor(10, 15, 26, 170))
+                    painter.setPen(QPen(QColor("#E2E8F0")))
+                    painter.drawText(int(tx), int(ty), text_str)
+
+        painter.restore()
+
+    def _draw_gap_channels_intraday(
+        self,
+        painter: QPainter,
+        margin_left: int,
+        margin_top: int,
+        chart_w: int,
+        chart_h: int,
+        min_p: float,
+        max_p: float,
+        time_to_x: Any,
+        price_to_y: Any,
+        df_view: pd.DataFrame,
+        prices: np.ndarray,
+        times: List[str],
+        op_ref: float,
+    ):
+        """通达信同款分时图跳空缺口通道带渲染 (多日日间跳空、单日首跳、动态阶梯回补)"""
+        if len(prices) < 1:
+            return
+
+        hi_arr = df_view["high"].astype(float).values if "high" in df_view.columns else prices
+        lo_arr = df_view["low"].astype(float).values if "low" in df_view.columns else prices
+
+        gaps = self._compute_intraday_gaps(df_view, hi_arr, lo_arr, times, op_ref=op_ref)
+        if not gaps:
+            return
+
+        painter.save()
+        painter.setClipRect(int(margin_left), int(margin_top), int(chart_w), int(chart_h))
+
+        brush_up = QBrush(QColor(180, 200, 225, 42))
+        pen_up = QPen(QColor(205, 220, 240, 95), 1, Qt.PenStyle.DashLine)
+
+        brush_dn = QBrush(QColor(195, 195, 215, 42))
+        pen_dn = QPen(QColor(215, 215, 235, 95), 1, Qt.PenStyle.DashLine)
+
+        font_label = QFont("Consolas", 8, QFont.Weight.Normal)
+        painter.setFont(font_label)
+        fm = painter.fontMetrics()
+        th = fm.height()
+        n_pts = len(prices)
+
+        for gap in gaps:
+            is_up = (gap["type"] == "UP")
+            brush_cur = brush_up if is_up else brush_dn
+            pen_cur = pen_up if is_up else pen_dn
+            is_closed = gap["is_closed"]
+
+            for seg_idx, (s_start, s_end, s_low, s_high) in enumerate(gap["segments"]):
+                if s_high < min_p or s_low > max_p:
+                    continue
+
+                x1 = float(time_to_x(max(0, min(n_pts - 1, s_start))))
+
+                is_last_open_seg = (not is_closed) and (seg_idx == len(gap["segments"]) - 1)
+                if is_last_open_seg or s_end >= n_pts - 1:
+                    x2 = float(margin_left + chart_w)
+                else:
+                    x2 = float(time_to_x(max(0, min(n_pts - 1, s_end))))
+
+                if x2 <= x1 + 1.0:
+                    continue
+
+                y_top = float(price_to_y(s_high))
+                y_bottom = float(price_to_y(s_low))
+                band_h = abs(y_bottom - y_top)
+
+                rect_band = QRectF(x1, y_top, x2 - x1, band_h)
+                painter.fillRect(rect_band, brush_cur)
+
+                painter.setPen(pen_cur)
+                painter.drawLine(int(x1), int(y_top), int(x2), int(y_top))
+                painter.drawLine(int(x1), int(y_bottom), int(x2), int(y_bottom))
+
+                text_str = f"{s_low:.2f}-{s_high:.2f}"
+                tw = fm.horizontalAdvance(text_str)
+                if (x2 - x1) >= tw + 6:
+                    tx = max(float(margin_left + 4), float(x1 + 4))
+                    if band_h >= 13.0:
+                        ty = y_top + (band_h + th) / 2.0 - 2.0
+                    else:
+                        ty = y_top - 2.0
+
+                    bg_rect = QRectF(tx - 2, ty - th + 2, tw + 4, th)
+                    painter.fillRect(bg_rect, QColor(10, 15, 26, 170))
+                    painter.setPen(QPen(QColor("#E2E8F0")))
+                    painter.drawText(int(tx), int(ty), text_str)
+
+        painter.restore()
 
 
 VALID_SBC_PERIODS = ["1m", "2d", "3d", "5d", "10d", "5m", "15m", "30m", "60m", "day", "2k", "3k", "week", "month"]
@@ -6096,6 +6515,14 @@ class SBCIntradayChartDialog(QWidget):
             from ats.ui.styles import is_editing_text
             if not is_editing_text(self):
                 self._on_vol_toggle_clicked()
+                event.accept()
+                return
+        elif key == Qt.Key.Key_G and not (modifiers & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+            from ats.ui.styles import is_editing_text
+            if not is_editing_text(self):
+                if hasattr(self, 'canvas') and self.canvas:
+                    self.canvas.show_gap_channels = not getattr(self.canvas, 'show_gap_channels', True)
+                    self.canvas.update()
                 event.accept()
                 return
         elif key == Qt.Key.Key_Q:
