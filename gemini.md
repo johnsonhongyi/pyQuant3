@@ -1,5 +1,23 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](stock_standalone/design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-22 22:55 【资金主线涨跌还原与新股次新股DFF基准日适配优化闭环】(`stock_standalone/docs/tasks/2026-10-22_2255_资金主线还原与新股次新DFF基准日适配闭环.md`, `stock_standalone/tests/test_multiday_pct_base_view.py`)
+- [x] **资金主线与龙头中枢彻底还原为原有逻辑**：
+  - 彻底回滚 `ats/capital_dragon_engine.py` 与 `ats/ui/capital_dragon_panel.py`，移除 `pct_base_day` 相关修改；
+  - 表头严格锁定为 `涨幅%`，渲染与排序恢复为以当日真实涨跌幅（`pct`）驱动；
+  - `ats/ui/main_window.py` 移除对资金主线设置基准日的调用，严格保持原有资金分析逻辑不变；
+- [x] **新股次新股主控面板（`NewStockPanel`）对齐 DFF 基准日适配闭环**：
+  - `get_new_stock_table_headers(extra_cols, base_day)`：当 `base_day > 1` 时将第 16 列由 `DFF` 自适应生成为 `DFF(2D)` / `DFF(3D)`；
+  - `_merge_ipc_frame`：同步 `ipc_row` 的 `lastp1d`~`lastp9d` 字段，确保历史多日收盘价完备可用；
+  - `_prepare_stock_table`：在后台预先通过 `compute_base_day_percent` 计算多日累计涨幅存入 `dff` 列，并支持点击 `DFF(2D)` 列头对多日涨幅直接排序；
+  - `_generate_table_rows`：渲染 DFF 列时，多日模式下动态展现累计涨幅，默认保持原日线强度逻辑；
+  - `NewStockPanel` 落地 `set_pct_base_day(base_day)`，在主窗口工具栏切换基准日时即时联动更新表头并重绘；
+- [x] **自动化测试全绿通过（6 项专项 + 9 项回归）**：
+  - `tests/test_multiday_pct_base_view.py`（6/6 PASS）：新增新股次新股 1D 保持原 dff 与 2D 自动计算累计涨幅验证，校验资金主线表头严格为原版 `涨幅%`；
+  - `tests/test_sbc_alt_click_broadcast.py` (5/5 PASS)、`tests/test_ats_favorite_actions.py` (4/4 PASS)；
+  - 语法编译 `python -m py_compile` 0 错误。
+
+
+
 ## 2026-10-22 22:10 【ATS主窗口多日基准涨跌幅切换（1D/2D强/3D强至9D）纯视图层优化落地闭环】(`stock_standalone/docs/tasks/2026-10-22_2210_ATS主窗口涨跌幅基准日切换优化.md`, `stock_standalone/tests/test_multiday_pct_base_view.py`)
 - [x] **纯视图层多日涨跌幅极速观察设计（严守底层信号隔离红线）**：
   - 严格确保不修改任何底层交易信号、风控规则、T+1 计算和订单逻辑；

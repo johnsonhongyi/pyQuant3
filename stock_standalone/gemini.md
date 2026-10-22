@@ -1,5 +1,36 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-22 22:55 【资金主线涨跌还原与新股次新股DFF基准日适配优化闭环】(`docs/tasks/2026-10-22_2255_资金主线还原与新股次新DFF基准日适配闭环.md`, `tests/test_multiday_pct_base_view.py`)
+- [x] **资金主线与龙头中枢彻底还原为原有逻辑**：
+  - 彻底回滚 `ats/capital_dragon_engine.py` 与 `ats/ui/capital_dragon_panel.py`，移除 `pct_base_day` 相关修改；
+  - 表头严格锁定为 `涨幅%`，渲染与排序恢复为以当日真实涨跌幅（`pct`）驱动；
+  - `ats/ui/main_window.py` 移除对资金主线设置基准日的调用，严格保持原有资金分析逻辑不变；
+- [x] **新股次新股主控面板（`NewStockPanel`）对齐 DFF 基准日适配闭环**：
+  - `get_new_stock_table_headers(extra_cols, base_day)`：当 `base_day > 1` 时将第 16 列由 `DFF` 自适应生成为 `DFF(2D)` / `DFF(3D)`；
+  - `_merge_ipc_frame`：同步 `ipc_row` 的 `lastp1d`~`lastp9d` 字段，确保历史多日收盘价完备可用；
+  - `_prepare_stock_table`：在后台预先通过 `compute_base_day_percent` 计算多日累计涨幅存入 `dff` 列，并支持点击 `DFF(2D)` 列头对多日涨幅直接排序；
+  - `_generate_table_rows`：渲染 DFF 列时，多日模式下动态展现累计涨幅，默认保持原日线强度逻辑；
+  - `NewStockPanel` 落地 `set_pct_base_day(base_day)`，在主窗口工具栏切换基准日时即时联动更新表头并重绘；
+- [x] **自动化测试全绿通过（6 项专项 + 9 项回归）**：
+  - `tests/test_multiday_pct_base_view.py`（6/6 PASS）：新增新股次新股 1D 保持原 dff 与 2D 自动计算累计涨幅验证，校验资金主线表头严格为原版 `涨幅%`；
+  - `tests/test_sbc_alt_click_broadcast.py` (5/5 PASS)、`tests/test_ats_favorite_actions.py` (4/4 PASS)；
+  - 语法编译 `python -m py_compile` 0 错误。
+
+
+
+## 2026-10-22 22:30 【RDP远程与分辨率切换Tkinter全底层DPI自适应与防膨胀闭环】(`dpi_utils.py`, `tk_gui_modules/dpi_mixin.py`, `tests/test_dpi_scaling_e2e.py`)
+- [x] **【彻底斩除虚假 2.0x 缩放与历史 RDP 恶意放大硬编码】**：
+  - 彻底删除 `dpi_utils.py` 内部 `if scale == 1.0 and is_rdp_session(): return 2.0` 这一致命代码，优先调用 Windows 10 原生 `GetDpiForSystem()`，客观忠实返回会话物理 DPI（1728x1080 真实 96 DPI 即为标准 1.0x 缩放，绝不虚假翻倍）；
+  - 废除废弃的粗暴 `scale_tk_window_for_rdp` 与 `monitor_rdp_and_scale`。
+- [x] **【理顺 Tkinter 与 PyQt6 混合运行底层缩放体系】**：
+  - **单一控制来源**：全由 `tk scaling = (scale_factor * 96.0) / 72.0` 单一来源驱动 Tk 底层物理像素换算，在初始化与每次 DPI 改变时显式调用 `_reset_named_fonts()` 锁定 `TkDefaultFont` / `TkHeadingFont` / `TkTextFont` 为标准设计磅数（9pt），坚决禁止人为将 `font.size` 乘以 `scale_factor`，彻底根除字号平方级膨胀（48px 庞然大物与字体重叠挤压）；
+  - **Treeview 全样式行高同步**：样式覆盖 `"Treeview"`、`"Fast.Treeview"`、`"Heading"` 等，行高统一按 `max(18, int(round(22 * scale_factor)))` 物理像素精确设置，字体与行高完美衬托；
+- [x] **【子窗口与 Treeview 列宽全自动双向递归自适应】**：
+  - 递归遍历主窗口所有的 `tk.Toplevel` 顶层子窗口（穿透所有概念 Top10、分时买卖、历史监控等）；
+  - 先调整窗口 `geometry` 并 `update_idletasks()` 扩展容器几何空间，再按缩放比率平滑调整内部所有 `Treeview` 的列宽，彻底杜绝容器挤压列宽导致的错位重叠，实现 1.0x -> 1.5x -> 1.0x 自由无损伸缩；
+- [x] **【自动化单元测试 100% 纯绿】**：新增 `tests/test_dpi_scaling_e2e.py`（2/2 PASS），验证 DPI 缩放、列宽双向伸缩与防虚假翻倍。
+
+
 ## 2026-10-22 21:26 【ATS退出同进程SBC联动持久化与Alt批量关闭闭环】(`docs/tasks/2026-10-22_2126_ATS退出同进程SBC联动持久化与Alt批量关闭闭环.md`, `ats/ui/intraday_strategy_dialog.py`, `ats/ui/main_window.py`, `tests/test_sbc_ats_mode_exit_and_anti_misclose.py`)
 - [x] **【彻底修复 ATS 退出遗留孤儿 SBC 窗口与状态丢失】**：在 `ATSMainWindow.closeEvent` 中注入 `app.setProperty("is_app_exiting", True)` 与环境变量 `ATS_IS_CLOSING`，显式接入 `close_all_open_sbc_dialogs()`，实现同进程走势窗口与独立子进程双保险 100% 优雅持久化与回收；
 - [x] **【加固 SBC 防误关判定杜绝正常关闭误杀】**：界定退出期、Alt 联动关闭、标题栏关闭按钮、系统菜单与任务栏关闭绝对放行，仅在鼠标光标明确落在走势图画布绘图区内部且处于双击/右键锁定期时才拦截误触信号，彻底消除标题栏关闭无效问题；

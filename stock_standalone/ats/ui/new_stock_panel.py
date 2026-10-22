@@ -119,7 +119,7 @@ def get_new_stock_extra_cols() -> List[str]:
     return extra
 
 
-def get_new_stock_table_headers(extra_cols: Optional[List[str]] = None) -> List[str]:
+def get_new_stock_table_headers(extra_cols: Optional[List[str]] = None, base_day: int = 1) -> List[str]:
     """
     组合全 ATS 统一的新股看板表头：
     14基础列 (含涨速%与VWAP) + 6核心对齐列 (DFF, Rank, DFF2, DFF3, 大盘偏离, 大盘共振) + 动态自定义列 (ats_col) + 1个阶梯策略列
@@ -131,10 +131,11 @@ def get_new_stock_table_headers(extra_cols: Optional[List[str]] = None) -> List[
     except Exception:
         col_map = {}
         
+    dff_label = f"DFF({base_day}D)" if base_day > 1 else "DFF"
     base_headers = [
         "代码", "名称", "状态", "竞价信号", "上市日", "申购日", "解禁日", "发行价",
         "现价", "涨跌%", "涨速%", "VWAP", "换手%", "流通(亿)", "总值(亿)", "成交(亿)",
-        "DFF", "Rank", "DFF2", "DFF3", "大盘偏离", "大盘共振"
+        dff_label, "Rank", "DFF2", "DFF3", "大盘偏离", "大盘共振"
     ]
     extra_headers = [col_map.get(c, c) for c in extra_cols]
     return base_headers + extra_headers + ["阶梯策略"]
@@ -269,6 +270,12 @@ def _merge_ipc_frame(data, df_ipc, extra_cols):
             if res_raw is not None and not pd.isna(res_raw):
                 data.at[idx, "resonance"] = str(res_raw)
 
+            # 4.1 同步多日历史基准价 lastp1d ~ lastp9d (用于多日基准强弱计算)
+            for d in range(1, 10):
+                col_d = f"lastp{d}d"
+                if col_d in ipc_row and not pd.isna(ipc_row[col_d]):
+                    data.at[idx, col_d] = clean_num(ipc_row[col_d], default=0.0)
+
             # 5. 同步市值字段 (若本地无市值时从 IPC 补充)
             local_fmv = clean_num(data.at[idx, "float_mv_yi"] if "float_mv_yi" in data.columns else 0.0, default=0.0)
             if local_fmv <= 0:
@@ -336,11 +343,19 @@ def _merge_ipc_frame(data, df_ipc, extra_cols):
     return data
 
 
-def _prepare_stock_table(data, fav_stocks, sh_pct, extra_cols, filter_type, search_txt, fset, sort_col, sort_order, selected_code):
+def _prepare_stock_table(data, fav_stocks, sh_pct, extra_cols, filter_type, search_txt, fset, sort_col, sort_order, selected_code, base_day: int = 1):
     today_str = datetime.datetime.now().strftime("%Y-%m-%d")
     if data.empty:
         return [], None, {}, (frozenset(fav_stocks), sh_pct, today_str, tuple(extra_cols)), today_str
     df_filtered = data.copy()
+
+    # 若选择多日基准，预先计算 dff 多日累计涨幅以供展示与排序
+    if base_day > 1 and not df_filtered.empty:
+        from ats.ui.styles import compute_base_day_percent
+        for idx in df_filtered.index:
+            row_dict = df_filtered.loc[idx].to_dict()
+            p = clean_num(row_dict.get("price", 0.0))
+            df_filtered.at[idx, "dff"] = compute_base_day_percent(row_dict, base_day=base_day, current_price=p)
 
     # 分类筛选
     if "重点关注" in filter_type:
@@ -380,7 +395,7 @@ def _prepare_stock_table(data, fav_stocks, sh_pct, extra_cols, filter_type, sear
         df_filtered = df_filtered[df_filtered["code"].astype(str).str.strip().str.zfill(6).isin(fset)]
 
     # ── 排序处理：有手动选择就按手动选择的排序方式刷新，没有选择就默认顺序 ──
-    headers = get_new_stock_table_headers(extra_cols)
+    headers = get_new_stock_table_headers(extra_cols, base_day=base_day)
     header_name = headers[int(sort_col)] if (sort_col is not None and 0 <= int(sort_col) < len(headers)) else None
 
     codes = df_filtered["code"].astype(str).str.zfill(6)
@@ -388,7 +403,8 @@ def _prepare_stock_table(data, fav_stocks, sh_pct, extra_cols, filter_type, sear
     listing_dates = df_filtered.get("listing_date", pd.Series("-", index=df_filtered.index)).astype(str)
     apply_dates = df_filtered.get("apply_date", pd.Series("-", index=df_filtered.index)).astype(str)
 
-    field_info = IPO_HEADER_FIELD_MAP.get(header_name)
+    lookup_h = "DFF" if (header_name and header_name.startswith("DFF")) else header_name
+    field_info = IPO_HEADER_FIELD_MAP.get(lookup_h)
     if not field_info and header_name:
         if "涨速" in header_name:
             field_info = ("velocity_pct", True)
@@ -524,9 +540,10 @@ class NewStockPanel(QWidget):
         self._pending_ipc_df: Optional[pd.DataFrame] = None
         self._pending_ipc_sh_pct: float = 0.0
         self.extra_cols = get_new_stock_extra_cols()
+        self.pct_base_day: int = int(load_config_node("ats_pct_base_day", 1))
 
         # 排序持久化状态 (默认: 上市日 降序)
-        init_headers = get_new_stock_table_headers(self.extra_cols)
+        init_headers = get_new_stock_table_headers(self.extra_cols, base_day=self.pct_base_day)
         self.sort_col = init_headers.index("上市日") if "上市日" in init_headers else 4
         self.sort_order = Qt.SortOrder.DescendingOrder
         self._load_sort_state()
@@ -841,7 +858,7 @@ class NewStockPanel(QWidget):
         self.table.viewport().setStyleSheet("background-color: #121218; border: none;")
         self.table.setStyleSheet("QTableWidget { background-color: #121218; border: none; }")
 
-        headers = get_new_stock_table_headers(self.extra_cols)
+        headers = get_new_stock_table_headers(self.extra_cols, base_day=self.pct_base_day)
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
         
@@ -1250,7 +1267,7 @@ class NewStockPanel(QWidget):
         cur_extra = get_new_stock_extra_cols()
         if getattr(self, 'extra_cols', None) != cur_extra:
             self.extra_cols = cur_extra
-            headers = get_new_stock_table_headers(self.extra_cols)
+            headers = get_new_stock_table_headers(self.extra_cols, base_day=self.pct_base_day)
             self.table.setColumnCount(len(headers))
             self.table.setHorizontalHeaderLabels(headers)
 
@@ -1370,7 +1387,8 @@ class NewStockPanel(QWidget):
         args = (None, ipc[1] if ipc else self._last_ipc_sh_pct,
                 tuple(get_new_stock_extra_cols()), filter_mode_str,
                 self.search_edit.text().strip().lower(), fset,
-                self.sort_col, self.sort_order, self.selected_code)
+                self.sort_col, self.sort_order, self.selected_code,
+                getattr(self, 'pct_base_day', 1))
         if not hasattr(self, '_table_prepare_lock'):
             self._table_prepare_lock = threading.Lock()
         with self._table_prepare_lock:
@@ -1513,7 +1531,7 @@ class NewStockPanel(QWidget):
         current_extra = get_new_stock_extra_cols()
         if self.extra_cols != current_extra:
             self.extra_cols = current_extra
-            headers = get_new_stock_table_headers(self.extra_cols)
+            headers = get_new_stock_table_headers(self.extra_cols, base_day=self.pct_base_day)
             if self.table.columnCount() != len(headers):
                 self.table.setColumnCount(len(headers))
                 self.table.setHorizontalHeaderLabels(headers)
@@ -1563,7 +1581,7 @@ class NewStockPanel(QWidget):
         c_fmv = self._get_col_by_header("流通(亿)", "流通")
         c_tmv = self._get_col_by_header("总值(亿)", "总值", "总市值")
         c_amt = self._get_col_by_header("成交(亿)", "成交", "成交额")
-        c_dff = self._get_col_by_header("DFF")
+        c_dff = self._get_col_by_header(f"DFF({getattr(self, 'pct_base_day', 1)}D)", "DFF")
         c_rank = self._get_col_by_header("Rank", "rank")
         c_dff2 = self._get_col_by_header("DFF2")
         c_dff3 = self._get_col_by_header("DFF3")
@@ -1913,10 +1931,14 @@ class NewStockPanel(QWidget):
                 self._set_or_update_item(row_idx, c_amt, amt_str, color="#cbd5e1", font=num_font, align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, bg_color=bg_color, is_pinned=row_pinned, raw_val=amt if amt > 0 else None, pin_rank=pin_rank)
 
             # ── 重点关注核心指标列 (DFF, Rank, DFF2, DFF3, 大盘偏离, 大盘共振) ──
-            # DFF (日线动量强度，带降级计算保护)
-            dff_val = clean_num(row.get("dff", row.get("dfi", None)), default=float('nan'))
-            if math.isnan(dff_val) and price > 0:
-                dff_val = round(pct * 0.4 + turnover * 0.05, 2)
+            # DFF (日线动量强度，带降级计算保护，支持多日基准日如 2D/3D 等计算)
+            if getattr(self, 'pct_base_day', 1) > 1:
+                from ats.ui.styles import compute_base_day_percent
+                dff_val = compute_base_day_percent(row, base_day=self.pct_base_day, current_price=price)
+            else:
+                dff_val = clean_num(row.get("dff", row.get("dfi", None)), default=float('nan'))
+                if math.isnan(dff_val) and price > 0:
+                    dff_val = round(pct * 0.4 + turnover * 0.05, 2)
                 
             if not math.isnan(dff_val):
                 dff_str = f"{dff_val:+.2f}"
@@ -2432,6 +2454,17 @@ class NewStockPanel(QWidget):
             self._render_table()
         except Exception as e:
             logger.debug(f"[NewStockPanel] refresh_favorites_display error: {e}")
+
+    def set_pct_base_day(self, base_day: int):
+        """动态切换涨跌幅基准日并即时更新表头与重绘"""
+        self.pct_base_day = max(1, int(base_day))
+        headers = get_new_stock_table_headers(self.extra_cols, base_day=self.pct_base_day)
+        if self.table.columnCount() == len(headers):
+            self.table.setHorizontalHeaderLabels(headers)
+        if getattr(self, '_last_ipc_df', None) is not None:
+            self._request_table_prepare(ipc=(self._last_ipc_df, getattr(self, '_last_ipc_sh_pct', 0.0)))
+        else:
+            self.load_data(force_refresh=True)
 
     def _on_add_dragon_clicked(self):
         """右键菜单：加入加速龙头追踪器"""

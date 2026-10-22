@@ -284,8 +284,6 @@ class CapitalDragonPanel(QWidget):
         else:
             self.dragon_focus_stocks = set()
 
-        self.pct_base_day: int = int(load_config_node("ats_pct_base_day", 1))
-
         self._init_ui()
 
     def is_dragon_focused(self, code: str) -> bool:
@@ -476,7 +474,7 @@ class CapitalDragonPanel(QWidget):
         self.table.setStyleSheet("QTableWidget { background-color: #121218; border: none; }")
 
         self.extra_cols = get_dragon_extra_cols()
-        self.headers = get_dragon_table_headers(self.extra_cols, base_day=self.pct_base_day)
+        self.headers = get_dragon_table_headers(self.extra_cols)
         self.table.setColumnCount(len(self.headers))
         self.table.setHorizontalHeaderLabels(self.headers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -973,7 +971,7 @@ class CapitalDragonPanel(QWidget):
             current_extra = get_dragon_extra_cols()
             if getattr(self, 'extra_cols', None) != current_extra:
                 self.extra_cols = current_extra
-                self.headers = get_dragon_table_headers(self.extra_cols, base_day=self.pct_base_day)
+                self.headers = get_dragon_table_headers(self.extra_cols)
                 self.table.setColumnCount(len(self.headers))
                 self.table.setHorizontalHeaderLabels(self.headers)
 
@@ -1177,22 +1175,11 @@ class CapitalDragonPanel(QWidget):
                     is_pinned=is_row_pinned, pin_rank=pin_rank
                 )
 
-                # 5: 涨幅% (支持根据选定基准日动态展示多日累计涨幅)
-                disp_pct = pct
-                if self.pct_base_day > 1 and self._last_df_all is not None and not self._last_df_all.empty:
-                    row_raw = None
-                    if code in self._last_df_all.index:
-                        row_raw = self._last_df_all.loc[code]
-                    elif c_clean in self._last_df_all.index:
-                        row_raw = self._last_df_all.loc[c_clean]
-                    if row_raw is not None:
-                        from ats.ui.styles import compute_base_day_percent
-                        disp_pct = compute_base_day_percent(row_raw, base_day=self.pct_base_day, current_price=price)
-
-                pct_str = f"{disp_pct:+.2f}%"
-                pct_col = COLOR_UP if disp_pct > 0 else (COLOR_DOWN if disp_pct < 0 else "#c9d1d9")
+                # 5: 涨幅%
+                pct_str = f"{pct:+.2f}%"
+                pct_col = COLOR_UP if pct > 0 else (COLOR_DOWN if pct < 0 else "#c9d1d9")
                 self._set_or_update_cell(
-                    row_idx, 5, pct_str, raw_val=disp_pct,
+                    row_idx, 5, pct_str, raw_val=pct,
                     align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                     fg_color=pct_col, bg_color=row_bg, font_bold=True, is_numeric=True,
                     is_pinned=is_row_pinned, pin_rank=pin_rank
@@ -1651,13 +1638,6 @@ class CapitalDragonPanel(QWidget):
             if hasattr(tw, 'filtered_codes_set'):
                 return tw
         return None
-
-    def set_pct_base_day(self, base_day: int):
-        """动态切换涨跌幅基准日并即时更新表头与重绘"""
-        self.pct_base_day = max(1, int(base_day))
-        self.headers = get_dragon_table_headers(self.extra_cols, base_day=self.pct_base_day)
-        if self.table.columnCount() == len(self.headers):
-            self.table.setHorizontalHeaderLabels(self.headers)
 
     def _toggle_extreme_perf(self):
         """切换极限性能模式 (开启精选 Top 30，关闭展示全部 300+ 全量候选池)"""
