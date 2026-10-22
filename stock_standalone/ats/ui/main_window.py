@@ -7680,6 +7680,14 @@ class ATSMainWindow(QMainWindow):
             return
         self._is_closing = True
         self._is_exiting = True
+        os.environ["ATS_IS_CLOSING"] = "1"
+        try:
+            from PyQt6.QtWidgets import QApplication
+            app_inst = QApplication.instance()
+            if app_inst:
+                app_inst.setProperty("is_app_exiting", True)
+        except Exception:
+            pass
         if self.ipo_learning_console is not None:
             self.ipo_learning_console.stop_monitor()
         if hasattr(self, "_next_day_watch_timer"):
@@ -7880,6 +7888,15 @@ class ATSMainWindow(QMainWindow):
             print("[ATSMainWindow] 已提交 SBC 子进程后台保存与退出任务。")
         except Exception as ex_sbc:
             print(f"[ATSMainWindow] 关闭 SBC 子进程异常: {ex_sbc}")
+
+        # 4.7.1 🛑 统一优雅关闭所有同进程内已打开的 SBC 走势窗口 (确保安全持久化，彻底杜绝孤儿窗口)
+        try:
+            from ats.ui.intraday_strategy_dialog import close_all_open_sbc_dialogs
+            closed_sbc_cnt = close_all_open_sbc_dialogs()
+            if closed_sbc_cnt > 0:
+                print(f"[ATSMainWindow] 已成功安全关闭并持久化同进程 {closed_sbc_cnt} 个 SBC 走势窗口。")
+        except Exception as ex_inproc:
+            print(f"[ATSMainWindow] 关闭同进程 SBC 走势窗口异常: {ex_inproc}")
 
         # 4.8 🛑 统一优雅关闭新股次新超短检测工具 (确保子进程安全落盘退出，不留孤儿进程)
         try:

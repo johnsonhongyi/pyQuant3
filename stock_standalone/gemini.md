@@ -1,5 +1,11 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-22 21:26 【ATS退出同进程SBC联动持久化与Alt批量关闭闭环】(`docs/tasks/2026-10-22_2126_ATS退出同进程SBC联动持久化与Alt批量关闭闭环.md`, `ats/ui/intraday_strategy_dialog.py`, `ats/ui/main_window.py`, `tests/test_sbc_ats_mode_exit_and_anti_misclose.py`)
+- [x] **【彻底修复 ATS 退出遗留孤儿 SBC 窗口与状态丢失】**：在 `ATSMainWindow.closeEvent` 中注入 `app.setProperty("is_app_exiting", True)` 与环境变量 `ATS_IS_CLOSING`，显式接入 `close_all_open_sbc_dialogs()`，实现同进程走势窗口与独立子进程双保险 100% 优雅持久化与回收；
+- [x] **【加固 SBC 防误关判定杜绝正常关闭误杀】**：界定退出期、Alt 联动关闭、标题栏关闭按钮、系统菜单与任务栏关闭绝对放行，仅在鼠标光标明确落在走势图画布绘图区内部且处于双击/右键锁定期时才拦截误触信号，彻底消除标题栏关闭无效问题；
+- [x] **【解除 ATS 模式下 Alt+点击关闭阻断并实现一键清空】**：操盘手在 ATS 模式下按住 Alt 点击走势图关闭或按 `Alt+Escape` 快捷键时，一键批量安全关闭所有已打开的 SBC 走势窗口并持久化，同时保留 ATS 主程序安然运行；
+- [x] **【全套自动化回归测试 100% 纯绿】**：新增 `test_sbc_ats_mode_exit_and_anti_misclose.py`（3/3 PASS），全量 47 项 SBC 关联测试秒级纯绿通过。
+
 ## 2026-10-22 20:20 【GG回归通道过长白色斜线截断修复与高低限制规范】(`docs/tasks/2026-10-22_2020_GG回归通道过长白色斜线截断修复与高低限制规范.md`)
 - [x] **【彻底修复过长白色斜线上冲失真】**：设置上限 `RH:=MAX_H*1.10`（最高价上浮10%），下限 `RL:=MIN_L*0.90`（最近通道结束后的最低价下浮10%）；
 - [x] **【全通道线与波段射线刚性边界拦截】**：中轨、上轨、下轨及白色射线 `KX` 全面接入 `[RL, RH]` 双向安全截断，彻底杜绝线段延伸至太空拉爆纵坐标，彻底恢复正常K线高度；
