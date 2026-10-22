@@ -2148,9 +2148,15 @@ class SBCChartCanvas(QWidget):
         vol_mode_text = {"normal": "正常(开)", "collapsed": "折叠(关)", "expanded": "放大"}.get(getattr(self, '_vol_mode', 'normal'), '正常')
         act_vol = QAction(f"📊 切换成交量副图 [当前: {vol_mode_text}] (V 键)", self)
         def _cycle_vol():
-            self.cycle_vol_mode()
-            if parent_win and hasattr(parent_win, '_update_vol_btn_style'):
-                parent_win._update_vol_btn_style()
+            modes = ["normal", "collapsed", "expanded"]
+            cur_idx = modes.index(self._vol_mode) if self._vol_mode in modes else 0
+            next_v = modes[(cur_idx + 1) % len(modes)]
+            if is_alt_modifier_active():
+                sync_all_open_sbc_vol_mode(next_v, trigger_dlg=parent_win if isinstance(parent_win, SBCIntradayChartDialog) else None)
+            else:
+                self.cycle_vol_mode()
+                if parent_win and hasattr(parent_win, '_update_vol_btn_style'):
+                    parent_win._update_vol_btn_style()
         act_vol.triggered.connect(_cycle_vol)
         menu.addAction(act_vol)
 
@@ -2162,14 +2168,24 @@ class SBCChartCanvas(QWidget):
         gap_enabled = getattr(self, 'show_gap_channels', True)
         act_gap = QAction(f"🔲 开关跳空缺口通道带 [当前: {'开' if gap_enabled else '关'}] (G 键)", self)
         def _toggle_gap():
-            self.show_gap_channels = not getattr(self, 'show_gap_channels', True)
-            self.update()
+            new_g = not getattr(self, 'show_gap_channels', True)
+            if is_alt_modifier_active():
+                sync_all_open_sbc_gap_channels(new_g, trigger_dlg=parent_win if isinstance(parent_win, SBCIntradayChartDialog) else None)
+            else:
+                self.show_gap_channels = new_g
+                self.update()
         act_gap.triggered.connect(_toggle_gap)
         menu.addAction(act_gap)
 
         boll_enabled = getattr(self, 'show_boll', True)
         act_boll = QAction(f"📈 开关标准 BOLL 布林带 [当前: {'开' if boll_enabled else '关'}] (B 键)", self)
-        act_boll.triggered.connect(self.toggle_boll)
+        def _toggle_boll():
+            new_b = not getattr(self, 'show_boll', True)
+            if is_alt_modifier_active():
+                sync_all_open_sbc_boll(new_b, trigger_dlg=parent_win if isinstance(parent_win, SBCIntradayChartDialog) else None)
+            else:
+                self.toggle_boll()
+        act_boll.triggered.connect(_toggle_boll)
         menu.addAction(act_boll)
 
         theme_display = {
@@ -2178,7 +2194,15 @@ class SBCChartCanvas(QWidget):
             "pro_charcoal": "雅致炭灰 (Slate)",
         }.get(getattr(self, 'theme_mode', 'pitch_dark'), '暗夜极黑')
         act_theme = QAction(f"🎨 切换主题配色 [当前: {theme_display}] (T 键)", self)
-        act_theme.triggered.connect(self.cycle_theme)
+        def _do_cycle_theme():
+            modes = ["pitch_dark", "deep_navy", "pro_charcoal"]
+            cur_idx = modes.index(self.theme_mode) if self.theme_mode in modes else 0
+            next_t = modes[(cur_idx + 1) % len(modes)]
+            if is_alt_modifier_active():
+                sync_all_open_sbc_theme(next_t, trigger_dlg=parent_win if isinstance(parent_win, SBCIntradayChartDialog) else None)
+            else:
+                self.cycle_theme()
+        act_theme.triggered.connect(_do_cycle_theme)
         menu.addAction(act_theme)
 
         # 5. 🔗 物理联动外部行情软件 (通达信/同花顺)
@@ -5840,8 +5864,8 @@ class SBCIntradayChartDialog(QWidget):
 
         btn_refresh = QPushButton("🔄 刷新")
         btn_refresh.setStyleSheet("QPushButton { background-color: #1e2638; color: #38bdf8; font-weight: bold; border: 1px solid #38bdf8; border-radius: 3px; padding: 2px 5px; font-size: 8.5pt; } QPushButton:hover { color: #ffffff; border: 1px solid #00ff88; }")
-        btn_refresh.setToolTip("快捷键: F5 键\n• 重新拉取并刷新当前标的最新行情与量化走势")
-        btn_refresh.clicked.connect(self.reload_chart)
+        btn_refresh.setToolTip("快捷键: F5 键\n• 单击: 重新拉取并刷新当前标的最新走势\n• 按住 Alt 点击: 联动错峰刷新所有已打开的 SBC 窗口")
+        btn_refresh.clicked.connect(self._on_refresh_btn_clicked)
 
         btn_clear_cache = QPushButton("🧹 清缓")
         btn_clear_cache.setStyleSheet("QPushButton { background-color: #3b1419; color: #ff6666; font-weight: bold; border: 1px solid #ff6666; border-radius: 3px; padding: 2px 4px; font-size: 8.5pt; } QPushButton:hover { color: #ffffff; border: 1px solid #ff4444; }")
@@ -5905,7 +5929,7 @@ class SBCIntradayChartDialog(QWidget):
         tb_layout.addWidget(self.btn_rule_editor)
         tb_layout.addWidget(self.btn_eval_r)
         self.btn_vol_toggle = QPushButton("📊 量:开")
-        self.btn_vol_toggle.setToolTip("快捷键: V 键 (分时成交量副图切换)\n• 正常开启 / 折叠隐藏 / 放大观察\n• 也可在成交量副图区域双击快速在放大与还原之间切换")
+        self.btn_vol_toggle.setToolTip("快捷键: V 键 (分时成交量副图切换)\n• 单击: 正常开启 / 折叠隐藏 / 放大观察\n• 按住 Alt 点击: 联动切换所有已打开窗口的成交量副图")
         self.btn_vol_toggle.clicked.connect(self._on_vol_toggle_clicked)
 
         self.btn_channel_overlay = QPushButton()
@@ -6922,32 +6946,63 @@ class SBCIntradayChartDialog(QWidget):
                     self.lbl_info.setText("暂无当日已采集的集合竞价轨迹；C键关闭竞价图")
 
     def _on_vol_toggle_clicked(self):
-        """点击工具栏成交量按钮：在 正常(开) -> 折叠(关) -> 放大 之间循环切换"""
+        """点击工具栏成交量按钮：在 正常(开) -> 折叠(关) -> 放大 之间循环切换 (按住 Alt 点击联动所有窗口)"""
         if hasattr(self, 'canvas') and self.canvas:
-            self.canvas.cycle_vol_mode()
-            self._update_vol_btn_style()
+            is_alt = is_alt_modifier_active()
+            modes = ["normal", "collapsed", "expanded"]
+            cur_mode = getattr(self.canvas, "_vol_mode", "normal")
+            cur_idx = modes.index(cur_mode) if cur_mode in modes else 0
+            next_mode = modes[(cur_idx + 1) % len(modes)]
+            if is_alt:
+                sync_all_open_sbc_vol_mode(next_mode, trigger_dlg=self)
+            else:
+                self.canvas.cycle_vol_mode()
+                self._update_vol_btn_style()
 
     def _on_channel_overlay_toggled(self, enabled: bool):
-        """切换分时/多日分时上的日线支撑与通道叠加。"""
-        self._channel_overlay_enabled = bool(enabled)
-        if hasattr(self, "canvas") and self.canvas:
-            self.canvas.channel_overlay_enabled = self._channel_overlay_enabled
-            self.canvas.update()
-        try:
-            QSettings("pyQuant3", "IntradayWorkbench").setValue(
-                "sbc_channel_overlay_enabled", self._channel_overlay_enabled
-            )
-        except Exception:
-            pass
-        self._update_channel_overlay_btn_style()
-        if self._channel_overlay_enabled and getattr(self, "_current_period_mode", "1m") in ("1m", "3d", "5d", "10d"):
-            self.reload_chart()
+        """切换分时/多日分时上的日线支撑与通道叠加 (按住 Alt 点击联动所有窗口)。"""
+        is_alt = is_alt_modifier_active()
+        if is_alt:
+            sync_all_open_sbc_channel_overlay(enabled, trigger_dlg=self)
+        else:
+            self._channel_overlay_enabled = bool(enabled)
+            if hasattr(self, "canvas") and self.canvas:
+                self.canvas.channel_overlay_enabled = self._channel_overlay_enabled
+                self.canvas.update()
+            try:
+                QSettings("pyQuant3", "IntradayWorkbench").setValue(
+                    "sbc_channel_overlay_enabled", self._channel_overlay_enabled
+                )
+            except Exception:
+                pass
+            self._update_channel_overlay_btn_style()
+            if self._channel_overlay_enabled and getattr(self, "_current_period_mode", "1m") in ("1m", "3d", "5d", "10d"):
+                self.reload_chart()
 
     def _on_boll_toggle_clicked(self):
-        self.canvas.toggle_boll()
+        is_alt = is_alt_modifier_active()
+        canvas = getattr(self, "canvas", None)
+        new_state = not getattr(canvas, "show_boll", True) if canvas else True
+        if is_alt:
+            sync_all_open_sbc_boll(new_state, trigger_dlg=self)
+        else:
+            if canvas:
+                canvas.toggle_boll()
+            self._update_boll_btn_style()
 
     def _on_theme_toggle_clicked(self):
-        self.canvas.cycle_theme()
+        is_alt = is_alt_modifier_active()
+        modes = ["pitch_dark", "deep_navy", "pro_charcoal"]
+        canvas = getattr(self, "canvas", None)
+        cur_mode = getattr(canvas, "theme_mode", "pitch_dark") if canvas else "pitch_dark"
+        cur_idx = modes.index(cur_mode) if cur_mode in modes else 0
+        next_mode = modes[(cur_idx + 1) % len(modes)]
+        if is_alt:
+            sync_all_open_sbc_theme(next_mode, trigger_dlg=self)
+        else:
+            if canvas:
+                canvas.set_theme(next_mode)
+            self._update_theme_btn_style()
 
     def _update_boll_btn_style(self):
         button = getattr(self, "btn_boll_toggle", None)
@@ -6963,7 +7018,7 @@ class SBCIntradayChartDialog(QWidget):
                 "border: 1px solid #00ff88; border-radius: 3px; padding: 2px 5px; font-size: 8.5pt; }"
                 "QPushButton:hover { color: #ffffff; border: 1px solid #38bdf8; }"
             )
-            button.setToolTip("快捷键: B 键 (当前: 【已开启】)\n• 显示通达信标准 BOLL 布林带 (20, 2)\n• 包含 MID中轨、UB上轨、LB下轨\n• 状态已持久化保存")
+            button.setToolTip("快捷键: B 键 (当前: 【已开启】)\n• 单击: 开关当前窗口 BOLL\n• 按住 Alt 点击: 联动开关所有打开窗口的 BOLL\n• 包含 MID中轨、UB上轨、LB下轨\n• 状态已持久化保存")
         else:
             button.setStyleSheet(
                 "QPushButton { background-color: #1e1e28; color: #888899; font-weight: normal; "
@@ -6992,7 +7047,7 @@ class SBCIntradayChartDialog(QWidget):
             "border: 1px solid #38bdf8; border-radius: 3px; padding: 2px 5px; font-size: 8.5pt; }"
             "QPushButton:hover { color: #ffffff; border: 1px solid #00ff88; }"
         )
-        button.setToolTip(f"快捷键: T 键 / 右键菜单 (当前: {theme_tips.get(mode, '暗夜极黑')})\n• 点击循环切换 3 组专业高对比主题色\n• 状态已持久化保存")
+        button.setToolTip(f"快捷键: T 键 / 右键菜单 (当前: {theme_tips.get(mode, '暗夜极黑')})\n• 单击: 循环切换当前窗口主题色\n• 按住 Alt 点击: 联动切换所有已打开窗口的主题色\n• 状态已持久化保存")
 
     def _update_channel_overlay_btn_style(self):
         button = getattr(self, "btn_channel_overlay", None)
@@ -7006,7 +7061,7 @@ class SBCIntradayChartDialog(QWidget):
                 "border: 1px solid #00ff88; border-radius: 3px; padding: 2px 5px; font-size: 8.5pt; }"
                 "QPushButton:hover { color: #ffffff; border: 1px solid #38bdf8; }"
             )
-            button.setToolTip("分时/多日分时显示日线支撑线与通道线；关闭后跳过分时专用指标读取和绘制")
+            button.setToolTip("日线支撑线与通道线叠加\n• 单击: 开关当前窗口通道叠加\n• 按住 Alt 点击: 联动开关所有已打开窗口的通道叠加")
         else:
             button.setStyleSheet(
                 "QPushButton { background-color: #1e1e28; color: #888899; font-weight: normal; "
@@ -7761,12 +7816,17 @@ class SBCIntradayChartDialog(QWidget):
             return
 
     def _toggle_auto_strategy(self):
-        """【🤖 自动交易策略开关】开启/关闭基于 VWAP 进攻 + 8层主动防守的全自动策略评估与信号标记"""
-        self.vwap_auto_strategy_enabled = not getattr(self, "vwap_auto_strategy_enabled", True)
-        if hasattr(self, "btn_auto_strategy"):
-            self.btn_auto_strategy.setChecked(self.vwap_auto_strategy_enabled)
-            self.btn_auto_strategy.setText("🤖 自动策略 (开)" if self.vwap_auto_strategy_enabled else "🤖 自动策略 (关)")
-        self.reload_chart()
+        """【🤖 自动交易策略开关】开启/关闭基于 VWAP 进攻 + 8层主动防守的全自动策略评估与信号标记 (按住 Alt 点击联动所有窗口)"""
+        is_alt = is_alt_modifier_active()
+        new_val = not getattr(self, "vwap_auto_strategy_enabled", True)
+        if is_alt:
+            sync_all_open_sbc_auto_strategy(new_val, trigger_dlg=self)
+        else:
+            self.vwap_auto_strategy_enabled = new_val
+            if hasattr(self, "btn_auto_strategy"):
+                self.btn_auto_strategy.setChecked(self.vwap_auto_strategy_enabled)
+                self.btn_auto_strategy.setText("🤖 自动策略 (开)" if self.vwap_auto_strategy_enabled else "🤖 自动策略 (关)")
+            self.reload_chart()
 
     def _open_rule_editor(self):
         """【⚙️ 打开策略调参面板】可视化编辑 8 层防守阵列与双组投票门槛，盘中热生效"""
@@ -9065,6 +9125,13 @@ class SBCIntradayChartDialog(QWidget):
             except Exception:
                 pass
 
+    def _on_refresh_btn_clicked(self):
+        """点击刷新按钮：单击刷新当前，按住 Alt 点击联动所有窗口错峰刷新"""
+        if is_alt_modifier_active():
+            sync_all_open_sbc_reload(trigger_dlg=self)
+        else:
+            self.reload_chart()
+
     def reload_chart(self, is_timer_tick: bool = False, force_sync: bool = False,
                      preloaded: Optional[Dict[str, Any]] = None):
         # 保持输入框与当前标的代码+名称同步 (非编辑输入状态下)
@@ -9508,6 +9575,155 @@ def activate_and_raise_sbc_window(dlg: SBCIntradayChartDialog, period_mode: Opti
     return dlg
 
 
+def get_all_active_sbc_dialogs() -> List[SBCIntradayChartDialog]:
+    """【🌐 统一检索当前所有已打开且存活的 SBC 走势窗口列表】"""
+    mgr = SBCWindowMemoryManager.get_instance()
+    active_dialogs = mgr.get_active_dialogs()
+    if not active_dialogs:
+        try:
+            from PyQt6.QtWidgets import QApplication
+            from PyQt6.sip import isdeleted
+            for w in QApplication.topLevelWidgets():
+                if isinstance(w, SBCIntradayChartDialog) and not isdeleted(w) and not getattr(w, '_is_closing', False):
+                    mgr.register(w)
+                    if w not in active_dialogs:
+                        active_dialogs.append(w)
+        except Exception:
+            pass
+    return active_dialogs or []
+
+
+def sync_all_open_sbc_theme(target_mode: str, trigger_dlg: Optional[SBCIntradayChartDialog] = None) -> int:
+    """【🎨 全局同步所有已打开 SBC 窗口的主题配色 (内存瞬间生效 + 全局持久化)】
+    当操盘手按住 Alt 点击主题切换按钮时调用：
+    1. 0 毫秒从 get_all_active_sbc_dialogs() 读取所有存活窗口；
+    2. 依次调用各窗口 canvas.set_theme(target_mode)，更新样式与静态缓存图层；
+    3. 刷新各窗口顶部主题按钮显示文本；
+    4. 全局持久化保存 set_sbc_theme_mode(target_mode)；
+    5. 返回同步的窗口总数。
+    """
+    from ats.ui.sbc_preferences import set_sbc_theme_mode, VALID_THEMES
+    if target_mode not in VALID_THEMES:
+        target_mode = "pitch_dark"
+    set_sbc_theme_mode(target_mode)
+    active_dialogs = get_all_active_sbc_dialogs()
+    for w in active_dialogs:
+        try:
+            if hasattr(w, "canvas") and w.canvas:
+                w.canvas.theme_mode = target_mode
+                theme = SBC_THEMES.get(target_mode, SBC_THEMES["pitch_dark"])
+                w.canvas.setStyleSheet(f"background-color: {theme['bg_color'].name()};")
+                w.canvas.update()
+            if hasattr(w, "_update_theme_btn_style"):
+                w._update_theme_btn_style()
+        except Exception:
+            pass
+    return len(active_dialogs)
+
+
+def sync_all_open_sbc_boll(enabled: bool, trigger_dlg: Optional[SBCIntradayChartDialog] = None) -> int:
+    """【📈 全局同步所有已打开 SBC 窗口的 BOLL 布林带开关 (内存瞬间生效 + 全局持久化)】
+    当操盘手按住 Alt 点击 BOLL 按钮时调用：
+    1. 全局持久化 set_sbc_show_boll(enabled)；
+    2. 0 毫秒同步更新所有存活窗口 canvas.show_boll 并在当前/背景窗口立即 update() 重绘；
+    3. 刷新各窗口顶部 BOLL 按钮高亮文本；
+    4. 返回同步的窗口总数。
+    """
+    from ats.ui.sbc_preferences import set_sbc_show_boll
+    set_sbc_show_boll(enabled)
+    active_dialogs = get_all_active_sbc_dialogs()
+    for w in active_dialogs:
+        try:
+            if hasattr(w, "canvas") and w.canvas:
+                w.canvas.show_boll = bool(enabled)
+                w.canvas.update()
+            if hasattr(w, "_update_boll_btn_style"):
+                w._update_boll_btn_style()
+        except Exception:
+            pass
+    return len(active_dialogs)
+
+
+def sync_all_open_sbc_gap_channels(enabled: bool, trigger_dlg: Optional[SBCIntradayChartDialog] = None) -> int:
+    """【🔲 全局同步所有已打开 SBC 窗口的跳空缺口通道带开关】"""
+    active_dialogs = get_all_active_sbc_dialogs()
+    for w in active_dialogs:
+        try:
+            if hasattr(w, "canvas") and w.canvas:
+                w.canvas.show_gap_channels = bool(enabled)
+                w.canvas.update()
+        except Exception:
+            pass
+    return len(active_dialogs)
+
+
+def sync_all_open_sbc_vol_mode(target_mode: str, trigger_dlg: Optional[SBCIntradayChartDialog] = None) -> int:
+    """【📊 全局同步所有已打开 SBC 窗口的成交量副图状态 (正常 / 折叠 / 放大)】"""
+    active_dialogs = get_all_active_sbc_dialogs()
+    for w in active_dialogs:
+        try:
+            if hasattr(w, "canvas") and w.canvas:
+                w.canvas._vol_mode = target_mode
+                w.canvas.update()
+            if hasattr(w, "_update_vol_btn_style"):
+                w._update_vol_btn_style()
+        except Exception:
+            pass
+    return len(active_dialogs)
+
+
+def sync_all_open_sbc_channel_overlay(enabled: bool, trigger_dlg: Optional[SBCIntradayChartDialog] = None) -> int:
+    """【📐 全局同步所有已打开 SBC 窗口的日线通道与支撑线叠加开关】"""
+    active_dialogs = get_all_active_sbc_dialogs()
+    for w in active_dialogs:
+        try:
+            w._channel_overlay_enabled = bool(enabled)
+            if hasattr(w, "canvas") and w.canvas:
+                w.canvas.channel_overlay_enabled = bool(enabled)
+                w.canvas.update()
+            if hasattr(w, "_update_channel_overlay_btn_style"):
+                w._update_channel_overlay_btn_style()
+        except Exception:
+            pass
+    return len(active_dialogs)
+
+
+def sync_all_open_sbc_auto_strategy(enabled: bool, trigger_dlg: Optional[SBCIntradayChartDialog] = None) -> int:
+    """【🤖 全局同步所有已打开 SBC 窗口的自动策略开关】"""
+    active_dialogs = get_all_active_sbc_dialogs()
+    for w in active_dialogs:
+        try:
+            w.vwap_auto_strategy_enabled = bool(enabled)
+            btn = getattr(w, "btn_auto_strategy", None)
+            if btn:
+                btn.setChecked(bool(enabled))
+                btn.setText("🤖 自动策略 (开)" if enabled else "🤖 自动策略 (关)")
+            if hasattr(w, "reload_chart"):
+                w.reload_chart()
+        except Exception:
+            pass
+    return len(active_dialogs)
+
+
+def sync_all_open_sbc_reload(trigger_dlg: Optional[SBCIntradayChartDialog] = None) -> int:
+    """【🔄 全局错峰重载所有已打开 SBC 窗口 (焦点窗口直达，其余错峰 35ms)】"""
+    active_dialogs = get_all_active_sbc_dialogs()
+    if not active_dialogs:
+        return 0
+    current_focus_win = trigger_dlg or next((w for w in active_dialogs if w.isActiveWindow()), active_dialogs[0])
+    try:
+        current_focus_win.reload_chart()
+    except Exception:
+        pass
+    delay = 35
+    for w in active_dialogs:
+        if w is current_focus_win:
+            continue
+        QTimer.singleShot(delay, lambda target_w=w: target_w.reload_chart() if hasattr(target_w, "reload_chart") else None)
+        delay += 35
+    return len(active_dialogs)
+
+
 def sync_all_open_sbc_period(target_mode: str, trigger_dlg: Optional[SBCIntradayChartDialog] = None) -> int:
     """【⚡ 全局同步所有已打开 SBC 窗口的看盘周期 (内存持久化 + 错峰直达)】
     当操盘手按住 Alt 点击任意周期按钮时调用：
@@ -9523,20 +9739,8 @@ def sync_all_open_sbc_period(target_mode: str, trigger_dlg: Optional[SBCIntraday
     if mode_clean not in VALID_SBC_PERIODS:
         mode_clean = "1m"
 
+    active_dialogs = get_all_active_sbc_dialogs()
     mgr = SBCWindowMemoryManager.get_instance()
-    active_dialogs = mgr.get_active_dialogs()
-    if not active_dialogs:
-        # 兜底补充一次
-        try:
-            from PyQt6.QtWidgets import QApplication
-            from PyQt6.sip import isdeleted
-            for w in QApplication.topLevelWidgets():
-                if isinstance(w, SBCIntradayChartDialog) and not isdeleted(w) and not getattr(w, '_is_closing', False):
-                    mgr.register(w)
-                    if w not in active_dialogs:
-                        active_dialogs.append(w)
-        except Exception:
-            pass
 
     count = len(active_dialogs)
     if count == 0:
