@@ -506,6 +506,16 @@ class MockTradeGateway:
             return False, msg
 
         with self._lock:
+            # [FIX][P0] 幂等保护：同一标的当日已平仓后，禁止再次卖出。
+            # 否则一旦持仓被对账流程回灌，止损会每 15 秒重复成交一次（实测 947 次/日）。
+            if code in self._today_sold_codes:
+                now_ts = time.time()
+                ck = f"sell_dup_{code}"
+                if now_ts - _GATEWAY_LOG_COOLDOWN.get(ck, 0) >= 300:
+                    logger.warning(f"[TradeGateway] 卖出拦截 {code}: 当日已平仓，忽略重复卖出请求")
+                    _GATEWAY_LOG_COOLDOWN[ck] = now_ts
+                return False, f"{code} 当日已平仓，重复卖出请求已忽略"
+
             pos = self._positions.get(code)
             if pos is None:
                 return False, f"{code} 不在持仓中"
@@ -588,6 +598,9 @@ class MockTradeGateway:
         to_sell = []
         with self._lock:
             for code, pos in self._positions.items():
+                # [FIX][P0] 当日已平仓的标的直接跳过，避免对账回灌后重复触发止损
+                if code in self._today_sold_codes:
+                    continue
                 if pos.current_price > 0 and pos.current_price <= pos.stop_loss:
                     # 校验 T+1 规则：如果当日买入则不能当日止损（测试和回测模拟模式除外）
                     if not (is_test or is_simulation):

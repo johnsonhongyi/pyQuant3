@@ -104,10 +104,20 @@ def append_jsonl_gzip(path, records):
         os.replace(temporary, os.path.join(directory, name))
         # Only managed segments are eligible for bounded diagnostic retention.
         from pathlib import Path
-        root = Path(directory).resolve()
+        try:
+            root = Path(directory).resolve()
+        except OSError:
+            root = Path(directory).absolute()
+
+        def _safe_parent(p):
+            try:
+                return p.resolve().parent
+            except OSError:
+                return p.absolute().parent
+
         segments = sorted((item for item in root.glob('*.jsonl.gz')
                            if item.is_file() and not item.is_symlink()
-                           and item.resolve().parent == root), reverse=True)
+                           and _safe_parent(item) == root), reverse=True)
         retained_bytes = 0
         for index, segment in enumerate(segments):
             retained_bytes += segment.stat().st_size
@@ -143,7 +153,10 @@ def remove_expired_reconciliation_segments(root, retention_days, today):
     removed = []
     if retention_days is None:
         return removed
-    root = Path(root).resolve()
+    try:
+        root = Path(root).resolve()
+    except OSError:
+        root = Path(root).absolute()
     for directory in root.glob('reconciliation_*.jsonl.parts'):
         match = re.fullmatch(r'reconciliation_(\d{8})\.jsonl\.parts', directory.name)
         if not match or not directory.is_dir() or directory.resolve().parent != root:

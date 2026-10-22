@@ -99,6 +99,9 @@ class PaperExecutionAdapter(ExecutionAdapter):
 
     commission_rate = 0.0
     sell_extra_fee = 0.0
+    # T+1 拒单日志聚合参数：同一事实状态 10 分钟内只落盘一次
+    _T1_LOG_INTERVAL = 600.0
+    _T1_STATE_MAX = 512
 
     def __init__(
         self,
@@ -124,6 +127,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
         self._submit_lock = threading.RLock()
         self._t1_warning_lock = threading.Lock()
         self._t1_warning_state = {}
+        self._t1_state_day = ""
         
         # 探测测试环境与物理持久化路径
         import os
@@ -138,16 +142,27 @@ class PaperExecutionAdapter(ExecutionAdapter):
         self._last_saved_fingerprint = self._get_trade_fingerprint()
 
     def _log_t1_rejection(self, action, code, status, total, bought_today, available, requested):
+        """记录 T+1 拒单，并做当日维度的日志聚合。
+
+        [FIX][P0] 原实现使用 30 秒窗口，而策略侧的重试周期是 15 秒，抑制率接近 0，
+        单只标的每天产生 ~197 条完全相同的拒单日志（生产日志中占比 26%）。
+        现改为：同一 (动作, 标的, 事实状态) 且事实完全一致时，10 分钟内只落盘一次，
+        其余次数累加到 suppressed 计数里，跨交易日自动清零。
+        """
         now = time.monotonic()
-        key = (action, code)
+        key = (action, code, status)
         facts = (status, total, bought_today, available, requested)
+        today = datetime.now().date().isoformat()
         with self._t1_warning_lock:
+            if getattr(self, "_t1_state_day", "") != today:
+                self._t1_warning_state.clear()
+                self._t1_state_day = today
             previous = self._t1_warning_state.get(key)
-            if previous and previous[1] == facts and now - previous[0] < 30.0:
+            if previous and previous[1] == facts and now - previous[0] < self._T1_LOG_INTERVAL:
                 self._t1_warning_state[key] = (previous[0], facts, previous[2] + 1)
                 return
             suppressed = previous[2] if previous else 0
-            if key not in self._t1_warning_state and len(self._t1_warning_state) >= 512:
+            if key not in self._t1_warning_state and len(self._t1_warning_state) >= self._T1_STATE_MAX:
                 self._t1_warning_state.pop(next(iter(self._t1_warning_state)))
             self._t1_warning_state[key] = (now, facts, 0)
         logger.warning(

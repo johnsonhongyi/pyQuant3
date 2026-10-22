@@ -14,11 +14,18 @@ def set_process_dpi_awareness():
             # 对 Windows 10+ 启用 Per-Monitor DPI 感知
             # ERROR_ACCESS_DENIED (5) usually means awareness is already set (e.g. by Qt6)
             try:
+                # 优先 Per-Monitor V2 (-4)，失败(已被设置/旧系统)再回退 shcore
+                try:
+                    if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+                        logger.info("[DPI] 已启用 Per-Monitor V2")
+                        return
+                except Exception:
+                    pass
                 ctypes.windll.shcore.SetProcessDpiAwareness(2)
                 logger.info("[DPI] 已启用 Per-Monitor DPI Aware")
             except OSError as e:
                 if e.winerror == 5:
-                    logger.debug("[DPI] Awareness already set, skipping.")
+                    logger.info("[DPI] Awareness already set (manifest/其他模块已设置)，跳过。")
                 else:
                     raise
     except Exception as e:
@@ -112,9 +119,20 @@ def monitor_rdp_and_scale(win, interval_ms=3000, scale_factor=1.5):
 def get_window_dpi_scale(window):
     """获取指定窗口的 DPI 缩放比例"""
     try:
+        user32 = ctypes.windll.user32
         hwnd = window.winfo_id()
-        dpi = ctypes.windll.user32.GetDpiForWindow(hwnd)
-        return dpi / 96.0
+        # Tk 的 winfo_id 是客户区子窗口，取顶层窗口更准确
+        top = user32.GetAncestor(hwnd, 2) or hwnd  # GA_ROOT
+        dpi = user32.GetDpiForWindow(top)
+        try:
+            # 优先取窗口所在显示器的有效 DPI（RDP/多屏切换时更及时）
+            mon = user32.MonitorFromWindow(top, 2)  # MONITOR_DEFAULTTONEAREST
+            dx, dy = ctypes.c_uint(0), ctypes.c_uint(0)
+            if mon and ctypes.windll.shcore.GetDpiForMonitor(mon, 0, ctypes.byref(dx), ctypes.byref(dy)) == 0 and dx.value:
+                dpi = dx.value
+        except Exception:
+            pass
+        return (dpi or 96) / 96.0
     except Exception:
         return 1.0
 
@@ -143,3 +161,57 @@ def get_windows_dpi_scale_factor():
         return scale
     except Exception:
         return 1.0
+
+def get_dpi_awareness_info(window=None):
+    """诊断当前进程 DPI 感知模式及各 DPI 数值。
+
+    awareness: unaware / system / per_monitor / per_monitor_v2 / unknown
+    若为 unaware/system，Windows 将一直返回登录/启动时的 DPI，RDP 改分辨率无法被检测。
+    """
+    info = {"awareness": "unknown", "system_dpi": None, "window_dpi": None, "monitor_dpi": None,
+            "rdp": False, "screen": None}
+    if sys.platform != "win32":
+        return info
+    try:
+        user32 = ctypes.windll.user32
+        info["rdp"] = is_rdp_session()
+        info["screen"] = (user32.GetSystemMetrics(0), user32.GetSystemMetrics(1))
+        try:
+            val = ctypes.c_int(-1)
+            if ctypes.windll.shcore.GetProcessDpiAwareness(0, ctypes.byref(val)) == 0:
+                info["awareness"] = {0: "unaware", 1: "system", 2: "per_monitor"}.get(val.value, "unknown")
+        except Exception:
+            pass
+        try:
+            ctx = user32.GetThreadDpiAwarenessContext()
+            ctx_v2 = ctypes.c_void_p(-4)
+            if user32.AreDpiAwarenessContextsEqual(ctypes.c_void_p(ctx), ctx_v2):
+                info["awareness"] = "per_monitor_v2"
+        except Exception:
+            pass
+        try:
+            info["system_dpi"] = user32.GetDpiForSystem()
+        except Exception:
+            pass
+        if window is not None:
+            info["window_dpi"] = int(round(get_window_dpi_scale(window) * 96))
+            try:
+                top = user32.GetAncestor(window.winfo_id(), 2) or window.winfo_id()
+                info["window_dpi_raw"] = user32.GetDpiForWindow(top)
+            except Exception:
+                pass
+    except Exception as e:
+        info["error"] = str(e)
+    return info
+
+
+def log_dpi_awareness(tag="", window=None):
+    """把 DPI 感知诊断写入日志，返回 info 字典。"""
+    info = get_dpi_awareness_info(window)
+    level_ok = info.get("awareness") in ("per_monitor", "per_monitor_v2")
+    msg = f"[DPI诊断]{tag} {info}"
+    if level_ok:
+        logger.info(msg)
+    else:
+        logger.warning(msg + " ⚠ 非 Per-Monitor 感知: 运行期无法检测 RDP DPI/分辨率变化，请检查 exe manifest 或先于 Tk 的 SetProcessDpiAwareness 调用")
+    return info

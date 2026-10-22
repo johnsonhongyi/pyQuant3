@@ -5,6 +5,43 @@ from logger_utils import LoggerFactory
 
 logger = LoggerFactory.getLogger("DecisionEngine")
 
+# ── 挖掘拦截日志窗口聚合 ────────────────────────────────────────────────
+# 同一标的在一个决策周期内会被多个 resample × 多个策略重复判定。开启 -log debug 时，
+# 单只标的可在 1 秒内产生 50 条同义拦截日志，既淹没其它信号又把日志撑爆。
+# 这里按标的做 60 秒窗口：窗口内只累计，窗口翻页时补一条含次数与得分区间的摘要，
+# 这样 debug 模式依然能看到得分分布，而不是简单把信息丢掉。
+_MINING_REJECT_WINDOW = 60.0
+_MINING_REJECT_MAX_CODES = 4096
+_mining_reject_windows: dict[str, dict] = {}
+
+
+def _log_mining_reject(code: str, name: str, score: float) -> None:
+    import time as _time
+    now = _time.monotonic()
+    st = _mining_reject_windows.get(code)
+    if st is not None and (now - st["start"]) < _MINING_REJECT_WINDOW:
+        st["count"] += 1
+        st["lo"] = min(st["lo"], score)
+        st["hi"] = max(st["hi"], score)
+        st["sum"] += score
+        return
+
+    if st is not None and st["count"] > 1:
+        logger.debug(
+            "🛡️ [DecisionEngine] %s(%s) 上一窗口拦截 %d 次 | 得分 %.1f~%.1f (均值 %.1f)",
+            code, name, st["count"], st["lo"], st["hi"], st["sum"] / st["count"],
+        )
+
+    if len(_mining_reject_windows) >= _MINING_REJECT_MAX_CODES:
+        _mining_reject_windows.clear()
+    _mining_reject_windows[code] = {
+        "start": now, "count": 1, "lo": score, "hi": score, "sum": score,
+    }
+    logger.debug(
+        "🛡️ [DecisionEngine] 拦截未达挖掘门槛标的: %s (%s) | 挖掘得分: %.1f/78.0 | 维持观望，避免无目的瞎买",
+        code, name, score,
+    )
+
 from trading_kernel.core.intent import DecisionIntent, DecisionReason
 from trading_kernel.core.signal import StrategySignal
 from trading_kernel.engine.deep_stock_mining_engine import DeepStockMiningEngine
@@ -1121,10 +1158,9 @@ def decide(signal: StrategySignal, state: str) -> DecisionIntent:
                 ctx["name"] = signal.name
             is_mined_target, mining_score, mining_details = DeepStockMiningEngine.evaluate_stock_mining(ctx)
             if not is_mined_target:
-                logger.debug(
-                    f"🛡️ [DecisionEngine] 拦截未达挖掘门槛标的: {signal.code} ({signal.name}) | "
-                    f"挖掘得分: {mining_score:.1f}/78.0 | 维持观望，避免无目的瞎买"
-                )
+                # [FIX] 按标的做 60 秒窗口聚合，避免 debug 模式下 1 秒 50 条的日志风暴，
+                # 同时保留每次窗口的次数与得分区间，诊断信息不丢。
+                _log_mining_reject(signal.code, signal.name, mining_score)
                 action = "HOLD"
                 size_pct = 0.0
                 setup = "NON_MINED_IGNORE"

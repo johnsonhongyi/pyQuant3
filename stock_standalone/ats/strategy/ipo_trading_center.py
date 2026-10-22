@@ -365,7 +365,7 @@ class IPOTradingCenter:
                  r9_gate_context_provider: Optional[Callable[[IPOOrderDirective], Mapping[str, Any]]] = None,
                  learning_root: Optional[str] = None):
         self._learning_root = safe_resolve_path(learning_root if learning_root is not None else get_app_root())
-        self._default_ledger_file = str(self._learning_root / "ats/config/ipo_trading_ledger.json")
+        self._default_ledger_file = TRADING_LEDGER_FILE if learning_root is None else str(self._learning_root / "ats/config/ipo_trading_ledger.json")
         self.total_capital = total_capital       # 虚拟/实盘总资金池 (默认 100 万基准)
         self.available_cash = total_capital
         self._ledger_file = ledger_file

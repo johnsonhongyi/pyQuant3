@@ -14056,7 +14056,11 @@ class MainWindow(QMainWindow, WindowMixin):
         if getattr(self, 'show_chan', True):
             try:
                 # 1. 核心计算 (Numba 加速) - 返回 (chanK, results) 元组
-                chan_key = (price_key, _frame_signature(day_df[['vol', 'amount']]))
+                # [FIX] 部分数据源（如纯日线缓存/指数）没有 amount 列，直接切片会抛
+                # KeyError "['amount'] not in index" 并中断整个缠论渲染。改为按实际存在的列取签名。
+                _sig_cols = [c for c in ('vol', 'amount') if c in getattr(day_df, 'columns', [])]
+                _sig = _frame_signature(day_df[_sig_cols]) if _sig_cols else len(day_df)
+                chan_key = (price_key, _sig)
                 chanK, results = self._cached_chart_value('chan', chan_key, lambda: my_chan2.get_chan_analysis_fast(day_df))
                 
                 # 0. 准备 X 轴日期映射
