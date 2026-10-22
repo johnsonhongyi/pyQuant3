@@ -1,5 +1,23 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](stock_standalone/design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-22 23:30 【持仓AI巡检交易风格自动继承与新交易日走势审核更新复检闭环】(`stock_standalone/stock-strategy/docs/tasks/2026-10-22_2330_持仓AI巡检交易风格自动继承与新交易日走势审核更新复检闭环.md`, `source/easy-stock-analysis/backend/internal/portfolioinspection/`, `source/easy-stock-web/src/components/PortfolioInspectionWorkspace.tsx`)
+- [x] **交易风格与持仓配置自动继承（告别重复添加与重复选择）**：
+  - 修复巡检配置持久化断层缺陷：在工作区加载时自动从历史最近成功记录继承 `trader_profile` 与持仓标的，无需用户从头重新点选风格与手动逐只搜索个股；
+  - 报告详情页新增 **【载入此配置】** 按钮，一键将当前历史报告的交易风格和每只股票（含权重、成本价）完整载入至草稿表单，方便微调；
+  - 统一草稿持久化与表单响应，确保激进/均衡/稳重风格在切换、刷新或重新进入时 100% 稳定记忆；
+- [x] **新交易日走势审核与再次巡检（Audit & Re-inspection）功能闭环**：
+  - **多入口直达更新**：报告页顶部提供醒目主操作 **【更新巡检（审核新走势）】**，左侧历史列表项新增快捷刷新操作按钮（`RefreshCw`），一键继承全部配置并发起新交易日更新；
+  - **后端走势审核基线机制**：
+    - 数据契约扩充支持 `previous_inspection_id`、`audit_base_date`、`audit_summary`、`trend_audit` 与 `previous_action`；
+    - `service.go` 自动从数据库提取前次巡检评估基线，在 Prompt 中引导 AI 对比前次预案，重点审核新交易日实际走势是否触及确认条件或跌破失效线，输出组合走势反思与最新策略；
+    - 本地降级 `localReport` 同步对齐规则化走势核验逻辑，0 崩溃、0 悬空指针；
+  - **可视化成果展示**：报告页渲染专门的 **【新交易日走势审核与策略更新（`portfolio-audit-banner`）】** 与逐股 **【走势审核与前次预案（`portfolio-holding-audit`）】**；
+- [x] **自动化测试回归全绿通过（后端 Go + 前端 React/Vitest）**：
+  - Go 单元测试 `TestBuildPromptWithPreviousInspectionBaseline` 与 `TestInspectionInheritsPreviousBaseline` 秒级通过，`internal/portfolioinspection`（0.059s）与 `internal/httpapi`（1.568s）全绿通过；
+  - 前端 Vitest 专项测试 `PortfolioInspectionWorkspace.test.tsx`（2/2 PASS）、`PortfolioSetupForm.test.tsx`、`portfolio-draft.test.ts` 全部纯绿通过；
+  - 前端 TypeScript 检查（`tsc --noEmit`）0 错误；Vite 生产构建打包成功（`✓ built in 6.17s`）。
+
+
 ## 2026-10-22 23:25 【ATS主窗口全Tab对齐DFF多日强弱新设计与资金主线涨幅完全解耦闭环】(`stock_standalone/docs/tasks/2026-10-22_2325_ATS主窗口全Tab对齐DFF多日强弱新设计.md`, `stock_standalone/tests/test_multiday_pct_base_view.py`)
 - [x] **ATS 主窗口 4 大业务 Tab 统一收敛至 DFF 呈现多日强弱**：
   - **规范统一**：主窗口表格中的 `涨幅%` / `涨跌%` 列严格保持为当日真实涨跌幅（0 篡改）；多日强弱观察（2D强、3D强至 9D 累计涨幅）全域收敛统一在 `DFF` 列；

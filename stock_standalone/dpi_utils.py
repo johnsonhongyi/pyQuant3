@@ -80,41 +80,13 @@ def is_rdp_session():
     SM_REMOTESESSION = 0x1000
     return bool(ctypes.windll.user32.GetSystemMetrics(SM_REMOTESESSION))
 
-def scale_tk_window_for_rdp(root, scale_factor=1.5):
-    """在 RDP 环境下自动放大 Tk 窗口尺寸"""
-    if is_rdp_session():
-        w = int(root.winfo_width() * scale_factor)
-        h = int(root.winfo_height() * scale_factor)
-        root.geometry(f"{w}x{h}")
-        logger.info(f"[RDP] 已按 {scale_factor} 缩放 Tk 窗口: {w}x{h}")
+def scale_tk_window_for_rdp(root, scale_factor=1.0):
+    """[DEPRECATED] 历史遗留 RDP 缩放函数，已由 DPIMixin 统一动态接管。"""
+    pass
 
-def monitor_rdp_and_scale(win, interval_ms=3000, scale_factor=1.5):
-    """间歇性检测 RDP 状态并调整缩放"""
-    if not hasattr(win, "_last_rdp_state"):
-        win._last_rdp_state = is_rdp_session()
-
-    current_state = is_rdp_session()
-    if current_state != win._last_rdp_state:
-        win._last_rdp_state = current_state
-        if current_state:
-            logger.info(f"[RDP] 检测到远程登录，放大 Tk 窗口 scale={scale_factor}")
-            try:
-                win.tk.call('tk', 'scaling', scale_factor)
-                w = int(win.winfo_width() * scale_factor)
-                h = int(win.winfo_height() * scale_factor)
-                win.geometry(f"{w}x{h}")
-            except Exception as e:
-                logger.info(f"[RDP] 调整窗口缩放失败: {e}")
-        else:
-            logger.info("[RDP] 返回本地会话，恢复默认缩放")
-            try:
-                win.tk.call('tk', 'scaling', 1.0)
-                w = int(win.winfo_width() / scale_factor)
-                h = int(win.winfo_height() / scale_factor)
-                win.geometry(f"{w}x{h}")
-            except Exception as e:
-                logger.info(f"[RDP] 恢复窗口缩放失败: {e}")
-    win.after(interval_ms, lambda: monitor_rdp_and_scale(win, interval_ms, scale_factor))
+def monitor_rdp_and_scale(win, interval_ms=3000, scale_factor=1.0):
+    """[DEPRECATED] 历史遗留 RDP 监控函数，已由 DPIMixin 统一动态接管。"""
+    pass
 
 def get_window_dpi_scale(window):
     """获取指定窗口的 DPI 缩放比例"""
@@ -147,18 +119,29 @@ def get_current_window_scale(tk_obj):
         return 96, 1.0
 
 def get_windows_dpi_scale_factor():
-    """获取 Windows 系统的 DPI 缩放因子"""
+    """获取 Windows 系统的真实 DPI 缩放因子。
+    严格返回系统或窗口的客观物理 DPI 比例，绝不因 RDP 远程桌面人为虚标或篡改。
+    """
+    if sys.platform != "win32":
+        return 1.0
     try:
-        LOGPIXELSX = 88
         user32 = ctypes.windll.user32
+        # 1. 优先使用 Windows 10 原生精确 API
+        try:
+            dpi = user32.GetDpiForSystem()
+            if dpi and dpi > 0:
+                return round(dpi / 96.0, 2)
+        except Exception:
+            pass
+        # 2. 回退传统 DC 查询
+        LOGPIXELSX = 88
         gdi32 = ctypes.windll.gdi32
         dc = user32.GetDC(0)
         dpi = gdi32.GetDeviceCaps(dc, LOGPIXELSX)
         user32.ReleaseDC(0, dc)
-        scale = dpi / 96.0
-        if scale == 1.0 and is_rdp_session():
-            return 2.0
-        return scale
+        if dpi and dpi > 0:
+            return round(dpi / 96.0, 2)
+        return 1.0
     except Exception:
         return 1.0
 
