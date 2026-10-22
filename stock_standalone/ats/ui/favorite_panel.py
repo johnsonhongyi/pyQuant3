@@ -67,13 +67,14 @@ def get_ats_extra_cols():
     return extra
 
 
-def get_ats_table_headers(extra_cols=None):
-    """获取与 SwingStateTable 100% 严格对齐的标准表头"""
+def get_ats_table_headers(extra_cols=None, base_day: int = 1):
+    """获取与 SwingStateTable 100% 严格对齐的标准表头 (支持动态多日基准 DFF 标签)"""
     if extra_cols is None:
         extra_cols = get_ats_extra_cols()
+    dff_label = f"DFF({base_day}D)" if base_day > 1 else "DFF"
     base_pre = [
         "股票代码", "股票名称", "当前价", "波段状态", "MA20 偏离", "连板数", "推荐仓位",
-        "首次发现", "优先级", "DFF", "Rank", "DFF2", "DFF3", "大盘偏离", "大盘共振"
+        "首次发现", "优先级", dff_label, "Rank", "DFF2", "DFF3", "大盘偏离", "大盘共振"
     ]
     extra_headers = [c.upper() for c in extra_cols]
     return base_pre + extra_headers + ["推荐理由"]
@@ -101,6 +102,8 @@ class FavoritePanel(QWidget):
         # 🏇 特异赛马去弱留强快筛开关 (默认关闭，展示全量重点关注)
         saved_horse = load_config_node(PERSIST_KEY_FAV_HORSE_FILTER, False)
         self.horse_filter_enabled = parse_bool_config(saved_horse, default=False)
+
+        self.pct_base_day: int = int(load_config_node("ats_pct_base_day", 1))
 
         self._init_ui()
 
@@ -152,7 +155,7 @@ class FavoritePanel(QWidget):
         self.table.viewport().setStyleSheet("background-color: #121218; border: none;")
         self.table.setStyleSheet("QTableWidget { background-color: #121218; border: none; }")
 
-        headers = get_ats_table_headers(self.extra_cols)
+        headers = get_ats_table_headers(self.extra_cols, base_day=self.pct_base_day)
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
 
@@ -168,6 +171,13 @@ class FavoritePanel(QWidget):
 
         # 启动时若无推送，立即加载基础重点关注股票清单
         self.load_initial_favorites()
+
+    def set_pct_base_day(self, base_day: int):
+        """动态切换涨跌幅基准日并即时更新表头"""
+        self.pct_base_day = max(1, int(base_day))
+        headers = get_ats_table_headers(self.extra_cols, base_day=self.pct_base_day)
+        if self.table.columnCount() == len(headers):
+            self.table.setHorizontalHeaderLabels(headers)
 
     def set_linkage_context(self, text):
         if hasattr(self, "linkage_context_label"):

@@ -75,7 +75,8 @@ class LedgerUpdateWorker(QThread):
     def __init__(self, df_all, signal_ledger, volume_profiler,
                  session_snapshot, swing_tracker, stock_history_cache,
                  price_pct_cache, name_cache, fav_stocks, universe_manager,
-                 today_str, ledger_update_service=None, linkage_context_client=None):
+                 today_str, ledger_update_service=None, linkage_context_client=None,
+                 pct_base_day: int = 1):
         super().__init__()
         # 浅拷贝 DataFrame：仅复制 index/columns 结构元数据，数据块共享内存
         # 在 Worker 只读访问 df 的场景下足够安全，避免 ~80ms 的深拷贝开销
@@ -93,6 +94,7 @@ class LedgerUpdateWorker(QThread):
         self._universe_manager = universe_manager
         self._today_str = today_str
         self._linkage_context_client = linkage_context_client
+        self._pct_base_day = int(pct_base_day or 1)
 
     def _get_name(self, code):
         """从 name_cache 或 df 解析股票名称 (无 IO 纯内存)"""
@@ -526,10 +528,15 @@ class LedgerUpdateWorker(QThread):
                             resonance = h_item.base_label
                             reason = f'[{h_item.base_label}] {h_item.reason} | {reason}'
 
+                display_dff = dff_val
+                if self._pct_base_day > 1:
+                    from ats.ui.styles import compute_base_day_percent
+                    display_dff = compute_base_day_percent(row, base_day=self._pct_base_day, current_price=latest_close)
+
                 swing_rows.append((
                     code, name, f'{latest_close:.2f}', state, dev_str, str(limit_ups), position,
                     first_seen, priority_val,
-                    f'{dff_val:.2f}', str(rank_val), f'{dff2_val:.2f}', f'{dff3_val:.2f}',
+                    f'{display_dff:.2f}', str(rank_val), f'{dff2_val:.2f}', f'{dff3_val:.2f}',
                     f'{rs_val:+.2f}%', resonance,
                     *extra_vals,
                     reason
@@ -2155,6 +2162,14 @@ class ATSMainWindow(QMainWindow):
         saved_period = load_config_node(PERSIST_KEY_CHANNEL_SCAN_PERIOD, "60f")
         self.channel_scan_period = str(saved_period).strip() if saved_period else "60f"
 
+        # 读取基准涨跌幅配置 (默认 1，即昨收 lastp1d；可选 2: 2日强, 3: 3日强 ... 至 cct.compute_lastdays)
+        try:
+            self.pct_base_day = int(load_config_node("ats_pct_base_day", 1))
+            if self.pct_base_day < 1 or self.pct_base_day > getattr(cct, 'compute_lastdays', 9):
+                self.pct_base_day = 1
+        except Exception:
+            self.pct_base_day = 1
+
         from ats.startup_profiler import mark_checkpoint
         mark_checkpoint("03.1 State & Managers Initialization")
 
@@ -2468,6 +2483,51 @@ class ATSMainWindow(QMainWindow):
         toolbar.addWidget(self.cb_profiler)
         
         toolbar.addSeparator()
+
+        # 📈 基准涨跌幅切换 (1D昨收 / 2D前收 / 3D ... 至 cct.compute_lastdays)
+        self.combo_pct_base = QComboBox()
+        self.combo_pct_base.setToolTip(
+            "选择涨跌幅计算基准日 (仅用于主窗口视图与排序，不影响底层策略信号):\n"
+            "• 1D(昨收): 当日涨跌幅 (默认，基于昨日收盘价 lastp1d)\n"
+            "• 2D(2日强): 2日累计涨跌幅 (基于前日收盘价 lastp2d，极速观察双日连板与主升资金)\n"
+            "• 3D~9D: 多日累计涨跌幅 (基于 lastpNd)"
+        )
+        max_days = getattr(cct, 'compute_lastdays', 9)
+        day_items = [("1D(昨收)", 1), ("2D(2日强)", 2), ("3D(3日强)", 3)]
+        for d in range(4, max_days + 1):
+            day_items.append((f"{d}D({d}日强)", d))
+        for text_label, val in day_items:
+            self.combo_pct_base.addItem(text_label, val)
+        
+        cur_idx = 0
+        for i in range(self.combo_pct_base.count()):
+            if self.combo_pct_base.itemData(i) == self.pct_base_day:
+                cur_idx = i
+                break
+        self.combo_pct_base.setCurrentIndex(cur_idx)
+        self.combo_pct_base.setStyleSheet("""
+            QComboBox { 
+                background-color: #1e293b; 
+                color: #38bdf8; 
+                font-weight: bold; 
+                border: 1px solid #0284c7; 
+                border-radius: 3px; 
+                min-width: 72px; 
+                max-width: 82px; 
+                font-size: 8.5pt; 
+                padding: 1px 2px; 
+            }
+            QComboBox:hover {
+                border-color: #38bdf8;
+                background-color: #0f172a;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 14px;
+            }
+        """)
+        self.combo_pct_base.currentIndexChanged.connect(self._on_pct_base_day_changed)
+        toolbar.addWidget(self.combo_pct_base)
         
         self.history_selector = QComboBox()
         self.history_selector.addItems(["history1", "history2", "history3", "history4", "history5"])
@@ -2610,6 +2670,14 @@ class ATSMainWindow(QMainWindow):
             mark_checkpoint("03.3.7 IPOLearningConsole (Read-only Learning Monitor)")
         else:
             mark_checkpoint("03.3.7 IPOLearningConsole skipped by ipo_learning_console=False")
+
+        if getattr(self, 'pct_base_day', 1) > 1:
+            if hasattr(self, 'favorite_panel') and hasattr(self.favorite_panel, 'set_pct_base_day'):
+                self.favorite_panel.set_pct_base_day(self.pct_base_day)
+            if hasattr(self, 'swing_table') and hasattr(self.swing_table, 'set_pct_base_day'):
+                self.swing_table.set_pct_base_day(self.pct_base_day)
+            if hasattr(self, 'capital_dragon_panel') and hasattr(self.capital_dragon_panel, 'set_pct_base_day'):
+                self.capital_dragon_panel.set_pct_base_day(self.pct_base_day)
 
         self.top_tabs.currentChanged.connect(self._on_top_tab_changed)
         
@@ -2892,6 +2960,38 @@ class ATSMainWindow(QMainWindow):
         self.heatmap_widget.sector_selected_with_codes.connect(lambda name, codes: self.on_sector_clicked(name, member_codes=codes if codes else None))
         self.swing_table.btn_refresh.clicked.connect(lambda: self.load_db_data(force=True))
         self.backtest_panel.btn_run_backtest.clicked.connect(self.on_run_backtest_clicked)
+
+    def _on_pct_base_day_changed(self, index: int):
+        """基准涨跌幅 (1D昨收 / 2D前收 / 3D ... 至 cct.compute_lastdays) 切换处理"""
+        if not hasattr(self, 'combo_pct_base'):
+            return
+        base_day = self.combo_pct_base.currentData()
+        if base_day is None:
+            return
+        base_day = int(base_day)
+        if getattr(self, 'pct_base_day', 1) == base_day:
+            return
+        self.pct_base_day = base_day
+        save_config_node_async("ats_pct_base_day", base_day)
+
+        # 1. 同步更新重点关注 Tab 表头
+        if hasattr(self, 'favorite_panel') and self.favorite_panel is not None:
+            if hasattr(self.favorite_panel, 'set_pct_base_day'):
+                self.favorite_panel.set_pct_base_day(base_day)
+
+        # 2. 同步更新 MA20d 跟踪表头
+        if hasattr(self, 'swing_table') and self.swing_table is not None:
+            if hasattr(self.swing_table, 'set_pct_base_day'):
+                self.swing_table.set_pct_base_day(base_day)
+
+        # 3. 同步更新资金主线与龙头中枢面板
+        if hasattr(self, 'capital_dragon_panel') and self.capital_dragon_panel is not None:
+            if hasattr(self.capital_dragon_panel, 'set_pct_base_day'):
+                self.capital_dragon_panel.set_pct_base_day(base_day)
+
+        # 4. 触发界面实时刷新
+        if hasattr(self, 'refresh_realtime_ui'):
+            self.refresh_realtime_ui()
 
     def _on_history_group_changed(self, keep_current_query: bool = False):
         group = self.history_selector.currentText() if hasattr(self, 'history_selector') else "history5"
@@ -5451,7 +5551,11 @@ class ATSMainWindow(QMainWindow):
                                   if any(c.isdigit() for c in str(code)) else str(code).strip())
                     if row is not None:
                         pool[code]['price'] = float(row.get('close', row.get('price', 0.0)))
-                        pool[code]['pct'] = float(row.get('percent', 0.0))
+                        if getattr(self, 'pct_base_day', 1) > 1:
+                            from ats.ui.styles import compute_base_day_percent
+                            pool[code]['pct'] = compute_base_day_percent(row, base_day=self.pct_base_day, current_price=pool[code]['price'])
+                        else:
+                            pool[code]['pct'] = float(row.get('percent', 0.0))
                     elif code_clean in self.price_pct_cache:
                         pool[code]['price'], pool[code]['pct'] = self.price_pct_cache[code_clean]
                     elif code in self.price_pct_cache:
@@ -5506,6 +5610,7 @@ class ATSMainWindow(QMainWindow):
             today_str=today_str,
             ledger_update_service=self.ledger_update_service,
             linkage_context_client=getattr(self, "_linkage_context_client", None),
+            pct_base_day=getattr(self, "pct_base_day", 1),
         )
         worker.results_ready.connect(self._on_ledger_results)
         worker.finished.connect(self._on_ledger_finished)
