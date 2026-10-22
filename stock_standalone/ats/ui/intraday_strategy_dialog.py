@@ -481,6 +481,65 @@ def _chart_signal_snapshot(signal):
     return shallow_copy(signal)
 
 
+# 🎨 SBC 走势窗口专业三组高对比主题色彩系统 (完美契合股票量化指标体系)
+SBC_THEMES = {
+    "pitch_dark": {
+        "name": "暗夜极黑 (OLED)",
+        "bg_color": QColor("#0A0B0E"),
+        "dialog_bg": "#101018",
+        "border_color": QColor("#1E2433"),
+        "grid_color": QColor("#161B26"),
+        "text_color": QColor("#94A3B8"),
+        "axis_label_color": QColor("#CBD5E1"),
+        "vol_sep_color": QColor("#1E293B"),
+        # 缺口通道带对比度增强 (灰白微冷蓝)
+        "gap_up_brush": QColor(145, 175, 215, 80),
+        "gap_up_pen": QColor(175, 205, 245, 190),
+        "gap_dn_brush": QColor(175, 160, 215, 80),
+        "gap_dn_pen": QColor(205, 190, 245, 190),
+        "gap_badge_bg": QColor(15, 23, 42, 235),
+        "gap_badge_border": QColor("#38BDF8"),
+        "gap_badge_text": QColor("#F8FAFC"),
+    },
+    "deep_navy": {
+        "name": "深海邃蓝 (Navy)",
+        "bg_color": QColor("#0E1626"),
+        "dialog_bg": "#0B132B",
+        "border_color": QColor("#243247"),
+        "grid_color": QColor("#1A283D"),
+        "text_color": QColor("#CBD5E1"),
+        "axis_label_color": QColor("#E2E8F0"),
+        "vol_sep_color": QColor("#243854"),
+        # 缺口通道带通透冷蓝
+        "gap_up_brush": QColor(125, 190, 245, 85),
+        "gap_up_pen": QColor(155, 215, 255, 210),
+        "gap_dn_brush": QColor(190, 170, 240, 85),
+        "gap_dn_pen": QColor(216, 195, 255, 210),
+        "gap_badge_bg": QColor(10, 25, 47, 240),
+        "gap_badge_border": QColor("#60A5FA"),
+        "gap_badge_text": QColor("#FFFFFF"),
+    },
+    "pro_charcoal": {
+        "name": "雅致炭灰 (Slate)",
+        "bg_color": QColor("#1A1D24"),
+        "dialog_bg": "#16181F",
+        "border_color": QColor("#2D323F"),
+        "grid_color": QColor("#252934"),
+        "text_color": QColor("#E2E8F0"),
+        "axis_label_color": QColor("#F8FAFC"),
+        "vol_sep_color": QColor("#2D323F"),
+        # 缺口通道带高级中性灰
+        "gap_up_brush": QColor(165, 185, 220, 95),
+        "gap_up_pen": QColor(200, 220, 245, 220),
+        "gap_dn_brush": QColor(185, 175, 210, 95),
+        "gap_dn_pen": QColor(220, 210, 240, 220),
+        "gap_badge_bg": QColor(22, 27, 34, 240),
+        "gap_badge_border": QColor("#94A3B8"),
+        "gap_badge_text": QColor("#FFFFFF"),
+    },
+}
+
+
 class SBCChartCanvas(QWidget):
     """
     SBC 多功能走势图画布控件 (支持 1日/2日/3日分时走势图 以及 5分/30分/60分/日K 线的 GG 通道图)
@@ -512,6 +571,9 @@ class SBCChartCanvas(QWidget):
         self.channel_info_period = ""
         self.channel_overlay_enabled = True
         self.show_gap_channels: bool = True  # 🌟 通达信同款跳空缺口通道带 (灰白半透明通道，动态阶梯回补，补回多少减少多少)
+        from ats.ui.sbc_preferences import get_sbc_theme_mode, get_sbc_show_boll
+        self.theme_mode: str = get_sbc_theme_mode()  # 🎨 3 组主题配色: pitch_dark / deep_navy / pro_charcoal
+        self.show_boll: bool = get_sbc_show_boll()    # 📈 通达信标准 BOLL 布林带开关 (默认打开)
         self.amplitude_info = {}  # 📊 存储标的近 5 日振幅高低与活跃度指标 (均振、极值、每日明细)
         self._amplitude_fetching_codes = set()
         self._amplitude_retry_after = {}
@@ -569,7 +631,8 @@ class SBCChartCanvas(QWidget):
         self._signal_hit_boxes: List[Dict[str, Any]] = []
 
         self.setMinimumSize(320, 180)
-        self.setStyleSheet("background-color: #0c0d14;")
+        cur_theme = SBC_THEMES.get(self.theme_mode, SBC_THEMES["pitch_dark"])
+        self.setStyleSheet(f"background-color: {cur_theme['bg_color'].name()};")
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
@@ -601,6 +664,44 @@ class SBCChartCanvas(QWidget):
             self.btn_close_auction.hide()
         except Exception:
             self.btn_close_auction = None
+
+    def cycle_theme(self):
+        """🎨 循环切换 3 组专业高对比主题配色并持久化 (暗夜极黑 -> 深海邃蓝 -> 雅致炭灰)"""
+        from ats.ui.sbc_preferences import set_sbc_theme_mode
+        modes = ["pitch_dark", "deep_navy", "pro_charcoal"]
+        cur_idx = modes.index(self.theme_mode) if self.theme_mode in modes else 0
+        self.theme_mode = modes[(cur_idx + 1) % len(modes)]
+        set_sbc_theme_mode(self.theme_mode)
+        theme = SBC_THEMES.get(self.theme_mode, SBC_THEMES["pitch_dark"])
+        self.setStyleSheet(f"background-color: {theme['bg_color'].name()};")
+        parent_win = self.window()
+        if parent_win and hasattr(parent_win, "_update_theme_btn_style"):
+            parent_win._update_theme_btn_style()
+        self.update()
+
+    def set_theme(self, mode: str):
+        """🎨 设置指定主题配色并持久化"""
+        from ats.ui.sbc_preferences import set_sbc_theme_mode
+        if mode not in SBC_THEMES:
+            mode = "pitch_dark"
+        self.theme_mode = mode
+        set_sbc_theme_mode(self.theme_mode)
+        theme = SBC_THEMES.get(self.theme_mode, SBC_THEMES["pitch_dark"])
+        self.setStyleSheet(f"background-color: {theme['bg_color'].name()};")
+        parent_win = self.window()
+        if parent_win and hasattr(parent_win, "_update_theme_btn_style"):
+            parent_win._update_theme_btn_style()
+        self.update()
+
+    def toggle_boll(self):
+        """📈 开关 K 线通达信标准 BOLL 布林带 (20, 2) 并持久化"""
+        from ats.ui.sbc_preferences import set_sbc_show_boll
+        self.show_boll = not getattr(self, "show_boll", True)
+        set_sbc_show_boll(self.show_boll)
+        parent_win = self.window()
+        if parent_win and hasattr(parent_win, "_update_boll_btn_style"):
+            parent_win._update_boll_btn_style()
+        self.update()
 
     def _extract_intraday_bar_volumes(self, df_view: pd.DataFrame) -> np.ndarray:
         """
@@ -865,7 +966,19 @@ class SBCChartCanvas(QWidget):
             self.run_adaptive_strategy_eval()
             event.accept()
             return
+        elif key == Qt.Key.Key_B and not (event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+            from ats.ui.styles import is_editing_text
+            if not is_editing_text(self):
+                self.toggle_boll()
+                event.accept()
+                return
         elif key == Qt.Key.Key_T and not (event.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)):
+            from ats.ui.styles import is_editing_text
+            if not is_editing_text(self):
+                self.cycle_theme()
+                event.accept()
+                return
+        elif key == Qt.Key.Key_T and (event.modifiers() & Qt.KeyboardModifier.AltModifier):
             from ats.ui.styles import is_editing_text
             if not is_editing_text(self):
                 if parent_win and hasattr(parent_win, '_toggle_stay_on_top'):
@@ -2054,6 +2167,20 @@ class SBCChartCanvas(QWidget):
         act_gap.triggered.connect(_toggle_gap)
         menu.addAction(act_gap)
 
+        boll_enabled = getattr(self, 'show_boll', True)
+        act_boll = QAction(f"📈 开关标准 BOLL 布林带 [当前: {'开' if boll_enabled else '关'}] (B 键)", self)
+        act_boll.triggered.connect(self.toggle_boll)
+        menu.addAction(act_boll)
+
+        theme_display = {
+            "pitch_dark": "暗夜极黑 (OLED)",
+            "deep_navy": "深海邃蓝 (Navy)",
+            "pro_charcoal": "雅致炭灰 (Slate)",
+        }.get(getattr(self, 'theme_mode', 'pitch_dark'), '暗夜极黑')
+        act_theme = QAction(f"🎨 切换主题配色 [当前: {theme_display}] (T 键)", self)
+        act_theme.triggered.connect(self.cycle_theme)
+        menu.addAction(act_theme)
+
         # 5. 🔗 物理联动外部行情软件 (通达信/同花顺)
         if parent_win and hasattr(parent_win, '_trigger_linkage'):
             act_link = QAction(f"🔗 物理联动外部通达信/同花顺 (F 键)", self)
@@ -2099,6 +2226,13 @@ class SBCChartCanvas(QWidget):
             volumes = self._extract_intraday_bar_volumes(self.df_intraday)
             if len(volumes) == len(self.df_intraday):
                 self.df_intraday["_bar_vol_computed"] = volumes
+            # 🌟 通达信标准 BOLL 布林带 (N=20, P=2): MID=MA(C,20), UB=MID+2*STD(C,20), LB=MID-2*STD(C,20)
+            if "close" in self.df_intraday.columns and "boll_mid" not in self.df_intraday.columns:
+                c_series = self.df_intraday["close"].astype(float)
+                self.df_intraday["boll_mid"] = c_series.rolling(20, min_periods=1).mean()
+                b_std = c_series.rolling(20, min_periods=1).std(ddof=0).fillna(0.0)
+                self.df_intraday["boll_upper"] = self.df_intraday["boll_mid"] + 2.0 * b_std
+                self.df_intraday["boll_lower"] = self.df_intraday["boll_mid"] - 2.0 * b_std
         self.signals = [_chart_signal_snapshot(sig) for sig in (signals or [])]
         self._data_revision = getattr(self, "_data_revision", 0) + 1
         self._cached_times_token = None
@@ -2164,7 +2298,8 @@ class SBCChartCanvas(QWidget):
             w = self.width()
             h = self.height()
 
-            painter.fillRect(0, 0, w, h, QColor("#0c0d14"))
+            theme = SBC_THEMES.get(getattr(self, "theme_mode", "pitch_dark"), SBC_THEMES["pitch_dark"])
+            painter.fillRect(0, 0, w, h, theme["bg_color"])
 
             margin_left = self.MARGIN_LEFT
             margin_right = self.MARGIN_RIGHT
@@ -2177,7 +2312,7 @@ class SBCChartCanvas(QWidget):
             if chart_w <= 10 or chart_h <= 10:
                 return
 
-            painter.setPen(QPen(QColor("#202030"), 1))
+            painter.setPen(QPen(theme["border_color"], 1))
             painter.drawRect(margin_left, margin_top, chart_w, chart_h)
 
             if self.df_intraday is None or self.df_intraday.empty:
@@ -2510,7 +2645,7 @@ class SBCChartCanvas(QWidget):
         scalar_keys = ("code", "period_mode", "_data_revision", "_zoom_start_idx", "_zoom_end_idx",
                        "_is_right_anchored", "_visible_bar_count", "selected_trade_id", "_vol_mode",
                        "open_price", "vwap", "high_price", "low_price", "target_sell_min", "target_sell_max",
-                       "channel_overlay_enabled", "auto_eval_enabled", "market_phase", "show_gap_channels")
+                       "channel_overlay_enabled", "auto_eval_enabled", "market_phase", "show_gap_channels", "theme_mode", "show_boll")
         object_keys = ("channel_info", "multi_vwap_snapshot", "strategy_eval_result", "amplitude_info")
         ratio = self.devicePixelRatioF()
         token = (self.width(), self.height(), ratio, self.font().toString(),
@@ -2679,11 +2814,12 @@ class SBCChartCanvas(QWidget):
         def time_to_x(idx_val: int) -> float:
             return margin_left + (idx_val / max(1, total_n - 1)) * active_chart_w
 
-        # 绘制背景水平网格线
+        # 绘制背景水平网格线 (自适应当前主题高对比度)
+        theme = SBC_THEMES.get(getattr(self, "theme_mode", "pitch_dark"), SBC_THEMES["pitch_dark"])
         grid_pens = [
-            (min_p + p_range * 0.75, QColor("#1e2230"), Qt.PenStyle.DotLine),
-            (min_p + p_range * 0.50, QColor("#282c3f"), Qt.PenStyle.DashLine),
-            (min_p + p_range * 0.25, QColor("#1e2230"), Qt.PenStyle.DotLine),
+            (min_p + p_range * 0.75, theme["grid_color"], Qt.PenStyle.DotLine),
+            (min_p + p_range * 0.50, theme["grid_color"], Qt.PenStyle.DashLine),
+            (min_p + p_range * 0.25, theme["grid_color"], Qt.PenStyle.DotLine),
         ]
         for gp_val, gp_col, gp_style in grid_pens:
             gy = price_to_y(gp_val)
@@ -3523,8 +3659,17 @@ class SBCChartCanvas(QWidget):
 
         ma5 = df_view['ma5'].astype(float).values if 'ma5' in df_view.columns else []
         ma20 = df_view['ma20'].astype(float).values if 'ma20' in df_view.columns else []
+        b_mid = df_view['boll_mid'].astype(float).values if 'boll_mid' in df_view.columns else []
         b_up = df_view['boll_upper'].astype(float).values if 'boll_upper' in df_view.columns else []
         b_dn = df_view['boll_lower'].astype(float).values if 'boll_lower' in df_view.columns else []
+        # 🌟 若切片中缺失 BOLL 则即时向量化补齐
+        if (len(b_mid) < len(df_view) or len(b_up) < len(df_view) or len(b_dn) < len(df_view)) and len(closes) > 0:
+            c_s = pd.Series(closes)
+            m_s = c_s.rolling(20, min_periods=1).mean().values
+            s_s = c_s.rolling(20, min_periods=1).std(ddof=0).fillna(0.0).values
+            b_mid = m_s
+            b_up = m_s + 2.0 * s_s
+            b_dn = m_s - 2.0 * s_s
 
         # ⚡ 提取通达信自动通道 (calc_trend_channel) 系列指标
         ch_up = df_view['ch_upper'].astype(float).values if 'ch_upper' in df_view.columns else []
@@ -3650,6 +3795,18 @@ class SBCChartCanvas(QWidget):
         def k_to_x(idx_val: int) -> float:
             return margin_left + (idx_val + 0.5) * bar_step
 
+        # 0.9 🌟 绘制通达信同款背景水平标尺网格线 (自适应当前主题)
+        theme = SBC_THEMES.get(getattr(self, "theme_mode", "pitch_dark"), SBC_THEMES["pitch_dark"])
+        grid_pens = [
+            (min_p + p_range * 0.75, theme["grid_color"], Qt.PenStyle.DotLine),
+            (min_p + p_range * 0.50, theme["grid_color"], Qt.PenStyle.DashLine),
+            (min_p + p_range * 0.25, theme["grid_color"], Qt.PenStyle.DotLine),
+        ]
+        for gp_val, gp_col, gp_style in grid_pens:
+            gy = k_to_y(gp_val)
+            painter.setPen(QPen(gp_col, 1, gp_style))
+            painter.drawLine(margin_left, int(gy), margin_left + chart_w, int(gy))
+
         # 1. 🌟 绘制 Fibonacci 黄金分割阶梯线 (基于加载的所有数据价格区间，通达信同款自上而下对齐)
         if fib_range > 1e-4:
             fib_levels = [
@@ -3720,18 +3877,37 @@ class SBCChartCanvas(QWidget):
             painter.drawPath(path_ch_dn)
             painter.setPen(QPen(QColor("#C0C0D0"), 1.0, Qt.PenStyle.DashLine))
             painter.drawPath(path_ch_mid)
-        elif len(b_up) > 1 and len(b_dn) > 1:
-            path_up = QPainterPath()
-            path_dn = QPainterPath()
-            path_up.moveTo(k_to_x(0), k_to_y(b_up[0]))
-            path_dn.moveTo(k_to_x(0), k_to_y(b_dn[0]))
-            for i in range(1, n):
-                if b_up[i] > 0: path_up.lineTo(k_to_x(i), k_to_y(b_up[i]))
-                if b_dn[i] > 0: path_dn.lineTo(k_to_x(i), k_to_y(b_dn[i]))
-            painter.setPen(QPen(QColor("#00ff88"), 1, Qt.PenStyle.DashLine))
-            painter.drawPath(path_up)
-            painter.setPen(QPen(QColor("#8888aa"), 1, Qt.PenStyle.DashLine))
-            painter.drawPath(path_dn)
+        # 2.2 🌟 绘制通达信标准 BOLL 布林带 (20, 2) (独立于自动通道，默认开启，快捷键 B 开关)
+        if getattr(self, "show_boll", True) and len(b_up) > 1 and len(b_dn) > 1:
+            path_b_up = QPainterPath()
+            path_b_mid = QPainterPath()
+            path_b_dn = QPainterPath()
+
+            started_b = False
+            for i in range(n):
+                if b_up[i] > 0.01 and b_dn[i] > 0.01:
+                    if not started_b:
+                        path_b_up.moveTo(k_to_x(i), k_to_y(b_up[i]))
+                        path_b_dn.moveTo(k_to_x(i), k_to_y(b_dn[i]))
+                        if len(b_mid) > i and b_mid[i] > 0.01:
+                            path_b_mid.moveTo(k_to_x(i), k_to_y(b_mid[i]))
+                        started_b = True
+                    else:
+                        path_b_up.lineTo(k_to_x(i), k_to_y(b_up[i]))
+                        path_b_dn.lineTo(k_to_x(i), k_to_y(b_dn[i]))
+                        if len(b_mid) > i and b_mid[i] > 0.01:
+                            path_b_mid.lineTo(k_to_x(i), k_to_y(b_mid[i]))
+
+            # 通达信经典三轨配色与线型：
+            # 上轨 (UB): 亮黄细虚线 (1.2px)
+            painter.setPen(QPen(QColor("#F59E0B"), 1.2, Qt.PenStyle.DashLine))
+            painter.drawPath(path_b_up)
+            # 中轨 (MID / BOLL): 纯白细点线 (1.0px)
+            painter.setPen(QPen(QColor("#E2E8F0"), 1.0, Qt.PenStyle.DotLine))
+            painter.drawPath(path_b_mid)
+            # 下轨 (LB): 洋红紫粉细虚线 (1.2px)
+            painter.setPen(QPen(QColor("#EC4899"), 1.2, Qt.PenStyle.DashLine))
+            painter.drawPath(path_b_dn)
 
         # 3. 🌟 绘制通达信翻转线 (reversal_line)
         if len(rev_line) > 1:
@@ -4709,11 +4885,12 @@ class SBCChartCanvas(QWidget):
         painter.save()
         painter.setClipRect(int(margin_left), int(margin_top), int(chart_w), int(main_h))
 
-        brush_up = QBrush(QColor(180, 200, 225, 42))  # 向上缺口：灰白带淡冷蓝
-        pen_up = QPen(QColor(205, 220, 240, 95), 1, Qt.PenStyle.DashLine)
+        theme = SBC_THEMES.get(getattr(self, "theme_mode", "pitch_dark"), SBC_THEMES["pitch_dark"])
+        brush_up = QBrush(theme["gap_up_brush"])
+        pen_up = QPen(theme["gap_up_pen"], 1.2, Qt.PenStyle.DashLine)
 
-        brush_dn = QBrush(QColor(195, 195, 215, 42))  # 向下缺口：灰白带淡紫
-        pen_dn = QPen(QColor(215, 215, 235, 95), 1, Qt.PenStyle.DashLine)
+        brush_dn = QBrush(theme["gap_dn_brush"])
+        pen_dn = QPen(theme["gap_dn_pen"], 1.2, Qt.PenStyle.DashLine)
 
         font_label = QFont("Consolas", 8, QFont.Weight.Normal)
         painter.setFont(font_label)
@@ -4758,20 +4935,25 @@ class SBCChartCanvas(QWidget):
                 painter.setPen(pen_cur)
                 painter.drawLine(int(x1), int(y_top), int(x2), int(y_top))
                 painter.drawLine(int(x1), int(y_bottom), int(x2), int(y_bottom))
+                # 起点垂直闭合线
+                painter.drawLine(int(x1), int(y_top), int(x1), int(y_bottom))
 
-                text_str = f"{s_low:.2f}-{s_high:.2f}"
+                text_str = f"缺口 {s_low:.2f}-{s_high:.2f}"
                 tw = fm.horizontalAdvance(text_str)
-                if (x2 - x1) >= tw + 6:
-                    tx = max(float(margin_left + 4), float(x1 + 4))
-                    if band_h >= 13.0:
-                        ty = y_top + (band_h + th) / 2.0 - 2.0
+                if (x2 - x1) >= tw + 10:
+                    tx = max(float(margin_left + 4), float(x1 + 6))
+                    if band_h >= 18.0:
+                        ty = y_top + 4
                     else:
-                        ty = y_top - 2.0
+                        ty = max(float(margin_top + 4), y_top - th - 3)
 
-                    bg_rect = QRectF(tx - 2, ty - th + 2, tw + 4, th)
-                    painter.fillRect(bg_rect, QColor(10, 15, 26, 170))
-                    painter.setPen(QPen(QColor("#E2E8F0")))
-                    painter.drawText(int(tx), int(ty), text_str)
+                    bg_rect = QRectF(tx, ty, tw + 8, th + 2)
+                    painter.setPen(QPen(theme["gap_badge_border"], 1))
+                    painter.setBrush(QBrush(theme["gap_badge_bg"]))
+                    painter.drawRoundedRect(bg_rect, 3, 3)
+                    painter.setPen(QPen(theme["gap_badge_text"]))
+                    painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+                    painter.drawText(int(tx + 4), int(ty + th - 2), text_str)
 
         painter.restore()
 
@@ -4805,11 +4987,12 @@ class SBCChartCanvas(QWidget):
         painter.save()
         painter.setClipRect(int(margin_left), int(margin_top), int(chart_w), int(chart_h))
 
-        brush_up = QBrush(QColor(155, 175, 205, 70))
-        pen_up = QPen(QColor(215, 230, 250, 180), 1.2, Qt.PenStyle.DashLine)
+        theme = SBC_THEMES.get(getattr(self, "theme_mode", "pitch_dark"), SBC_THEMES["pitch_dark"])
+        brush_up = QBrush(theme["gap_up_brush"])
+        pen_up = QPen(theme["gap_up_pen"], 1.2, Qt.PenStyle.DashLine)
 
-        brush_dn = QBrush(QColor(175, 170, 200, 70))
-        pen_dn = QPen(QColor(225, 220, 245, 180), 1.2, Qt.PenStyle.DashLine)
+        brush_dn = QBrush(theme["gap_dn_brush"])
+        pen_dn = QPen(theme["gap_dn_pen"], 1.2, Qt.PenStyle.DashLine)
 
         font_label = QFont("Consolas", 8, QFont.Weight.Normal)
         painter.setFont(font_label)
@@ -4863,10 +5046,10 @@ class SBCChartCanvas(QWidget):
                         ty = max(float(margin_top + 4), y_top - th - 3)
 
                     bg_rect = QRectF(tx, ty, tw + 8, th + 2)
-                    painter.setPen(QPen(QColor(140, 175, 220, 190), 1))
-                    painter.setBrush(QBrush(QColor(16, 24, 38, 225)))
+                    painter.setPen(QPen(theme["gap_badge_border"], 1))
+                    painter.setBrush(QBrush(theme["gap_badge_bg"]))
                     painter.drawRoundedRect(bg_rect, 3, 3)
-                    painter.setPen(QPen(QColor("#F8FAFC")))
+                    painter.setPen(QPen(theme["gap_badge_text"]))
                     painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
                     painter.drawText(int(tx + 4), int(ty + th - 2), text_str)
 
@@ -5736,8 +5919,20 @@ class SBCIntradayChartDialog(QWidget):
         tb_layout.addWidget(btn_rearrange)
         tb_layout.addWidget(btn_refresh)
         tb_layout.addWidget(btn_clear_cache)
+        # 📈 BOLL 布林带开关按钮
+        self.btn_boll_toggle = QPushButton()
+        self.btn_boll_toggle.clicked.connect(self._on_boll_toggle_clicked)
+        self._update_boll_btn_style()
+
+        # 🎨 主题配色切换按钮
+        self.btn_theme_toggle = QPushButton()
+        self.btn_theme_toggle.clicked.connect(self._on_theme_toggle_clicked)
+        self._update_theme_btn_style()
+
         tb_layout.addWidget(self.btn_vol_toggle)
         tb_layout.addWidget(self.btn_channel_overlay)
+        tb_layout.addWidget(self.btn_boll_toggle)
+        tb_layout.addWidget(self.btn_theme_toggle)
         tb_layout.addWidget(self.btn_toggle_log)
 
         layout.addLayout(tb_layout)
@@ -6747,6 +6942,57 @@ class SBCIntradayChartDialog(QWidget):
         self._update_channel_overlay_btn_style()
         if self._channel_overlay_enabled and getattr(self, "_current_period_mode", "1m") in ("1m", "3d", "5d", "10d"):
             self.reload_chart()
+
+    def _on_boll_toggle_clicked(self):
+        self.canvas.toggle_boll()
+
+    def _on_theme_toggle_clicked(self):
+        self.canvas.cycle_theme()
+
+    def _update_boll_btn_style(self):
+        button = getattr(self, "btn_boll_toggle", None)
+        if button is None:
+            return
+        canvas = getattr(self, "canvas", None)
+        from ats.ui.sbc_preferences import get_sbc_show_boll
+        enabled = bool(getattr(canvas, "show_boll", get_sbc_show_boll())) if canvas else get_sbc_show_boll()
+        button.setText("📈布林:开" if enabled else "📈布林:关")
+        if enabled:
+            button.setStyleSheet(
+                "QPushButton { background-color: #1a2e22; color: #00ff88; font-weight: bold; "
+                "border: 1px solid #00ff88; border-radius: 3px; padding: 2px 5px; font-size: 8.5pt; }"
+                "QPushButton:hover { color: #ffffff; border: 1px solid #38bdf8; }"
+            )
+            button.setToolTip("快捷键: B 键 (当前: 【已开启】)\n• 显示通达信标准 BOLL 布林带 (20, 2)\n• 包含 MID中轨、UB上轨、LB下轨\n• 状态已持久化保存")
+        else:
+            button.setStyleSheet(
+                "QPushButton { background-color: #1e1e28; color: #888899; font-weight: normal; "
+                "border: 1px solid #333344; border-radius: 3px; padding: 2px 5px; font-size: 8.5pt; }"
+                "QPushButton:hover { color: #ffffff; border: 1px solid #38bdf8; }"
+            )
+            button.setToolTip("快捷键: B 键 (当前: 【已关闭】)\n• 点击可重新打开 K 线标准 BOLL 布林带\n• 状态已持久化保存")
+
+    def _update_theme_btn_style(self):
+        button = getattr(self, "btn_theme_toggle", None)
+        if button is None:
+            return
+        canvas = getattr(self, "canvas", None)
+        from ats.ui.sbc_preferences import get_sbc_theme_mode
+        mode = getattr(canvas, "theme_mode", get_sbc_theme_mode()) if canvas else get_sbc_theme_mode()
+        theme_names = {"pitch_dark": "极黑", "deep_navy": "深蓝", "pro_charcoal": "炭灰"}
+        name_short = theme_names.get(mode, "极黑")
+        button.setText(f"🎨 {name_short}")
+        theme_tips = {
+            "pitch_dark": "暗夜极黑 (OLED高反差，深邃黑底，指标如霓虹)",
+            "deep_navy": "深海邃蓝 (Bloomberg/TradingView经典深蓝，温润护眼)",
+            "pro_charcoal": "雅致炭灰 (通达信高级中性灰，色彩真实无偏色)",
+        }
+        button.setStyleSheet(
+            "QPushButton { background-color: #1a233a; color: #38bdf8; font-weight: bold; "
+            "border: 1px solid #38bdf8; border-radius: 3px; padding: 2px 5px; font-size: 8.5pt; }"
+            "QPushButton:hover { color: #ffffff; border: 1px solid #00ff88; }"
+        )
+        button.setToolTip(f"快捷键: T 键 / 右键菜单 (当前: {theme_tips.get(mode, '暗夜极黑')})\n• 点击循环切换 3 组专业高对比主题色\n• 状态已持久化保存")
 
     def _update_channel_overlay_btn_style(self):
         button = getattr(self, "btn_channel_overlay", None)
