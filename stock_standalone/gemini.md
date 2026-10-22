@@ -1,5 +1,22 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-23 00:40 【用户管理全功能修复(CRUD)+密码可见性与登录容错加固闭环】(`docs/tasks/2026-10-23_0040_用户管理全功能修复与密码登录加固闭环.md`, `stock-strategy/source/easy-stock-analysis/backend/internal/httpapi/web_auth.go`, `stock-strategy/source/easy-stock-web/src/components/AuthGate.tsx`)
+- [x] **用户管理全能力（增 / 改 / 删 / 查 / 重置密码）前后端彻底闭环**：
+  - **后端 `web_auth.go` 接口补全**：扩充支持 `GET`（列表）、`POST`（新增）、`PUT`（角色调整：管理员 ⇋ 普通用户）、`DELETE`（删除用户）；
+  - **行内快捷重置密码**：支持管理员直接重置指定用户密码（无需旧密码），重置后即时吊销该用户所有历史 session，且管理员自身的 session 保持有效；
+  - **核心安全防线**：系统默认主管理员 `johnson`（ID 1）受绝对保护，禁止删除且禁止取消管理员角色；防自删机制阻止管理员删除自身账号或自我降权；
+- [x] **新加用户登录密码不对与防暴破锁死彻底根治**：
+  - **用户名大小写容错匹配**：登录时对用户名查询从精确区分大小写升级为大小写不敏感容错（`WHERE LOWER(username)=LOWER(?)`），消除 `lili` / `Lili` 差异导致的查空报 401；
+  - **自愈清理机制**：在用户新增、修改角色或重置密码成功后，立即调用 `clearUserFailures(username)`，清除该用户的登录失败计数，解除 15 分钟锁定，使用户能立即用新密码登录；
+  - **前端密码可见性切换（`PasswordInput` 组件）**：在登录、改密、重置密码及添加用户所有密码输入框配备眼睛图标按钮（`Eye` / `EyeOff`），随时查看明文，从源头杜绝因盲盒输入导致的输入失误；
+  - **二次确认比对**：添加用户与修改密码均增加二次密码确认输入，实时前端校验一致性；
+- [x] **自动化测试回归全绿通过（后端 Go + 前端 React/Vitest）**：
+  - Go 专项集成测试 `TestWebAuthUserManagementCRUD`（覆盖增、改、删、重置密码、大小写容错、安全防线）秒级通过，`internal/httpapi` 全绿通过（8.736s）；
+  - 前端专项测试 `AuthGate.test.tsx` 纯绿通过，TypeScript 检查（`tsc --noEmit`）0 错误，Vite 生产构建成功（`✓ built in 5.78s`）；
+- [x] **生产环境安全部署上线（发布号 `20261023003714`）**：
+  - 按照标准操作手册通过 `build-and-deploy.ps1 -AllowLayeredImageBuild` 部署到生产环境，线上 API 健康检查（`/api/health`）HTTP 200 返回 `ok: True`，前端静态资源与主入口 100% 刷新加载。
+
+
 ## 2026-10-22 23:25 【ATS主窗口全Tab对齐DFF多日强弱新设计与资金主线涨幅完全解耦闭环】(`docs/tasks/2026-10-22_2325_ATS主窗口全Tab对齐DFF多日强弱新设计.md`, `tests/test_multiday_pct_base_view.py`)
 - [x] **ATS 主窗口 4 大业务 Tab 统一收敛至 DFF 呈现多日强弱**：
   - **规范统一**：主窗口表格中的 `涨幅%` / `涨跌%` 列严格保持为当日真实涨跌幅（0 篡改）；多日强弱观察（2D强、3D强至 9D 累计涨幅）全域收敛统一在 `DFF` 列；
