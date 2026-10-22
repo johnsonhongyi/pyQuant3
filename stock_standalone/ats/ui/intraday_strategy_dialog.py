@@ -5247,7 +5247,15 @@ def get_ats_closing_flag_path() -> str:
 
 
 def _is_ats_shutting_down() -> bool:
-    """检查当前是否处于 ATS 主系统退出/关闭流程中 (支持标记文件、环境变量与主进程 PID 探针)"""
+    """检查当前是否处于 ATS 主系统退出/关闭流程中 (支持标记文件、环境变量、QApp退出属性与主进程 PID 探针)"""
+    try:
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app and app.property("is_app_exiting"):
+            return True
+    except Exception:
+        pass
+
     try:
         closing_flag_file = get_ats_closing_flag_path()
         if os.path.exists(closing_flag_file):
@@ -5731,6 +5739,7 @@ class SBCIntradayChartDialog(QWidget):
     _global_sbc_size: Optional[tuple] = None
     _global_sbc_geo: Optional[dict] = None
     _global_auto_eval: bool = True  # 💡 全局维护自动测算状态开关
+    _global_alt_closing: bool = False  # 💡 全局批量关闭防重入保护
     _async_chart_data_ready = pyqtSignal(int, str, str, object)  # epoch, code, mode, payload
 
     def __init__(self, parent=None, code: str = "688826", engine: Optional[IntradayStrategyEngine] = None, initial_period_mode: Optional[str] = None, target_screen: Optional[Any] = None):
@@ -6855,8 +6864,8 @@ class SBCIntradayChartDialog(QWidget):
         if (key == Qt.Key.Key_Q and (modifiers & Qt.KeyboardModifier.ControlModifier) and (modifiers & Qt.KeyboardModifier.ShiftModifier)) or \
            (key == Qt.Key.Key_Escape and (modifiers & Qt.KeyboardModifier.AltModifier)):
             if self.is_ats_sbc_mode():
-                logger.info("ℹ️ [SBC快捷键] 当前处于 ATS 模式，忽略 Alt+全部关闭功能，仅安全关闭当前窗口。")
-                self.close()
+                logger.info("🛑 [SBC快捷键] ATS模式触发 Alt+全部关闭，批量关闭所有已打开的 SBC 走势窗口并持久化！")
+                self._exit_and_save_all()
             else:
                 self._exit_and_save_all()
             event.accept()
@@ -6884,8 +6893,8 @@ class SBCIntradayChartDialog(QWidget):
     def _exit_and_save_all(self):
         """【🛑 全部退出并持久化】持久化保存所有已打开的盯盘窗口并安全退出"""
         if self.is_ats_sbc_mode():
-            logger.info("ℹ️ [SBC退出] 当前处于 ATS 模式，严格忽略全部退出功能，仅关闭当前窗口。")
-            self.close()
+            logger.info("🛑 [SBC退出] 当前处于 ATS 模式，批量关闭所有已打开的 SBC 窗口并持久化，保留 ATS 主程序。")
+            close_all_open_sbc_dialogs(exclude=None)
             return
         try:
             from run_sbc import quit_and_save_all_sbc_windows
@@ -7438,34 +7447,45 @@ class SBCIntradayChartDialog(QWidget):
                 lock_until = max(lock_until, float(raw_c_lock))
         app_inst = QApplication.instance()
         is_app_exiting = bool(app_inst and app_inst.property("is_app_exiting"))
-        # 🛡️ 若处于鼠标双击/右键派生锁定期内，且当前鼠标并非悬停在窗口右上角关闭按钮区域，坚决拦截误关
-        if not is_app_exiting and ((now < lock_until) or (QApplication.mouseButtons() != Qt.MouseButton.NoButton)):
-            cursor_pos = self.mapFromGlobal(QCursor.pos())
-            in_close_btn = (cursor_pos.x() >= self.width() - 45) and (cursor_pos.y() <= 35)
-            if not in_close_btn:
-                logger.info("🛡️ [SBC防误关] 检测到鼠标操作派发的异常关闭信号，已拦截并忽略关闭事件！")
-                event.ignore()
-                return
+        is_ats_closing = _is_ats_shutting_down()
+        is_alt_pressed = is_alt_modifier_active()
+        is_batch_closing = bool(getattr(SBCIntradayChartDialog, "_global_alt_closing", False))
+
+        # 🛡️ 防误关判定加固：
+        # 1. 退出流程、Alt 联动关闭、全局批量关闭中绝对放行，绝不阻断正常退出；
+        # 2. 仅当鼠标光标明确落在走势图画布绘图区域内部(例如双击或右键派生的异常关闭)时才拦截；
+        #    操盘手点击窗口标题栏右上角关闭按钮、系统菜单、任务栏关闭或代码调用 close() 绝对放行！
+        if not is_app_exiting and not is_ats_closing and not is_alt_pressed and not is_batch_closing:
+            if (now < lock_until) or (QApplication.mouseButtons() != Qt.MouseButton.NoButton):
+                in_canvas = False
+                if hasattr(self, 'canvas') and self.canvas and self.canvas.isVisible():
+                    canvas_pos = self.canvas.mapFromGlobal(QCursor.pos())
+                    in_canvas = self.canvas.rect().contains(canvas_pos)
+                if in_canvas:
+                    logger.info("🛡️ [SBC防误关] 检测到鼠标在走势图画布内操作派发的异常关闭信号，已拦截并忽略关闭事件！")
+                    event.ignore()
+                    return
 
         # 💡 [NEW] 操盘手快捷交互：按住 Alt 键点击右上角关闭 [X] 键，触发全部退出并持久化！
-        is_alt_pressed = is_alt_modifier_active()
-
-        if is_alt_pressed and not is_app_exiting:
-            if self.is_ats_sbc_mode():
-                logger.info("ℹ️ [SBC关闭] 当前处于 ATS 模式，严格忽略 Alt+全部关闭功能，仅正常关闭当前个股窗口。")
-            else:
-                logger.info("🛑 [SBC退出] 检测到操盘手按住 Alt 点击关闭键，触发全部盯盘窗口一键退出并持久化！")
-                self._sbc_alt_close_in_progress = True
-                try:
-                    from run_sbc import quit_and_save_all_sbc_windows
-                    quit_and_save_all_sbc_windows()
-                except Exception as e:
-                    logger.warning(f"Alt退出持久化异常: {e}")
-                    app_inst = QApplication.instance()
-                    if app_inst:
-                        app_inst.quit()
-                # The initiating window must also unsubscribe and release its timers.
-                is_app_exiting = True
+        if is_alt_pressed and not is_app_exiting and not is_batch_closing:
+            SBCIntradayChartDialog._global_alt_closing = True
+            try:
+                if self.is_ats_sbc_mode():
+                    logger.info("🛑 [SBC联动关闭] 检测到操盘手按住 Alt 点击关闭键 (ATS模式)，批量关闭所有其他 SBC 走势窗口并持久化！")
+                    close_all_open_sbc_dialogs(exclude=self)
+                else:
+                    logger.info("🛑 [SBC退出] 检测到操盘手按住 Alt 点击关闭键，触发全部盯盘窗口一键退出并持久化！")
+                    self._sbc_alt_close_in_progress = True
+                    try:
+                        from run_sbc import quit_and_save_all_sbc_windows
+                        quit_and_save_all_sbc_windows()
+                    except Exception as e:
+                        logger.warning(f"Alt退出持久化异常: {e}")
+                        if app_inst:
+                            app_inst.quit()
+                    is_app_exiting = True
+            finally:
+                SBCIntradayChartDialog._global_alt_closing = False
 
         if hasattr(self, 'poll_timer') and self.poll_timer:
             self.poll_timer.stop()
@@ -9859,6 +9879,34 @@ def sync_all_open_sbc_zoom(in_: bool, factor: float = 0.80, trigger_dlg: Optiona
 
     return count
 
+
+
+def close_all_open_sbc_dialogs(exclude: Optional[SBCIntradayChartDialog] = None) -> int:
+    """
+    【🛑 批量安全关闭所有已打开的同进程 SBC 走势窗口并持久化】
+    用于在 ATS 模式下按住 Alt 点击关闭或快捷键 Alt+Esc 时，一键批量清空桌面所有走势图，
+    但保持 ATS 主程序安全运行；亦供 ATSMainWindow 退出时统一调用。
+    """
+    try:
+        save_all_open_sbc_windows()
+    except Exception as e:
+        logger.warning(f"批量关闭 SBC 窗口前保存配置异常: {e}")
+
+    count = 0
+    active_sbcs = get_all_active_sbc_dialogs()
+    SBCIntradayChartDialog._global_alt_closing = True
+    try:
+        for w in active_sbcs:
+            if exclude is not None and w is exclude:
+                continue
+            try:
+                w.close()
+                count += 1
+            except Exception as e_close:
+                logger.warning(f"关闭 SBC 窗口 {getattr(w, 'code', '未知')} 异常: {e_close}")
+    finally:
+        SBCIntradayChartDialog._global_alt_closing = False
+    return count
 
 
 def _get_screen_for_geometry(x: int, y: int, w: int, h: int):
