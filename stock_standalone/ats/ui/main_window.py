@@ -2676,8 +2676,8 @@ class ATSMainWindow(QMainWindow):
                 self.favorite_panel.set_pct_base_day(self.pct_base_day)
             if hasattr(self, 'swing_table') and hasattr(self.swing_table, 'set_pct_base_day'):
                 self.swing_table.set_pct_base_day(self.pct_base_day)
-            if hasattr(self, 'capital_dragon_panel') and hasattr(self.capital_dragon_panel, 'set_pct_base_day'):
-                self.capital_dragon_panel.set_pct_base_day(self.pct_base_day)
+            if hasattr(self, 'new_stock_panel') and hasattr(self.new_stock_panel, 'set_pct_base_day'):
+                self.new_stock_panel.set_pct_base_day(self.pct_base_day)
 
         self.top_tabs.currentChanged.connect(self._on_top_tab_changed)
         
@@ -2984,10 +2984,10 @@ class ATSMainWindow(QMainWindow):
             if hasattr(self.swing_table, 'set_pct_base_day'):
                 self.swing_table.set_pct_base_day(base_day)
 
-        # 3. 同步更新资金主线与龙头中枢面板
-        if hasattr(self, 'capital_dragon_panel') and self.capital_dragon_panel is not None:
-            if hasattr(self.capital_dragon_panel, 'set_pct_base_day'):
-                self.capital_dragon_panel.set_pct_base_day(base_day)
+        # 3. 同步更新新股次新股面板表头与 DFF 基准
+        if hasattr(self, 'new_stock_panel') and self.new_stock_panel is not None:
+            if hasattr(self.new_stock_panel, 'set_pct_base_day'):
+                self.new_stock_panel.set_pct_base_day(base_day)
 
         # 4. 触发界面实时刷新
         if hasattr(self, 'refresh_realtime_ui'):

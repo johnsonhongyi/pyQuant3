@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 
 from ats.ui.styles import compute_base_day_percent
 from ats.ui.favorite_panel import get_ats_table_headers
+from ats.ui.new_stock_panel import get_new_stock_table_headers
 from ats.capital_dragon_engine import get_dragon_table_headers
 from ats.signal_ledger import SignalLedger
 from ats.ledger_update_service import LedgerUpdateService
@@ -88,14 +89,22 @@ def test_table_headers_dynamic_adaptation():
     headers_3d = get_ats_table_headers(extra_cols=extra_cols, base_day=3)
     assert 'DFF(3D)' in headers_3d
 
-    # 资金主线与龙头中枢 (CapitalDragonEngine / CapitalDragonPanel)
-    dragon_headers_1d = get_dragon_table_headers(extra_cols=[], base_day=1)
-    assert '涨幅%' in dragon_headers_1d
-    assert '涨幅%(2D)' not in dragon_headers_1d
+    # 新股次新股面板 (NewStockPanel) - 与重点关注对齐使用 DFF 呈现
+    new_headers_1d = get_new_stock_table_headers(extra_cols=extra_cols, base_day=1)
+    assert 'DFF' in new_headers_1d
+    assert 'DFF(2D)' not in new_headers_1d
 
-    dragon_headers_2d = get_dragon_table_headers(extra_cols=[], base_day=2)
-    assert '涨幅%(2D)' in dragon_headers_2d
-    assert '涨幅%' not in dragon_headers_2d
+    new_headers_2d = get_new_stock_table_headers(extra_cols=extra_cols, base_day=2)
+    assert 'DFF(2D)' in new_headers_2d
+    assert 'DFF' not in new_headers_2d
+
+    new_headers_3d = get_new_stock_table_headers(extra_cols=extra_cols, base_day=3)
+    assert 'DFF(3D)' in new_headers_3d
+
+    # 资金主线与龙头中枢 (CapitalDragonEngine / CapitalDragonPanel) - 还原为原逻辑，表头严格为 涨幅%
+    dragon_headers = get_dragon_table_headers(extra_cols=[])
+    assert '涨幅%' in dragon_headers
+    assert '涨幅%(2D)' not in dragon_headers
 
 
 def test_worker_view_calculation_and_signal_isolation():
@@ -176,3 +185,38 @@ def test_worker_view_calculation_and_signal_isolation():
     entry = ledger.entries.get('600001')
     assert entry is not None
     assert round(entry.latest_pct, 2) == 10.0, f"Core signal corrupted! Expected 10.0%, got {entry.latest_pct}"
+
+
+def test_new_stock_panel_multiday_dff_adaptation():
+    """测试新股次新股面板 (NewStockPanel) 适配 2D 基准日的 DFF 多日累计涨幅与排序"""
+    from ats.ui.new_stock_panel import _prepare_stock_table
+    df_data = pd.DataFrame([{
+        'code': '301600',
+        'name': '次新测试股',
+        'status': '次新股',
+        'price': 11.0,
+        'pct': 10.0,
+        'dff': 9.8,
+        'lastp1d': 10.0,
+        'lastp2d': 9.0,
+        'turnover': 15.0,
+        'listing_date': '2026-10-15',
+    }])
+
+    # 1. 默认 base_day=1，dff 保持原有数值
+    records_1d, _, _, _, _ = _prepare_stock_table(
+        df_data, fav_stocks=set(), sh_pct=0.0, extra_cols=(),
+        filter_type='全部', search_txt='', fset=None,
+        sort_col=None, sort_order=None, selected_code='', base_day=1
+    )
+    assert len(records_1d) == 1
+    assert records_1d[0]['dff'] == 9.8
+
+    # 2. 切换至 base_day=2，dff 自动计算为 2D 累计涨跌幅 (11.0 - 9.0)/9.0*100 = 22.22%
+    records_2d, _, _, _, _ = _prepare_stock_table(
+        df_data, fav_stocks=set(), sh_pct=0.0, extra_cols=(),
+        filter_type='全部', search_txt='', fset=None,
+        sort_col=None, sort_order=None, selected_code='', base_day=2
+    )
+    assert len(records_2d) == 1
+    assert round(records_2d[0]['dff'], 2) == 22.22

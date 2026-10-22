@@ -228,8 +228,8 @@ def get_dragon_extra_cols() -> List[str]:
     return extra
 
 
-def get_dragon_table_headers(extra_cols: Optional[List[str]] = None, base_day: int = 1) -> List[str]:
-    """获取资金主线表格标准表头字段名称列表（在资金买点类型后面平滑嵌入自定义列，支持多日基准涨幅标签）"""
+def get_dragon_table_headers(extra_cols: Optional[List[str]] = None) -> List[str]:
+    """获取资金主线表格标准表头字段名称列表（在资金买点类型后面平滑嵌入自定义列）"""
     if extra_cols is None:
         extra_cols = get_dragon_extra_cols()
     try:
@@ -237,9 +237,8 @@ def get_dragon_table_headers(extra_cols: Optional[List[str]] = None, base_day: i
         col_map = getattr(cct, 'vis_column_map', {}) or {}
     except Exception:
         col_map = {}
-    pct_label = f"涨幅%({base_day}D)" if base_day > 1 else "涨幅%"
     base_pre = [
-        "代码", "名称", "龙头角色", "所属主线", "现价", pct_label, "虚拟量比",
+        "代码", "名称", "龙头角色", "所属主线", "现价", "涨幅%", "虚拟量比",
         "成交额(亿)", "换手率%", "资金买点类型"
     ]
     extra_headers = [col_map.get(c, col_map.get(c.lower(), c.upper())) for c in extra_cols]
