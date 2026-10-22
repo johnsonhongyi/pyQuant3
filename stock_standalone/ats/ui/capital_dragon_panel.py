@@ -284,6 +284,8 @@ class CapitalDragonPanel(QWidget):
         else:
             self.dragon_focus_stocks = set()
 
+        self.pct_base_day: int = int(load_config_node("ats_pct_base_day", 1))
+
         self._init_ui()
 
     def is_dragon_focused(self, code: str) -> bool:
@@ -474,7 +476,7 @@ class CapitalDragonPanel(QWidget):
         self.table.setStyleSheet("QTableWidget { background-color: #121218; border: none; }")
 
         self.extra_cols = get_dragon_extra_cols()
-        self.headers = get_dragon_table_headers(self.extra_cols)
+        self.headers = get_dragon_table_headers(self.extra_cols, base_day=self.pct_base_day)
         self.table.setColumnCount(len(self.headers))
         self.table.setHorizontalHeaderLabels(self.headers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -971,7 +973,7 @@ class CapitalDragonPanel(QWidget):
             current_extra = get_dragon_extra_cols()
             if getattr(self, 'extra_cols', None) != current_extra:
                 self.extra_cols = current_extra
-                self.headers = get_dragon_table_headers(self.extra_cols)
+                self.headers = get_dragon_table_headers(self.extra_cols, base_day=self.pct_base_day)
                 self.table.setColumnCount(len(self.headers))
                 self.table.setHorizontalHeaderLabels(self.headers)
 
@@ -1269,22 +1271,39 @@ class CapitalDragonPanel(QWidget):
                 col_offset = 10
                 for ec in getattr(self, 'extra_cols', []):
                     val_str = "--"
-                    if "extra_cols" in d and ec in d["extra_cols"]:
-                        val_str = str(d["extra_cols"][ec])
-                    elif ec in d:
-                        val_str = str(d[ec])
-                    elif self._last_df_all is not None and not self._last_df_all.empty:
-                        for k in (ec, ec.lower(), ec.upper()):
-                            if k in self._last_df_all.columns and code in self._last_df_all.index:
-                                val_raw = self._last_df_all.loc[code, k]
-                                val_str = cct.format_col_value(ec, val_raw)
-                                break
-
                     raw_num = None
-                    try:
-                        raw_num = float(val_str)
-                    except Exception:
-                        raw_num = None
+
+                    # 对齐 DFF 多日基准强弱计算
+                    if str(ec).lower() == 'dff' and getattr(self, 'pct_base_day', 1) > 1:
+                        from ats.ui.styles import compute_base_day_percent
+                        row_raw = None
+                        if self._last_df_all is not None and not self._last_df_all.empty:
+                            if code in self._last_df_all.index:
+                                row_raw = self._last_df_all.loc[code]
+                            elif c_clean in self._last_df_all.index:
+                                row_raw = self._last_df_all.loc[c_clean]
+                        if row_raw is not None:
+                            dff_calc = compute_base_day_percent(row_raw, base_day=self.pct_base_day, current_price=price)
+                            val_str = f"{dff_calc:+.2f}"
+                            raw_num = dff_calc
+                        else:
+                            val_str = "--"
+                            raw_num = None
+                    else:
+                        if "extra_cols" in d and ec in d["extra_cols"]:
+                            val_str = str(d["extra_cols"][ec])
+                        elif ec in d:
+                            val_str = str(d[ec])
+                        elif self._last_df_all is not None and not self._last_df_all.empty:
+                            for k in (ec, ec.lower(), ec.upper()):
+                                if k in self._last_df_all.columns and code in self._last_df_all.index:
+                                    val_raw = self._last_df_all.loc[code, k]
+                                    val_str = cct.format_col_value(ec, val_raw)
+                                    break
+                        try:
+                            raw_num = float(val_str)
+                        except Exception:
+                            raw_num = None
 
                     ec_col = "#888888"
                     if raw_num is not None:
@@ -1638,6 +1657,15 @@ class CapitalDragonPanel(QWidget):
             if hasattr(tw, 'filtered_codes_set'):
                 return tw
         return None
+
+    def set_pct_base_day(self, base_day: int):
+        """动态切换涨跌幅基准日并即时更新 DFF 表头与重绘"""
+        self.pct_base_day = max(1, int(base_day))
+        self.headers = get_dragon_table_headers(self.extra_cols, base_day=self.pct_base_day)
+        if self.table.columnCount() == len(self.headers):
+            self.table.setHorizontalHeaderLabels(self.headers)
+        if self._last_df_all is not None and not self._last_df_all.empty:
+            self._process_pending_payload(force=True)
 
     def _toggle_extreme_perf(self):
         """切换极限性能模式 (开启精选 Top 30，关闭展示全部 300+ 全量候选池)"""

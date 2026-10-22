@@ -1,5 +1,19 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-22 23:25 【ATS主窗口全Tab对齐DFF多日强弱新设计与资金主线涨幅完全解耦闭环】(`docs/tasks/2026-10-22_2325_ATS主窗口全Tab对齐DFF多日强弱新设计.md`, `tests/test_multiday_pct_base_view.py`)
+- [x] **ATS 主窗口 4 大业务 Tab 统一收敛至 DFF 呈现多日强弱**：
+  - **规范统一**：主窗口表格中的 `涨幅%` / `涨跌%` 列严格保持为当日真实涨跌幅（0 篡改）；多日强弱观察（2D强、3D强至 9D 累计涨幅）全域收敛统一在 `DFF` 列；
+  - **资金主线与龙头中枢（`CapitalDragonPanel`）**：基础列第 5 列严格为原版 `涨幅%`，而自定义指标中的 `DFF` 列自适应为 `DFF(2D)`，单元格渲染与后台数值排序（`raw_val`）动态同步；
+  - **新股次新股（`NewStockPanel`）**：基础列第 9 列严格为原版 `涨跌%`，而第 16 列 `DFF` 自适应为 `DFF(2D)`，后台多日收益预算与点击排序全面对齐；
+  - **重点关注（`FavoritePanel`）与 MA20 跟踪（`SwingStateTable`）**：维持动态表头 `DFF(2D)` 与多日累计收益展示；
+- [x] **主窗口工具栏 4 大 Tab 全链路无缝联动**：
+  - 工具栏切换基准日时，一次性联动更新 4 个核心 Tab 的 `set_pct_base_day(base_day)`，界面重绘与表头刷新无主线程卡顿；
+- [x] **自动化测试回归全绿通过（6 项专项 + 9 项回归）**：
+  - `tests/test_multiday_pct_base_view.py`（6/6 PASS）：校验重点关注、新股次新股、资金主线的 DFF 列全部对齐为 `DFF(2D)`，同时资金主线“涨幅%”列严格保持原版；
+  - 源码文件 `python -m py_compile` 0 语法错误。
+
+
+
 ## 2026-10-22 22:55 【资金主线涨跌还原与新股次新股DFF基准日适配优化闭环】(`docs/tasks/2026-10-22_2255_资金主线还原与新股次新DFF基准日适配闭环.md`, `tests/test_multiday_pct_base_view.py`)
 - [x] **资金主线与龙头中枢彻底还原为原有逻辑**：
   - 彻底回滚 `ats/capital_dragon_engine.py` 与 `ats/ui/capital_dragon_panel.py`，移除 `pct_base_day` 相关修改；
