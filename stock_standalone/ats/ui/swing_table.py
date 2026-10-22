@@ -49,6 +49,7 @@ class SwingStateTable(QWidget):
         # 🎯 策略过滤持久化开关 (专属独立持久化，默认关闭)
         saved_filter = load_config_node(PERSIST_KEY_SWING_FILTER, load_config_node("ats_tab_filter_enabled", False))
         self.filter_enabled = parse_bool_config(saved_filter, default=False)
+        self.pct_base_day: int = int(load_config_node("ats_pct_base_day", 1))
         
         self._init_ui()
         self.load_mock_data()
@@ -152,7 +153,7 @@ class SwingStateTable(QWidget):
         self.table.viewport().setStyleSheet("background-color: #121218; border: none;")
         self.table.setStyleSheet("QTableWidget { background-color: #121218; border: none; }")
 
-        headers = get_ats_table_headers(self.extra_cols)
+        headers = get_ats_table_headers(self.extra_cols, base_day=self.pct_base_day)
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
         
@@ -305,7 +306,7 @@ class SwingStateTable(QWidget):
         current_extra = get_ats_extra_cols()
         if not hasattr(self, 'extra_cols') or self.extra_cols != current_extra:
             self.extra_cols = current_extra
-            headers = get_ats_table_headers(self.extra_cols)
+            headers = get_ats_table_headers(self.extra_cols, base_day=self.pct_base_day)
             if self.table.columnCount() != len(headers):
                 self.table.setColumnCount(len(headers))
                 self.table.setHorizontalHeaderLabels(headers)
@@ -542,6 +543,13 @@ class SwingStateTable(QWidget):
         is_checked = (state == 2 or state is True or state == Qt.CheckState.Checked.value)
         self._save_show_favorite_config(is_checked)
         self._apply_favorite_filter()
+
+    def set_pct_base_day(self, base_day: int):
+        """动态切换涨跌幅基准日并即时更新表头"""
+        self.pct_base_day = max(1, int(base_day))
+        headers = get_ats_table_headers(self.extra_cols, base_day=self.pct_base_day)
+        if self.table.columnCount() == len(headers):
+            self.table.setHorizontalHeaderLabels(headers)
 
     def _get_parent_mw(self):
         """稳健获取持有 filtered_codes_set 的主窗口实例"""

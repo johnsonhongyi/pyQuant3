@@ -1,5 +1,21 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](stock_standalone/design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-22 22:10 【ATS主窗口多日基准涨跌幅切换（1D/2D强/3D强至9D）纯视图层优化落地闭环】(`stock_standalone/docs/tasks/2026-10-22_2210_ATS主窗口涨跌幅基准日切换优化.md`, `stock_standalone/tests/test_multiday_pct_base_view.py`)
+- [x] **纯视图层多日涨跌幅极速观察设计（严守底层信号隔离红线）**：
+  - 严格确保不修改任何底层交易信号、风控规则、T+1 计算和订单逻辑；
+  - 在 `ats/ui/styles.py` 中落地 `compute_base_day_percent`，实现根据 `lastp{N}d`（1D昨收/2D前收/3D等至 `cct.compute_lastdays` 即 9D）计算多日累计涨幅，缺失值毫秒级优雅回退，0 异常不上抛；
+- [x] **主窗口各 Tab 与左侧策略池全链路动态自适应联动**：
+  - 工具栏提供 `combo_pct_base` 下拉菜单（`1D(昨收)`、`2D(2日强)`、`3D(3日强)`...），支持 `window_config.json` 自动持久化记忆；
+  - 重点关注面板（`favorite_panel`）、大级别 MA20d 跟踪器（`swing_table`）表头动态对齐为 `DFF(2D)`；
+  - 资金主线与龙头中枢面板（`capital_dragon_panel`）表头自适应为 `涨幅%(2D)`，单元格渲染与排序数值（`raw_val`）动态同步；
+  - `LedgerUpdateWorker` 后台解耦计算 `display_dff`，左侧三级池树状图（`universe_widget`）同步更新多日涨幅；
+- [x] **自动化测试回归全绿通过（5 项专项 + 9 项回归）**：
+  - `tests/test_multiday_pct_base_view.py`（5/5 PASS）：覆盖 1D 昨收默认、2D/3D/5D 累计涨幅计算、缺失平滑降级、多面板表头动态标签以及 Worker 视图与 SignalLedger 核心 1D 信号绝对隔离（底层 `latest_pct` 0 污染）；
+  - `tests/test_sbc_alt_click_broadcast.py` (5/5 PASS)、`tests/test_ats_favorite_actions.py` (4/4 PASS)；
+  - 6 个修改源文件 `python -m py_compile` 0 语法错误。
+
+
+
 ## 2026-10-22 15:50 【审核instockMonitorTK问题处理与待办执行闭环】(`stock_standalone/docs/tasks/2026-10-22_1550_审核instockMonitorTK问题处理与待办执行.md`, `stock_standalone/tests/test_no_duplicate_sell.py`, `stock_standalone/tests/test_buffered_log.py`, `C:/Users/Johnson/WorkBuddy AI/2026-10-21-21-50-08/instockMonitorTK_问题处理与待办总结.md`)
 - [x] **12 处缺陷修复全面核验无误（3×P0 / 5×P1 / 4×P2）**：
   - **P0 交易缺陷**：① 修复 `kernel_service.py` 反哺逻辑，引入 `sold_today_pure` 识别与建仓日期判定，早于今日跳过反哺并在第 3 步从内核账本 pop 剔除，打破“15 秒卖出 → 反哺 → 再卖出”死循环（9461 笔 SELL）；当日回补新仓放行反哺并解除当日卖出标记；② `t1_position_facts.py` 按 `entry_time` 智能识别前日可卖与当日不可卖，解决无台账持仓被 fail-closed 永久阻断止损问题；③ `trade_gateway.py` 增加当日已卖出跳过与 5 分钟卖出冷却门控；
