@@ -97,16 +97,39 @@ def build_t1_position_facts(
         if derived_qty < total_qty - 1e-9:
             missing = total_qty - derived_qty
             entry_day = _date_from_timestamp(position.get("entry_time"))
-            derived_lots.append({
-                "qty": missing,
-                "price": _number(position.get("entry_price")),
-                # Position-level entry_time cannot establish the acquisition
-                # date of an unexplained quantity delta.
-                "buy_date": "",
-                "timestamp": str(position.get("entry_time") or ""),
-                "source": "POSITION_FALLBACK",
-            })
-            status = "POSITION_FALLBACK_FAIL_CLOSED" if entry_day else "INCOMPLETE_FAIL_CLOSED"
+
+            # [FIX][P0] 整仓无台账覆盖时的兜底判定。
+            # 旧逻辑把 buy_date 一律置空 → sellable_qty 恒为 0 → fail-closed 永久拒单，
+            # 导致「台账断档的持仓永远卖不掉」，止损/止盈/一键清仓全部失效。
+            # 现按 entry_time 的日期分层：
+            #   1) entry_time 早于今日 → 该仓整体为隔日持仓，T+1 不构成约束，可卖；
+            #   2) entry_time 等于今日 → 明确是当日买入，计入 today_buy_qty（不可卖，符合 T+1）；
+            #   3) 无 entry_time 或仅有部分台账缺口 → 保持 fail-closed，不做任何推测。
+            whole_position_uncovered = derived_qty <= 1e-9
+            if entry_day and whole_position_uncovered:
+                derived_lots.append({
+                    "qty": missing,
+                    "price": _number(position.get("entry_price")),
+                    "buy_date": entry_day,
+                    "timestamp": str(position.get("entry_time") or ""),
+                    "source": "POSITION_FALLBACK_DATED",
+                })
+                status = (
+                    "POSITION_FALLBACK_PREV_DAY_SELLABLE"
+                    if entry_day < day
+                    else "POSITION_FALLBACK_TODAY_BUY"
+                )
+            else:
+                derived_lots.append({
+                    "qty": missing,
+                    "price": _number(position.get("entry_price")),
+                    # Position-level entry_time cannot establish the acquisition
+                    # date of an unexplained quantity delta.
+                    "buy_date": "",
+                    "timestamp": str(position.get("entry_time") or ""),
+                    "source": "POSITION_FALLBACK",
+                })
+                status = "POSITION_FALLBACK_FAIL_CLOSED" if entry_day else "INCOMPLETE_FAIL_CLOSED"
         elif derived_qty > total_qty + 1e-9:
             # The missing sell/update record makes the surviving lot ages
             # ambiguous. Do not guess which lots remain or unlock T+1 shares.

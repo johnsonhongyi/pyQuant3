@@ -1,5 +1,18 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-22 15:50 【审核instockMonitorTK问题处理与待办执行闭环】(`docs/tasks/2026-10-22_1550_审核instockMonitorTK问题处理与待办执行.md`, `tests/test_no_duplicate_sell.py`, `tests/test_buffered_log.py`, `C:/Users/Johnson/WorkBuddy AI/2026-10-21-21-50-08/instockMonitorTK_问题处理与待办总结.md`)
+- [x] **12 处缺陷修复全面核验无误（3×P0 / 5×P1 / 4×P2）**：
+  - **P0 交易缺陷**：① 修复 `kernel_service.py` 反哺逻辑，引入 `sold_today_pure` 识别与建仓日期判定，早于今日跳过反哺并在第 3 步从内核账本 pop 剔除，打破“15 秒卖出 → 反哺 → 再卖出”死循环（9461 笔 SELL）；当日回补新仓放行反哺并解除当日卖出标记；② `t1_position_facts.py` 按 `entry_time` 智能识别前日可卖与当日不可卖，解决无台账持仓被 fail-closed 永久阻断止损问题；③ `trade_gateway.py` 增加当日已卖出跳过与 5 分钟卖出冷却门控；
+  - **P1 日志/性能**：④ `buffered_log.py` 彻底修复覆盖消息正文缺陷，保留正文并追加 `[repeat_count=N]`，支持 300s 抑制聚合与真正的滚动文件轮转备份；⑤ `LoggerFactory.py` 中 `DropQueueHandler` 增加计数告警，全局队列由 2000 扩容至 20000；⑥ `decision_engine.py` 挖掘拦截 DEBUG 日志改为 60s 窗口聚合摘要；⑦ `paper_adapter.py` T+1 拒单日志聚合由 30s 调整至 600s（10分钟）并按状态聚合；⑧ 刷盘间隔 60s→5s，锁超时 0.25s→2.0s，`_seen` 扩容至 8192 支持 TTL；
+  - **P2 稳定性**：⑨ `instock_MonitorTK.py` 看门狗改用 `_active_secs` 仅计算有效连续竞价时段，午休不计入，彻底消除 13:00 误杀子进程；⑩ `trade_visualizer_qt6.py` 缠论渲染安全取列避免 KeyError；⑪ `realdatajson.py` SINA 分页就地补抓失败页；⑫ 情绪快照重试达到 5 次后优雅终止，杜绝无限重试刷屏；
+  - **关键校正确认**：DEBUG 日志由启动参数 `-log debug` 控制，误加的 `resolve_level()` 彻底回滚清理干净；
+- [x] **自动化测试回归与工程化沉淀**：
+  - 将 `test_no_duplicate_sell.py`（5/5 PASS）与 `test_buffered_log.py`（11/11 PASS）沉淀纳入根目录 `tests/` 套件；
+  - 彻底根除历史遗留缺陷（修复 `ipo_trading_center.py` 遵从 `TRADING_LEDGER_FILE`，加固 `storage_archive.py` 在 RAMDisk 下的 `Path.resolve()` OSError，对齐 `test_extension_contracts.py` 归档流读取契约），**全量内核测试 97 项 100% 纯绿通过（97 passed, 0 failed）**，`test_t1_position_facts_v2.py` 10 项全绿；
+  - 12 个修改源文件 `python -m py_compile` 0 语法错误；
+- [x] **严格遵守禁止自行打包铁律与生产待办明晰**：遵循指示不执行打包操作，梳理标准打包脚本、停进程热替换、生产 3 大指标观测及回滚备份（`*.bak_20261021_logaudit`）方案。
+
+
 ## 2026-10-21 13:50 【自动跟单手动个股添加、科创板20cm适配与高频扫描降频部署】(`docs/tasks/2026-10-21_1350_自动跟单手动个股添加科创板适配与时滞刷屏根治.md`, `stock-strategy/auto_follow.py`, `stock-strategy/test_auto_follow.py`, `stock-strategy/ENVIRONMENT_HANDOFF.md`)
 - [x] **手动添加个股与板块兼容（支持 688787 海天瑞声）**：`symbol()` 放行 688/300，`candidates()` 注入 `manual_symbols` 并赋予最高优先级，控制协议支持 `manual_symbols` / `add_symbol` / `remove_symbol`；CLI 增加 `--add-symbol` 指令，成功将 688787.SH 注入线上候选池；
 - [x] **科创板/创业板 20cm 涨跌幅自适应**：`entry_ok()` 自动识别 688/300，封板线设为 20%（`limit_ratio=1.20`），P4 涨幅上限（14.0%）与 VWAP 偏离上限（1.045）自适应放宽，杜绝主板规则误杀科创板强势股；

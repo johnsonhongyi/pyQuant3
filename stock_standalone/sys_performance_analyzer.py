@@ -29,7 +29,8 @@ except ImportError:
 
 # Windows 高 DPI 适配，防止界面模糊
 try:
-    if platform.system() == "Windows":
+    # 仅独立运行时设置；被主程序 import 时不得改变进程 DPI 感知(会覆盖 Per-Monitor)
+    if platform.system() == "Windows" and __name__ == "__main__":
         ctypes.windll.shcore.SetProcessDpiAwareness(1) # DPI Aware
 except Exception:
     pass

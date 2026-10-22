@@ -493,15 +493,46 @@ class TradingKernelService:
         if not trade_gw or not hasattr(self, "paper_adapter") or not self.paper_adapter:
             return {}
 
-        result = {"restored_to_gw": 0, "synced_from_gw": 0, "evicted": 0}
+        result = {"restored_to_gw": 0, "synced_from_gw": 0, "evicted": 0,
+                  "sold_today_skipped": 0, "rebuy_unlocked": 0}
         try:
             from trading_kernel.execution.paper_adapter import Position as PaperPosition
             from trade_gateway import Position as LegacyPosition
+
+            # [FIX][P0] 当日已卖出的标的禁止反哺回灌。
+            # 老网关止损卖出后会 del 持仓并写入 _today_sold_codes，若此处无条件把内核持仓
+            # 反哺回去，就会形成「15 秒卖出 → 反哺 → 再卖出」的死循环（实测单标的 947 次/日）。
+            # 但只拦截「今日之前建立」的陈旧持仓：若当日卖出后策略又合法回补了新仓
+            # （entry_time 为今日），必须放行反哺，否则会被第 3 步当成多余持仓清掉。
+            sold_today_raw = getattr(trade_gw, "_today_sold_codes", None) or set()
+            sold_today_pure = {
+                "".join(filter(str.isdigit, str(c)))[:6] for c in sold_today_raw
+            }
+            today_str = datetime.now().date().isoformat()
+
+            def _position_entry_day(pos_obj) -> str:
+                """尽量解析持仓建仓日期，失败返回空串（空串视为不确定，放行反哺）。"""
+                entry_time = getattr(pos_obj, "entry_time", "")
+                if isinstance(entry_time, datetime):
+                    return entry_time.date().isoformat()
+                text = str(entry_time or "").strip()
+                if len(text) >= 10:
+                    candidate = text[:10]
+                    if candidate[4] == "-" and candidate[7] == "-":
+                        return candidate
+                return ""
 
             # 1) 内核持仓反哺/自愈恢复至老网关（防老网关崩溃或清空）
             with self.paper_adapter.account._lock if hasattr(self.paper_adapter.account, "_lock") else self._noop_context():
                 for p_code, pos_obj in list(self.paper_adapter.account.positions.items()):
                     p_code_pure = "".join(filter(str.isdigit, str(p_code)))[:6]
+                    if len(p_code_pure) == 6 and p_code_pure in sold_today_pure:
+                        entry_day = _position_entry_day(pos_obj)
+                        if entry_day and entry_day < today_str:
+                            # 今日已平仓，且该仓是昨日或更早建立的陈旧持仓 → 不再回灌
+                            result["sold_today_skipped"] += 1
+                            continue
+                        # entry_time 为今日或无法判定：可能是当日回补的新仓，放行
                     if len(p_code_pure) == 6 and p_code_pure not in trade_gw._positions:
                         vol = float(pos_obj.volume)
                         if vol > 0:
@@ -548,6 +579,15 @@ class TradingKernelService:
                             )
                             trade_gw._positions[p_code_pure] = leg_pos
                             result["restored_to_gw"] += 1
+                            # 当日回补的新仓：解除该标的的「今日已卖出」标记，
+                            # 否则 submit_sell / check_stop_loss 会把它当成已平仓标的而拒绝止损。
+                            if p_code_pure in sold_today_pure:
+                                sold_today_raw.discard(p_code_pure)
+                                for raw_code in list(sold_today_raw):
+                                    if "".join(filter(str.isdigit, str(raw_code)))[:6] == p_code_pure:
+                                        sold_today_raw.discard(raw_code)
+                                sold_today_pure.discard(p_code_pure)
+                                result["rebuy_unlocked"] = result.get("rebuy_unlocked", 0) + 1
 
             # 2) 老网关持仓双向对账至新内核
             old_positions = trade_gw.get_positions()

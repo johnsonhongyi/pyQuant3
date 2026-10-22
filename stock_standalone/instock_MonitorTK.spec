@@ -78,6 +78,7 @@ exe = EXE(
     a.datas,
     [],
     name='instock_MonitorTK',
+    manifest='instock_MonitorTK.manifest',  # PerMonitorV2 dpi aware at load
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

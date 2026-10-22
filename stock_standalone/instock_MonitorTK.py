@@ -651,6 +651,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
         self.last_dpi_scale = self.scale_factor
+        try:
+            from dpi_utils import log_dpi_awareness
+            log_dpi_awareness(" startup", self)
+        except Exception:
+            pass
         # 3. 接下来是 Qt 初始化
         from PyQt6 import QtWidgets
         if not QtWidgets.QApplication.instance():
@@ -3914,7 +3919,26 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.warning("[MarketSentiment] Persisted validated daily snapshot for %s", today)
             return True
         except Exception as exc:
-            logger.error("[MarketSentiment] Daily snapshot remains pending for retry: %s", exc)
+            # [FIX] 原逻辑失败后不设上限，调度器每 60 秒重试一次，
+            # 生产上曾从 15:05 一直重试到次日 21:51（覆盖率恒为 0/5579，永远不会成功）。
+            # 现最多重试 5 次，之后标记当日已处理并明确报错，避免无限刷屏与重复重活。
+            attempts = getattr(self, "_sentiment_snapshot_attempts", None)
+            if not isinstance(attempts, dict):
+                attempts = {}
+            count = int(attempts.get(today, 0)) + 1
+            attempts[today] = count
+            self._sentiment_snapshot_attempts = attempts
+            if count >= 5:
+                self._sentiment_snapshot_done_date = today
+                logger.error(
+                    "[MarketSentiment] Daily snapshot ABANDONED for %s after %d attempts: %s "
+                    "(sector detector coverage never reached 90%%; check panel/detector readiness)",
+                    today, count, exc,
+                )
+            else:
+                logger.error(
+                    "[MarketSentiment] Daily snapshot pending retry %d/5: %s", count, exc,
+                )
             return False
         finally:
             self._sentiment_snapshot_task_running = False
@@ -6874,8 +6898,29 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             is_active_trading = cct.get_trade_date_status() and ((930 <= now_time_int <= 1130) or (1300 <= now_time_int <= 1500))
                             
                             last_recv = getattr(self, '_last_snapshot_recv_time', now_time)
-                            if is_active_trading and (now_time - last_recv > 300): # 超过 5 分钟
-                                logger.error(f"🛑 [DataWatchdog] Subprocess alive but no data received for {now_time - last_recv:.0f}s. Forcing restart of fetch_and_process...")
+                            # [FIX] 原逻辑直接比较墙钟秒数，导致每天 13:00 开盘瞬间必然误判：
+                            # 11:30 收盘后到 13:00 之间没有行情是正常的，但 13:00 一进入
+                            # 交易时段，now - last_recv 已经累积了 5379s，立刻强杀子进程。
+                            # 现改为只统计「落在连续竞价时段内」的秒数，午休/非交易时段不计入。
+                            try:
+                                _start_dt = datetime.fromtimestamp(last_recv)
+                                _active_secs = 0.0
+                                if _start_dt.date() == now_dt.date():
+                                    for _sh, _sm, _eh, _em in ((9, 30, 11, 30), (13, 0, 15, 0)):
+                                        _seg_start = now_dt.replace(hour=_sh, minute=_sm, second=0, microsecond=0)
+                                        _seg_end = now_dt.replace(hour=_eh, minute=_em, second=0, microsecond=0)
+                                        _lo = max(_seg_start, _start_dt)
+                                        _hi = min(_seg_end, now_dt)
+                                        if _hi > _lo:
+                                            _active_secs += (_hi - _lo).total_seconds()
+                                else:
+                                    _active_secs = float('inf')
+                            except Exception:
+                                _active_secs = now_time - last_recv
+
+                            if is_active_trading and _active_secs > 300:  # 累计有效交易时间超过 5 分钟
+                                logger.error(f"🛑 [DataWatchdog] Subprocess alive but no data received for {now_time - last_recv:.0f}s "
+                                             f"(active {_active_secs:.0f}s). Forcing restart of fetch_and_process...")
                                 try:
                                     self.proc.terminate()
                                     self.proc.join(timeout=3)
@@ -6883,6 +6928,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                     logger.warning(f"Failed to terminate stale subprocess: {e_term}")
                                 self._last_snapshot_recv_time = now_time # 重置时间戳，防止频繁重启
                                 self._start_process()
+                            elif is_active_trading and (now_time - last_recv > 300):
+                                # 刚开盘/刚过午休：跨过了非交易时段，重置基线而不是重启
+                                self._last_snapshot_recv_time = now_time
 
         except Exception as e:
             logger.error(f"Error starting tree update: {e}", exc_info=True)

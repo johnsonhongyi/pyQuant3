@@ -1609,7 +1609,10 @@ def _refresh_sina_Market_json(market='all', showtime=True, num='100', retry_coun
             # 避免协程已超时、底层 socket 仍运行而新一轮又启动。
             rs = loop.run_until_complete(asyncio.gather(*tasks))
             failed_indices = [idx for idx, result in enumerate(rs) if result is None or result.empty]
-            if failed_indices and retry_count > 1:
+            # [FIX] 原来仅在 retry_count > 1 时才补抓失败页，导致首轮刷新出现
+            # 45/58 这类缺页时直接判定失败并回退缓存（生产日志中 SINA-FATAL 25 次）。
+            # 失败页就地补抓一次成本极低，可显著提升首轮完整率。
+            if failed_indices:
                 log.warning(f"[SINA-PAGE-RETRY] batch={batch_num}/{total_batches} retry_pages={len(failed_indices)}")
                 retry_tasks = [_fetch_with_delay(url_list[i + idx], pause_range, stagger_sec=pos * 0.08)
                                for pos, idx in enumerate(failed_indices)]

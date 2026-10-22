@@ -5,8 +5,9 @@ import tkinter.font as tkfont
 from tkinter import ttk
 from typing import Any, Optional, Union, Protocol, runtime_checkable, TYPE_CHECKING
 import logging
+import ctypes
 from JohnsonUtil import commonTips as cct
-from dpi_utils import get_current_window_scale, get_window_dpi_scale
+from dpi_utils import get_current_window_scale, get_window_dpi_scale, log_dpi_awareness
 
 try:
     from PyQt6 import QtWidgets, QtCore, QtGui
@@ -21,7 +22,18 @@ except ImportError:
         QtGui = Any # type: ignore
         PYQT6_AVAILABLE = False
 
+PYQT5_AVAILABLE = PYQT6_AVAILABLE
+
 logger = LoggerFactory.getLogger("instock_TK.DPI")
+
+
+def _virtual_screen_sig() -> tuple:
+    """虚拟桌面 (x, y, w, h)；用于检测远程改分辨率/多屏变化。"""
+    try:
+        gm = ctypes.windll.user32.GetSystemMetrics
+        return (gm(76), gm(77), gm(78), gm(79))
+    except Exception:
+        return (0, 0, 0, 0)
 
 @runtime_checkable
 class DPIAppProtocol(Protocol):
@@ -88,21 +100,71 @@ class DPIMixin:
         return (width_px, height_px)
 
     def _check_dpi_change(self) -> None:
-        """定期检测 DPI 是否变化（例如 RDP 登录）"""
-        scale = get_window_dpi_scale(self) # type: ignore
-        current_scale = scale
-        if abs(current_scale - getattr(self, 'last_dpi_scale', 1.0)) > 0.05:
-            logger.info(f"{cct.get_now_time_int()}  current_scale:{current_scale}")
-            logger.info(f"[DPI变化检测] 从 {getattr(self, 'last_dpi_scale', 1.0):.2f} → {current_scale:.2f}")
-            self._apply_scale_dpi_change(current_scale)
-            self.on_dpi_changed_qt(current_scale)
-            self.last_dpi_scale = current_scale
-
-        # 每 5 秒检测一次
+        """定期检测 DPI / 分辨率变化（RDP 登录、远程改分辨率、拖到不同 DPI 显示器）。"""
+        try:
+            self._dpi_poll_once()
+        except Exception as e:
+            logger.warning(f"[DPI] 轮询异常(已降级继续): {e}")
+        # 1.5 秒轮询一次: 仅两次轻量 ctypes 调用，开销可忽略
         if hasattr(self, '_schedule_after'):
-            self._schedule_after(5000, self._check_dpi_change)
+            self._schedule_after(1500, self._check_dpi_change)
         else:
-            self.after(5000, self._check_dpi_change)
+            self.after(1500, self._check_dpi_change)
+
+    def _dpi_poll_once(self) -> None:
+        scale = get_window_dpi_scale(self)  # type: ignore
+        last = getattr(self, 'last_dpi_scale', 1.0) or 1.0
+        try:
+            state = self.state()  # type: ignore
+        except Exception:
+            state = 'normal'
+        w, h = self.winfo_width(), self.winfo_height()
+        sig = _virtual_screen_sig()
+
+        if abs(scale - last) > 0.05:
+            logger.info(f"[DPI变化检测] 从 {last:.2f} → {scale:.2f} screen={sig}")
+            log_dpi_awareness(" on_change", self)
+            base_wh = getattr(self, '_dpi_last_wh', None) or (w, h)
+            self._apply_scale_dpi_change(scale, base_wh)
+            self.on_dpi_changed_qt(scale)
+            self.last_dpi_scale = scale
+            self._dpi_last_wh = None
+            self._dpi_screen_sig = sig
+            return
+
+        if state == 'normal' and w > 1 and h > 1:
+            self._dpi_last_wh = (w, h)  # 变化前的最后一次稳定尺寸，作为缩放基准
+        prev_sig = getattr(self, '_dpi_screen_sig', None)
+        self._dpi_screen_sig = sig
+        if prev_sig is not None and prev_sig != sig and state == 'normal':
+            logger.info(f"[DPI] 屏幕几何变化 {prev_sig} → {sig}，窗口收敛进可视区")
+            self._clamp_window_to_screen(self)
+
+    def _clamp_window_to_screen(self, win: Any) -> None:
+        """把窗口尺寸与位置限制在虚拟桌面内，避免分辨率变化后窗口越界/不可见。"""
+        try:
+            vx, vy, vw, vh = _virtual_screen_sig()
+            if vw <= 0 or vh <= 0:
+                return
+            win.update_idletasks()
+            w, h = win.winfo_width(), win.winfo_height()
+            x, y = win.winfo_x(), win.winfo_y()
+            nw, nh = min(w, vw - 20), min(h, vh - 60)
+            nx = max(vx, min(x, vx + vw - nw))
+            ny = max(vy, min(y, vy + vh - nh - 40))
+            if (nw, nh, nx, ny) != (w, h, x, y):
+                win.geometry(f"{nw}x{nh}+{nx}+{ny}")
+        except Exception as e:
+            logger.debug(f"[DPI] clamp 失败: {e}")
+
+    @staticmethod
+    def _scale_tree_columns(tree: Any, ratio: float) -> None:
+        try:
+            for c in tree['columns']:
+                cur = int(tree.column(c, 'width'))
+                tree.column(c, width=max(10, int(round(cur * ratio))))
+        except Exception as e:
+            logger.debug(f"[DPI] 列宽缩放失败: {e}")
 
     def get_qt_window_scale_base(self, win: Any) -> tuple[float, float]:
         if not PYQT5_AVAILABLE:
@@ -136,34 +198,23 @@ class DPIMixin:
             return 1.0
 
     def on_dpi_changed_qt(self, new_scale: float) -> None:
-        """RDP 或 DPI 变化时自动缩放窗口"""
+        """DPI 变化通知 Qt 窗口。
+
+        Qt6 自身为 Per-Monitor 感知，窗口/字体由 Qt 内部随屏幕 DPI 重算；
+        此处不再二次缩放(会叠加放大)，也不再因异常删除 _pg_windows 记录，仅清理已销毁窗口。
+        """
         try:
-            if hasattr(self, "_pg_windows"):
-                for k, v in list(getattr(self, "_pg_windows").items()):
-                    win = v.get("win")
-                    try:
-                        if win is not None:
-                            win_qt_scale = self.get_qt_window_scale(win)
-                            if win_qt_scale == new_scale:
-                                geom = win.geometry()
-                                width, height = geom.width(), geom.height()
-                                base = getattr(self, "_dpi_base", {"scale": 1.0})
-                                scale_ratio = new_scale / base["scale"]
-                                new_w = int(width * scale_ratio)
-                                new_h = int(height * scale_ratio)
-                                win.resize(new_w, new_h)
-                                code = v.get("code", "N/A")
-                                logger.info(f"[DPI] code={code} 窗口自动放大到 {new_scale:.2f} 倍-> {scale_ratio:.2f}倍 ({new_w}x{new_h})")
-                                if PYQT5_AVAILABLE:
-                                    for child in win.findChildren(QtWidgets.QWidget):
-                                        font = child.font()
-                                        font.setPointSizeF(font.pointSizeF() * scale_ratio)
-                                        child.setFont(font)
-                    except Exception as e:
-                        logger.info(f'e:{e} pg win is None will remove:{v.get("win")}')
-                        del getattr(self, "_pg_windows")[k]
+            for k, v in list(getattr(self, "_pg_windows", {}).items()):
+                win = v.get("win")
+                try:
+                    if win is not None:
+                        win.isVisible()  # 仅探测 C++ 对象是否存活
+                        win.update()
+                except RuntimeError:
+                    getattr(self, "_pg_windows").pop(k, None)
+                    logger.info(f'[DPI] pg win 已销毁，移除记录: {k}')
         except Exception as e:
-            logger.info(f"[DPI] 自动缩放失败: {e}")
+            logger.info(f"[DPI] Qt 通知失败: {e}")
 
     def scale_single_window(self, window: Any, scale_factor: float) -> None:
         width = window.winfo_width()
@@ -180,59 +231,33 @@ class DPIMixin:
             style = ttk.Style(window)
             style.configure("Treeview", rowheight=int(22 * scale_factor))
 
-    def scale_tk_window(self, window: Any, scale_factor: float, name: str) -> None:
-        """对单个 Tk 窗口进行 DPI 缩放"""
-        if not hasattr(window, "_dpi_base"):
-            base_tree_colwidths = []
-            if hasattr(window, 'tree'):
-                base_tree_colwidths = [window.tree.column(c)['width'] for c in window.tree['columns']]
-            window._dpi_base = {
-                "width": window.winfo_width(),
-                "height": window.winfo_height(),
-                "font_size": getattr(self, 'default_font_size', 10),
-                "tree_rowheight": 22,
-                "tree_colwidths": base_tree_colwidths,
-                "scale": get_window_dpi_scale(window)
-            }
-            logger.info(f"[DPI] {name} 初始化基准值: {window._dpi_base['scale']} 窗口 {window._dpi_base['width']}x{window._dpi_base['height']}")
+    def scale_tk_window(self, window: Any, scale_factor: float, name: str, old_scale: Optional[float] = None) -> None:
+        """对单个 Tk 子窗口做 DPI 缩放（字体由 tk scaling 全局处理，这里只处理尺寸/列宽）。"""
+        applied = getattr(window, "_dpi_applied", None) or old_scale or scale_factor
+        ratio = scale_factor / applied if applied else 1.0
+        window._dpi_applied = scale_factor
+        if abs(ratio - 1.0) < 0.01:
             return
-
-        base = window._dpi_base
-        base_scale_factor = base["scale"]
-        font_size = base["font_size"]
-        rowheight = base["tree_rowheight"]
-
-        if abs(scale_factor - base_scale_factor) < 0.01:
-            return
-        
-        logger.info(f"[DPI] {name} font_size: {font_size} rowheight:{rowheight} 变化: {base_scale_factor} to {scale_factor}")
-        
-        def scale_widgets(parent: Any, f_size: int) -> None:
-            for child in parent.winfo_children():
-                try:
-                    f_old = tkfont.nametofont(child.cget("font"))
-                    f_new = tkfont.Font(family=f_old.cget("family"), size=f_size, weight=f_old.cget("weight"), slant=f_old.cget("slant"))
-                    child.configure(font=f_new)
-                except Exception:
-                    pass
-                scale_widgets(child, f_size)
-
-        scale_widgets(window, font_size)
-
+        try:
+            if window.state() == 'normal':
+                w, h = window.winfo_width(), window.winfo_height()
+                x, y = window.winfo_x(), window.winfo_y()
+                window.geometry(f"{max(100, int(w * ratio))}x{max(80, int(h * ratio))}+{x}+{y}")
+                self._clamp_window_to_screen(window)
+        except Exception as e:
+            logger.debug(f"[DPI] {name} 尺寸缩放失败: {e}")
         if hasattr(window, "tree"):
-            style = ttk.Style(window)
-            style_name = f"{window.winfo_id()}.Treeview"
-            style.configure(style_name, rowheight=rowheight)
-            window.tree.configure(style=style_name)
+            self._scale_tree_columns(window.tree, ratio)
+        logger.info(f"[DPI] {name} 缩放 {applied:.2f} → {scale_factor:.2f}")
 
-    def scale_refesh_windows(self, scale_factor: float) -> None:
+    def scale_refesh_windows(self, scale_factor: float, old_scale: Optional[float] = None) -> None:
         if hasattr(self, "_concept_win") and self._concept_win:
             if self._concept_win.winfo_exists():
-                self.scale_tk_window(self._concept_win, scale_factor, name="_concept_win")
-        
+                self.scale_tk_window(self._concept_win, scale_factor, "_concept_win", old_scale)
+
         if hasattr(self, "kline_monitor") and self.kline_monitor and hasattr(self.kline_monitor, 'winfo_exists') and self.kline_monitor.winfo_exists():
             try:
-                self.scale_tk_window(self.kline_monitor, scale_factor, name="kline_monitor")
+                self.scale_tk_window(self.kline_monitor, scale_factor, "kline_monitor", old_scale)
             except Exception:
                 pass
 
@@ -242,90 +267,56 @@ class DPIMixin:
                 win = win_info.get('toplevel')
                 if win and win.winfo_exists():
                     try:
-                        self.scale_tk_window(win, scale_factor, name=unique_code)
+                        self.scale_tk_window(win, scale_factor, unique_code, old_scale)
                     except Exception as e:
                         logger.warning(f"scale_tk_window {unique_code} 失败: {e}")
-        logger.info(f'scale_refesh_win done')
+        logger.info('scale_refesh_win done')
 
-    def _apply_scale_dpi_change(self, scale_factor: float) -> None:
-        """当 DPI 变化时，同步缩放 Tk + Qt"""
+    def _apply_scale_dpi_change(self, scale_factor: float, base_wh: Optional[tuple] = None) -> None:
+        """DPI 变化时重设 Tk 全局缩放(含缩小方向)、行高、列宽、窗口尺寸，并收敛进屏幕。"""
+        old_scale = getattr(self, 'scale_factor', 1.0) or 1.0
         try:
-            if not hasattr(self, "_dpi_base"):
-                base_tree_colwidths = []
-                if hasattr(self, 'tree'):
-                    base_tree_colwidths = [self.tree.column(c)['width'] for c in self.tree['columns']]
-                self._dpi_base = {
-                    "width": self.winfo_width(),
-                    "height": self.winfo_height(),
-                    "font_size": self.default_font.cget("size"),
-                    "tree_rowheight": 22,
-                    "tree_colwidths": base_tree_colwidths,
-                    "scale": getattr(self, 'scale_factor', 1.0)
-                }
-                logger.info(f"[DPI] 初始化基准值Main: 窗口 {self._dpi_base['width']}x{self._dpi_base['height']}")
-
-            base = self._dpi_base
-            font_size = base["font_size"]
-            scale_ratio = scale_factor / base["scale"]
-
-            width = self.winfo_width()
-            height = self.winfo_height()
-            new_w = int(width * scale_factor / (getattr(self, 'scale_factor', 1.0) or 1.0))
-            new_h = int(height * scale_factor / (getattr(self, 'scale_factor', 1.0) or 1.0))
-            self.geometry(f"{new_w}x{new_h}")
-
-            old_scale = getattr(self, 'scale_factor', 1.0) or 1.0
-            if abs(scale_factor - old_scale) < 0.01:
-                return
-
+            ratio = scale_factor / old_scale
+            # 1) 全局 tk scaling: 所有以 pt 计的字体随之重算(不再手工二次改字号)
+            self.tk.call('tk', 'scaling', (scale_factor * 96.0) / 72.0)  # type: ignore
+            # 2) Treeview 行高
+            try:
+                ttk.Style(self).configure("Treeview", rowheight=int(22 * scale_factor))
+            except Exception as e:
+                logger.warning(f"[DPI变化] 设置 Treeview 行高失败: {e}")
+            # 3) 主表列宽
+            if hasattr(self, "tree") and abs(ratio - 1.0) >= 0.01:
+                self._scale_tree_columns(self.tree, ratio)
+            # 4) 主窗口尺寸(基于变化前稳定尺寸)，最大化状态交给系统
+            try:
+                if self.state() == 'normal':  # type: ignore
+                    bw, bh = base_wh or (self.winfo_width(), self.winfo_height())
+                    x, y = self.winfo_x(), self.winfo_y()
+                    self.geometry(f"{int(bw * ratio)}x{int(bh * ratio)}+{x}+{y}")
+                    self._clamp_window_to_screen(self)
+            except Exception as e:
+                logger.warning(f"[DPI变化] 主窗口缩放失败: {e}")
             self.scale_factor = scale_factor
-            new_size = max(9, round(font_size * scale_ratio))
-
-            font_names = ["TkDefaultFont", "TkTextFont", "TkFixedFont", "TkHeadingFont", "TkMenuFont"]
-            for name in font_names:
-                try:
-                    f = tkfont.nametofont(name)
-                    f.configure(size=new_size)
-                except Exception:
-                    pass
-
-            self.default_font.configure(size=new_size)
-            self.default_font_bold.configure(size=new_size)
-
-            if hasattr(self, "tree"):
-                try:
-                    style = ttk.Style(self)
-                    style.configure("Treeview", rowheight=int(22 * scale_factor))
-                except Exception as e:
-                    logger.warning(f"[DPI变化] 设置 Treeview 行高失败: {e}")
-
-            self.on_dpi_changed_qt(scale_factor)
-            logger.info(f"[DPI变化] ✅ DPI同步完成 Tk+Qt @ {scale_factor:.2f}x")
-
+            # 5) 子窗口
+            self.scale_refesh_windows(scale_factor, old_scale)
+            logger.info(f"[DPI变化] ✅ DPI同步完成 Tk @ {scale_factor:.2f}x (ratio={ratio:.3f})")
         except Exception as e:
             logger.error(f"[DPI变化] ❌ DPI同步失败: {e}", exc_info=True)
         finally:
             self.scale_factor = scale_factor
 
     def _apply_dpi_scaling(self, scale_factor: Optional[float] = None) -> float:
-        """自动计算并设置 Tkinter 的内部 DPI 缩放。"""
-        if scale_factor is None: 
-            self.scale_factor = get_window_dpi_scale(self) # type: ignore
+        """自动计算并设置 Tkinter 的内部 DPI 缩放（含 <=1.0，保证放大后可缩回）。"""
+        if scale_factor is None:
+            self.scale_factor = get_window_dpi_scale(self)  # type: ignore
             scale_factor = self.scale_factor
         else:
             self.scale_factor = scale_factor
-        
-        if scale_factor > 1.0:
-            tk_scaling_value = (scale_factor * 96.0) / 72.0 
-            self.tk.call('tk', 'scaling', tk_scaling_value) # type: ignore
-            try:
-                style = ttk.Style(self) # type: ignore
-                scaled_row_height = int(22 * scale_factor)
-                # f = tkfont.nametofont("TkDefaultFont")
-                # scaled_row_height = int(f.metrics("linespace") * 1.4)
-                style.configure('Treeview', rowheight=scaled_row_height)
-            except Exception as e_rowinit:
-                logger.warning(f"[初始化缩放] 设置 Treeview 行高失败: {e_rowinit}")
+        try:
+            self.tk.call('tk', 'scaling', (scale_factor * 96.0) / 72.0)  # type: ignore
+            ttk.Style(self).configure('Treeview', rowheight=int(22 * scale_factor))  # type: ignore
+        except Exception as e_rowinit:
+            logger.warning(f"[初始化缩放] 设置失败: {e_rowinit}")
         return scale_factor
 
     def get_scaled_value(self) -> float:

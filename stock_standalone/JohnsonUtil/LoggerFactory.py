@@ -505,12 +505,42 @@ class DropQueueHandler(QueueHandler):
     """
     丢弃式日志处理器 (P0-4)
     当 Queue 满载时，直接丢弃新日志，防止阻塞业务线程。
+
+    [FIX] 原实现静默丢弃且无任何计数，导致生产上突发日志（如某标的 1 秒内 50 条
+    DEBUG）在文件里凭空消失、无法判断是「没发生」还是「被丢了」。
+    现在累计丢弃数，并每 30 秒尝试补一条带时间戳的告警记录。
     """
+
+    _drop_count = 0
+    _last_report = 0.0
+    _report_interval = 30.0
+
     def enqueue(self, record):
         try:
             self.queue.put_nowait(record)
+            return
         except queue.Full:
-            pass  # 💣 满载即丢弃
+            pass
+
+        cls = type(self)
+        cls._drop_count += 1
+        import time as _time
+        now = _time.monotonic()
+        if now - cls._last_report < cls._report_interval:
+            return
+        dropped = cls._drop_count
+        try:
+            notice = logging.LogRecord(
+                name='log.drop', level=logging.WARNING, pathname=__file__, lineno=0,
+                msg='[log drop] queue full, %d records dropped before enqueue '
+                    '(raise queue size or lower log level)', args=(dropped,), exc_info=None,
+            )
+            self.queue.put_nowait(notice)
+            cls._last_report = now
+            cls._drop_count = 0
+        except queue.Full:
+            # 队列仍满，保留计数，下一条记录时再试
+            pass
 
 
 def _ensure_listener_started(log_f, show_detail=True):
@@ -519,8 +549,10 @@ def _ensure_listener_started(log_f, show_detail=True):
     # ⭐ [STABILITY] 在 Windows 混合 GUI 环境下，multiprocessing.Queue 的 feeder 线程会引发 GIL 崩溃。
     # 我们改为每个进程使用各自独立的 queue.Queue（线程安全且无后台 feeder 线程）。
     if _GLOBAL_QUEUE is None:
-        # ⭐ [PERF] 限制队列长度为 2000，配合 DropQueueHandler 实现丢弃策略，防止 IO 阻塞业务
-        _GLOBAL_QUEUE = queue.Queue(2000)
+        # ⭐ [PERF] 限制队列长度，配合 DropQueueHandler 实现丢弃策略，防止 IO 阻塞业务
+        # [FIX] 2000 → 20000：单条 record 很小，2 万条仅占几 MB，
+        # 但原容量在行情快照/批量扫描的突发下极易打满并静默丢日志。
+        _GLOBAL_QUEUE = queue.Queue(20000)
 
 
         # ================= Console handler（彩色） =================
