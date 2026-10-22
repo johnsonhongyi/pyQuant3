@@ -4345,9 +4345,14 @@ class SBCChartCanvas(QWidget):
                     p_idx_local = p_idx_raw - start_i
                     if 0 <= p_idx_local < n:
                         x_p = k_to_x(p_idx_local)
-                        # 通达信同款贯穿上下的绿色细虚线
-                        painter.setPen(QPen(QColor("#00FF66"), 1.2, Qt.PenStyle.DashLine))
-                        painter.drawLine(int(x_p), int(margin_top + main_h), int(x_p), int(margin_top))
+                        # 🌟 通达信同款引导细虚线：避开 K 棒自身高低点与影线，绝不遮挡蜡烛实体形态
+                        y_k_hi = k_to_y(highs[p_idx_local])
+                        y_k_lo = k_to_y(lows[p_idx_local])
+                        painter.setPen(QPen(QColor(0, 255, 102, 130), 1.0, Qt.PenStyle.DashLine))
+                        if y_k_hi > margin_top + 2:
+                            painter.drawLine(int(x_p), int(margin_top), int(x_p), int(y_k_hi - 2))
+                        if y_k_lo < margin_top + main_h - 2:
+                            painter.drawLine(int(x_p), int(y_k_lo + 2), int(x_p), int(margin_top + main_h))
 
                         # 通达信同款顶部【| 逆势先锋】绿色粗体文字 (避开左上角通道 HUD 卡片区域)
                         if x_p > margin_left + 450:
@@ -4800,11 +4805,11 @@ class SBCChartCanvas(QWidget):
         painter.save()
         painter.setClipRect(int(margin_left), int(margin_top), int(chart_w), int(chart_h))
 
-        brush_up = QBrush(QColor(180, 200, 225, 42))
-        pen_up = QPen(QColor(205, 220, 240, 95), 1, Qt.PenStyle.DashLine)
+        brush_up = QBrush(QColor(155, 175, 205, 70))
+        pen_up = QPen(QColor(215, 230, 250, 180), 1.2, Qt.PenStyle.DashLine)
 
-        brush_dn = QBrush(QColor(195, 195, 215, 42))
-        pen_dn = QPen(QColor(215, 215, 235, 95), 1, Qt.PenStyle.DashLine)
+        brush_dn = QBrush(QColor(175, 170, 200, 70))
+        pen_dn = QPen(QColor(225, 220, 245, 180), 1.2, Qt.PenStyle.DashLine)
 
         font_label = QFont("Consolas", 8, QFont.Weight.Normal)
         painter.setFont(font_label)
@@ -4837,26 +4842,33 @@ class SBCChartCanvas(QWidget):
                 y_bottom = float(price_to_y(s_low))
                 band_h = abs(y_bottom - y_top)
 
+                # 🌟 通达信同款质感通道带与起点闭合框
                 rect_band = QRectF(x1, y_top, x2 - x1, band_h)
                 painter.fillRect(rect_band, brush_cur)
 
                 painter.setPen(pen_cur)
                 painter.drawLine(int(x1), int(y_top), int(x2), int(y_top))
                 painter.drawLine(int(x1), int(y_bottom), int(x2), int(y_bottom))
+                # 起点垂直边界线
+                painter.drawLine(int(x1), int(y_top), int(x1), int(y_bottom))
 
-                text_str = f"{s_low:.2f}-{s_high:.2f}"
+                # 🌟 极致美观缺口标签：悬浮胶囊徽章，避开指标重叠
+                text_str = f"缺口 {s_low:.2f}-{s_high:.2f}"
                 tw = fm.horizontalAdvance(text_str)
-                if (x2 - x1) >= tw + 6:
-                    tx = max(float(margin_left + 4), float(x1 + 4))
-                    if band_h >= 13.0:
-                        ty = y_top + (band_h + th) / 2.0 - 2.0
+                if (x2 - x1) >= tw + 10:
+                    tx = max(float(margin_left + 4), float(x1 + 6))
+                    if band_h >= 18.0:
+                        ty = y_top + 4
                     else:
-                        ty = y_top - 2.0
+                        ty = max(float(margin_top + 4), y_top - th - 3)
 
-                    bg_rect = QRectF(tx - 2, ty - th + 2, tw + 4, th)
-                    painter.fillRect(bg_rect, QColor(10, 15, 26, 170))
-                    painter.setPen(QPen(QColor("#E2E8F0")))
-                    painter.drawText(int(tx), int(ty), text_str)
+                    bg_rect = QRectF(tx, ty, tw + 8, th + 2)
+                    painter.setPen(QPen(QColor(140, 175, 220, 190), 1))
+                    painter.setBrush(QBrush(QColor(16, 24, 38, 225)))
+                    painter.drawRoundedRect(bg_rect, 3, 3)
+                    painter.setPen(QPen(QColor("#F8FAFC")))
+                    painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+                    painter.drawText(int(tx + 4), int(ty + th - 2), text_str)
 
         painter.restore()
 
