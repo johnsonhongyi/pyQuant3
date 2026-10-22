@@ -4602,7 +4602,7 @@ class SBCChartCanvas(QWidget):
         return gaps
 
     def _compute_kline_gaps(self, highs: np.ndarray, lows: np.ndarray) -> List[Dict[str, Any]]:
-        """计算 K 线序列中的全部跳空缺口与回补生命周期"""
+        """计算 K 线序列中的全部跳空缺口与回补生命周期 (通达信同款：仅保留未完全回补的有效缺口)"""
         n = len(highs)
         if n < 2:
             return []
@@ -4612,7 +4612,8 @@ class SBCChartCanvas(QWidget):
             l_prev = float(lows[i - 1])
             if h_prev > 0 and l_prev > 0:
                 candidates.append((i, h_prev, l_prev))
-        return self._calculate_gaps_engine(highs, lows, candidates, min_gap_abs=0.005)
+        all_gaps = self._calculate_gaps_engine(highs, lows, candidates, min_gap_abs=0.005)
+        return [g for g in all_gaps if not g.get("is_closed", False)]
 
     def _compute_intraday_gaps(
         self,
@@ -4622,7 +4623,7 @@ class SBCChartCanvas(QWidget):
         times: List[str],
         op_ref: float = 0.0,
     ) -> List[Dict[str, Any]]:
-        """计算分时走势中的多日日间跳空缺口与单日首跳缺口"""
+        """计算分时走势中的多日日间跳空缺口与单日首跳缺口 (通达信同款：仅保留未完全回补的有效缺口)"""
         n = len(highs)
         if n < 1:
             return []
@@ -4658,14 +4659,16 @@ class SBCChartCanvas(QWidget):
                 if p_hi > 0 and p_lo > 0:
                     candidates.append((curr_s, p_hi, p_lo))
 
-        # 3. 单日首点跳空 (开盘相对昨收基准价 op_ref)
-        if op_ref > 0.01 and n > 0:
+        # 3. 严格仅在单日分时模式下 (len(day_ranges) <= 1)，才基于 op_ref (昨收) 检测早盘跳空
+        elif len(day_ranges) <= 1 and op_ref > 0.01 and n > 0:
             first_h = float(highs[0])
             first_l = float(lows[0])
             if first_h > 0 and first_l > 0 and abs(first_l - op_ref) > 0.005 and abs(first_h - op_ref) > 0.005:
                 candidates.append((0, op_ref, op_ref))
 
-        return self._calculate_gaps_engine(highs, lows, candidates, min_gap_abs=0.005)
+        all_gaps = self._calculate_gaps_engine(highs, lows, candidates, min_gap_abs=0.005)
+        # 🌟 通达信同款：分时图仅展示尚未被完全回补的有效缺口 (已回补历史缺口不予显示)
+        return [g for g in all_gaps if not g.get("is_closed", False)]
 
     def _draw_gap_channels_kline(
         self,

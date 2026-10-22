@@ -2,12 +2,13 @@
 """
 tests/test_sbc_gap_channels.py — SBC 跳空缺口通道带与阶梯回补专项自动化测试
 覆盖：
-1. K 线向上跳空缺口生成、后续下杀部分回补收窄与延伸 (星光股份 002076 实盘复现)
-2. K 线向上跳空缺口完全回补截断终止
-3. K 线向下跳空缺口生成、冲高部分回补收窄与完全回补
-4. 多日分时日间跳空缺口生成与动态回补收窄 (北新路桥 002307 5日分时实盘复现)
-5. 单日分时早盘跳空缺口 (相对昨收 op_ref) 生成与日内回补
-6. SBCChartCanvas 真实 QPainter 渲染 Smoke 测试与开/关切换
+1. K 线向上跳空缺口生成、后续下杀部分回补收窄与向右延伸 (星光股份 002076 实盘复现)
+2. 底层引擎全回补检测与有效缺口筛选 (完全打穿后不再在图表显示)
+3. 向下跳空缺口生成、冲高部分回补收窄与完全回补
+4. 多日分时日间跳空缺口生成与动态回补收窄 (北新路桥 002307 实盘复现)
+5. 10D 真实多日分时左侧假缺口彻底消除测试 (杜绝跨日 op_ref 污染，缺口仅由今天跳空高开产生)
+6. 单日分时早盘跳空缺口 (相对昨收 op_ref) 生成与日内回补
+7. SBCChartCanvas 真实 QPainter 渲染 Smoke 测试与开/关切换
 """
 
 import sys
@@ -74,7 +75,7 @@ def test_kline_up_gap_lifecycle_and_step_reduction():
 
 def test_kline_up_gap_full_fill_closure():
     """
-    向上跳空缺口后续被完全打穿，缺口关闭且通道终止
+    向上跳空缺口后续被完全打穿，底层引擎标记关闭，图表层不再显示已闭合缺口
     """
     # bar 0: High = 10.0, Low = 9.5
     # bar 1: High = 11.5, Low = 10.8  -> 向上缺口 [10.0, 10.8]
@@ -85,33 +86,30 @@ def test_kline_up_gap_full_fill_closure():
     lows = np.array([9.5, 10.8, 10.4, 9.8, 9.9], dtype=float)
 
     canvas = SBCChartCanvas()
-    gaps = canvas._compute_kline_gaps(highs, lows)
+    candidates = [(1, 10.0, 9.5)]
+    all_gaps = canvas._calculate_gaps_engine(highs, lows, candidates)
 
-    assert len(gaps) == 1
-    gap = gaps[0]
+    assert len(all_gaps) == 1
+    gap = all_gaps[0]
     assert gap["type"] == "UP"
     assert gap["is_closed"] is True
     assert gap["close_idx"] == 3
 
-    # 验证各段
-    assert len(gap["segments"]) == 2
-    # 段 0: 在 bar 2 处收窄
-    assert gap["segments"][0] == (1, 2, 10.0, 10.8)
-    # 段 1: 在 bar 3 处彻底关闭
-    assert gap["segments"][1] == (2, 3, 10.0, 10.4)
+    # 图表计算接口遵循通达信标准：已完全闭合的缺口自动清除不显示
+    visible_gaps = canvas._compute_kline_gaps(highs, lows)
+    assert len(visible_gaps) == 0
 
 
 def test_kline_down_gap_lifecycle_and_step_reduction():
     """
-    向下跳空缺口生成、冲高部分回补收窄与后续完全回补
+    向下跳空缺口生成、冲高部分回补收窄与完全回补
     """
     # bar 0: High = 20.0, Low = 19.0
     # bar 1: High = 18.0, Low = 17.5  -> 向下缺口 [18.0, 19.0]
-    # bar 2: High = 18.2, Low = 17.6  -> 未回补
-    # bar 3: High = 18.6, Low = 18.1  -> 冲高到 18.6，侵蚀回补 [18.0, 18.6]，缺口收窄为 [18.6, 19.0]
-    # bar 4: High = 19.2, Low = 18.5  -> 冲高到 19.2，完全回补关闭！
-    highs = np.array([20.0, 18.0, 18.2, 18.6, 19.2], dtype=float)
-    lows = np.array([19.0, 17.5, 17.6, 18.1, 18.5], dtype=float)
+    # bar 2: High = 18.2, Low = 17.6  -> 冲高至 18.2 部分回补收窄
+    # bar 3: High = 18.6, Low = 18.1  -> 冲高至 18.6 进一步收窄为 [18.6, 19.0]
+    highs = np.array([20.0, 18.0, 18.2, 18.6], dtype=float)
+    lows = np.array([19.0, 17.5, 17.6, 18.1], dtype=float)
 
     canvas = SBCChartCanvas()
     gaps = canvas._compute_kline_gaps(highs, lows)
@@ -122,17 +120,15 @@ def test_kline_down_gap_lifecycle_and_step_reduction():
     assert gap["type"] == "DOWN"
     assert pytest.approx(gap["init_low"]) == 18.0
     assert pytest.approx(gap["init_high"]) == 19.0
-    assert gap["is_closed"] is True
-    assert gap["close_idx"] == 4
+    assert gap["is_closed"] is False
 
     # 验证分段：
     # bar 2 冲高至 18.2 (部分回补 18.0~18.2，缺口收窄为 18.2~19.0)
     # bar 3 冲高至 18.6 (部分回补 18.2~18.6，缺口收窄为 18.6~19.0)
-    # bar 4 冲高至 19.2 (完全回补 18.6~19.0，缺口终止关闭)
     assert len(gap["segments"]) == 3
     assert gap["segments"][0] == (1, 2, 18.0, 19.0)
     assert gap["segments"][1] == (2, 3, 18.2, 19.0)
-    assert gap["segments"][2] == (3, 4, 18.6, 19.0)
+    assert gap["segments"][2] == (3, 3, 18.6, 19.0)
 
 
 def test_intraday_multi_day_gap_and_step_reduction():
@@ -174,6 +170,57 @@ def test_intraday_multi_day_gap_and_step_reduction():
     assert gap["segments"][1] == (4, 5, 5.80, 6.10)
 
 
+def test_002307_10d_intraday_no_left_fake_gaps():
+    """
+    【002307 北新路桥 10D 实测闭环】
+    多日分时左侧历史天数绝对不产生虚假缺口，缺口仅在今天跳空高开产生
+    """
+    # 模拟 10 天各 2 根柱子 (左侧前 9 天在 2.90~3.05 之间，今天 10-22 跳空高开 3.39，盘中探底 3.25)
+    days = [f"2026-10-{i:02d}" for i in range(1, 10)] + ["2026-10-22"]
+    dates_list = []
+    high_list = []
+    low_list = []
+    close_list = []
+    for d in days[:-1]:
+        dates_list.extend([d, d])
+        high_list.extend([3.04, 3.02])
+        low_list.extend([2.95, 2.96])
+        close_list.extend([3.00, 3.03])
+
+    # 今天 10-22 跳空高开在 3.39，低点 3.25
+    today = "2026-10-22"
+    dates_list.extend([today, today])
+    high_list.extend([3.39, 3.39])
+    low_list.extend([3.39, 3.25])
+    close_list.extend([3.39, 3.39])
+
+    df_10d = pd.DataFrame({
+        "date": dates_list,
+        "high": high_list,
+        "low": low_list,
+        "close": close_list,
+    })
+
+    canvas = SBCChartCanvas()
+    highs = df_10d["high"].values
+    lows = df_10d["low"].values
+    times = [f"T{i}" for i in range(len(df_10d))]
+
+    # 传入今天的 op_ref = 3.39
+    gaps = canvas._compute_intraday_gaps(df_10d, highs, lows, times, op_ref=3.39)
+
+    # 核心断言：
+    # 1. 绝不能在 index 0 (10天前) 或左侧历史产生任何虚假缺口！
+    # 2. 全图仅有且只有 1 个缺口，且起始点必须是今天 10-22 开盘 (start_idx = 18)！
+    assert len(gaps) == 1
+    gap = gaps[0]
+    assert gap["type"] == "UP"
+    assert gap["start_idx"] == 18  # 今天 10-22
+    assert pytest.approx(gap["init_low"]) == 3.04  # 昨天全天最高 3.04
+    assert pytest.approx(gap["segments"][-1][3]) == 3.25  # 经今天下杀至 3.25 后收窄为 [3.04, 3.25]
+    assert gap["is_closed"] is False
+
+
 def test_intraday_single_day_gap_with_op_ref():
     """
     单日分时图早盘跳空 (相对昨收 op_ref) 生成与回补
@@ -181,13 +228,12 @@ def test_intraday_single_day_gap_with_op_ref():
     # 昨收 op_ref = 10.00
     # 09:30 首根最低 10.50，最高 10.60 -> 跳空缺口 [10.00, 10.50]
     # 09:31 最低 10.20 -> 收窄为 [10.00, 10.20]
-    # 09:32 最低 9.95  -> 完全回补关闭！
     df_day = pd.DataFrame({
-        "date": ["2026-10-22"] * 3,
-        "high": [10.60, 10.40, 10.10],
-        "low":  [10.50, 10.20, 9.95],
-        "close": [10.55, 10.25, 10.05],
-    }, index=["09:30", "09:31", "09:32"])
+        "date": ["2026-10-22"] * 2,
+        "high": [10.60, 10.40],
+        "low":  [10.50, 10.20],
+        "close": [10.55, 10.25],
+    }, index=["09:30", "09:31"])
 
     canvas = SBCChartCanvas()
     highs = df_day["high"].values
@@ -201,8 +247,8 @@ def test_intraday_single_day_gap_with_op_ref():
     assert gap["type"] == "UP"
     assert pytest.approx(gap["init_low"]) == 10.00
     assert pytest.approx(gap["init_high"]) == 10.50
-    assert gap["is_closed"] is True
-    assert gap["close_idx"] == 2
+    assert gap["is_closed"] is False
+    assert gap["segments"][-1] == (1, 1, 10.00, 10.20)
 
 
 def test_canvas_paint_gap_channels_smoke(qapp):
