@@ -1253,7 +1253,7 @@ class IPOSubnewDetectorDialog(QMainWindow):
 
     def _on_batch_analyzed(self, batch_signals: List[VWAPDetectorSignal]):
         """【🚀 批量分组接收】整组多只信号批量压入平滑待渲染队列，彻底消灭单只零碎调度性能损耗"""
-        if self._closing:
+        if getattr(self, '_closing', False):
             return
         for sig in batch_signals:
             if sig.code not in self.monitored_codes:
@@ -3067,7 +3067,7 @@ class IPOSubnewDetectorDialog(QMainWindow):
                     return
                 self._stream_ui_pending = True
             def _ui_update():
-                if self._closing:
+                if getattr(self, '_closing', False):
                     return
                 with self._stream_ui_lock:
                     self._stream_ui_pending = False

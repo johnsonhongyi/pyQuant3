@@ -44,6 +44,7 @@ _cached_valid_audio_output_idx = None
 
 def _speak_sapi(speaker, text, stop_event, interrupt_event=None, max_timeout=8.0):
     """Keep COM calls on the voice thread with a hard deadline to prevent deadlocks."""
+    import time
     if stop_event.is_set():
         return
     speaker.Speak(text, 1)  # SVSFlagsAsync

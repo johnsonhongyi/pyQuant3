@@ -7969,7 +7969,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     revision = max(revision, int(manager.persistent_revision))
                     self.global_dict['linkage_monitor_codes'] = favorite_codes
                     self.global_dict['linkage_favorites_revision'] = revision
-                    with self._ipc_sync_state_lock:
+                    ipc_lock = getattr(self, '_ipc_sync_state_lock', None)
+                    if ipc_lock is not None:
+                        with ipc_lock:
+                            self._force_full_sync_pending = True
+                    else:
                         self._force_full_sync_pending = True
                     self._force_ui_refresh_pending = True
                     with self._tk_linkage_receipt_lock:
@@ -20511,7 +20515,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # --- 新窗口 ---
         win = tk.Toplevel(self)
         win.title(f"{concept_name} 概念前10放量上涨股")
-        win.minsize(360, 180)
+        win.minsize(120, 80)
 
         # 缓存窗口
         # --- 如果传了code但没传stock_name，则从self.df_all查找 ---
@@ -20923,7 +20927,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         win._concept_name = concept_name
         real_width = int(saved_width * self.scale_factor)
         real_height = int(saved_height * self.scale_factor)
-        win.minsize(real_width, real_height)
+        win.minsize(min(160, real_width), min(100, real_height))
         # win.minsize(460, 320)
         # 在创建窗口时保存定时器 id
         win._auto_refresh_id = None

@@ -119,29 +119,38 @@ def get_current_window_scale(tk_obj):
         return 96, 1.0
 
 def get_windows_dpi_scale_factor():
-    """获取 Windows 系统的真实 DPI 缩放因子。
-    严格返回系统或窗口的客观物理 DPI 比例，绝不因 RDP 远程桌面人为虚标或篡改。
+    """获取 Windows 系统的 DPI 缩放因子。
+    在 RDP 远程桌面连接时，若底层驱动报告默认 1.0，平滑识别 RDP 环境并返回 2.0，
+    驱动整个界面和窗口配置完美对齐远程桌面专属布局。
     """
     if sys.platform != "win32":
         return 1.0
     try:
         user32 = ctypes.windll.user32
+        dpi = 96
         # 1. 优先使用 Windows 10 原生精确 API
         try:
-            dpi = user32.GetDpiForSystem()
-            if dpi and dpi > 0:
-                return round(dpi / 96.0, 2)
+            dpi_val = user32.GetDpiForSystem()
+            if dpi_val and dpi_val > 0:
+                dpi = dpi_val
         except Exception:
             pass
-        # 2. 回退传统 DC 查询
-        LOGPIXELSX = 88
-        gdi32 = ctypes.windll.gdi32
-        dc = user32.GetDC(0)
-        dpi = gdi32.GetDeviceCaps(dc, LOGPIXELSX)
-        user32.ReleaseDC(0, dc)
-        if dpi and dpi > 0:
-            return round(dpi / 96.0, 2)
-        return 1.0
+        if dpi == 96:
+            # 2. 回退传统 DC 查询
+            try:
+                LOGPIXELSX = 88
+                gdi32 = ctypes.windll.gdi32
+                dc = user32.GetDC(0)
+                dpi_dc = gdi32.GetDeviceCaps(dc, LOGPIXELSX)
+                user32.ReleaseDC(0, dc)
+                if dpi_dc and dpi_dc > 0:
+                    dpi = dpi_dc
+            except Exception:
+                pass
+        scale = round(dpi / 96.0, 2)
+        if scale == 1.0 and is_rdp_session():
+            return 2.0
+        return scale
     except Exception:
         return 1.0
 

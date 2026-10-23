@@ -5247,7 +5247,7 @@ def get_ats_closing_flag_path() -> str:
 
 
 def _is_ats_shutting_down() -> bool:
-    """检查当前是否处于 ATS 主系统退出/关闭流程中 (支持标记文件、环境变量、QApp退出属性与主进程 PID 探针)"""
+    """检查当前是否处于 ATS 主系统退出/关闭流程中 (支持标记文件自愈、环境变量、QApp退出属性与主进程 PID 探针)"""
     try:
         from PyQt6.QtWidgets import QApplication
         app = QApplication.instance()
@@ -5256,20 +5256,51 @@ def _is_ats_shutting_down() -> bool:
     except Exception:
         pass
 
-    try:
-        closing_flag_file = get_ats_closing_flag_path()
-        if os.path.exists(closing_flag_file):
-            return True
-        # 兜底兼容旧物理路径
-        from sys_utils import get_app_root
-        old_flag = os.path.join(get_app_root(), "config", ".ats_closing")
-        if os.path.exists(old_flag):
-            return True
-    except Exception:
-        pass
-
     if os.environ.get("ATS_IS_CLOSING") == "1":
         return True
+
+    try:
+        from sys_utils import get_app_root
+        flag_candidates = [get_ats_closing_flag_path(), os.path.join(get_app_root(), "config", ".ats_closing")]
+        for c_file in flag_candidates:
+            if c_file and os.path.exists(c_file):
+                is_stale = False
+                try:
+                    mtime = os.path.getmtime(c_file)
+                    # 超过 60 秒的标记文件视为历史异常崩溃残留
+                    if time.time() - mtime > 60:
+                        is_stale = True
+                    else:
+                        with open(c_file, "r", encoding="utf-8") as f_pid:
+                            pid_txt = f_pid.read().strip()
+                        if pid_txt and pid_txt.isdigit():
+                            pid = int(pid_txt)
+                            if sys.platform == "win32":
+                                import ctypes
+                                kernel32 = ctypes.windll.kernel32
+                                SYNCHRONIZE = 0x00100000
+                                h_proc = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+                                if h_proc:
+                                    kernel32.CloseHandle(h_proc)
+                                else:
+                                    is_stale = True
+                            else:
+                                try:
+                                    os.kill(pid, 0)
+                                except OSError:
+                                    is_stale = True
+                except Exception:
+                    pass
+
+                if is_stale:
+                    try:
+                        os.remove(c_file)
+                    except Exception:
+                        pass
+                else:
+                    return True
+    except Exception:
+        pass
 
     parent_pid = os.environ.get("ATS_MAIN_PID")
     if parent_pid:

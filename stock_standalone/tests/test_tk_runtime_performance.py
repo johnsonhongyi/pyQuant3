@@ -338,7 +338,7 @@ def test_t1_warning_summary_preserves_changed_facts_and_bounds_memory():
     log = Mock()
     owner = SimpleNamespace(_t1_warning_lock=threading.Lock(), _t1_warning_state={})
     report = method('trading_kernel/execution/paper_adapter.py', 'PaperExecutionAdapter',
-                    '_log_t1_rejection', time=clock, logger=log)
+                    '_log_t1_rejection', time=clock, logger=log, datetime=datetime.datetime)
     for _ in range(100):
         report(owner, 'SELL', '000001', 'FAIL_CLOSED', 100., 0., 0., 100.)
     assert log.warning.call_count == 1
@@ -385,7 +385,7 @@ def test_sector_increment_reads_only_five_bars_and_copies_only_affected_membersh
         _calculate_leader_score=lambda data, *_args: data['score'])
     aggregate = method('bidding_momentum_detector.py', 'BiddingMomentumDetector', '_aggregate_sectors',
         cct=SimpleNamespace(CFG=SimpleNamespace(bidding_window_col=[])), SECTOR_BLACKLIST=set(),
-        get_limit_up_threshold=lambda code: 9.9, _datetime=datetime.datetime)
+        get_limit_up_threshold=lambda code: 9.9, _datetime=datetime)
     aggregate(owner, list(ticks))
     assert unused.copies == 0
     assert all(tick.klines.full_scans == 0 for tick in ticks.values())
