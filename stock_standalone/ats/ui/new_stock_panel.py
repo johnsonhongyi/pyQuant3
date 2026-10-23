@@ -169,6 +169,10 @@ IPO_HEADER_FIELD_MAP = {
 
 
 def _merge_ipc_frame(data, df_ipc, extra_cols):
+    if data is None or getattr(data, 'empty', True) or 'code' not in data.columns:
+        return data if data is not None else pd.DataFrame()
+    if df_ipc is None or getattr(df_ipc, 'empty', True):
+        return data
     data = data.copy()
     # ⚡【极速 O(1) 预索引映射表】：一次性建立全市场 code -> ipc_idx 字典，杜绝循环内 5000 行全表扫描
     if df_ipc.index.name == "code" and df_ipc.index.is_unique and 'code' not in df_ipc.columns:
@@ -197,7 +201,10 @@ def _merge_ipc_frame(data, df_ipc, extra_cols):
 
     updated_any = False
     for idx, row in zip(data.index, data.to_dict('records')):
-        code = str(row["code"]).zfill(6)
+        raw_c = row.get("code")
+        if not raw_c:
+            continue
+        code = str(raw_c).zfill(6)
         ipc_row = None
         target_idx = ipc_index_map.get(code)
         if target_idx is None:
@@ -345,7 +352,7 @@ def _merge_ipc_frame(data, df_ipc, extra_cols):
 
 def _prepare_stock_table(data, fav_stocks, sh_pct, extra_cols, filter_type, search_txt, fset, sort_col, sort_order, selected_code, base_day: int = 1):
     today_str = datetime.datetime.now().strftime("%Y-%m-%d")
-    if data.empty:
+    if data is None or getattr(data, 'empty', True) or 'code' not in data.columns:
         return [], None, {}, (frozenset(fav_stocks), sh_pct, today_str, tuple(extra_cols)), today_str
     df_filtered = data.copy()
 
@@ -1415,7 +1422,7 @@ class NewStockPanel(QWidget):
                     values = (favorites, *values[1:])
                     data = _merge_ipc_frame(source, quotes[0], values[2]) if quotes else source
                     prepared = _prepare_stock_table(data, *values)
-                    selected = data[data['code'] == values[-1]] if values[-1] and not data.empty else None
+                    selected = data[data['code'] == values[-1]] if (values[-1] and not getattr(data, 'empty', True) and 'code' in data.columns) else None
                     preview = selected.iloc[0].to_dict() if selected is not None and not selected.empty else None
                     result = (rev, source, data, quotes, prepared, preview, None)
                 except Exception as exc:
