@@ -1,5 +1,40 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-23 18:40 【移动端K线图竖排自适应与横排按钮重叠彻底修复闭环】(`docs/tasks/2026-10-23_1828_修复移动端K线图竖排自适应与横排按钮重叠.md`, `source/easy-stock-web/src/styles.css`, `source/easy-stock-web/src/components/sbc.css`, `source/easy-stock-web/src/theme.css`, `source/easy-stock-web/src/components/KLineModalMobileResponsive.test.tsx`)
+- [x] **【彻底解决手机竖排窗口不自适应与截断撑爆】**：
+  - **根除 SVG 移动端 720px 硬编码**：在 `<= 900px` 与 `<= 620px` 响应式断点下，覆盖设置 `.kline-chart { min-width: 0; width: 100%; height: auto; }` 与 `.kline-chart-wrap { min-width: 0; width: 100%; max-width: 100%; overflow-x: hidden; }`，使 SVG 图表根据 `viewBox="0 0 960 430"` 100% 自动等比例缩放适配手机屏幕宽度；
+  - **弹窗满屏与右侧关闭按钮归位**：`.kline-modal` 严格锁定 `width: 100vw; max-width: 100vw;`，彻底根除内层 720px 强制撑爆外层导致右半边（关闭按钮、价格轴、行情指标）溢出屏幕外的 Bug；
+  - **行情卡片 4 列 × 2 行紧凑排布**：`.kline-modal-quote` 设为 `repeat(4, minmax(0, 1fr))`，8 项行情（最新、涨跌幅、开盘、换手率、最高、最低、成交量、成交额）完整清晰呈现且不占过多垂直空间；
+  - **周期按钮栏单行顺滑横滑**：移动端下 `.kline-period-controls` 设为 `flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none;`，12 个周期按钮整齐单行滑动，右侧导航与放大操作按钮对齐，杜绝折成 4 行混乱堆叠；
+- [x] **【彻底根绝手机横排时 Footer 说明文字与操作区周期按钮重叠】**：
+  - **弹窗整体重构为 Flex 垂直流式布局**：废除脆弱的 `grid-template-rows: auto auto auto auto minmax(0, 1fr) auto;`，彻底根除当横屏高度受限（< 350px）时 Grid 将 Row 5（KLineChart）压缩为 0 导致 Row 6（Footer）与顶部操作按钮处于同一 Y 物理坐标重合的恶性 Bug；
+  - **自然流式隔离**：各子项（Header -> Tabs -> Quote -> Summary -> KLineChart -> Footer）均设置 `flex-shrink: 0;`，Footer 永远稳居图表最后，与操作区按钮物理完全解耦；
+  - **专门针对手机横屏增加 `@media (max-height: 520px)` 紧凑适配**：Quote 紧凑呈现为 8 列单行，微调纵向间距，最大程度为横屏用户释放 K 线走势图可视区；
+- [x] **【全套自动化测试 100% 纯绿与生产构建通过】**：
+  - 新增专项响应式与防重叠测试套件 `src/components/KLineModalMobileResponsive.test.tsx`（5/5 PASS）；
+  - 全量 8 个 KLine / 主题关联测试套件（38 项）**全部 100% 纯绿通过**；
+  - TypeScript 检查 0 错误，生产环境 Vite 打包构建成功（`✓ built in 5.06s`）；
+- [x] **【已完成生产环境安全部署上线】**：
+  - 通过 `build-and-deploy.ps1 -AllowLayeredImageBuild` 成功发布至 PVE 生产服务器（192.168.50.60），发布号 `20261023192841`；
+  - 线上健康检查接口 `/api/health` 正常返回 HTTP 200，Web 容器与 API 容器状态 healthy，移动端前端资源已全面同步生效。
+
+
+
+## 2026-10-23 18:25 【版本分支所有功能实现及业务功能闭环全景审核】(`docs/tasks/2026-10-23_1825_版本分支功能实现与业务闭环全景审核.md`)
+- [x] **【版本分支 27 个 Commit 全链路业务功能闭环核验】**：
+  - **ATS 时序可交易信号引擎完全闭环**：`premarket_profile.py` 宽表画像压缩与形态门控 -> `signal_timeline.py` 时间轴切片与连续 bar 确认 -> `signal_state_machine.py` 8 大状态流转与分段加权退场归因 -> `PositionLedger` 孤儿对账，D1~D5 缺陷及 H1 隐患彻底清零；
+  - **SBC 走势图交互与生命周期闭环**：通达信同款跳空缺口通道带及“补回多少减少多少”阶梯回补、多日分时左侧假缺口根除、隔夜无成交断开与 T 字涨停板端正还原、3 组高对比专业主题色与标准 BOLL (20,2)、Alt+点击多窗口广播联动、单窗关闭除名与退出持久化解耦；
+  - **ATS 主窗口多日强弱与核心涨跌完全解耦闭环**：工具栏 1D~9D 切换联动 4 大 Tab，真实当日涨跌幅严格 0 污染，多日累计强弱全域收敛至 DFF 列并动态对齐排序；
+  - **早盘极限性能压降与网络行情超时韧性闭环**：切除 UI 主线程 512 股 Frame 扫描，自选股样本 16 股且 ready 即短路；管道不可达 0.1ms 立即返回；新浪行情超时脱敏截断、重试与本地 HDF5 快照降级；
+  - **instockMonitorTK 交易反哺死循环根治与 T+1 门控闭环**：早于今日持仓卖出后从内核账本 pop 剔除，打破 15 秒卖出死循环；T+1 无台账持仓区分处理；5 分钟冷却与日志暴涨拦截；
+  - **自动跟单科创板 20cm 适配、投研常驻结算与桌面桥自愈闭环**：桥看门狗自愈与退出无死锁；自动淘汰过期任务与常驻对账；
+  - **Web 权限管理 CRUD、密码可见性与 Safari 闪烁根治闭环**：增删改查全支持，主管理员保护，密码眼睛可见性与大小写容错，生产环境发布号 `20261023003714` 验证上线；
+- [x] **【自动化测试全量深度审查与专项 100% 纯绿】**：
+  - 本分支关联的 17 个核心功能专项测试套件（126 项）+ 自动跟单策略测试（27 项）**全部 100% 纯绿通过（149/149 PASS）**；
+  - 定位并排查出系统在异常退出后残留的 `G:\.ats_closing` 标志文件对单窗除名的干扰机制，并提出基于 PID 存活检查的自愈增强方案。
+
+
+
 ## 2026-10-23 13:00 【ATS联动管道刷屏与早盘卡顿极限性能优化闭环】(`docs/tasks/2026-10-23_1255_ATS联动管道刷屏与早盘卡顿极限性能优化.md`, `ats/ui/main_window.py`, `data_utils.py`, `data_utils1.py`, `system_linkage_quotes.py`, `tests/test_linkage_performance_and_suppression.py`)
 - [x] **【彻底切除 Qt UI 主线程 512 股全量扫描，早盘卡顿 100% 根除】**：
   - **`_linkage_heartbeat_quote_status` 极速短路优化**：自选股样本限制在代表性前 16 股（杜绝无脑 512 轮 Frame 遍历），且只要命中最高优先级 `ready` 即刻短路返回，盘中耗时从几百毫秒压降至纳秒级；
