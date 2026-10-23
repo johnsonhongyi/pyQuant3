@@ -21,6 +21,8 @@
 !trading_kernel/tests/test_confirm_mode.py
 !trading_kernel/tests/test_broker_adapter.py
 .tmp/
+.archive-checkpoint/
+data/
 config/new_stock_data_cache.json.gz
 config/new_stock_ipo_calendar.json.gz
 config/.archive-checkpoint/
