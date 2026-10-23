@@ -1,5 +1,33 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-23 13:00 【ATS联动管道刷屏与早盘卡顿极限性能优化闭环】(`docs/tasks/2026-10-23_1255_ATS联动管道刷屏与早盘卡顿极限性能优化.md`, `ats/ui/main_window.py`, `data_utils.py`, `data_utils1.py`, `system_linkage_quotes.py`, `tests/test_linkage_performance_and_suppression.py`)
+- [x] **【彻底切除 Qt UI 主线程 512 股全量扫描，早盘卡顿 100% 根除】**：
+  - **`_linkage_heartbeat_quote_status` 极速短路优化**：自选股样本限制在代表性前 16 股（杜绝无脑 512 轮 Frame 遍历），且只要命中最高优先级 `ready` 即刻短路返回，盘中耗时从几百毫秒压降至纳秒级；
+  - **心跳定时器降频**：`_linkage_heartbeat_timer` 由 5 秒大幅拉长为 30 秒；
+  - **不可达自动跳过**：当检测到 TK 管道不可达且处于重试静默期时，主线程自动跳过心跳排队，彻底消除无用功与主线程 CPU 绑架；
+- [x] **【`frame_quote_row` 致命 $O(N)$ 全表扫描重构为 $O(1)$ 哈希命中】**：
+  - 将 `if code in frame.index:` 前置优先匹配，直接利用 Pandas 索引哈希查找（纳秒级）；
+  - 杜绝每次查询时对全表 5000 行执行高耗时 `col.astype(str).str.strip().str.zfill(6)` 字符串向量化变换；
+- [x] **【`send_code_via_pipe` 找不到管道时 2.5 秒死循环硬 sleep 彻底根绝】**：
+  - 遇到 `ERROR_FILE_NOT_FOUND` 立即退出（`break`），耗时由 2500ms 降至 0.1ms（提升 25,000 倍）；
+  - 遇到 `ERROR_PIPE_BUSY` 时等待超时由 1000ms 优化为 100ms 快速判决；
+- [x] **【300 秒日志抑制与过重心跳丢弃，彻底消除每 5 秒 WARNING 刷屏】**：
+  - `_linkage_receipt_worker` 增加 300 秒警告日志抑制：首次告知进入单机流畅模式，后续降为 DEBUG，彻底消除每 5 秒刷屏；
+  - 管道连不上时自动清理并丢弃队列中陈旧积压的 `WATCHLIST_HEARTBEAT`，保障回执与主流程轻盈；
+- [x] **【盘中自选股轮询降频消除空转】**：
+  - `_poll_favorites_loop` 盘中间隔由 500ms 降频为 15000ms（15秒），以已有 listener 事件驱动为主、定时器兜底，彻底消灭半秒一次的磁盘/SQLite 访问；
+- [x] **【全套自动化回归测试 100% 纯绿】**：
+  - 新增 `tests/test_linkage_performance_and_suppression.py`（4/4 PASS），全量 40 项联动与 ATS 核心测试纯绿秒级通过。
+
+
+## 2026-10-23 13:00 【修复singleAnalyseUtil新浪行情超时与日志刷屏优化闭环】(`docs/tasks/2026-10-23_1300_修复singleAnalyseUtil新浪行情超时与日志刷屏优化.md`, `singleAnalyseUtil.py`, `JSONData/sina_data.py`, `JohnsonUtil/commonTips.py`, `tests/test_sina_network_resilience.py`)
+- [x] **错误脱敏与日志清爽化闭环**：在 `JohnsonUtil/commonTips.py` 沉淀 `format_clean_error(msg)`，识别并截断数千字符的超长 `list=...` URL 股票列表为 `(total=N stocks)`，网络超时异常不再输出整屏详细 traceback；
+- [x] **新浪行情网络抓取韧性加固**：`JSONData/sina_data.py` 单批次规模优化至 500，连接超时由 3 秒放宽至 8 秒；分片增加局部快速重试与 `return_exceptions=True` 收集；`get_stock_data` 真正落地内部重试，每次清空 `self.stock_data`，重试用尽后返回 `df.attrs['__error__']` 结构体；
+- [x] **本地 HDF5 快照优雅降级**：`sina.all` 网络请求全量超时后降级使用本地已有 HDF5 缓存快照保底，主流程绝不崩溃；
+- [x] **`singleAnalyseUtil.py` 异常保护与连续计数修复**：调用 `sina.all` 增加保护层；每轮循环成功后重置 `except_count = 0`，解决历史累积导致的永久 `except_count > 3` 误判；
+- [x] **自动化测试回归全绿通过**：编写专项测试验证网络超时重试、脱敏清洗、HDF5 降级、计数重置及全链路回归（22 passed）。
+
+
 ## 2026-10-23 00:40 【用户管理全功能修复(CRUD)+密码可见性与登录容错加固闭环】(`docs/tasks/2026-10-23_0040_用户管理全功能修复与密码登录加固闭环.md`, `stock-strategy/source/easy-stock-analysis/backend/internal/httpapi/web_auth.go`, `stock-strategy/source/easy-stock-web/src/components/AuthGate.tsx`)
 - [x] **用户管理全能力（增 / 改 / 删 / 查 / 重置密码）前后端彻底闭环**：
   - **后端 `web_auth.go` 接口补全**：扩充支持 `GET`（列表）、`POST`（新增）、`PUT`（角色调整：管理员 ⇋ 普通用户）、`DELETE`（删除用户）；

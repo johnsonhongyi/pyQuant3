@@ -8923,6 +8923,29 @@ def combine_dataFrame(maindf: Union[pd.DataFrame, pd.Series], subdf: Union[pd.Da
     #         maindf = maindf.rename_axis('code')
     return maindf
 
+
+def format_clean_error(msg: Any, max_codes: int = 5) -> str:
+    """
+    清洗并截断错误消息中的超长股票 URL，防止日志被数百个代码刷屏
+    例如: http://hq.sinajs.cn/?format=text&list=sz002312,sh600962,... -> 截断为只保留前几个代码并附带总代码数
+    """
+    if not msg:
+        return ""
+    import re
+    msg_str = str(msg)
+    def _replace_list(m):
+        full_list = m.group(1)
+        codes = [c.strip() for c in full_list.split(',') if c.strip()]
+        if len(codes) > max_codes:
+            prefix = ','.join(codes[:max_codes])
+            return f"list={prefix},...(total={len(codes)} stocks)"
+        return m.group(0)
+
+    clean = re.sub(r'list=([a-zA-Z0-9_,]+)', _replace_list, msg_str)
+    if len(clean) > 280:
+        clean = clean[:277] + '...'
+    return clean
+
 # get_config_value_ramfile(fname='is_trade_date',update=True,currvalue=get_day_istrade_date(),xtype='trade_date')
 
 if __name__ == '__main__':

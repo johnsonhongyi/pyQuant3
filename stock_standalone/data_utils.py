@@ -1291,8 +1291,8 @@ def generate_simple_vect_features(df):
     
 
 
-def send_code_via_pipe(code: Union[str, Dict[str, Any]], logger: Any,pipe_name: str=PIPE_NAME) -> bool:
-    """通过命名管道发送股票代码 (带 busy/not_found 重试机制)"""
+def send_code_via_pipe(code: Union[str, Dict[str, Any]], logger: Any, pipe_name: str = PIPE_NAME, max_retries: int = 2) -> bool:
+    """通过命名管道发送股票代码 (带 busy/not_found 快速判决与低时延重试)"""
     import win32file
     import win32pipe
     import winerror
@@ -1302,7 +1302,7 @@ def send_code_via_pipe(code: Union[str, Dict[str, Any]], logger: Any,pipe_name: 
     if isinstance(code, dict):
         code = json.dumps(code, ensure_ascii=False)
     payload = code.encode("utf-8")
-    for attempt in range(5):
+    for attempt in range(max_retries):
         try:
             handle = win32file.CreateFile(
                 pipe_name, win32file.GENERIC_WRITE, 0, None,
@@ -1312,19 +1312,22 @@ def send_code_via_pipe(code: Union[str, Dict[str, Any]], logger: Any,pipe_name: 
             win32file.CloseHandle(handle)
             return True
         except pywintypes.error as e:
-            if e.winerror == winerror.ERROR_PIPE_BUSY:
+            if e.winerror == winerror.ERROR_FILE_NOT_FOUND:
+                # 管道尚未创建或服务端未启动，立即快速退出，绝不 sleep 阻塞主流程
+                break
+            elif e.winerror == winerror.ERROR_PIPE_BUSY:
                 try:
-                    win32pipe.WaitNamedPipe(pipe_name, 1000)
+                    # 管道正忙时微量等待 100ms 快速判决，避免长时间占用
+                    win32pipe.WaitNamedPipe(pipe_name, 100)
                     continue
                 except Exception:
                     pass
-            elif e.winerror == winerror.ERROR_FILE_NOT_FOUND:
-                time.sleep(0.5)
-                continue
-            logger.info(f"发送数据到管道失败 (尝试 {attempt+1}): {e}")
+            if logger and hasattr(logger, "debug"):
+                logger.debug(f"发送数据到管道失败 (尝试 {attempt+1}/{max_retries}): {e}")
             break
         except Exception as e:
-            logger.info(f"发送数据到管道未知失败 (尝试 {attempt+1}): {e}")
+            if logger and hasattr(logger, "debug"):
+                logger.debug(f"发送数据到管道未知失败 (尝试 {attempt+1}/{max_retries}): {e}")
             break
     return False
 
