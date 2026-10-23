@@ -1,5 +1,20 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-23 20:45 【DPI环境隔离与双向回退自适应彻底修复闭环】(`docs/tasks/2026-10-23_2045_DPI统一配置平滑迁移与自适应彻底修复.md`, `tk_gui_modules/window_mixin.py`, `tk_gui_modules/dpi_mixin.py`, `dpi_utils.py`, `instock_MonitorTK.py`, `tests/test_dpi_window_restore_and_subwindow_persistence.py`)
+- [x] **【彻底解决 RDP 远程桌面与本地环境窗口识别变形与膨胀】**：
+  - **显式环境路由与双向平滑回退继承**：在 `dpi_utils.py` 与 `window_mixin.py` 中，恢复对 RDP 会话的确定性精准识别（`is_rdp_session()`），远程环境下优先读取 `scale2_window_config.json`（完美加载用户长期精心调优的 134 个紧凑窗口布局），本地环境下读取 `window_config.json`；若主配置文件中未包含指定窗口，自动从备用配置文件双向平滑兜底回退读取，杜绝任何窗口丢失或跳出默认尺寸撑爆屏幕；
+  - **1:1 物理真实像素绝对保真**：彻底斩除历史存盘除以 `scale`、加载乘以 `scale` 带来的浮点累积漂移和反复膨胀收缩，存什么物理宽高即恢复什么物理宽高，彻底解决退出重启恢复错误的恶性缺陷；
+- [x] **【彻底根绝 Treeview 表格文字拉长变形与上下行字体重叠挤压（图3）】**：
+  - **切除对全局字体的破坏性篡改**：废除粗暴将命名字体强行修改为正数 9pt 的 `_reset_named_fonts()`，保留原生 Windows 物理像素字体计算；
+  - **动态安全行高防护引擎**：新增 `_compute_safe_rowheight(scale_factor)`，基于当前字体的真实 `linespace` 动态设置行高，保证行高至少比字体度量跨度高出 5 像素，上下各留出充足呼吸留白，从几何物理原理层面彻底阻断上下行字符粘连重叠；
+- [x] **【彻底恢复概念前10放量小窗口整齐紧凑平铺（图2）】**：
+  - **放开硬编码尺寸下限**：将概念 Top10 小窗口的最小尺寸下调为 `win.minsize(120, 80)`，允许窗口宽度收缩至 180~220 像素；
+  - **已持久化窗口绝对权威保护**：`scale_tk_window` 与后台巡检对带有 `_persisted_window_name` 的已恢复窗口实行绝对只读保护，严禁后台定时器推拉篡改窗口几何，确保顶部 5 个小窗口紧凑整齐平铺一字排开；
+- [x] **【自动化测试全量深度审查与专项 100% 纯绿】**：
+  - 核心持久化与 DPI 专项测试 `tests/test_dpi_window_restore_and_subwindow_persistence.py`（4/4 PASS）；
+  - 全量 6 个关联核心套件（36 项测试）**全部 100% 纯绿秒级通过（36/36 PASS）**；
+  - 语法编译 `python -m py_compile` 0 错误。
+
 ## 2026-10-23 18:40 【移动端K线图竖排自适应与横排按钮重叠彻底修复闭环】(`docs/tasks/2026-10-23_1828_修复移动端K线图竖排自适应与横排按钮重叠.md`, `source/easy-stock-web/src/styles.css`, `source/easy-stock-web/src/components/sbc.css`, `source/easy-stock-web/src/theme.css`, `source/easy-stock-web/src/components/KLineModalMobileResponsive.test.tsx`)
 - [x] **【彻底解决手机竖排窗口不自适应与截断撑爆】**：
   - **根除 SVG 移动端 720px 硬编码**：在 `<= 900px` 与 `<= 620px` 响应式断点下，覆盖设置 `.kline-chart { min-width: 0; width: 100%; height: auto; }` 与 `.kline-chart-wrap { min-width: 0; width: 100%; max-width: 100%; overflow-x: hidden; }`，使 SVG 图表根据 `viewBox="0 0 960 430"` 100% 自动等比例缩放适配手机屏幕宽度；

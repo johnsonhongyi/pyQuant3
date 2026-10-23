@@ -40,7 +40,11 @@ def agv_token_counts(path, now=None):
     if not path.is_file():
         return result
     try:
-        with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+        try:
+            db_uri = path.resolve().as_uri() + "?mode=ro"
+        except (OSError, RuntimeError):
+            db_uri = path.absolute().as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(db_uri, uri=True, timeout=1)) as db:
             for table in ("chat_results", "results"):
                 columns = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
                 if not {"result", "created_at"}.issubset(columns):

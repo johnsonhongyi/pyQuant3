@@ -150,7 +150,7 @@ class PaperExecutionAdapter(ExecutionAdapter):
         其余次数累加到 suppressed 计数里，跨交易日自动清零。
         """
         now = time.monotonic()
-        key = (action, code, status)
+        key = (action, code)
         facts = (status, total, bought_today, available, requested)
         today = datetime.now().date().isoformat()
         with self._t1_warning_lock:
@@ -158,11 +158,13 @@ class PaperExecutionAdapter(ExecutionAdapter):
                 self._t1_warning_state.clear()
                 self._t1_state_day = today
             previous = self._t1_warning_state.get(key)
-            if previous and previous[1] == facts and now - previous[0] < self._T1_LOG_INTERVAL:
+            log_interval = getattr(self, "_T1_LOG_INTERVAL", 600.0)
+            state_max = getattr(self, "_T1_STATE_MAX", 512)
+            if previous and previous[1] == facts and now - previous[0] < log_interval:
                 self._t1_warning_state[key] = (previous[0], facts, previous[2] + 1)
                 return
             suppressed = previous[2] if previous else 0
-            if key not in self._t1_warning_state and len(self._t1_warning_state) >= self._T1_STATE_MAX:
+            if key not in self._t1_warning_state and len(self._t1_warning_state) >= state_max:
                 self._t1_warning_state.pop(next(iter(self._t1_warning_state)))
             self._t1_warning_state[key] = (now, facts, 0)
         logger.warning(

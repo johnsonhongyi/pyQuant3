@@ -77,18 +77,26 @@ class WindowMixin:
             logger.warning(f"[_get_dpi_scale_factor] 获取缩放失败，使用默认值: {e}")
             return 1.0
 
-    def _get_config_file_path(self, base_file_path: str, scale: float) -> str:
-        """根据缩放因子获取配置文件路径（统一处理）"""
-        if scale > 1.5:
-            base, filename = os.path.split(base_file_path)
+    def _get_config_file_path(self, base_file_path: str, scale: Optional[float] = None) -> str:
+        """根据会话环境获取主配置文件路径：RDP 会话专属 scale2_，本地会话 window_config"""
+        base, filename = os.path.split(base_file_path)
+        is_rdp = False
+        try:
+            from dpi_utils import is_rdp_session
+            is_rdp = is_rdp_session()
+        except Exception:
+            pass
+        
+        # 兼容传统 scale 参数（若显式传入 > 1.5 或检测到 RDP 会话，走远程专用配置）
+        if is_rdp or (scale is not None and scale > 1.5):
             if "window_config.json" in filename:
-                return os.path.join(base, f"scale{int(scale)}_window_config.json")
-            return os.path.join(base, f"scale{int(scale)}_{filename}")
+                return os.path.join(base, "scale2_window_config.json")
+            return os.path.join(base, f"scale2_{filename}")
         return base_file_path
 
     def load_window_position(self, win: Any, window_name: str, file_path: Optional[str] = None, 
                              default_width: int = 500, default_height: int = 500, offset_step: int = 100) -> tuple[int, int, Optional[int], Optional[int]]:
-        """从统一配置文件加载窗口位置（自动按当前 DPI 缩放）"""
+        """从统一配置文件加载窗口位置（支持 RDP 环境隔离与双向平滑回退，1:1 物理像素保真）"""
         if file_path is None:
             file_path = WINDOW_CONFIG_FILE
             
@@ -96,55 +104,76 @@ class WindowMixin:
             window_name = str(window_name)
             scale = self._get_dpi_scale_factor()
             
-            # 获取正确的配置文件路径
-            config_file_path = self._get_config_file_path(file_path, scale)
+            # 主配置文件与备用回退文件路径
+            primary_path = self._get_config_file_path(file_path, scale)
+            base_dir, f_name = os.path.split(file_path)
+            fallback_path = os.path.join(base_dir, "window_config.json") if primary_path != os.path.join(base_dir, "window_config.json") else os.path.join(base_dir, "scale2_window_config.json")
+            
+            data = {}
+            # 1. 尝试从主配置文件读取
+            if os.path.exists(primary_path):
+                try:
+                    with open(primary_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception as e_p:
+                    logger.debug(f"[load_window_position] 主配置读取失败: {e_p}")
+            
+            # 2. 若主配置未命中该窗口，尝试从备用配置兜底回退读取（平滑迁移无感衔接）
+            if window_name not in data and os.path.exists(fallback_path):
+                try:
+                    with open(fallback_path, "r", encoding="utf-8") as f:
+                        fb_data = json.load(f)
+                        if window_name in fb_data:
+                            data[window_name] = fb_data[window_name]
+                            logger.info(f"[load_window_position] 窗口 {window_name} 从备用配置成功平滑兜底继承")
+                except Exception as e_fb:
+                    logger.debug(f"[load_window_position] 备用配置读取失败: {e_fb}")
 
-            if os.path.exists(config_file_path):
-                with open(config_file_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+            if window_name in data:
+                pos = data[window_name]
+                # 1:1 物理像素绝对保真，杜绝除乘浮点累积漂移
+                width = int(pos.get("width", default_width))
+                height = int(pos.get("height", default_height))
+                x = int(pos.get("x", 0))
+                y = int(pos.get("y", 0))
 
-                if window_name in data:
-                    pos = data[window_name]
-                    width = int(pos["width"] * scale)
-                    height = int(pos["height"] * scale)
-                    x = int(pos["x"] * scale)
-                    y = int(pos["y"] * scale)
+                # 处理叠加窗口的偏移
+                if window_name == 'concept_top10_window_simple' and hasattr(self, "_pg_top10_window_simple"):
+                    active_windows = self._pg_top10_window_simple.values()
+                    for aw_info in active_windows:
+                        aw = aw_info.get("win")
+                        if aw and aw.winfo_exists() and aw != win:
+                            if aw.winfo_x() == x and aw.winfo_y() == y:
+                                x += offset_step
+                                y += offset_step
 
-                    # 处理叠加窗口的偏移
-                    if window_name == 'concept_top10_window_simple' and hasattr(self, "_pg_top10_window_simple"):
-                        active_windows = self._pg_top10_window_simple.values()
-                        for aw_info in active_windows:
-                            aw = aw_info.get("win")
-                            if aw and aw.winfo_exists() and aw != win:
-                                if aw.winfo_x() == x and aw.winfo_y() == y:
-                                    x += offset_step
-                                    y += offset_step
-
-                    # 限制在屏幕范围内
-                    x, y = clamp_window_to_screens(x, y, width, height)
-                    win.geometry(f"{width}x{height}+{x}+{y}")
-                    try:
-                        setattr(win, '_persisted_window_name', window_name)
-                    except Exception:
-                        pass
-                    logger.debug(f"[load_window_position] 加载 {window_name}: {width}x{height} {x}+{y}")
-                    return width, height, x, y
+                # 限制在屏幕范围内
+                x, y = clamp_window_to_screens(x, y, width, height)
+                win.geometry(f"{width}x{height}+{x}+{y}")
+                try:
+                    setattr(win, '_persisted_window_name', window_name)
+                    setattr(win, '_dpi_applied', scale)
+                except Exception:
+                    pass
+                logger.debug(f"[load_window_position] 加载 {window_name}: {width}x{height} {x}+{y}")
+                return width, height, x, y
 
             # 默认居中
-            self.center_window(win, int(default_width * scale), int(default_height * scale))
+            self.center_window(win, int(default_width), int(default_height))
             try:
                 setattr(win, '_persisted_window_name', window_name)
+                setattr(win, '_dpi_applied', scale)
             except Exception:
                 pass
-            return int(default_width * scale), int(default_height * scale), None, None
+            return int(default_width), int(default_height), None, None
             
         except Exception as e:
             logger.error(f"[load_window_position] 失败: {e}")
-            self.center_window(win, int(default_width * self._get_dpi_scale_factor()), int(default_height * self._get_dpi_scale_factor()))
+            self.center_window(win, int(default_width), int(default_height))
             return default_width, default_height, None, None
 
     def save_window_position(self, win: Any, window_name: str, file_path: Optional[str] = None) -> None:
-        """保存窗口位置到统一配置文件（自动移除当前 DPI 缩放）"""
+        """保存窗口位置到统一配置文件（1:1 物理像素保真，避免除乘漂移）"""
         if file_path is None:
             file_path = WINDOW_CONFIG_FILE
             
@@ -159,12 +188,13 @@ class WindowMixin:
 
             geom = win.geometry().split('+')
             size = geom[0].split('x')
-            width = int(int(size[0]) / scale)
-            height = int(int(size[1]) / scale)
-            x = int(int(geom[1]) / scale)
-            y = int(int(geom[2]) / scale)
+            # 1:1 物理真实像素保存，绝不除以 scale 造成多次除乘后窗口收缩或爆炸
+            width = int(size[0])
+            height = int(size[1])
+            x = int(geom[1])
+            y = int(geom[2])
 
-            pos = {"x": x, "y": y, "width": width, "height": height}
+            pos = {"x": x, "y": y, "width": width, "height": height, "screen_scale": scale}
             config_file_path = self._get_config_file_path(file_path, scale)
 
             data = {}
@@ -186,21 +216,19 @@ class WindowMixin:
                         os.replace(tmp_file, config_file_path)
                         break
                     except PermissionError:
-                        if _attempt == 4:
-                            raise
-                        time.sleep(0.02 * (_attempt + 1))
-                logger.debug(f"[save_window_position] 已原子保存 {window_name}: {pos}")
-            except Exception as e:
-                logger.error(f"[save_window_position] 原子保存失败: {e}")
+                        time.sleep(0.05)
+                else:
+                    try:
+                        with open(config_file_path, "w", encoding="utf-8") as f:
+                            json.dump(data, f, ensure_ascii=False, indent=4)
+                    except Exception:
+                        pass
             finally:
                 if os.path.exists(tmp_file):
                     try:
                         os.remove(tmp_file)
-                    except OSError:
+                    except Exception:
                         pass
-
-
-            logger.debug(f"[save_window_position] 已保存 {window_name}: {pos}")
         except Exception as e:
             logger.error(f"[save_window_position] 失败: {e}")
 

@@ -100,29 +100,19 @@ class DPIMixin:
         def winfo_id(self) -> int: ...
         def geometry(self, new_geom: Optional[str] = None) -> str: ...
 
-    def _reset_named_fonts(self) -> None:
-        """保护并重置全局命名字体为标准磅数，彻底杜绝历史残留乘法放大污染。"""
-        font_names = ["TkDefaultFont", "TkTextFont", "TkHeadingFont", "TkMenuFont"]
-        for name in font_names:
-            try:
-                f = tkfont.nametofont(name)
-                # 无论之前被改成了多大，一律收敛恢复到标准 9pt
-                if f.cget("size") != BASE_POINT_SIZE:
-                    f.configure(size=BASE_POINT_SIZE)
-            except Exception:
-                pass
+    @staticmethod
+    def _compute_safe_rowheight(scale_factor: float = 1.0) -> int:
+        """根据当前字体度量 linespace 动态计算安全行高，上下预留呼吸空间，彻底杜绝文字粘连。"""
         try:
-            f_fixed = tkfont.nametofont("TkFixedFont")
-            if f_fixed.cget("size") != 10:
-                f_fixed.configure(size=10)
+            f = tkfont.nametofont("TkDefaultFont")
+            linespace = f.metrics("linespace")
         except Exception:
-            pass
-        if hasattr(self, 'default_font_bold') and getattr(self, 'default_font_bold', None):
-            try:
-                if self.default_font_bold.cget("size") != 10:
-                    self.default_font_bold.configure(size=10)
-            except Exception:
-                pass
+            linespace = 14
+        return max(18, linespace + 5, int(round(BASE_ROW_HEIGHT * scale_factor)))
+
+    def _reset_named_fonts(self) -> None:
+        """安全保护全局字体，不粗暴覆盖系统根据 DPI 计算出的物理像素大小。"""
+        pass
 
     def print_tk_dpi_detail(self) -> tuple[int, int]:
         px_per_inch = self.winfo_fpixels('1i')
@@ -208,6 +198,12 @@ class DPIMixin:
             if getattr(win, "_dpi_applied", None) is None:
                 try:
                     title = getattr(win, "title", lambda: "SubWindow")()
+                    # 若窗口已经由 load_window_position 明确恢复了持久化 geometry，直接标记已对齐，绝不二次放大自身尺寸
+                    if getattr(win, "_persisted_window_name", None) is not None:
+                        win._dpi_applied = current_scale
+                        for tv in self._find_all_treeviews(win):
+                            self._scale_treeview_widget(tv, current_scale)
+                        continue
                     self.scale_tk_window(win, current_scale, title)
                     logger.info(f"[DPI] 新建子窗口自动对齐当前 DPI @ {current_scale:.2f}x: {title}")
                 except Exception as e:
@@ -291,8 +287,11 @@ class DPIMixin:
     def scale_tk_window(self, window: Any, scale_factor: float, name: str, old_scale: Optional[float] = None, ratio: Optional[float] = None) -> None:
         """对单个 Tk 子窗口做 DPI 缩放（尺寸与内部所有 Treeview 列宽同步调整）。"""
         applied = getattr(window, "_dpi_applied", None)
+        is_persisted = getattr(window, "_persisted_window_name", None) is not None
+        if is_persisted and applied is not None:
+            # 关键：已由配置文件精确恢复几何的窗口拥有绝对权威，禁止外部后台调用篡改窗口几何
+            return
         if applied is None:
-            # 关键：新打开的未适配子窗口，其控件默认是按 1.0 逻辑尺寸构建的
             ratio = scale_factor / 1.0
         elif ratio is None:
             ratio = scale_factor / applied if applied else 1.0
@@ -303,7 +302,9 @@ class DPIMixin:
             if window.state() == 'normal':
                 w, h = window.winfo_width(), window.winfo_height()
                 x, y = window.winfo_x(), window.winfo_y()
-                if abs(ratio - 1.0) >= 0.01:
+                # 只有真正发生跨 DPI 动态切换，或者完全新建且未受持久化配置保护的窗口才缩放自身几何
+                should_scale_geom = (applied is not None and abs(ratio - 1.0) >= 0.01) or (applied is None and not is_persisted and abs(ratio - 1.0) >= 0.01)
+                if should_scale_geom:
                     window.geometry(f"{max(120, int(w * ratio))}x{max(80, int(h * ratio))}+{x}+{y}")
                 window.update_idletasks()
                 self._clamp_window_to_screen(window)
@@ -344,7 +345,7 @@ class DPIMixin:
             # 3) 同步所有 Treeview 样式的行高
             try:
                 style = ttk.Style(self)
-                row_h = max(18, int(round(BASE_ROW_HEIGHT * scale_factor)))
+                row_h = self._compute_safe_rowheight(scale_factor)
                 for s_name in ("Treeview", "Fast.Treeview", "Treeview.Heading", "Heading"):
                     try:
                         style.configure(s_name, rowheight=row_h)
@@ -386,6 +387,7 @@ class DPIMixin:
             scale_factor = self.scale_factor
         else:
             self.scale_factor = scale_factor
+        self.last_dpi_scale = scale_factor
         
         try:
             # 保护并标准化字体为 9pt
@@ -396,7 +398,7 @@ class DPIMixin:
             
             # 设置各 Treeview 样式行高
             style = ttk.Style(self)  # type: ignore
-            row_h = max(18, int(round(BASE_ROW_HEIGHT * scale_factor)))
+            row_h = self._compute_safe_rowheight(scale_factor)
             for s_name in ("Treeview", "Fast.Treeview", "Treeview.Heading", "Heading"):
                 try:
                     style.configure(s_name, rowheight=row_h)
