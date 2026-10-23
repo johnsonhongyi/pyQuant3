@@ -7538,7 +7538,7 @@ class SBCIntradayChartDialog(QWidget):
         is_holdings_mode = (os.environ.get("SBC_IS_HOLDINGS_LAUNCHER") == "1")
         if not is_holdings_mode:
             # 常规 ATS SBC 内部原生窗口：只有用户手动单独关闭时（非随 ATS 统一退出）才更新 ATS 记录
-            if not is_app_exiting and not _is_ats_shutting_down():
+            if not is_app_exiting and not _is_ats_shutting_down() and not is_batch_closing:
                 try:
                     _remove_sbc_open_record(self.code)
                 except Exception:
@@ -10209,16 +10209,42 @@ def _record_sbc_open(code: str, geo=None, period_mode: Optional[str] = None):
 
 
 def _remove_sbc_open_record(code: str):
-    """从已打开 SBC 窗口列表中移除指定个股 (0毫秒从内存注册中心注销，退出时集中落盘)"""
+    """从已打开 SBC 窗口列表中移除指定个股 (内存除名并原子更新磁盘配置，确保下次启动绝不自动打开)"""
     try:
         c_clean = str(code).zfill(6)
-        # 💡 0毫秒直达内存持久化注册中心注销，不在单窗口关闭时频繁物理写盘
+        # 1. 内存持久化注册中心注销除名
         try:
             SBCWindowMemoryManager.get_instance().unregister(c_clean)
         except Exception:
             pass
+
+        # 2. 同步原子从磁盘配置中彻底移除该股票 (确保下次启动绝不会再自动打开它)
+        cfg_path = _get_sbc_layout_cfg_path()
+        if not os.path.exists(cfg_path):
+            return
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        modified = False
+        for key in ("sbc_open_windows", "sbc_holdings_windows"):
+            if key in data and isinstance(data[key], list):
+                new_list = [item for item in data[key] if isinstance(item, dict) and item.get("code") != c_clean]
+                if len(new_list) != len(data[key]):
+                    data[key] = new_list
+                    modified = True
+        if modified:
+            tmp_path = cfg_path + f".tmp_{os.getpid()}_{time.time()}"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            try:
+                if os.path.exists(cfg_path):
+                    os.replace(tmp_path, cfg_path)
+                else:
+                    os.rename(tmp_path, cfg_path)
+            except Exception:
+                import shutil
+                shutil.move(tmp_path, cfg_path)
     except Exception as e:
-        logger.debug(f"移除 SBC 窗口记录内存异常: {e}")
+        logger.debug(f"移除 SBC 窗口记录异常: {e}")
 
 
 def save_all_open_sbc_windows():
@@ -10376,9 +10402,14 @@ def save_all_open_sbc_windows():
             return res
 
         active_list = _sort_items_spatial(active_list)
-        # 🛡️ 防冲刷守卫：若当前探测窗口列表为空，但历史配置中已存在有效窗口，且未声明显式清空，保留历史记录
-        if not active_list and data.get("sbc_open_windows"):
-            valid_existing = [it for it in data["sbc_open_windows"] if isinstance(it, dict) and str(it.get("code", "")).isdigit()]
+        # 🛡️ 防冲刷守卫：若当前探测窗口列表为空，仅在内存注册中心尚有存活标的且未被显式全关时兜底
+        mem_active = set()
+        try:
+            mem_active = set(SBCWindowMemoryManager.get_instance().get_active_codes())
+        except Exception:
+            pass
+        if not active_list and data.get("sbc_open_windows") and mem_active:
+            valid_existing = [it for it in data["sbc_open_windows"] if isinstance(it, dict) and str(it.get("code", "")).isdigit() and it.get("code") in mem_active]
             if valid_existing:
                 active_list = valid_existing
         data["sbc_open_windows"] = [it for it in active_list if str(it.get("code", "")).isdigit() and len(str(it.get("code", ""))) == 6]

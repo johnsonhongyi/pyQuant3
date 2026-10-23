@@ -141,3 +141,36 @@ def test_close_all_open_sbc_dialogs_helper(qapp):
     assert closed_cnt >= 2
     assert getattr(dlg1, "_is_closing", False) or not dlg1.isVisible()
     assert getattr(dlg2, "_is_closing", False) or not dlg2.isVisible()
+
+
+def test_single_sbc_close_removes_from_disk_and_does_not_persist(qapp, tmp_path, monkeypatch):
+    """验证手动单独关闭 SBC 窗口：彻底从磁盘和内存中除名，下次启动绝不自动打开"""
+    import json
+    from ats.ui.intraday_strategy_dialog import _remove_sbc_open_record, _get_sbc_layout_cfg_path
+
+    fake_cfg = str(tmp_path / "sbc_layout.json")
+    monkeypatch.setattr("ats.ui.intraday_strategy_dialog._get_sbc_layout_cfg_path", lambda: fake_cfg)
+
+    # 预设磁盘上有 000001 和 600000 两个打开窗口
+    initial_data = {
+        "sbc_open_windows": [
+            {"code": "000001", "x": 100, "y": 100, "width": 680, "height": 420},
+            {"code": "600000", "x": 800, "y": 100, "width": 680, "height": 420},
+        ]
+    }
+    with open(fake_cfg, "w", encoding="utf-8") as f:
+        json.dump(initial_data, f)
+
+    # 操盘手单独关闭了 000001
+    dlg = SBCIntradayChartDialog(code="000001")
+    dlg.show()
+    # 触发单窗关闭
+    dlg.close()
+
+    # 读取磁盘配置，验证 000001 已被彻底除名，只保留 600000
+    with open(fake_cfg, "r", encoding="utf-8") as f:
+        saved_data = json.load(f)
+    codes_on_disk = [item["code"] for item in saved_data.get("sbc_open_windows", [])]
+    assert "000001" not in codes_on_disk, "单独关闭的个股窗口必须从磁盘配置彻底移除！"
+    assert "600000" in codes_on_disk, "未关闭的个股窗口应继续保留！"
+

@@ -318,7 +318,7 @@ class Sina:
         self.stock_data = []
         self.stock_codes = []
         self.stock_with_exchange_list = []
-        self.max_num = 850
+        self.max_num = 500
         self.start_t = time.time()
         self.dataframe = pd.DataFrame()
         self.hdf_name = 'sina_data'
@@ -611,6 +611,11 @@ class Sina:
                 df = self._filter_suspended(df) if df is not None else pd.DataFrame()
             
             if df is None or df.empty:
+                if h5 is not None and not h5.empty:
+                    log.warning("Sina.all network fetch failed, gracefully falling back to existing HDF5 cache")
+                    if snapshot_only:
+                        return self._cache_breadth_snapshot(h5, cache_key)
+                    return self._sanitize_indicators(self.combine_lastbuy(h5))
                 return pd.DataFrame()
 
             if snapshot_only:
@@ -1081,18 +1086,47 @@ class Sina:
 
 
     # https://github.com/jinrongxiaoe/easyquotation
-    async def get_stocks_by_range(self, index: int, session: aiohttp.ClientSession) -> None:
+    async def get_stocks_by_range(self, index: int, session: aiohttp.ClientSession, max_retries: int = 1) -> Optional[str]:
+        if index >= len(self.stock_list):
+            return None
         url = self.sina_stock_api + self.stock_list[index]
-        async with session.get(url=url, headers=self.sinaheader) as response:
-            response.encoding = self.encoding
-            result = await response.text()
-            self.stock_data.append(result)
+        for attempt in range(max_retries + 1):
+            try:
+                async with session.get(url=url, headers=self.sinaheader) as response:
+                    response.encoding = self.encoding
+                    result = await response.text()
+                    if result:
+                        return result
+            except (aiohttp.ClientError, asyncio.TimeoutError, asyncio.CancelledError) as e:
+                clean_err = cct.format_clean_error(e)
+                if attempt < max_retries:
+                    log.debug("Sina chunk %d retry %d/%d due to %s" % (index, attempt + 1, max_retries, clean_err))
+                    await asyncio.sleep(0.1)
+                else:
+                    log.warning("Sina chunk %d failed after %d retries: %s" % (index, max_retries, clean_err))
+                    return None
+            except Exception as e:
+                log.warning("Sina chunk %d unexpected err: %s" % (index, cct.format_clean_error(e)))
+                return None
+        return None
 
     async def _fetch_all_stocks(self, session: aiohttp.ClientSession):
         tasks = [self.get_stocks_by_range(i, session) for i in range(self.request_num)]
         if not tasks:
             tasks = [self.get_stocks_by_range(0, session)]
-        await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        valid_results = []
+        err_count = 0
+        for r in results:
+            if isinstance(r, Exception):
+                err_count += 1
+                log.warning("Sina chunk gather exception: %s" % cct.format_clean_error(r))
+            elif r:
+                valid_results.append(r)
+
+        self.stock_data = valid_results
+        if len(valid_results) == 0 and len(tasks) > 0:
+            raise IOError("All Sina quote chunks failed to respond")
 
     def fill_other_data(self, df):
         time_s = time.time()
@@ -1229,31 +1263,57 @@ class Sina:
 
         return df_final
 
-    def get_stock_data(self, retry_count: int = 3, pause: float = 0.01) -> pd.DataFrame:
-        for _ in range(retry_count):
-            time.sleep(pause)
+    def get_stock_data(self, retry_count: int = 3, pause: float = 0.05) -> pd.DataFrame:
+        last_exc = None
+        for attempt in range(retry_count):
+            self.stock_data = []
+            if attempt > 0:
+                time.sleep(pause * (attempt + 1))
             try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            
-            remaining = max(.01, getattr(self, '_task_deadline', time.monotonic() + 15) - time.monotonic())
-            async def run():
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=min(15, remaining), connect=min(3, remaining), sock_read=min(10, remaining))) as session:
-                    await self._fetch_all_stocks(session)
-            
-            loop.run_until_complete(run())
-            log.debug('get_stock_data_loop')
-            
-            df = self.format_response_data()
-            if df is not None:
-                df = self.fill_other_data(df)
-                return self._filter_suspended(df)
-            else:
-                return pd.DataFrame()
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_closed():
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
 
-        raise IOError(ct.NETWORK_URL_ERROR_MSG)
+                remaining = max(1.0, getattr(self, '_task_deadline', time.monotonic() + 15) - time.monotonic())
+                timeout_cfg = aiohttp.ClientTimeout(
+                    total=min(15.0, remaining),
+                    connect=min(8.0, remaining),
+                    sock_read=min(12.0, remaining)
+                )
+                async def run():
+                    async with aiohttp.ClientSession(timeout=timeout_cfg) as session:
+                        await self._fetch_all_stocks(session)
+
+                loop.run_until_complete(run())
+                log.debug('get_stock_data_loop succeeded')
+
+                df = self.format_response_data()
+                if df is not None:
+                    if not df.empty:
+                        df = self.fill_other_data(df)
+                        return self._filter_suspended(df)
+                    else:
+                        log.debug("get_stock_data attempt %d: format_response_data returned empty" % (attempt + 1))
+            except Exception as e:
+                last_exc = e
+                clean_err = cct.format_clean_error(e)
+                log.warning("get_stock_data attempt %d/%d failed: %s" % (attempt + 1, retry_count, clean_err))
+
+        clean_last = cct.format_clean_error(last_exc) if last_exc else ct.NETWORK_URL_ERROR_MSG
+        log.error("get_stock_data: all %d attempts failed. Last error: %s" % (retry_count, clean_last))
+        df_empty = pd.DataFrame()
+        if last_exc:
+            df_empty.attrs['__error__'] = {
+                "code": "SINA_NETWORK_TIMEOUT",
+                "exc_type": type(last_exc).__name__,
+                "exc_msg": clean_last,
+            }
+        return df_empty
 
     def ensure_code_ticktime_index(self,df: pd.DataFrame, name='df'):
         """

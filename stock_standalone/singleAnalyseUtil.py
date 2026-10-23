@@ -400,9 +400,14 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
     ffall['zzb'] = 0
 
     # 统一获取全市场最新行情快照，杜绝分市场多次请求与单例累积
-    sina = sina_data.Sina(readonly=True)
-    sina._snapshot_only = True
-    df_all = sina.all
+    try:
+        sina = sina_data.Sina(readonly=True)
+        sina._snapshot_only = True
+        df_all = sina.all
+    except Exception as e:
+        log.warning("get_hot_countNew: Failed to fetch sina.all: %s" % cct.format_clean_error(e))
+        df_all = pd.DataFrame()
+
     if df_all is None or df_all.empty:
         log.warning("sina.all returned empty DataFrame")
         return pd.DataFrame()
@@ -855,6 +860,7 @@ if __name__ == '__main__':
                     log.info('start get_hot_count')
                     get_hot_countNew(percentDuration, rzrq, fibl, fibc)
                     fibcount += 1
+                    except_count = 0  # 成功完成一次轮询，重置连续异常计数
                 else:
                     if not num_input:
                         num_input = input("please input code:")
@@ -1044,16 +1050,21 @@ if __name__ == '__main__':
                 cct.sleep(2)
 
         except (IOError, EOFError) as e:
-            print("SingleError", e)
+            clean_err = cct.format_clean_error(e)
+            log.warning("SingleError: %s" % (clean_err))
             cct.sleeprandom(30)
         except Exception as e:
-            log.error("Error Exception:%s" % (e))
-            import traceback
-            traceback.print_exc()
+            clean_err = cct.format_clean_error(e)
+            log.error("Error Exception: %s" % (clean_err))
+            # 针对常见的网络超时或连接断开异常，记录清晰单行告警，避免满屏 traceback 刷屏
+            is_net_err = any(k in clean_err.lower() for k in ["timeout", "cancellederror", "connection reset", "connection refused"])
+            if not is_net_err:
+                import traceback
+                traceback.print_exc()
             except_count += 1
             if except_count < 3:
                 cct.sleeprandom(ct.duration_sleep_time / 2)
             else:
-                print("except_count >3")
+                print("except_count >3 (consecutive failures: %d)" % (except_count))
                 cct.sleeprandom(ct.duration_sleep_time * 2)
 

@@ -171,22 +171,32 @@ def quote_row_status(row, latest_trade_date, market_active, frame_age_seconds=0,
 
 
 def frame_quote_row(frame, code):
-    """Find one quote row in either code-indexed or code-column frames."""
+    """Find one quote row in either code-indexed or code-column frames (O(1) prioritized)."""
     if frame is None or getattr(frame, "empty", True):
         return None
     code = str(code).strip().zfill(6)
     try:
-        if "code" in frame.columns:
-            matches = frame[frame["code"].astype(str).str.strip().str.zfill(6) == code]
-            if not matches.empty:
-                return matches.iloc[0]
+        # 1. 优先尝试 O(1) 索引命中 (最快速路径，杜绝全表扫描)
         if code in frame.index:
             row = frame.loc[code]
+            return row.iloc[0] if getattr(row, "ndim", 1) > 1 else row
         elif code.isdigit() and int(code) in frame.index:
             row = frame.loc[int(code)]
-        else:
-            return None
-        return row.iloc[0] if getattr(row, "ndim", 1) > 1 else row
+            return row.iloc[0] if getattr(row, "ndim", 1) > 1 else row
+
+        # 2. 次选 code 列匹配 (优先直接比较，避免高耗时全列 str.zfill 向量化变换)
+        if "code" in frame.columns:
+            col = frame["code"]
+            matches = frame[col == code]
+            if matches.empty and code.isdigit():
+                matches = frame[col == int(code)]
+            if not matches.empty:
+                return matches.iloc[0]
+            # 兜底：仅当首轮未命中时针对脏数据尝试轻量匹配
+            matches = frame[col.astype(str).str.strip().str.zfill(6) == code]
+            if not matches.empty:
+                return matches.iloc[0]
+        return None
     except (KeyError, TypeError, ValueError, AttributeError):
         return None
 

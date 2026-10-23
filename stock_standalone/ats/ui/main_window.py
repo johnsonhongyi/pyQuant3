@@ -2107,7 +2107,7 @@ class ATSMainWindow(QMainWindow):
         self._next_day_watch_timer.timeout.connect(self._poll_next_day_watch_tdx)
         self._next_day_watch_timer.start()
         
-        # Initialize favorites version-tracking and start polling loop
+        # Initialize favorites version-tracking and start polling loop (降频至15s兜底，杜绝盘中500ms高频空转)
         try:
             from global_favorites import GlobalFavoriteManager
             self._last_favorites_version = GlobalFavoriteManager().version
@@ -2115,7 +2115,7 @@ class ATSMainWindow(QMainWindow):
             self._last_favorites_version = 0
 
         self._favorites_poll_timer = QTimer(self)
-        self._favorites_poll_timer.setInterval(500 if market_active else 60000)
+        self._favorites_poll_timer.setInterval(15000 if market_active else 60000)
         self._favorites_poll_timer.timeout.connect(self._poll_favorites_loop)
         self._favorites_poll_timer.start()
         try:
@@ -2127,13 +2127,16 @@ class ATSMainWindow(QMainWindow):
             self._linkage_last_reported = {}
             self._linkage_state_lock = threading.Lock()
             self._ats_linkage_consumed_revision = 0
+            self._linkage_pipe_available = None
+            self._linkage_pipe_last_warning_at = 0.0
+            self._linkage_pipe_last_attempt_at = 0.0
             self._linkage_favorites_listener = self._on_linkage_store_changed_from_worker
             favorite_manager = GlobalFavoriteManager()
             favorite_manager.add_change_listener(self._linkage_favorites_listener)
             threading.Thread(target=self._linkage_receipt_worker, name="ATSLinkageReceipt", daemon=True).start()
             QTimer.singleShot(1000, self._reconcile_linkage_favorites)
             self._linkage_heartbeat_timer = QTimer(self)
-            self._linkage_heartbeat_timer.setInterval(5000)
+            self._linkage_heartbeat_timer.setInterval(30000)
             self._linkage_heartbeat_timer.timeout.connect(self._send_linkage_heartbeat)
             self._linkage_heartbeat_timer.start()
         except Exception:
@@ -8291,18 +8294,42 @@ class ATSMainWindow(QMainWindow):
         try:
             from global_favorites import GlobalFavoriteManager
             manager = GlobalFavoriteManager()
-            statuses = [self._linkage_quote_status(code)
-                        for code in list(manager.get_favorite_stocks())[:512]]
+            favorites = list(manager.get_favorite_stocks())
+            if not favorites:
+                return 'market_closed' if not self._is_market_session_active() else 'ready'
+
+            # 优先从缓存取状态，避免在 UI 主线程遍历 Frame
+            cached_statuses = getattr(self, '_linkage_quote_statuses', {})
+            candidates = ('ready', 'market_closed', 'quota_limited', 'stale', 'pending_fetch')
+            found_candidates = set()
+
+            # 极限性能优化：仅抽样前 16 只代表性股票并支持快速短路，坚决杜绝 512 轮 DataFrame 检索卡死主线程
+            sample_codes = favorites[:16]
+            for code in sample_codes:
+                norm_code = str(code).strip().zfill(6)
+                st = cached_statuses.get(norm_code)
+                if not st:
+                    st = self._linkage_quote_status(norm_code)
+                if st == 'ready':
+                    return 'ready'  # 命中最高优先级即刻短路返回，耗时趋近于 0ms
+                if st in candidates:
+                    found_candidates.add(st)
+
+            for candidate in candidates:
+                if candidate in found_candidates:
+                    return candidate
         except Exception:
             return 'unknown'
-        for candidate in ('ready', 'market_closed', 'quota_limited', 'stale', 'pending_fetch'):
-            if candidate in statuses:
-                return candidate
         return 'unknown'
 
     def _send_linkage_heartbeat(self):
         if getattr(self, '_is_closing', False) or not hasattr(self, '_linkage_receipt_queue'):
             return
+        # 若 TK 管道已被证实不可达且距离上次尝试不足 30s，跳过心跳排队，避免无效工作与队列膨胀
+        if getattr(self, '_linkage_pipe_available', None) is False:
+            now = time.monotonic()
+            if now - getattr(self, '_linkage_pipe_last_attempt_at', 0.0) < 30.0:
+                return
         try:
             from global_favorites import GlobalFavoriteManager
             self._refresh_linkage_quote_receipts()
@@ -8325,17 +8352,39 @@ class ATSMainWindow(QMainWindow):
                 payload = self._linkage_receipt_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
+
+            # 若管道已确认为不可达，自动丢弃多余积压的 WATCHLIST_HEARTBEAT 心跳，仅保留消费状态回执
+            if payload.get('cmd') == 'WATCHLIST_HEARTBEAT' and getattr(self, '_linkage_pipe_available', None) is False:
+                now = time.monotonic()
+                if now - getattr(self, '_linkage_pipe_last_attempt_at', 0.0) < 30.0:
+                    continue
+
+            self._linkage_pipe_last_attempt_at = time.monotonic()
             try:
-                delivered = send_code_via_pipe(payload, logger, pipe_name=PIPE_NAME_TK)
+                delivered = send_code_via_pipe(payload, logger, pipe_name=PIPE_NAME_TK, max_retries=1)
+                self._linkage_pipe_available = delivered
                 if not delivered:
-                    logger.warning("ATS watchlist status could not reach TK pipe")
+                    now = time.monotonic()
+                    # 300 秒日志抑制：首次给与清晰警告，随后的 300s 内降为 DEBUG，彻底根除高频刷屏
+                    if now - getattr(self, '_linkage_pipe_last_warning_at', 0.0) >= 300.0:
+                        self._linkage_pipe_last_warning_at = now
+                        logger.warning("ATS watchlist status could not reach TK pipe (will suppress for 300s; ATS runs smoothly in standalone mode)")
+                    else:
+                        logger.debug("ATS watchlist status could not reach TK pipe (suppressed)")
+                else:
+                    self._linkage_pipe_last_warning_at = 0.0
             except Exception:
                 delivered = False
-                logger.exception("ATS watchlist status delivery failed")
+                logger.debug("ATS watchlist status delivery failed", exc_info=True)
+
             if not delivered and payload.get('cmd') == 'WATCHLIST_CONSUMED':
                 with self._linkage_state_lock:
                     for item in payload.get('operations', []):
                         self._linkage_last_reported.pop(str(item.get('operation_id', '')), None)
+
+            # 管道连不上时工作线程短暂停顿 0.5s，避免 CPU 紧密空转
+            if not delivered:
+                time.sleep(0.5)
 
     def _on_favorites_changed(self):
         if getattr(self, '_favorites_refresh_scheduled', False):
@@ -8350,7 +8399,8 @@ class ATSMainWindow(QMainWindow):
 
     def _poll_favorites_loop(self):
         try:
-            desired_interval = 500 if self._is_market_session_active() else 60000
+            # 盘中 15s 兜底轮询 (已有 change_listener 事件监听驱动，无需 500ms 高频空转)
+            desired_interval = 15000 if self._is_market_session_active() else 60000
             if self._favorites_poll_timer.interval() != desired_interval:
                 self._favorites_poll_timer.setInterval(desired_interval)
             from global_favorites import GlobalFavoriteManager
