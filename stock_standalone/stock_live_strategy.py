@@ -3503,6 +3503,29 @@ class StockLiveStrategy:
             decision["reason"] = f"🛡️ [监理拦截] {veto_reason} | 原理由: {decision['reason']}"
             logger.warning(f"🛡️ {code} {snap.get('name')} 信号被监理拦截: {veto_reason}")
 
+        # --- [SFL] 全市场信号融合梯度层（影子只读：不改 decision、不下单、不发语音）---
+        # 只做一件事：把本次单票评估换算成 L0~L4 梯度并落一行影子日志，
+        # 供影子期与现有决策并行比对。异常一律吞掉，绝不影响主循环。
+        try:
+            _fusion = getattr(self, "_fusion_shadow", None)
+            if _fusion is None:
+                from ats.fusion.shadow import FusionShadow
+                _fusion = FusionShadow()
+                self._fusion_shadow = _fusion
+            _fusion.observe(
+                code=code,
+                row=row,
+                snap=snap,
+                decision=decision,
+                vetoed=is_vetoed,
+                veto_reason=veto_reason,
+                name=str(snap.get("name") or data.get("name") or ""),
+                now=time.time(),
+                source="live_strategy",
+            )
+        except Exception as _fusion_err:
+            logger.debug(f"[fusion] shadow skipped {code}: {_fusion_err}")
+
         # --- 3.3 冷却机制：避免短时重复触发 ---
         cooldown_minutes = 5
         # import removed

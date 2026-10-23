@@ -119,6 +119,21 @@ MAX_SINGLE_SIZE_PCT = 35.0
 MAX_PENALTY = 60.0
 STALE_SECONDS = 20.0
 
+DEFAULT_WEIGHTS = {"position": 0.30, "support": 0.25, "intent": 0.25, "regime": 0.20}
+
+DEFAULT_VETO = {"stale_seconds": STALE_SECONDS, "max_bias_pct": 7.0, "min_amount_wan": 3000.0}
+
+DEFAULT_PENALTY = {
+    "chase_start_pct": 3.0,
+    "chase_per_pct": 6.0,
+    "chase_cap": 30.0,
+    "overheat_penalty": 20.0,
+    "crowd_vol_ratio": 4.5,
+    "crowd_penalty": 10.0,
+    "illiquid_penalty": 15.0,
+    "cap": MAX_PENALTY,
+}
+
 
 # ---------------------------------------------------------------------------
 # 基础工具
@@ -140,11 +155,45 @@ def _band(x: float, full_lo: float, full_hi: float, soft_lo: float, soft_hi: flo
     return max(0.0, (soft_hi - x) / span)
 
 
-def tier_of(rar: float) -> int:
-    for cut, tier in RAR_TIER_CUTS:
+def tier_of(rar: float, cuts: Optional[tuple] = None) -> int:
+    for cut, tier in (cuts or RAR_TIER_CUTS):
         if rar >= cut:
             return tier
     return 0
+
+
+def _parse_cuts(raw: Any) -> tuple:
+    """配置里的分档阈值 -> ((cut, tier), ...)，降序。坏数据退回默认。"""
+    if not raw:
+        return RAR_TIER_CUTS
+    try:
+        if isinstance(raw, dict):
+            pairs = [
+                (float(raw.get("l4", 82.0)), 4),
+                (float(raw.get("l3", 72.0)), 3),
+                (float(raw.get("l2", 62.0)), 2),
+                (float(raw.get("l1", 50.0)), 1),
+            ]
+        else:
+            pairs = [(float(item[0]), int(item[1])) for item in raw]
+        pairs.sort(key=lambda x: x[0], reverse=True)
+        return tuple(pairs)
+    except Exception:
+        return RAR_TIER_CUTS
+
+
+def _parse_age_table(raw: Any) -> tuple:
+    """[[分钟上限, 级别上限, 仓位系数], ...] -> 按分钟升序的元组。"""
+    if not raw:
+        return AGE_TABLE
+    try:
+        rows = sorted(
+            ((float(item[0]), int(item[1]), float(item[2])) for item in raw),
+            key=lambda x: x[0],
+        )
+        return tuple(rows) or AGE_TABLE
+    except Exception:
+        return AGE_TABLE
 
 
 def _stop_anchor(event: SignalEvent) -> float:
@@ -193,7 +242,9 @@ def score_position(event: SignalEvent) -> tuple:
         s_room = 0.60  # 无阻力数据，给中性值，不奖不罚
 
     pos = event.pos_in_range()
-    s_pos = _band(pos, 0.25, 0.65, 0.05, 0.90)
+    # 注意：突破型龙头本来就贴着日内高点，位置轴不该因此重罚——
+    # 追高风险由 penalty 里的"偏离均价"负责，避免同一件事被扣两次。
+    s_pos = _band(pos, 0.20, 0.80, 0.02, 0.95)
 
     s_multi = 0.5
     if event.vwap_5d > 0 and price > 0:
@@ -217,6 +268,9 @@ def score_support(event: SignalEvent) -> tuple:
     s_bid = _band(event.bid_pressure, 55.0, 75.0, 40.0, 92.0)
     s_clarity = _clip(event.structure_clarity) / 100.0
     s_minutes = _band(event.minutes_above_vwap, 20.0, 240.0, 0.0, 300.0)
+    if event.minutes_above_vwap <= 0:
+        # 字段缺失时给中性偏低值：缺失不等于"刚站上均价"
+        s_minutes = 0.35
 
     if event.taker_buy_ratio >= 60:
         notes.append("外盘{:.0f}%".format(event.taker_buy_ratio))
@@ -240,6 +294,8 @@ def score_intent(event: SignalEvent) -> tuple:
     s_slope = _clip((event.slope_score - 40.0) / 55.0, 0.0, 1.0)
     s_intent = _clip((event.intent_score - 15.0) / 85.0, 0.0, 1.0)
     s_vel = _band(event.velocity_pct, 0.6, 6.0, 0.0, 9.0)
+    if event.velocity_pct <= 0 and event.segment_vol_inc <= 0:
+        s_vel = 0.35   # 无分段数据：中性偏低，而不是当作"零拉升"
     s_vol = _band(event.vol_ratio, 1.6, 4.0, 0.9, 6.0)
 
     if event.slope_score >= 70:
@@ -279,8 +335,11 @@ def score_regime(event: SignalEvent, regime: Optional[MarketRegime]) -> tuple:
             notes.append("退潮中")
 
     s_sector = _clip(event.sector_resonance) / 100.0
-    if event.sector_resonance >= 60:
-        notes.append("板块共振{:.0f}".format(event.sector_resonance))
+    if event.sector_resonance <= 0:
+        s_sector = 0.50   # 板块数据缺失 -> 中性，不惩罚也不奖励
+    else:
+        if event.sector_resonance >= 60:
+            notes.append("板块共振{:.0f}".format(event.sector_resonance))
 
     score = 0.55 * base + 0.30 * (100.0 * s_sector) + flip_adj
     if event.is_leader:
@@ -289,14 +348,16 @@ def score_regime(event: SignalEvent, regime: Optional[MarketRegime]) -> tuple:
     return _clip(score), notes
 
 
-def penalty_of(event: SignalEvent, regime: Optional[MarketRegime]) -> tuple:
+def penalty_of(event: SignalEvent, regime: Optional[MarketRegime], params: Optional[Dict[str, Any]] = None) -> tuple:
     """风险惩罚：这些不是"缺点"，是会让你亏钱的东西。"""
+    p_cfg = dict(DEFAULT_PENALTY)
+    p_cfg.update(params or {})
     notes: List[str] = []
     p = 0.0
 
     bias = event.bias_pct()
-    if bias > 3.0:
-        chase = min(30.0, (bias - 3.0) * 6.0)
+    if bias > p_cfg["chase_start_pct"]:
+        chase = min(p_cfg["chase_cap"], (bias - p_cfg["chase_start_pct"]) * p_cfg["chase_per_pct"])
         p += chase
         notes.append("偏离均价{:+.1f}%".format(bias))
 
@@ -304,33 +365,41 @@ def penalty_of(event: SignalEvent, regime: Optional[MarketRegime]) -> tuple:
         p += 12.0
         notes.append("涨幅{:.1f}%+换手{:.0f}%透支".format(event.pct, event.turnover))
 
-    if event.vol_ratio > 4.5:
-        p += 10.0
+    if event.vol_ratio > p_cfg["crowd_vol_ratio"]:
+        p += p_cfg["crowd_penalty"]
         notes.append("量比{:.1f}过度拥挤".format(event.vol_ratio))
 
     if regime is not None and regime.temp >= 60.0 and not event.is_leader:
-        p += 20.0
+        p += p_cfg["overheat_penalty"]
         notes.append("过热期非龙头")
 
     if 0 < event.amount_wan < 3000:
-        p += 15.0
+        p += p_cfg["illiquid_penalty"]
         notes.append("成交额不足{:.0f}万".format(event.amount_wan))
 
-    return min(MAX_PENALTY, p), notes
+    return min(p_cfg["cap"], p), notes
 
 
 # ---------------------------------------------------------------------------
 # 否决器
 # ---------------------------------------------------------------------------
-def veto_of(event: SignalEvent, regime: Optional[MarketRegime], today: str = "") -> str:
+def veto_of(
+    event: SignalEvent,
+    regime: Optional[MarketRegime],
+    today: str = "",
+    params: Optional[Dict[str, Any]] = None,
+) -> str:
     """硬否决：直接 L0，不参与打分。
 
     刻意保持"少而硬"：只有不可修复的风险才进这里，
     其余通过 penalty 与级别上限表达，避免又退化成单阈值。
     """
+    v_cfg = dict(DEFAULT_VETO)
+    v_cfg.update(params or {})
+
     if event.price <= 0 or event.vwap <= 0:
         return "行情缺失(price/vwap无效)"
-    if event.freshness_s > STALE_SECONDS:
+    if event.freshness_s > v_cfg["stale_seconds"]:
         return "数据过期{:.0f}s".format(event.freshness_s)
     if today and event.trade_date and event.trade_date != today:
         return "跨交易日数据({})".format(event.trade_date)
@@ -338,11 +407,11 @@ def veto_of(event: SignalEvent, regime: Optional[MarketRegime], today: str = "")
         return "跌破底台{:.2f}".format(event.base_support)
     if event.sbc_supp > 0 and event.price < event.sbc_supp * 0.995:
         return "跌破SBC支撑{:.2f}".format(event.sbc_supp)
-    if event.bias_pct() > 7.0:
+    if event.bias_pct() > v_cfg["max_bias_pct"]:
         return "追高透支(偏离均价{:+.1f}%)".format(event.bias_pct())
     if regime is not None and regime.stage == STAGE_EBB and not event.is_leader:
         return "退潮期非龙头"
-    if 0 < event.amount_wan < 3000:
+    if 0 < event.amount_wan < v_cfg["min_amount_wan"]:
         return "流动性不足({:.0f}万)".format(event.amount_wan)
     return ""
 
@@ -356,15 +425,40 @@ class FusionEngine:
     单写者、纯函数式、无 IO。调用方负责提供新鲜事件与当前温度。
     """
 
-    def __init__(self, today: str = "", max_single_size_pct: float = MAX_SINGLE_SIZE_PCT):
+    def __init__(
+        self,
+        today: str = "",
+        max_single_size_pct: float = MAX_SINGLE_SIZE_PCT,
+        params: Optional[Dict[str, Any]] = None,
+    ):
         self.today = today
-        self.max_single_size_pct = max_single_size_pct
+        self.params: Dict[str, Any] = dict(params or {})
+        self.max_single_size_pct = float(self.params.get("max_single_size_pct", max_single_size_pct))
+
+        self.weights = dict(DEFAULT_WEIGHTS)
+        self.weights.update(self.params.get("weights") or {})
+
+        self.veto_params = dict(DEFAULT_VETO)
+        self.veto_params.update(self.params.get("veto") or {})
+
+        self.penalty_params = dict(DEFAULT_PENALTY)
+        self.penalty_params.update(self.params.get("penalty") or {})
+
+        self.temp_matrix = dict(TEMP_MATRIX)
+        for stage, pair in (self.params.get("temp_matrix") or {}).items():
+            try:
+                self.temp_matrix[stage] = (int(pair[0]), float(pair[1]))
+            except Exception:
+                continue
+
+        self.cuts = _parse_cuts(self.params.get("tier_cuts"))
+        self.age_table = _parse_age_table(self.params.get("age_table"))
 
     # -- 级别与仓位 -------------------------------------------------------
     def _temp_cap(self, regime: Optional[MarketRegime], event: SignalEvent) -> tuple:
         if regime is None:
             return 4, 1.0
-        cap, coef = TEMP_MATRIX.get(regime.stage, (4, 1.0))
+        cap, coef = self.temp_matrix.get(regime.stage, (4, 1.0))
 
         # 过热期龙头单独放行一档，但仓位仍压低
         if regime.stage == STAGE_OVERHEAT and event.is_leader:
@@ -390,8 +484,10 @@ class FusionEngine:
         if event.launch_ts <= 0 or now <= event.launch_ts:
             return 0.0, 4, 1.0
         age_min = (now - event.launch_ts) / 60.0
-        cap, coef = _age_limits(age_min)
-        return age_min, cap, coef
+        for limit_min, cap, coef in self.age_table:
+            if age_min <= limit_min:
+                return age_min, cap, coef
+        return age_min, 0, 0.0
 
     def _entry_plan(self, tier: int, event: SignalEvent) -> Dict[str, Any]:
         spec = LADDER.get(tier)
@@ -450,10 +546,11 @@ class FusionEngine:
         event: SignalEvent,
         regime: Optional[MarketRegime] = None,
         now: Optional[float] = None,
+        tier_cap: Optional[int] = None,
     ) -> FusionDecision:
         now = float(now if now is not None else (event.ts or time.time()))
 
-        veto = veto_of(event, regime, self.today)
+        veto = veto_of(event, regime, self.today, self.veto_params)
         if veto:
             return FusionDecision(
                 code=event.code,
@@ -472,13 +569,19 @@ class FusionEngine:
         s, n_sup = score_support(event)
         i, n_itn = score_intent(event)
         r, n_reg = score_regime(event, regime)
-        pen, n_pen = penalty_of(event, regime)
+        pen, n_pen = penalty_of(event, regime, self.penalty_params)
 
-        rar = 0.30 * p + 0.25 * s + 0.25 * i + 0.20 * r - pen
+        rar = (
+            self.weights["position"] * p
+            + self.weights["support"] * s
+            + self.weights["intent"] * i
+            + self.weights["regime"] * r
+            - pen
+        )
         rar = _clip(rar, 0.0, 100.0)
         axes = AxisScores(position=p, support=s, intent=i, regime=r, penalty=pen, rar=rar)
 
-        tier = tier_of(rar)
+        tier = tier_of(rar, self.cuts)
         temp_cap, temp_coef = self._temp_cap(regime, event)
         age_min, age_cap, age_coef = self._age(event, now)
         tier = min(tier, temp_cap, age_cap)
@@ -488,6 +591,8 @@ class FusionEngine:
             tier = 3
         if tier >= 3 and event.structure_clarity > 0 and event.structure_clarity < 60.0:
             tier = min(tier, 2)
+        if tier_cap is not None:
+            tier = max(0, min(tier, int(tier_cap)))
 
         spec = LADDER[tier]
         size = spec.base_size_pct * temp_coef * age_coef
@@ -538,16 +643,30 @@ class FusionEngine:
 # 收敛：同一标的只留一条，按级别排序
 # ---------------------------------------------------------------------------
 class FusionBus:
-    """跨来源收敛。
+    """跨来源收敛 + 组合级配额。
 
     现状问题：一个票被 5 个模块报警就播 5 条，用户无法判断哪条更重要。
     这里以 code 为键只保留一条决策，来源合并进 sources[]，
     对外只输出"按级别 + RAR 排序的 TopN"。
+
+    组合配额（rebalance）解决翻转日的另一个问题：
+    单票评分是独立算的，温度一翻转可能同时冒出 5 只 L4，每只 30%，
+    合计 150%——仓位梯度必须再加一层"总预算与头部数量"约束。
     """
 
-    def __init__(self, engine: Optional[FusionEngine] = None):
+    def __init__(
+        self,
+        engine: Optional[FusionEngine] = None,
+        max_l4: int = 2,
+        max_total_pct: float = 85.0,
+    ):
         self.engine = engine or FusionEngine()
         self._decisions: Dict[str, FusionDecision] = {}
+        self._events: Dict[str, SignalEvent] = {}
+        self._regimes: Dict[str, Optional[MarketRegime]] = {}
+        self.max_l4 = int(max_l4)
+        self.max_total_pct = float(max_total_pct)
+        self._portfolio: List[FusionDecision] = []
 
     def update(self, event: SignalEvent, regime: Optional[MarketRegime] = None) -> FusionDecision:
         decision = self.engine.evaluate(event, regime)
@@ -556,10 +675,52 @@ class FusionBus:
             if prev is not None:
                 decision.sources = list(dict.fromkeys(list(prev.sources) + list(decision.sources)))
             self._decisions[event.code] = decision
+            self._events[event.code] = event
+            self._regimes[event.code] = regime
         else:
             if event.source and event.source not in prev.sources:
                 prev.sources = list(dict.fromkeys(prev.sources + [event.source]))
         return self._decisions[event.code]
+
+    def rebalance(self, max_l4: Optional[int] = None, max_total_pct: Optional[float] = None) -> List[FusionDecision]:
+        """按级别 + RAR 重新分配组合预算：限制 L4 数量与总仓位。
+
+        超额时不是"全部砍掉"，而是逐级降档（L4->L3->L2...），
+        保证强弱顺序不变、梯度不塌陷。
+        """
+        cap_l4 = self.max_l4 if max_l4 is None else int(max_l4)
+        budget = self.max_total_pct if max_total_pct is None else float(max_total_pct)
+
+        ranked = sorted(self._decisions.values(), key=lambda d: (d.tier, d.rar), reverse=True)
+        l4_used = 0
+        total = 0.0
+        out: List[FusionDecision] = []
+
+        for base in ranked:
+            ev = self._events.get(base.code)
+            rg = self._regimes.get(base.code)
+            decision = base
+
+            if decision.tier >= 4 and l4_used >= cap_l4:
+                decision = self.engine.evaluate(ev, rg, now=base.ts, tier_cap=3) if ev else decision
+
+            while ev is not None and decision.tier > 0 and total + decision.size_pct > budget:
+                decision = self.engine.evaluate(ev, rg, now=base.ts, tier_cap=decision.tier - 1)
+
+            if decision.tier >= 4:
+                l4_used += 1
+            total += decision.size_pct
+            self._decisions[decision.code] = decision
+            out.append(decision)
+
+        self._portfolio = out
+        return out
+
+    def portfolio(self) -> List[Dict[str, Any]]:
+        return [d.to_dict() for d in self._portfolio]
+
+    def total_size_pct(self) -> float:
+        return round(sum(d.size_pct for d in self._portfolio), 1)
 
     def top(self, n: int = 10, actionable_only: bool = False) -> List[FusionDecision]:
         items = list(self._decisions.values())
@@ -576,3 +737,6 @@ class FusionBus:
 
     def reset(self) -> None:
         self._decisions.clear()
+        self._events.clear()
+        self._regimes.clear()
+        self._portfolio.clear()

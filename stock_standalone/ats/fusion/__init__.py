@@ -16,13 +16,16 @@
     不得把过期或跨日数据伪装为有效行情。
 """
 
+from ats.fusion.adapter import LaunchTracker, build_event
+from ats.fusion.config import engine_params, load_config
 from ats.fusion.contract import (
     AxisScores,
     FusionDecision,
     SignalEvent,
     TierSpec,
 )
-from ats.fusion.engine import FusionEngine, LADDER, tier_of
+from ats.fusion.engine import FusionBus, FusionEngine, LADDER, tier_of
+from ats.fusion.shadow import FusionShadow
 from ats.fusion.regime import (
     FLIP_ARMED,
     FLIP_CONFIRMED,
@@ -45,6 +48,12 @@ __all__ = [
     "SignalEvent",
     "TierSpec",
     "FusionEngine",
+    "FusionBus",
+    "FusionShadow",
+    "LaunchTracker",
+    "build_event",
+    "load_config",
+    "engine_params",
     "LADDER",
     "tier_of",
     "MarketRegime",
