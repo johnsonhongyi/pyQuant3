@@ -87,18 +87,16 @@ def safe_float(val: Any, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return default
 
-# 默认预备通达信 HQ 服务器 (实测 100% 存活且支持沪深主板与北交所的优质主站池，彻底剔除 111.15.15.43 假活主站)
+# 默认预备通达信 HQ 服务器 (实测 100% 存活、低延迟优质黄金主站池，置顶江苏主站与西安电信主力集群)
 FALLBACK_TDX_HOSTS = [
-    ("通达信优质主站1", "117.34.114.16", 7709),
-    ("通达信优质主站2", "117.34.114.14", 7709),
-    ("通达信优质主站3", "117.34.114.13", 7709),
-    ("通达信优质主站4", "117.34.114.17", 7709),
-    ("通达信优质主站5", "117.34.114.20", 7709),
-    ("通达信优质主站6", "117.34.114.18", 7709),
-    ("通达信优质主站7", "117.34.114.15", 7709),
     ("通达信江苏主站", "223.112.100.140", 7709),
-    ("通达信电信主站", "59.36.5.11", 7709),
-    ("通达信西安主站", "117.34.114.27", 7709),
+    ("通达信西安主站1", "117.34.114.16", 7709),
+    ("通达信西安主站4", "117.34.114.17", 7709),
+    ("通达信西安主站7", "117.34.114.15", 7709),
+    ("通达信西安主站8", "117.34.114.27", 7709),
+    ("通达信西安主站3", "117.34.114.13", 7709),
+    ("通达信西安主站5", "117.34.114.20", 7709),
+    ("通达信上海主站", "180.153.18.170", 7709),
 ]
 
 def get_trading_segment_info(now_ts: float, segment_mode: str = "30m") -> Tuple[str, str, float, float]:
@@ -248,41 +246,35 @@ def extract_hosts_from_tdx_cfg(cfg_path: str) -> List[Tuple[str, str, int]]:
 
 
 def get_all_tdx_hosts() -> List[Tuple[str, str, int]]:
-    """获取所有可用 TDX 服务器（高可用活跃主站优先，官方池补充，本地预设去重合并）"""
+    """获取所有可用 TDX 服务器（高可用黄金活跃主站优先，本地有效配置补充，杜绝陈年废弃死站）"""
     all_hosts = []
     seen = set()
 
-    # 1. 优先注入实测 100% 存活、低延迟的优质主站
+    # 1. 优先注入实测 100% 存活、低延迟的黄金主力主站
     for name, ip, port in FALLBACK_TDX_HOSTS:
         if (ip, port) not in seen:
             seen.add((ip, port))
             all_hosts.append((name, ip, port))
 
-    # 2. 引入 pytdx 官方主站池中的优质节点
-    try:
-        import pytdx.config.hosts
-        for item in pytdx.config.hosts.hq_hosts:
-            if len(item) >= 3:
-                name, ip, port = str(item[0]), str(item[1]), int(item[2])
-                if (ip, port) not in seen:
-                    seen.add((ip, port))
-                    all_hosts.append((f"官方_{name}", ip, port))
-    except Exception:
-        pass
-
-    # 3. 本地配置文件提取的历史节点去重补充
+    # 2. 本地配置文件提取的节点去重补充 (限制数量与端口，杜绝臃肿死站池)
     cfg_paths = get_local_tdx_config_paths()
     local_count = 0
     for path in cfg_paths:
         parsed = extract_hosts_from_tdx_cfg(path)
         for name, ip, port in parsed:
-            if (ip, port) not in seen:
-                seen.add((ip, port))
-                all_hosts.append((name, ip, port))
-                local_count += 1
+            # 严格过滤非 7709 端口或已知重复节点
+            if port != 7709 or (ip, port) in seen:
+                continue
+            seen.add((ip, port))
+            all_hosts.append((name, ip, port))
+            local_count += 1
+            if len(all_hosts) >= 16:
+                break
+        if len(all_hosts) >= 16:
+            break
 
     logger.info(
-        f"⚡ [TDX自适应] 高可用活跃池 {len(FALLBACK_TDX_HOSTS)} 个，本地探测 {local_count} 个节点 (测速总候选池: {len(all_hosts)} 个)"
+        f"⚡ [TDX自适应] 精简高可用候选池: {len(all_hosts)} 个节点 (黄金主力: {len(FALLBACK_TDX_HOSTS)} 个, 本地补充: {local_count} 个)"
     )
     return all_hosts
 
@@ -2814,15 +2806,19 @@ class TDXRealtimeFetcher:
         test_api = TdxHq_API(heartbeat=False)
         t0 = time.time()
         try:
-            if test_api.connect(ip, port, time_out=0.8):
-                # 必须验证能成功拉取真实行情且有效返回数据 (开盘前/早盘 price 为 0.0，但 last_close > 0)
-                quotes = test_api.get_security_quotes([(0, "000001"), (1, "600519")])
+            if test_api.connect(ip, port, time_out=0.4):
                 cost = (time.time() - t0) * 1000
+                # 盘中拉取行情快照验证，非交易时段兼容证券总数握手校验 (防假活/拒绝服务节点)
+                quotes = test_api.get_security_quotes([(0, "000001"), (1, "600519")])
                 if quotes and len(quotes) >= 1:
                     p = safe_float(quotes[0].get("price", 0.0))
                     lc = safe_float(quotes[0].get("last_close", 0.0))
                     if p > 0 or lc > 0:
                         return (cost, name, ip, port)
+                # 兼容非交易时段/夜间清算：检查基础协议握手与股票列表
+                cnt = test_api.get_security_count(0)
+                if isinstance(cnt, int) and cnt > 0:
+                    return (cost, name, ip, port)
         except Exception:
             pass
         finally:
@@ -2832,45 +2828,49 @@ class TDXRealtimeFetcher:
                 pass
         return None
 
-    def _init_best_server(self, max_test_count: int = 60, force: bool = False):
-        """首次可用即返回；其余独立探测在后台完善故障转移池。"""
+    def _init_best_server(self, max_test_count: int = 8, force: bool = False):
+        """【⚡ 极速首胜直连机制】优先复用上次可用节点，首胜秒退，彻底杜绝后台探针雪崩"""
         hosts = get_all_tdx_hosts()
         if not hosts:
             hosts = FALLBACK_TDX_HOSTS
 
-        test_targets = hosts[:max_test_count]
-        self._host_probe_generation = getattr(self, "_host_probe_generation", 0) + 1
-        generation = self._host_probe_generation
+        # 1. 优先尝试上一次成功的节点 (50~150ms 极速命中)
         try:
             from sys_utils import get_app_root
             path = os.path.join(get_app_root(), "config", "tdx_last_host.json")
-            with open(path, "r", encoding="utf-8") as handle:
-                saved = json.load(handle)
-            preferred = (str(saved[0]), str(saved[1]), int(saved[2]))
-            if preferred in test_targets:
-                test_targets.remove(preferred)
-                test_targets.insert(0, preferred)
-        except (OSError, ValueError, TypeError, IndexError):
+            if os.path.exists(path) and not force:
+                with open(path, "r", encoding="utf-8") as handle:
+                    saved = json.load(handle)
+                saved_host = (str(saved[0]), str(saved[1]), int(saved[2]))
+                res = self._ping_single_host(saved_host)
+                if res:
+                    self.latency_ms = res[0]
+                    self.current_host = (res[1], res[2], res[3])
+                    self.active_hosts_pool = [res]
+                    logger.info(f"⚡ [TDX秒级连接] 快速复用上次最优主站: {res[1]} ({res[2]}:{res[3]}), 延迟: {res[0]:.1f}ms")
+                    self.add_log(f"⚡ 快速复用上次主站: [{res[1]}] ({res[2]}:{res[3]}), 延迟: {res[0]:.1f}ms", level="INFO")
+                    return
+        except Exception:
             pass
-        valid_results = []
 
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=25)
-        futures = [executor.submit(self._ping_single_host, h) for h in test_targets]
-        pending = set(futures)
-        deadline = time.monotonic() + 0.8
-        while pending:
-            budget = None if force else max(0.0, deadline - time.monotonic())
-            done, pending = concurrent.futures.wait(
-                pending, timeout=budget, return_when=concurrent.futures.FIRST_COMPLETED)
-            for future in done:
-                try:
-                    result = future.result()
-                    if result:
-                        valid_results.append(result)
-                except Exception:
-                    pass
-            if not force and (valid_results or time.monotonic() >= deadline):
-                break
+        # 2. 精简并发探测前 6~8 个候选站点 (首胜快速退出，不排队死等)
+        test_targets = hosts[:min(max_test_count, 8)]
+        valid_results = []
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(test_targets), 6)) as executor:
+                future_to_host = {executor.submit(self._ping_single_host, h): h for h in test_targets}
+                # 首胜退出：有首个存活主站即退出，彻底杜绝探针风暴
+                for future in concurrent.futures.as_completed(future_to_host, timeout=0.8):
+                    try:
+                        res = future.result()
+                        if res:
+                            valid_results.append(res)
+                            if not force:
+                                break
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
         if valid_results:
             valid_results.sort(key=lambda x: x[0])
@@ -2878,34 +2878,14 @@ class TDXRealtimeFetcher:
             best = valid_results[0]
             self.latency_ms = best[0]
             self.current_host = (best[1], best[2], best[3])
+            self._remember_successful_host()
             logger.info(f"🏆 TDX 极速服务器选定: {best[1]} ({best[2]}:{best[3]}), 延迟: {best[0]:.1f}ms")
-            self.add_log(f"🏆 测速完成选定最优主站: [{best[1]}] ({best[2]}:{best[3]}), 延迟: {best[0]:.1f}ms (可用主站: {len(valid_results)}个)", level="INFO")
+            self.add_log(f"🏆 测速完成选定最优主站: [{best[1]}] ({best[2]}:{best[3]}), 延迟: {best[0]:.1f}ms (候选池存活: {len(valid_results)}个)", level="INFO")
         else:
             fb = FALLBACK_TDX_HOSTS[0]
             self.current_host = (fb[0], fb[1], fb[2])
             self.latency_ms = 150.0
             self.add_log(f"⚠️ 动态测速未探测到有效主站，使用默认高可用兜底主站: [{fb[0]}] ({fb[1]}:{fb[2]})", level="WARN")
-
-        def finish_probes():
-            results = list(valid_results)
-            try:
-                for future in concurrent.futures.as_completed(pending):
-                    try:
-                        result = future.result()
-                        if result:
-                            results.append(result)
-                    except Exception:
-                        pass
-                if results:
-                    with self._conn_lock:
-                        if generation == self._host_probe_generation:
-                            self.active_hosts_pool = sorted(results, key=lambda item: item[0])
-            finally:
-                executor.shutdown(wait=True)
-        if pending:
-            threading.Thread(target=finish_probes, name="TDX-host-probes", daemon=True).start()
-        else:
-            executor.shutdown(wait=False)
 
     def _remember_successful_host(self):
         temp_path = None
@@ -2927,19 +2907,22 @@ class TDXRealtimeFetcher:
                     pass
 
     def _probe_host_alive(self, api: TdxHq_API) -> bool:
-        """轻量探针：验证连接的主站是否能真实返回股票行情数据 (防假活/拒绝服务节点，兼容早盘未开盘 price==0 但昨收有效)"""
+        """轻量探针：验证连接的主站是否能真实通信 (兼容盘中五档盘口、早盘未开盘及非交易时段/夜间清算)"""
         try:
             q = api.get_security_quotes([(0, "000001")])
             if q and len(q) >= 1:
                 p = safe_float(q[0].get("price", 0.0))
                 lc = safe_float(q[0].get("last_close", 0.0))
-                return bool(p > 0 or lc > 0)
-            return False
+                if p > 0 or lc > 0:
+                    return True
+            # 兼容非交易时段/夜间盘后清算：通过证券统计总数验证主站可用性
+            cnt = api.get_security_count(0)
+            return bool(isinstance(cnt, int) and cnt > 0)
         except Exception:
             return False
 
     def connect(self, probe: bool = True, force: bool = False) -> bool:
-        """建立或确保连接（带真实行情探针健康校验、早盘初始化缓重试延时与全局连接熔断保护）"""
+        """建立或确保连接（带真实行情探针健康校验、极速直连与全局连接熔断防雪崩保护）"""
         with self._conn_lock:
             if self._is_connected and self.api is not None:
                 return True
@@ -2959,7 +2942,7 @@ class TDXRealtimeFetcher:
                 else:
                     if now_t - self._last_connect_fail_warn_time > 60.0:
                         self._last_connect_fail_warn_time = now_t
-                        self.add_log(f"💤 [连接熔断保护] 上次所有主站连接均失败，处于指数退避冷却中 (剩余 {remain_s}s)，避免高频尝试引发 IP 受限", level="WARN")
+                        self.add_log(f"💤 [连接熔断保护] 上次主站连接均失败，处于指数退避冷却中 (剩余 {remain_s}s)，避免高频尝试引发 IP 受限", level="WARN")
                 return False
 
             if not self.current_host:
@@ -2973,8 +2956,9 @@ class TDXRealtimeFetcher:
             name, ip, port = self.current_host
             self.api = TdxHq_API(heartbeat=False)
             try:
-                if self.api.connect(ip, port, time_out=1.2):
-                    # 必须验证真实行情探针 (开盘前/早盘兼容 price==0 但昨收有效)
+                # 毫秒级极速直连：单站握手超时设为 0.5s
+                if self.api.connect(ip, port, time_out=0.5):
+                    # 必须验证真实行情探针 (兼容非交易时段与早盘未开盘)
                     if not probe or self._probe_host_alive(self.api):
                         self._is_connected = True
                         self._global_connect_fail_count = 0
@@ -2995,19 +2979,19 @@ class TDXRealtimeFetcher:
                     self.add_log(f"连接主站 [{name}] ({ip}:{port}) 失败: {e}", level="WARN")
                 self.disconnect()
 
-            # 故障转移：按活跃服务器池逐个探查可用节点
+            # 故障转移：按活跃服务器池快速尝试最多 2 个备用主站，彻底杜绝多重死循环雪崩
             failover_targets = [h for h in self.active_hosts_pool if (h[2], h[3]) != (ip, port)]
             if not failover_targets:
                 for fb in FALLBACK_TDX_HOSTS:
                     if (fb[1], fb[2]) != (ip, port):
                         failover_targets.append((150.0, fb[0], fb[1], fb[2]))
 
-            # 🛡️ 早盘初始化期间最多仅快速尝试 1 个备用主站，常规时段最多尝试 8 个
-            max_try = 1 if is_server_init else 8
+            # 🛡️ 备用主站尝试上限：早盘 1 个，常规时段最多 2 个
+            max_try = 1 if is_server_init else 2
             for cost, f_name, f_ip, f_port in failover_targets[:max_try]:
                 try:
                     self.api = TdxHq_API(heartbeat=False)
-                    if self.api.connect(f_ip, f_port, time_out=1.2):
+                    if self.api.connect(f_ip, f_port, time_out=0.5):
                         if not probe or self._probe_host_alive(self.api):
                             self._is_connected = True
                             self.current_host = (f_name, f_ip, f_port)
@@ -3028,7 +3012,6 @@ class TDXRealtimeFetcher:
             # 🛡️ 记录全局连接失败熔断与早盘缓重试冷却
             self._global_connect_fail_count += 1
             if is_server_init:
-                # 早盘服务器初始化缓重试延时计算：离 09:15 越远冷却越长，动态逼近
                 now_time = now_dt.time()
                 if now_time < dtime(9, 5, 0):
                     backoff_sec = 60.0
@@ -3045,40 +3028,45 @@ class TDXRealtimeFetcher:
                 self._global_connect_cooldown_until = now_t + backoff_sec
                 if now_t - self._last_connect_fail_warn_time > 60.0:
                     self._last_connect_fail_warn_time = now_t
-                    self.add_log(f"❌ 所有备用 TDX HQ 服务器连接均失败，网络或 IP 可能受限，启动熔断保护 (冷却 {int(backoff_sec)}s)", level="ERROR")
+                    self.add_log(f"❌ 备用 TDX HQ 服务器连接均失败，启动熔断保护 (冷却 {int(backoff_sec)}s)，杜绝重试风暴", level="ERROR")
             return False
 
     def auto_failover(self, force: bool = False) -> bool:
-        """【🚀 自动故障转移】主动断开异常主站并切换至下一个可用备用主站"""
+        """【🚀 自动故障转移】主动断开异常主站并切换至下一个可用备用主站（带 15s 防抖与单次精简尝试，杜绝探针雪崩）"""
         with self._conn_lock:
+            now_t = time.time()
             now_dt = datetime.now()
             _, _, stage_meta = is_tdx_trading_allowed(now_dt)
             if not force and stage_meta.get("is_server_init", False):
-                # 早盘服务器初始化期间主站无盘口属于正常现象，坚决不触发 auto_failover 震荡
                 return False
+
+            # 频控防抖：15 秒内最多触发 1 次故障切换
+            last_failover_t = getattr(self, "_last_auto_failover_time", 0.0)
+            if not force and (now_t - last_failover_t) < 15.0:
+                return False
+            self._last_auto_failover_time = now_t
 
             old_host = self.current_host
             self.disconnect()
             curr_ip_port = (old_host[1], old_host[2]) if old_host else None
-            # 活跃池中剔除当前失效节点
+            # 活跃池中剔除当前失效节点，精简至最多 2 个候选站
             candidate_pool = [h for h in self.active_hosts_pool if (h[2], h[3]) != curr_ip_port]
             if not candidate_pool:
                 self._init_best_server(force=True)
                 candidate_pool = [h for h in self.active_hosts_pool if (h[2], h[3]) != curr_ip_port]
 
-            for cost, f_name, f_ip, f_port in candidate_pool:
+            for cost, f_name, f_ip, f_port in candidate_pool[:2]:
                 self.current_host = (f_name, f_ip, f_port)
                 if self.connect(probe=True, force=force):
                     self.latency_ms = cost
                     self.add_log(f"🔄 自动故障转移成功：已由异常主站切换至 [{f_name}] ({f_ip}:{f_port}), 延迟: {cost:.1f}ms", level="INFO")
-                    # 清空因异常主站导致的误冷却标的
                     self._unlisted_or_dormant_codes.clear()
                     self._no_quote_counts.clear()
                     self._no_quote_last_attempt.clear()
                     return True
 
-            # 若活跃池仍未连上，遍历 fallback 主站池
-            for f_name, f_ip, f_port in FALLBACK_TDX_HOSTS:
+            # 若活跃池仍未连上，尝试最多 2 个 fallback 黄金主站
+            for f_name, f_ip, f_port in FALLBACK_TDX_HOSTS[:2]:
                 if (f_ip, f_port) != curr_ip_port:
                     self.current_host = (f_name, f_ip, f_port)
                     if self.connect(probe=True, force=force):
@@ -3089,7 +3077,7 @@ class TDXRealtimeFetcher:
                         self._no_quote_last_attempt.clear()
                         return True
 
-            self.add_log("❌ 自动故障转移失败，无可用主站", level="ERROR")
+            self.add_log("❌ 自动故障转移失败，无可用主站，进入退避熔断", level="ERROR")
             return False
 
     def switch_host(self, name: str, ip: str, port: int) -> bool:
