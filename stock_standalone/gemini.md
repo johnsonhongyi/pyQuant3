@@ -1,5 +1,12 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-23 23:25 【修复新股面板启动初期空值KeyError防御闭环】(`docs/tasks/2026-10-23_2315_修复新股面板启动空值KeyError防御闭环.md`, `ats/ui/new_stock_panel.py`, `tests/test_multiday_pct_base_view.py`)
+- [x] **【彻底根绝 ATS 启动报 `IPO preparation failed: 'code'` 警告】**：
+  - **前置边界空值守卫**：在 `_merge_ipc_frame` 与 `_prepare_stock_table` 中，增加针对 `data is None or getattr(data, 'empty', True) or 'code' not in data.columns` 的前置防护，启动真空期新股数据未拉取完毕时优雅降级返回，绝不盲目执行 `data['code']`；
+  - **行字典安全访问**：将 `row["code"]` 统一升级为 `row.get("code")` 容错安全读取；
+  - **自动化测试 100% 纯绿秒级通过**：在 `tests/test_multiday_pct_base_view.py` 新增空 DataFrame 与 None 降级测试（7/7 PASS）。
+
+
 ## 2026-10-23 20:45 【DPI环境隔离与双向回退自适应彻底修复闭环】(`docs/tasks/2026-10-23_2045_DPI统一配置平滑迁移与自适应彻底修复.md`, `tk_gui_modules/window_mixin.py`, `tk_gui_modules/dpi_mixin.py`, `dpi_utils.py`, `instock_MonitorTK.py`, `tests/test_dpi_window_restore_and_subwindow_persistence.py`)
 - [x] **【彻底解决 RDP 远程桌面与本地环境窗口识别变形与膨胀】**：
   - **显式环境路由与双向平滑回退继承**：在 `dpi_utils.py` 与 `window_mixin.py` 中，恢复对 RDP 会话的确定性精准识别（`is_rdp_session()`），远程环境下优先读取 `scale2_window_config.json`（完美加载用户长期精心调优的 134 个紧凑窗口布局），本地环境下读取 `window_config.json`；若主配置文件中未包含指定窗口，自动从备用配置文件双向平滑兜底回退读取，杜绝任何窗口丢失或跳出默认尺寸撑爆屏幕；

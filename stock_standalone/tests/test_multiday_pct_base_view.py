@@ -228,3 +228,28 @@ def test_new_stock_panel_multiday_dff_adaptation():
     )
     assert len(records_2d) == 1
     assert round(records_2d[0]['dff'], 2) == 22.22
+
+
+def test_new_stock_panel_empty_dataframe_guard():
+    """验证启动初期 df_data 为空时 _merge_ipc_frame 与 _prepare_stock_table 绝不抛 KeyError: 'code'"""
+    from ats.ui.new_stock_panel import _merge_ipc_frame, _prepare_stock_table
+
+    empty_df = pd.DataFrame()
+    ipc_df = pd.DataFrame({'close': [10.0]}, index=pd.Index(['000001', '600000'], name='code'))
+
+    # 1. 验证空 DataFrame 合并 IPC 不会触发 KeyError: 'code'
+    merged = _merge_ipc_frame(empty_df, ipc_df, extra_cols=())
+    assert getattr(merged, 'empty', True)
+
+    # 2. 验证 None 数据优雅降级
+    merged_none = _merge_ipc_frame(None, ipc_df, extra_cols=())
+    assert getattr(merged_none, 'empty', True)
+
+    # 3. 验证 _prepare_stock_table 处理空 DataFrame 不抛异常
+    records, _, _, _, _ = _prepare_stock_table(
+        empty_df, fav_stocks=set(), sh_pct=0.0, extra_cols=(),
+        filter_type='全部', search_txt='', fset=None,
+        sort_col=None, sort_order=None, selected_code='', base_day=1
+    )
+    assert records == []
+
