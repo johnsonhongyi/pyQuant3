@@ -106,7 +106,10 @@ class ThemeMap:
             df = pd.read_hdf(self.path, key="/low_d_120_y_all", columns=["category"])
             for code, row in df.iterrows():
                 raw = str(row.get("category") or "")
-                tags = [t.strip() for t in raw.split(";") if t.strip() and t.strip() not in self.BROAD]
+                tags = [
+                    t.strip() for t in raw.split(";")
+                    if t.strip() and t.strip() not in self.BROAD and t.strip() not in ("0", "--", "nan", "None")
+                ]
                 if tags:
                     self.code2tags[str(code).zfill(6)] = tags
             self.ok = bool(self.code2tags)

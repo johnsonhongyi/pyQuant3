@@ -78,6 +78,15 @@ def profit_ranking(rp: DayReplay, day: str, top: int = 20, start_hm: str = "10:0
         if np.isfinite(p0[i]) and p0[i] > 0 and np.isfinite(last[i]):
             rows.append({"code": c, "profit": round(float(last[i] / p0[i] - 1) * 100, 2),
                          "p0": round(float(p0[i]), 3), "close": round(float(last[i]), 3)})
+    try:
+        from ats.fusion.sector import get_theme_map
+        tm = get_theme_map()
+    except Exception:
+        tm = None
+    for r in rows:
+        if tm is not None and tm.ok:
+            tags = tm.get(r["code"])
+            r["theme"] = tags[0] if tags else ""
     rows.sort(key=lambda r: -r["profit"])
     return rows[:top]
 
