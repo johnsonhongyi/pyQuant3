@@ -51,6 +51,7 @@ from ats.fusion.context import get_daily_context
 from ats.fusion.anomaly import detect_patterns, pattern_score, PATTERN_LATENT_BREAK
 from ats.fusion.premarket import get_premarket
 from ats.fusion.structure import classify as classify_structure
+from ats.fusion.sector import get_sector_map, sector_strength
 from dataclasses import replace
 
 _ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
@@ -453,6 +454,12 @@ class DayReplay:
             _v = float((daily_ctx.get(_c) or {}).get("vwap10", 0.0))
             vwap10_map[_c] = _v if _v > 0 else float(_pm_vwap.get(_c, 0.0))
         latent: Dict[str, float] = {}
+        # 赛道（板块）索引：个股分类是"蓄势"，板块才是"赛道"
+        try:
+            _sm = get_sector_map()
+            sec_index = _sm.build_index(codes) if _sm.ok else {}
+        except Exception:
+            _sm, sec_index = None, {}
 
         day_open_map = {}
         for _c in codes:
@@ -532,6 +539,21 @@ class DayReplay:
             ret5_arr = ret5_mat[:, t]
             mkt_ret5 = float(np.nanmean(ret5_arr)) if np.isfinite(ret5_arr).any() else 0.0
             mkt_pct = float(np.mean(pct[v])) if v.any() else 0.0
+
+            # 赛道实时强度与排名（每个时点重算，避免用当日收盘）
+            sec_strength: Dict[str, float] = {}
+            sec_rank: Dict[str, float] = {}
+            sec_breadth: Dict[str, float] = {}
+            if sec_index:
+                sec_strength = sector_strength(pct, valid, sec_index)
+                if sec_strength:
+                    _vals = np.array(sorted(sec_strength.values()))
+                    for _k, _v in sec_strength.items():
+                        sec_rank[_k] = float(np.searchsorted(_vals, _v) / max(1, len(_vals)))
+                for _k, _idx in sec_index.items():
+                    _m = valid[_idx]
+                    if _m.sum() >= 3:
+                        sec_breadth[_k] = float(np.mean(pct[_idx][_m] > 0))
 
             # 龙头代理：当日涨幅进入全池前 1% 且量比>1.5（无板块数据时的近似）
             leader_mask = np.zeros(n_code, dtype=bool)
@@ -636,7 +658,10 @@ class DayReplay:
                     intent_score=intent_proxy,
                     velocity_pct=vel_proxy,
                     segment_vol_inc=accel,
-                    sector_resonance=0.0,
+                    sector_resonance=(
+                        100.0 * (0.6 * sec_rank.get(_sm.get(codes[i]), 0.5) + 0.4 * sec_breadth.get(_sm.get(codes[i]), 0.5))
+                        if sec_index else 0.0
+                    ),
                     is_leader=bool(leader_mask[i]),
                     ma5=float((daily_ctx.get(codes[i]) or {}).get("ma5", 0.0)),
                     ma10=float((daily_ctx.get(codes[i]) or {}).get("ma10", 0.0)),
@@ -766,6 +791,8 @@ class DayReplay:
                         "ignition": round(ignition, 1),
                         "patterns": patterns,
                         "structure": classify_structure(_dc, price, float(pct[i])),
+                        "sector": _sm.get(codes[i]) if sec_index else "",
+                        "sector_rank": round(float(sec_rank.get(_sm.get(codes[i]), 0.5)), 2) if sec_index else 0.0,
                         "session": "AM" if time.localtime(int(clock[t])).tm_hour < 13 else "PM",
                         "pattern_score": round(pattern_score(patterns), 1),
                         "leader": bool(leader_mask[i]),
