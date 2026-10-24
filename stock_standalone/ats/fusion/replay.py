@@ -245,10 +245,15 @@ class DayReplay:
         cum_v = np.cumsum(v)
         vwap = np.divide(np.cumsum(tp * v), np.maximum(cum_v, 1e-9))
         # --- 盘口代理：3 分钟线能推出来的两个量 ---
-        # 外盘占比：收阳 bar 的成交量占累计成交量（标准 bar 级近似）
+        # 外盘占比：用**滚动 10 根**而不是全天累计。
+        # 累计口径是滞后的：早盘走弱会把全天的外盘占比压住，
+        # 等下午真加速时它还在低位，导致"启动"被误判为"承接差"。
         bar_up = close > sub["open"].astype("float64")
-        cum_buy = np.cumsum(np.where(bar_up, v, 0.0))
-        taker = np.divide(cum_buy, np.maximum(cum_v, 1e-9)) * 100.0
+        buy_v = np.where(bar_up, v, 0.0)
+        win = np.ones(10)
+        roll_buy = np.convolve(buy_v, win, "full")[: len(buy_v)]
+        roll_vol = np.convolve(v, win, "full")[: len(v)]
+        taker = np.divide(roll_buy, np.maximum(roll_vol, 1e-9)) * 100.0
         # 买盘压：收盘在 bar 区间中的位置，映射到 40~80
         rng = np.maximum(high - low, 1e-6)
         bid = 40.0 + (close - low) / rng * 40.0
@@ -523,6 +528,28 @@ class DayReplay:
                 up_ratio_i = float(np.mean(np.diff(seg) > 0)) if len(seg) >= 2 else 0.5
                 intent_proxy = float(np.clip(50.0 + (accel - 1.0) * 40.0 + (up_ratio_i - 0.5) * 40.0, 15.0, 100.0))
 
+                # --- 点火强度：与"安全度"分开的弹性指标 ---
+                # 现有四轴偏"确认"（位置/承接），会把刚启动的票判成中庸；
+                # 这里单独量化"量能扩张 + 波动扩张 + 突破前高 + 加速"。
+                vbase = mat["volume"][i, max(0, t - 20): t]
+                vbase = vbase[~np.isnan(vbase)]
+                vbase = float(np.median(vbase)) if len(vbase) >= 5 else 0.0
+                vol_exp = (vol_ratio * (float(np.mean(vbase)) / max(1e-9, vbase))) if vbase > 0 else 1.0
+                vol_exp = float(np.clip(vol_exp, 0.3, 5.0))
+                rng_now = (dh - dl) / max(1e-9, price)
+                rng_base = (mat["high"][i, max(0, t - 20): t] - mat["low"][i, max(0, t - 20): t])
+                rng_base = rng_base[~np.isnan(rng_base)]
+                rng_base = float(np.mean(rng_base)) / max(1e-9, price) if len(rng_base) >= 5 else rng_now
+                rng_exp = float(np.clip(rng_now / max(1e-6, rng_base), 0.3, 5.0))
+                prev_highs = mat["high"][i, max(0, t - 20): t]
+                prev_highs = prev_highs[~np.isnan(prev_highs)]
+                breakout = 1.0 if (len(prev_highs) >= 5 and price > float(np.max(prev_highs))) else 0.0
+                accel_term = float(np.clip(vel_proxy / 1.5, -2.0, 3.0))
+                ignition = float(np.clip(
+                    30.0 + 18.0 * np.log2(vol_exp) + 12.0 * np.log2(rng_exp)
+                    + 8.0 * accel_term + 22.0 * breakout, 0.0, 100.0
+                ))
+
                 launch_ts = float(clock[launch_idx[i]]) if launch_idx[i] >= 0 else 0.0
                 # 结构清晰度代理：最近 10 根 bar 中站上均价的比例
                 av = mat["above_vwap"][i, max(0, t - 9): t + 1]
@@ -625,6 +652,7 @@ class DayReplay:
                         "close_ret": round(close_ret, 2),
                         "base_mfe": round(base_mfe, 2) if np.isfinite(base_mfe) else 0.0,
                         "excess": round(excess, 2),
+                        "ignition": round(ignition, 1),
                         "leader": bool(leader_mask[i]),
                         "veto": decision.veto_reason,
                     }
@@ -708,6 +736,97 @@ class DayReplay:
             day=day, records=records, regime_series=regime_series,
             tier_stats=stats, meta=meta, orders=orders, trades=trades, trade_stats=trade_stats,
         )
+
+    def discover(
+        self,
+        day: str,
+        top_k: int = 20,
+        cutoff: str = "14:00",
+        opportunity_pct: float = 5.0,
+    ) -> Dict[str, Any]:
+        """让系统自己在全市场里选票，再用事后走势打分（不给答案）。
+
+        口径：
+            - 系统自选 = 每只票"首次达到 L2+"的那一刻，按 RAR 取前 top_k，且时间 <= cutoff；
+            - 机会集   = 当日 10:00 到收盘涨幅 >= opportunity_pct 的票（事后真相）；
+            - 命中     = 系统自选里当日收盘相对买入价 >= 2% 的比例；
+            - 召回     = 机会集中被系统选中的比例；
+            - 提升     = 命中率 / 全市场基准命中率。
+        """
+        res = self.run_day(day)
+        if res.meta.get("error"):
+            return {"day": day, "error": res.meta["error"]}
+
+        def _hm(s: str) -> int:
+            try:
+                h, m = s.split(":")
+                return int(h) * 60 + int(m)
+            except Exception:
+                return 24 * 60
+
+        cutoff_min = _hm(cutoff)
+
+        # 每只票首次 L2+（真实可执行时点）
+        first: Dict[str, Dict[str, Any]] = {}
+        for r in sorted(res.records, key=lambda x: x["ts"]):
+            if r["tier"] < 2 or r["code"] in first:
+                continue
+            first[r["code"]] = r
+
+        eligible = {c: r for c, r in first.items() if _hm(r["time"]) <= cutoff_min}
+        picks = sorted(eligible.values(), key=lambda r: r["rar"], reverse=True)[:top_k]
+        picks_ign = sorted(eligible.values(), key=lambda r: r.get("ignition", 0), reverse=True)[:top_k]
+
+        # 机会集：当日 10:00 到收盘的涨幅（与系统无关）
+        aligned = self._align(self._universe(day), day)
+        opportunity: Dict[str, float] = {}
+        if aligned is not None:
+            codes = aligned["codes"]
+            close = aligned["mat"]["close"]
+            clock = aligned["clock"]
+            day_start, _ = day_bounds(day)
+            t10 = int(np.searchsorted(clock, day_start + 10 * 3600))
+            t10 = max(0, min(t10, close.shape[1] - 1))
+            p10 = close[:, t10]
+            last = close[:, -1]
+            for i, c in enumerate(codes):
+                if np.isfinite(p10[i]) and p10[i] > 0 and np.isfinite(last[i]):
+                    opportunity[c] = (float(last[i]) / float(p10[i]) - 1.0) * 100.0
+
+        opp_set = {c for c, v in opportunity.items() if v >= opportunity_pct}
+        pick_codes = {r["code"] for r in picks}
+        hit = [r for r in picks if float(r.get("close_ret") or 0.0) >= 2.0]
+        base_rate = (
+            sum(1 for v in opportunity.values() if v >= 2.0) / len(opportunity)
+            if opportunity else 0.0
+        )
+        precision = len(hit) / len(picks) if picks else 0.0
+        recall = len(pick_codes & opp_set) / len(opp_set) if opp_set else 0.0
+
+        hit_ign = [r for r in picks_ign if float(r.get("close_ret") or 0.0) >= 2.0]
+        prec_ign = len(hit_ign) / len(picks_ign) if picks_ign else 0.0
+        rec_ign = (len({r["code"] for r in picks_ign} & opp_set) / len(opp_set)) if opp_set else 0.0
+
+        return {
+            "day": day,
+            "cutoff": cutoff,
+            "picks_ign": picks_ign,
+            "precision_ign": round(prec_ign, 3),
+            "recall_ign": round(rec_ign, 3),
+            "lift_ign": round(prec_ign / base_rate, 2) if base_rate > 0 else 0.0,
+            "opportunity_pct": opportunity_pct,
+            "universe": len(opportunity),
+            "opportunity_n": len(opp_set),
+            "picks": picks,
+            "pick_n": len(picks),
+            "hit_n": len(hit),
+            "precision": round(precision, 3),
+            "recall": round(recall, 3),
+            "base_rate": round(base_rate, 3),
+            "lift": round(precision / base_rate, 2) if base_rate > 0 else 0.0,
+            "avg_close_ret": round(float(np.mean([r.get("close_ret", 0) for r in picks])), 2) if picks else 0.0,
+            "opportunity_sample": sorted(opp_set)[:10],
+        }
 
     def run_day(
         self,
@@ -830,6 +949,45 @@ def render_focus(result: ReplayResult, codes: Iterable[str]) -> str:
                 )
             )
             lines.append("")
+    return "\n".join(lines)
+
+
+def render_discover(d: Dict[str, Any]) -> str:
+    if d.get("error"):
+        return "## 全市场自选\n\n- ❌ {}".format(d["error"])
+    lines = ["## 全市场自选（系统自己挖，未给答案）", ""]
+    lines.append(
+        "- {}｜全池 {} 只｜当日涨幅≥{}% 的机会 {} 只｜系统自选 {} 只（{} 前）".format(
+            d["day"], d["universe"], d["opportunity_pct"], d["opportunity_n"],
+            d["pick_n"], d["cutoff"],
+        )
+    )
+    lines.append(
+        "- 按 RAR 自选：命中率 {:.1%}（收盘≥+2%）｜基准 {:.1%}｜提升 {}x｜**召回 {:.1%}**".format(
+            d["precision"], d["base_rate"], d["lift"], d["recall"],
+        )
+    )
+    lines.append(
+        "- 按点火强度自选：命中率 {:.1%}｜提升 {}x｜**召回 {:.1%}**".format(
+            d.get("precision_ign", 0.0), d.get("lift_ign", 0.0), d.get("recall_ign", 0.0),
+        )
+    )
+    lines.append(
+        "- 自选平均收盘收益 {}%｜机会集 {} 只（10:00→收盘 ≥{}%）".format(
+            d["avg_close_ret"], d["opportunity_n"], d["opportunity_pct"],
+        )
+    )
+    lines.append("")
+    lines.append("| # | 代码 | 首次L2+ | 级别 | RAR | 点火 | 买入价 | 当时涨幅 | 之后MFE | 收盘 | 超额 |")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
+    for i, r in enumerate(d["picks"], 1):
+        lines.append(
+            "| {} | {} | {} | {} | {} | {} | {} | {}% | {}% | {}% | {}% |".format(
+                i, r["code"], r["time"], r["tier_name"], r["rar"], r.get("ignition", 0),
+                r["entry"], r["pct"], r["mfe"], r["close_ret"], r.get("excess", 0),
+            )
+        )
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -970,6 +1128,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--max-pos", type=int, default=5, help="每日最多开仓数")
     parser.add_argument("--out", default="", help="输出目录")
     parser.add_argument("--json", action="store_true", help="输出 JSON 摘要")
+    parser.add_argument("--discover", action="store_true", help="全市场自选模式：系统自己选票并打分")
+    parser.add_argument("--top-k", type=int, default=20, help="自选前 K 只")
+    parser.add_argument("--cutoff", default="14:00", help="自选时间上限 HH:MM")
     args = parser.parse_args(argv)
 
     focus = tuple(c.strip() for c in args.focus.split(",") if c.strip())
@@ -982,6 +1143,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("❌ 找不到可用的分钟线缓存")
         return 2
     day = args.day or (rp.days()[-1] if rp.days() else today_str())
+
+    if args.discover:
+        disc = rp.discover(day, top_k=args.top_k, cutoff=args.cutoff)
+        if args.json:
+            print(json.dumps({k: v for k, v in disc.items() if k != "picks"}, ensure_ascii=False, indent=2))
+        else:
+            print(render_discover(disc))
+        return 0
 
     result = rp.run_day(day, focus=focus)
     paths = save_result(result, args.out or None)
