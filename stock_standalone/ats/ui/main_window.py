@@ -2399,6 +2399,12 @@ class ATSMainWindow(QMainWindow):
         self.btn_sector_miner.setStyleSheet("QPushButton { background-color: #1e3a3a; color: #00ffd5; font-weight: bold; border: 1px solid #00e5bb; border-radius: 3px; padding: 1px 4px; font-size: 8.5pt; } QPushButton:hover { background-color: #00e5bb; color: #000; }")
         self.btn_sector_miner.clicked.connect(self.open_sector_rotation_miner)
         toolbar.addWidget(self.btn_sector_miner)
+
+        self.btn_fusion_ladder = QPushButton("梯度🧬")
+        self.btn_fusion_ladder.setToolTip("打开全市场信号融合梯度监视器：实时影子梯度 / 按日回放 / 验收复盘 (完全独立非模态运行)")
+        self.btn_fusion_ladder.setStyleSheet("QPushButton { background-color: #2a1e3a; color: #c8a2ff; font-weight: bold; border: 1px solid #a97bff; border-radius: 3px; padding: 1px 4px; font-size: 8.5pt; } QPushButton:hover { background-color: #a97bff; color: #000; }")
+        self.btn_fusion_ladder.clicked.connect(self.open_fusion_ladder)
+        toolbar.addWidget(self.btn_fusion_ladder)
         
         toolbar.addSeparator()
 
@@ -8717,6 +8723,17 @@ class ATSMainWindow(QMainWindow):
             return
         from ats.ui.sector_rotation_miner_dialog import open_sector_rotation_miner_dialog
         open_sector_rotation_miner_dialog(parent_window=self, current_df=self.current_df)
+
+    def open_fusion_ladder(self):
+        """调起【🧬 融合梯度监视器】：实时影子梯度 / 按日回放 / 验收复盘 (独立非模态)"""
+        if getattr(self, '_is_closing', False) or getattr(self, '_is_exiting', False):
+            return
+        try:
+            from ats.ui.fusion_ladder_dialog import open_fusion_ladder_dialog
+            open_fusion_ladder_dialog(parent_window=self)
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning(f"融合梯度监视器打开失败: {exc}")
 
     def open_global_market_dialog(self):
         """打开/激活【🌐 全球外盘与热点情绪看板】独立自适应窗口 (不影响主界面原有布局)"""
