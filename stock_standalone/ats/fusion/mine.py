@@ -64,6 +64,48 @@ def collect(
     return out
 
 
+def profit_ranking(rp: DayReplay, day: str, top: int = 20, start_hm: str = "10:00") -> List[Dict[str, Any]]:
+    """当日"盈利排行榜"（答案）：从 start_hm 到收盘的涨幅，与系统信号无关。"""
+    from ats.fusion.replay import day_bounds
+    codes = rp._universe(day)
+    aligned = rp._align(codes, day)
+    if aligned is None:
+        return []
+    clock = aligned["clock"]
+    close = aligned["mat"]["close"]
+    ds, _ = day_bounds(day)
+    hh, mm = start_hm.split(":")
+    t0 = int(np.searchsorted(clock, ds + int(hh) * 3600 + int(mm) * 60))
+    t0 = max(0, min(t0, close.shape[1] - 1))
+    p0 = close[:, t0]
+    last = close[:, -1]
+    rows = []
+    for i, c in enumerate(aligned["codes"]):
+        if np.isfinite(p0[i]) and p0[i] > 0 and np.isfinite(last[i]):
+            rows.append({"code": c, "profit": round(float(last[i] / p0[i] - 1) * 100, 2),
+                         "p0": round(float(p0[i]), 3), "close": round(float(last[i]), 3)})
+    rows.sort(key=lambda r: -r["profit"])
+    return rows[:top]
+
+
+def gap_report(ranking: List[Dict[str, Any]], events: List[Dict[str, Any]], day: str) -> Dict[str, Any]:
+    """把"盈利排行榜"和"系统当天给的 L2+"对齐，看命中/漏掉/多报。"""
+    ev = {e["code"]: e for e in events if e["day"] == day}
+    hit, miss = [], []
+    for r in ranking:
+        e = ev.get(r["code"])
+        if e:
+            hit.append({**r, "time": e["time"], "tier": e["tier"], "rar": e["rar"], "patterns": e["patterns"]})
+        else:
+            miss.append(r)
+    extra = [e for c, e in ev.items() if c not in {r["code"] for r in ranking}]
+    return {
+        "day": day, "rank_n": len(ranking), "hit": hit, "miss": miss,
+        "system_n": len(ev), "extra_n": len(extra),
+        "recall": round(len(hit) / len(ranking), 3) if ranking else 0.0,
+    }
+
+
 def analyze(events: List[Dict[str, Any]], min_n: int = 15) -> Dict[str, Any]:
     """按形态组合统计边际效果，并分类。"""
     if not events:
@@ -171,6 +213,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--top", type=int, default=6000)
     parser.add_argument("--step", type=int, default=2)
     parser.add_argument("--out", default="")
+    parser.add_argument("--rank", action="store_true", help="同时输出盈利排行榜与命中缺口")
     args = parser.parse_args(argv)
 
     rp = DayReplay(config=ReplayConfig(top_n=args.top, step=args.step))
@@ -179,6 +222,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     report = analyze(events)
     singles = single_patterns(events)
     md = render(report, singles, days)
+    if args.rank:
+        rp2 = DayReplay(config=ReplayConfig(top_n=args.top, step=args.step), cache=rp.cache)
+        md += "\n\n## 盈利排行榜 vs 系统命中\n"
+        for day in days:
+            rk = profit_ranking(rp2, day, top=20)
+            g = gap_report(rk, events, day)
+            md += "\n### {}｜榜单20只，系统命中 {}（召回 {:.0%}）｜系统当日 L2+ {} 只\n".format(
+                day, len(g["hit"]), g["recall"], g["system_n"])
+            md += "\n| # | 代码 | 涨幅 | 系统 | 时间 | 级别 | 形态 |\n|---|---|---|---|---|---|---|\n"
+            for i, r in enumerate(rk, 1):
+                e = {h["code"]: h for h in g["hit"]}.get(r["code"])
+                if e:
+                    md += "| {} | {} | {:+.1f}% | ✅ | {} | L{} | {} |\n".format(
+                        i, r["code"], r["profit"], e["time"], e["tier"], "、".join(e["patterns"]) or "-")
+                else:
+                    md += "| {} | {} | {:+.1f}% | ❌ | - | - | - |\n".format(i, r["code"], r["profit"])
 
     out_dir = args.out or os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "logs", "fusion_mine")
     os.makedirs(out_dir, exist_ok=True)

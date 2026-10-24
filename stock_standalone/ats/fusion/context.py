@@ -103,6 +103,7 @@ class DailyContext:
             "dist_ma20_pct": 0.0, "vol_ratio_5d": 1.0,
             "ret_std20": 0.0, "vol_mean20": 0.0, "vol_std20": 0.0,
             "vwap5": 0.0, "vwap10": 0.0,
+            "vol_ma5": 0.0, "vol_ma20": 0.0, "vol_dry": 1.0,
         }
         v = self._by_code.get(str(code).zfill(6))
         if v is None:
@@ -154,6 +155,15 @@ class DailyContext:
                 sv = float(np.sum(vol[-w:]))
                 if sv > 0:
                     out[name] = float(np.sum(amt[-w:]) / sv)
+
+        # 缩量程度：5 日均量 / 20 日均量。越小说明越"干"，是放量的前提
+        if n >= 21:
+            vma5 = float(np.mean(vol[-5:]))
+            vma20 = float(np.mean(vol[-20:]))
+            out["vol_ma5"] = vma5
+            out["vol_ma20"] = vma20
+            if vma20 > 0:
+                out["vol_dry"] = round(vma5 / vma20, 3)
 
         if n >= 6 and np.mean(vol[-6:-1]) > 0:
             out["vol_ratio_5d"] = float(vol[-1] / np.mean(vol[-6:-1]))

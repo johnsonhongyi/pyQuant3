@@ -663,6 +663,7 @@ class DayReplay:
                     vol_ratio=vol_ratio, rs5=_rs5,
                     mkt_ret5=mkt_ret5, is_leader=bool(leader_mask[i]),
                     vwap10=_vw10,
+                    vol_dry=float(_dc.get("vol_dry", 1.0) or 1.0),
                 )
                 patterns = list(_pat_early)
 
