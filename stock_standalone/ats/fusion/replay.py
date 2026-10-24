@@ -134,6 +134,7 @@ class ReplayConfig:
     max_positions_per_day: int = 5   # 每日最多开仓数（按级别+RAR 取前 N）
     fill_mode: str = "limit"         # limit=挂区间限价等回踩；market=次根开盘市价
     require_pattern: bool = True     # L3+ 必须命中至少一种异动形态（千金买马骨）
+    pattern_floor: bool = False      # 形态是否可以直接抬级别（挖掘显示会稀释质量，默认关）
     first_only: bool = False         # 每只票首次 L2+ 后不再评估（全市场自选用，省 3~5 倍）
 
 
@@ -439,11 +440,17 @@ class DayReplay:
         except Exception:
             daily_ctx = {}
 
+        # 注意：tdx_last_df.h5 是"最新一天盘前"的快照，直接套到历史某天就是未来函数。
+        # 历史回放一律用 DailyContext 按 (code, day) 现算的 VWAP10；盘前表只做兜底。
         try:
             _pm = get_premarket()
-            vwap10_map = {c: _pm.vwap10(c) for c in codes} if _pm.ok else {}
+            _pm_vwap = {c: _pm.vwap10(c) for c in codes} if _pm.ok else {}
         except Exception:
-            vwap10_map = {}
+            _pm_vwap = {}
+        vwap10_map = {}
+        for _c in codes:
+            _v = float((daily_ctx.get(_c) or {}).get("vwap10", 0.0))
+            vwap10_map[_c] = _v if _v > 0 else float(_pm_vwap.get(_c, 0.0))
         latent: Dict[str, float] = {}
 
         day_open_map = {}
@@ -671,7 +678,9 @@ class DayReplay:
                         patterns.append(PATTERN_LATENT_BREAK)
 
                 _ps = pattern_score(patterns)
-                _floor = 3 if _ps >= 100 else (2 if _ps >= 70 else None)
+                _floor = None
+                if self.cfg.pattern_floor:
+                    _floor = 3 if _ps >= 100 else (2 if _ps >= 70 else None)
                 decision = self.engine.evaluate(
                     ev, regime, now=float(clock[t]), tier_floor=_floor
                 )

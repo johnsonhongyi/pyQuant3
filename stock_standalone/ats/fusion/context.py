@@ -49,18 +49,21 @@ class DailyContext:
             import pandas as pd
 
             df = pd.read_hdf(self.path, key="/all_300")
-            df = df[~df.index.get_level_values(0).duplicated(keep=False) | True]
+            # 该表每个 (code, date) 有重复行，必须去重，否则均线与多日收益全部错位
+            df = df[~df.index.duplicated(keep="last")]
             codes = df.index.get_level_values(0).astype(str)
             dates = pd.to_datetime(df.index.get_level_values(1), errors="coerce")
             close = df["close"].to_numpy(dtype="float64")
             high = df["high"].to_numpy(dtype="float64")
             low = df["low"].to_numpy(dtype="float64")
             vol = df["vol"].to_numpy(dtype="float64")
+            amount = df["amount"].to_numpy(dtype="float64") if "amount" in df.columns else np.zeros_like(vol)
 
             order = np.lexsort((dates.to_numpy(), codes.to_numpy()))
             codes_s = codes.to_numpy()[order]
             dates_s = dates.to_numpy()[order]
             close, high, low, vol = close[order], high[order], low[order], vol[order]
+            amount = amount[order]
 
             uniq, starts = np.unique(codes_s, return_index=True)
             ends = np.append(starts[1:], len(codes_s))
@@ -71,6 +74,7 @@ class DailyContext:
                     "high": high[s:e],
                     "low": low[s:e],
                     "vol": vol[s:e],
+                    "amount": amount[s:e],
                 }
             self.ok = bool(self._by_code)
         except Exception:
@@ -98,6 +102,7 @@ class DailyContext:
             "days_since_high": 0.0, "limit_up_streak": 0.0,
             "dist_ma20_pct": 0.0, "vol_ratio_5d": 1.0,
             "ret_std20": 0.0, "vol_mean20": 0.0, "vol_std20": 0.0,
+            "vwap5": 0.0, "vwap10": 0.0,
         }
         v = self._by_code.get(str(code).zfill(6))
         if v is None:
@@ -141,6 +146,14 @@ class DailyContext:
             else:
                 break
         out["limit_up_streak"] = float(streak)
+
+        # 10 日 / 5 日累计均价（VWAP），只用截至昨日的成交额与成交量
+        amt = v["amount"][: idx + 1]
+        for w, name in ((5, "vwap5"), (10, "vwap10")):
+            if n >= w:
+                sv = float(np.sum(vol[-w:]))
+                if sv > 0:
+                    out[name] = float(np.sum(amt[-w:]) / sv)
 
         if n >= 6 and np.mean(vol[-6:-1]) > 0:
             out["vol_ratio_5d"] = float(vol[-1] / np.mean(vol[-6:-1]))
