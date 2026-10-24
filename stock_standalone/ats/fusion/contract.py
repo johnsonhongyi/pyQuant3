@@ -74,6 +74,21 @@ class SignalEvent:
     is_leader: bool = False
     upper_score: float = 0.0
 
+    # 跨日结构（截至昨日，避免未来函数）
+    ma5: float = 0.0
+    ma10: float = 0.0
+    ma20: float = 0.0
+    ret5d: float = 0.0
+    ret10d: float = 0.0
+    ret20d: float = 0.0
+    days_since_high: float = 0.0
+    limit_up_streak: float = 0.0
+    dist_ma20_pct: float = 0.0
+
+    # 相对强度（逆势异动）
+    rs5: float = 0.0          # 近 5 根 bar 相对全池的超额收益 %
+    rs_day: float = 0.0       # 当日相对全池的超额收益 %
+
     # 先手与新鲜度（数据不变量）
     launch_ts: float = 0.0       # 本轮启动时刻；0 表示未知
     freshness_s: float = 0.0     # 数据延迟秒数
@@ -146,6 +161,7 @@ class AxisScores:
     support: float = 0.0
     intent: float = 0.0
     regime: float = 0.0
+    relative: float = 50.0
     penalty: float = 0.0
     rar: float = 0.0   # risk-adjusted rank = 加权 - 惩罚
 
@@ -155,6 +171,7 @@ class AxisScores:
             "support": round(self.support, 2),
             "intent": round(self.intent, 2),
             "regime": round(self.regime, 2),
+            "relative": round(self.relative, 2),
             "penalty": round(self.penalty, 2),
             "rar": round(self.rar, 2),
         }
