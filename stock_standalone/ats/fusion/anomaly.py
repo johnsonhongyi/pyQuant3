@@ -22,6 +22,7 @@ PATTERN_LEADERSHIP = "逆势带头"
 PATTERN_VWAP_BREAK = "突破10日VWAP"
 PATTERN_LATENT_BREAK = "潜伏转突破"
 PATTERN_DRY_UP = "缩量转放量"
+PATTERN_TWO_YANG = "两阳加速"
 
 PATTERN_LABELS = {
     PATTERN_PIERCE: "🕯️ 一阳穿三线",
@@ -30,6 +31,7 @@ PATTERN_LABELS = {
     PATTERN_VWAP_BREAK: "📈 突破10日VWAP",
     PATTERN_LATENT_BREAK: "🎯 潜伏转突破",
     PATTERN_DRY_UP: "💧 缩量转放量",
+    PATTERN_TWO_YANG: "🕯️ 两阳加速",
 }
 
 
@@ -47,6 +49,7 @@ def detect_patterns(
     is_leader: bool = False,
     vwap10: float = 0.0,
     vol_dry: float = 1.0,
+    prev_pct: float = 0.0,
     thresholds: Optional[Dict[str, float]] = None,
 ) -> List[str]:
     """返回命中的形态名列表（可能为空）。"""
@@ -60,6 +63,9 @@ def detect_patterns(
         "dry_vol_rise": 1.50,   # 缩量后放量：当前 bar 量比门槛
         "dry_pct_max": 3.50,    # 价格仍在低位：当日涨幅上限
         "dry_vwap_max": 1.01,   # 价格未远离 VWAP10（<= 1.01 倍）
+        "yang_prev": 5.0,       # 两阳加速：昨日涨幅下限
+        "yang_today": 3.0,      # 今日涨幅下限
+        "yang_vol": 1.20,
     }
     if thresholds:
         t.update(thresholds)
@@ -84,6 +90,11 @@ def detect_patterns(
     if rs5 >= t["lead_rs"] and (mkt_ret5 <= t["lead_mkt"] or is_leader):
         out.append(PATTERN_LEADERSHIP)
 
+    # 两阳加速：昨日已经是一根有力度的阳线，今天继续加速（用户习惯的结构）
+    if prev_pct >= t["yang_prev"] and pct >= t["yang_today"] and vol_ratio >= t["yang_vol"]:
+        if vwap10 <= 0 or price >= vwap10 * 0.99:
+            out.append(PATTERN_TWO_YANG)
+
     # 缩量转放量：极致缩量之后的第一波放量，且价格还在低位
     if (vol_dry > 0 and vol_dry <= t["dry_max"]
             and vol_ratio >= t["dry_vol_rise"]
@@ -105,6 +116,6 @@ def pattern_score(patterns: List[str]) -> float:
     w = {
         PATTERN_PIERCE: 40.0, PATTERN_LEADERSHIP: 35.0,
         PATTERN_SELF_ABNORMAL: 30.0, PATTERN_VWAP_BREAK: 35.0,
-        PATTERN_LATENT_BREAK: 45.0, PATTERN_DRY_UP: 45.0,
+        PATTERN_LATENT_BREAK: 45.0, PATTERN_DRY_UP: 45.0, PATTERN_TWO_YANG: 40.0,
     }
     return min(100.0, sum(w.get(p, 20.0) for p in patterns))

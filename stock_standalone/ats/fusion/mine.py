@@ -106,6 +106,42 @@ def gap_report(ranking: List[Dict[str, Any]], events: List[Dict[str, Any]], day:
     }
 
 
+def stratified(events: List[Dict[str, Any]], min_n: int = 10) -> List[Dict[str, Any]]:
+    """按 (结构, 时段) 分层，看每层里各形态的边际。这就是"先分类再谈信号"。"""
+    from ats.fusion.structure import label as slabel
+    out = []
+    buckets: Dict[tuple, List[Dict[str, Any]]] = defaultdict(list)
+    for e in events:
+        buckets[(e.get("structure") or "OTHER", e.get("session") or "AM")].append(e)
+    for (st, sess), items in buckets.items():
+        if len(items) < min_n:
+            continue
+        base_win = float(np.mean([1.0 if i["close_ret"] >= 2.0 else 0.0 for i in items]))
+        base_ret = float(np.mean([i["close_ret"] for i in items]))
+        by_pat: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for i in items:
+            for p in (i["patterns"] or ["（无形态）"]):
+                by_pat[p].append(i)
+        rows = []
+        for p, ps in by_pat.items():
+            rets = [x["close_ret"] for x in ps]
+            win = float(np.mean([1.0 if x >= 2.0 else 0.0 for x in rets]))
+            rows.append({
+                "pattern": p, "n": len(ps),
+                "avg_ret": round(float(np.mean(rets)), 2),
+                "win_rate": round(win, 3),
+                "lift": round(win / base_win, 2) if base_win > 0 else 0.0,
+            })
+        rows.sort(key=lambda r: -r["lift"])
+        out.append({
+            "structure": st, "label": slabel(st), "session": sess,
+            "n": len(items), "base_win": round(base_win, 3), "base_ret": round(base_ret, 2),
+            "patterns": rows,
+        })
+    out.sort(key=lambda x: (x["structure"], x["session"]))
+    return out
+
+
 def analyze(events: List[Dict[str, Any]], min_n: int = 15) -> Dict[str, Any]:
     """按形态组合统计边际效果，并分类。"""
     if not events:
@@ -222,6 +258,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     report = analyze(events)
     singles = single_patterns(events)
     md = render(report, singles, days)
+    strat = stratified(events)
+    if strat:
+        md += "\n\n## 按结构 × 时段分层（先分类，再谈信号）\n"
+        for g in strat:
+            md += "\n### {}｜{}｜样本 {}｜基准胜率 {:.1%}、平均 {:+.2f}%\n".format(
+                g["label"], "上午" if g["session"] == "AM" else "下午", g["n"], g["base_win"], g["base_ret"])
+            md += "\n| 形态 | 样本 | 平均收盘 | 胜率 | 提升 |\n|---|---|---|---|---|\n"
+            for r in g["patterns"]:
+                md += "| {} | {} | {:+.2f}% | {:.1%} | {}x |\n".format(
+                    r["pattern"], r["n"], r["avg_ret"], r["win_rate"], r["lift"])
     if args.rank:
         rp2 = DayReplay(config=ReplayConfig(top_n=args.top, step=args.step), cache=rp.cache)
         md += "\n\n## 盈利排行榜 vs 系统命中\n"

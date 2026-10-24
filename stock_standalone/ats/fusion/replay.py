@@ -50,6 +50,7 @@ from ats.fusion.trade_sim import T1Simulator, render_trades, summarize_trades
 from ats.fusion.context import get_daily_context
 from ats.fusion.anomaly import detect_patterns, pattern_score, PATTERN_LATENT_BREAK
 from ats.fusion.premarket import get_premarket
+from ats.fusion.structure import classify as classify_structure
 from dataclasses import replace
 
 _ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
@@ -664,6 +665,7 @@ class DayReplay:
                     mkt_ret5=mkt_ret5, is_leader=bool(leader_mask[i]),
                     vwap10=_vw10,
                     vol_dry=float(_dc.get("vol_dry", 1.0) or 1.0),
+                    prev_pct=float(_dc.get("prev_pct", 0.0) or 0.0),
                 )
                 patterns = list(_pat_early)
 
@@ -763,6 +765,8 @@ class DayReplay:
                         "excess": round(excess, 2),
                         "ignition": round(ignition, 1),
                         "patterns": patterns,
+                        "structure": classify_structure(_dc, price, float(pct[i])),
+                        "session": "AM" if time.localtime(int(clock[t])).tm_hour < 13 else "PM",
                         "pattern_score": round(pattern_score(patterns), 1),
                         "leader": bool(leader_mask[i]),
                         "veto": decision.veto_reason,

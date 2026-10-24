@@ -104,6 +104,7 @@ class DailyContext:
             "ret_std20": 0.0, "vol_mean20": 0.0, "vol_std20": 0.0,
             "vwap5": 0.0, "vwap10": 0.0,
             "vol_ma5": 0.0, "vol_ma20": 0.0, "vol_dry": 1.0,
+            "prev_pct": 0.0, "above_vwap10_days": 0,
         }
         v = self._by_code.get(str(code).zfill(6))
         if v is None:
@@ -133,9 +134,11 @@ class DailyContext:
                 out[name] = (last / float(c[-w - 1]) - 1.0) * 100.0
 
         if n >= 20:
-            hi = float(np.max(h[-20:]))
+            win = h[-20:]
+            hi = float(np.max(win))
             if hi > 0:
-                out["days_since_high"] = float(n - 1 - int(np.argmax(h[-20:])))
+                # 注意：是"窗口内最后一天到最高点"的距离，不能用全局索引相减
+                out["days_since_high"] = float(len(win) - 1 - int(np.argmax(win)))
         if out["ma20"] > 0:
             out["dist_ma20_pct"] = (last / out["ma20"] - 1.0) * 100.0
 
@@ -155,6 +158,25 @@ class DailyContext:
                 sv = float(np.sum(vol[-w:]))
                 if sv > 0:
                     out[name] = float(np.sum(amt[-w:]) / sv)
+
+        # 昨日涨幅（用于"两阳加速"）
+        if n >= 2 and c[-2] > 0:
+            out["prev_pct"] = (last / float(c[-2]) - 1.0) * 100.0
+
+        # 连续多少个交易日收在 VWAP10 上方（多日验证："一天可以骗人，多日骗不了"）
+        if n >= 11:
+            cnt = 0
+            for k in range(1, min(11, n) + 1):
+                seg_v = float(np.sum(vol[-10 * k: len(vol) - 10 * (k - 1)])) if len(vol) >= 10 * k else 0.0
+                seg_a = float(np.sum(amt[-10 * k: len(amt) - 10 * (k - 1)])) if len(amt) >= 10 * k else 0.0
+                if seg_v <= 0 or seg_a <= 0:
+                    break
+                vw = seg_a / seg_v
+                if c[-k] > vw:
+                    cnt += 1
+                else:
+                    break
+            out["above_vwap10_days"] = cnt
 
         # 缩量程度：5 日均量 / 20 日均量。越小说明越"干"，是放量的前提
         if n >= 21:
