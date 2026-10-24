@@ -1,0 +1,62 @@
+{
+  "_comment": "全市场信号融合与梯度执行层(SFL)配置。P1 阶段 shadow_only=true：只写日志，不影响任何下单。",
+  "version": 1,
+  "enabled": true,
+  "shadow_only": true,
+  "log_dir": "logs/fusion_shadow",
+  "max_records_per_day": 200000,
+  "sample_interval_s": 3.0,
+  "weights": {
+    "position": 0.3,
+    "support": 0.25,
+    "intent": 0.25,
+    "regime": 0.2
+  },
+  "tier_cuts": {
+    "l4": 82.0,
+    "l3": 72.0,
+    "l2": 62.0,
+    "l1": 50.0
+  },
+  "max_single_size_pct": 35.0,
+  "veto": {
+    "stale_seconds": 20.0,
+    "max_bias_pct": 7.0,
+    "min_amount_wan": 3000.0
+  },
+  "penalty": {
+    "chase_start_pct": 3.0,
+    "chase_per_pct": 6.0,
+    "chase_cap": 30.0,
+    "overheat_penalty": 20.0,
+    "crowd_vol_ratio": 4.5,
+    "crowd_penalty": 10.0,
+    "illiquid_penalty": 15.0,
+    "cap": 60.0
+  },
+  "temp_matrix": {
+    "ICE_COLD": [2, 0.5],
+    "COLD_WEAK": [3, 0.7],
+    "WARMING": [4, 1.0],
+    "OVERHEATED": [2, 0.6],
+    "COOLING_EBB": [1, 0.3]
+  },
+  "age_table": [
+    [10.0, 4, 1.0],
+    [25.0, 3, 0.85],
+    [45.0, 2, 0.7],
+    [70.0, 1, 0.5]
+  ],
+  "portfolio": {
+    "max_l4": 2,
+    "max_total_pct": 85.0
+  },
+  "state_temp_map": {
+    "PANIC": 25.0,
+    "COOLDOWN": 30.0,
+    "NEUTRAL": 50.0,
+    "REPAIR": 55.0,
+    "REVERSAL": 58.0,
+    "FOMO": 68.0
+  }
+}

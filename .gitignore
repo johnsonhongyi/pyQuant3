@@ -8,6 +8,8 @@ __pycache__/
 *.csv
 *.txt
 *.json
+# 融合梯度层配置：与 ats/fusion/config.py:DEFAULTS 同源，随代码版本化以便复盘校准留痕
+!stock_standalone/config/fusion_ladder.json
 *.bz2
 *.db
 *.xlsx
