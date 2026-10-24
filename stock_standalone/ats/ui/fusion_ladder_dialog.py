@@ -230,6 +230,11 @@ class FusionLadderDialog(QWidget):
         ])
         self.tabs.addTab(self.tbl_replay, "按日回放")
 
+        self.tbl_trades = self._make_table([
+            "代码", "买入", "买入价", "时段", "卖出", "卖出价", "盈亏%", "当日最低%", "被锁止损", "原因",
+        ])
+        self.tabs.addTab(self.tbl_trades, "T+1 订单与成交")
+
         page3 = QWidget()
         v3 = QVBoxLayout(page3)
         v3.setContentsMargins(4, 4, 4, 4)
@@ -395,6 +400,22 @@ class FusionLadderDialog(QWidget):
             )
         )
         self.lbl_status.setStyleSheet("color:#8fd18f; font-weight:bold;")
+
+        # T+1 订单与成交
+        t2 = self.tbl_trades
+        t2.setRowCount(0)
+        for tr in sorted(getattr(result, "trades", []), key=lambda x: x.entry_ts):
+            d = tr.to_dict()
+            i = t2.rowCount()
+            t2.insertRow(i)
+            vals = [
+                d["code"], d["entry_time"], d["entry_price"], d["window"],
+                d["exit_time"], d["exit_price"] or "-", d["pnl_pct"],
+                d["day0_mae_pct"], "是" if d["stop_blocked"] else "否", d["exit_reason"],
+            ]
+            color = QColor("#ff5c5c") if d["pnl_pct"] < 0 else QColor("#8fd18f")
+            for c, v in enumerate(vals):
+                t2.setItem(i, c, self._item(v, color if c == 6 else None, bold=(c == 6)))
 
         self.txt_report.setPlainText(render_report(result))
 

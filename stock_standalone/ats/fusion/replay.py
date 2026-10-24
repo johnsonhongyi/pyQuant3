@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import pickle
 import time
@@ -43,6 +44,9 @@ from ats.fusion.regime import (
     RegimeSample,
 )
 from ats.fusion.contract import SignalEvent
+
+logger = logging.getLogger(__name__)
+from ats.fusion.trade_sim import T1Simulator, render_trades, summarize_trades
 
 _ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 _CACHE_DEFAULT = r"G:/minute_kline_cache.pkl"
@@ -121,6 +125,10 @@ class ReplayConfig:
     max_records: int = 20000
     focus_codes: Tuple[str, ...] = ()   # 验收标的：无论成交额排名如何都纳入
     cuts_mode: str = "percentile"    # percentile=按当日分位自适应；fixed=用配置固定阈值
+    hold_days: int = 2               # T+1 模拟最长持有交易日
+    target_pct: float = 6.0          # 止盈目标
+    max_positions_per_day: int = 5   # 每日最多开仓数（按级别+RAR 取前 N）
+    fill_mode: str = "limit"         # limit=挂区间限价等回踩；market=次根开盘市价
 
 
 @dataclass
@@ -130,6 +138,9 @@ class ReplayResult:
     regime_series: List[Dict[str, Any]] = field(default_factory=list)
     tier_stats: Dict[str, Any] = field(default_factory=dict)
     meta: Dict[str, Any] = field(default_factory=dict)
+    orders: List[Any] = field(default_factory=list)
+    trades: List[Any] = field(default_factory=list)
+    trade_stats: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -137,6 +148,9 @@ class ReplayResult:
             "meta": self.meta,
             "tier_stats": self.tier_stats,
             "regime_series": self.regime_series,
+            "orders": [o.to_dict() for o in self.orders],
+            "trades": [t.to_dict() for t in self.trades],
+            "trade_stats": self.trade_stats,
             "records": self.records,
         }
 
@@ -599,6 +613,8 @@ class DayReplay:
                         "axes": decision.axes.to_dict(),
                         "size_pct": decision.size_pct,
                         "entry": round(price, 3),
+                        "entry_lo": round(float((decision.entry or {}).get("price_lo") or 0.0), 3),
+                        "entry_hi": round(float((decision.entry or {}).get("price_hi") or 0.0), 3),
                         "stop": decision.stop.get("price", 0.0),
                         "age_min": round(decision.age_min, 1),
                         "temp": round(regime.temp, 1),
@@ -625,6 +641,40 @@ class DayReplay:
 
         stats = summarize_tiers(records)
         self._last_rar_samples = rar_samples
+
+        # ---- T+1 订单与持仓模拟（买入当日不可卖）----
+        focus_all = [str(c).strip().zfill(6) for c in list(focus) + list(self.cfg.focus_codes)]
+        orders: List[Any] = []
+        trades: List[Any] = []
+        trade_stats: Dict[str, Any] = {}
+        if not collect_only and records:
+            try:
+                decisions = [
+                    {
+                        "code": r["code"],
+                        "ts": r["ts"],
+                        "tier": r["tier"],
+                        "rar": r["rar"],
+                        "size_pct": r["size_pct"],
+                        "stop": r["stop"],
+                        "entry_price": r["entry"],
+                        "entry": {"price_lo": r.get("entry_lo"), "price_hi": r.get("entry_hi")},
+                    }
+                    for r in records
+                ]
+                sim = T1Simulator(self.cache, self.days())
+                orders, trades = sim.simulate(
+                    decisions,
+                    hold_days=self.cfg.hold_days,
+                    target_pct=self.cfg.target_pct,
+                    max_per_day=self.cfg.max_positions_per_day,
+                    focus_codes=tuple(focus_all),
+                    fill_mode=self.cfg.fill_mode,
+                )
+                trade_stats = summarize_trades(trades)
+            except Exception as exc:
+                logger.debug("[replay] T+1 模拟失败: %s", exc)
+
         focus_all = [str(c).strip().zfill(6) for c in list(focus) + list(self.cfg.focus_codes)]
         meta = {
             "day": day,
@@ -642,14 +692,22 @@ class DayReplay:
             },
             "veto_counts": dict(sorted(veto_counts.items(), key=lambda x: -x[1])[:10]),
             "cache_path": default_cache_path(),
+            "orders": len(orders),
+            "orders_filled": sum(1 for o in orders if o.status == "FILLED"),
+            "trades": len(trades),
+            "trade_stats": trade_stats,
             "approximations": [
                 "vwap=3分钟(H+L+C)/3按量加权",
-                "taker/bid=50 中性",
-                "structure_clarity=0",
+                "taker/bid 由 bar 推导（外盘占比/收盘位置）",
+                "structure_clarity=近10根站上均价比例",
                 "base_support=当日最低与均价×0.985 取高",
+                "T+1：买入当日不卖出，止损最早次日生效",
             ],
         }
-        return ReplayResult(day=day, records=records, regime_series=regime_series, tier_stats=stats, meta=meta)
+        return ReplayResult(
+            day=day, records=records, regime_series=regime_series,
+            tier_stats=stats, meta=meta, orders=orders, trades=trades, trade_stats=trade_stats,
+        )
 
     def run_day(
         self,
@@ -845,6 +903,10 @@ def render_report(result: ReplayResult, top: int = 20) -> str:
         )
     lines.append("")
 
+    if result.orders:
+        lines.append(render_trades(result.orders, result.trades))
+        lines.append("")
+
     lines.append("## 温度轨迹")
     lines.append("| 时间 | 温度 | 阶段 | 翻转 | 斜率 | 上涨占比 | 涨停 |")
     lines.append("|---|---|---|---|---|---|---|")
@@ -904,6 +966,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--step", type=int, default=1, help="每 N 根 bar 评估一次")
     parser.add_argument("--cache", default="", help="分钟线缓存路径")
     parser.add_argument("--focus", default="", help="验收标的，逗号分隔，如 688787,300296")
+    parser.add_argument("--fill", default="limit", choices=("limit", "market"), help="成交方式：挂限价等回踩 / 次根开盘市价")
+    parser.add_argument("--max-pos", type=int, default=5, help="每日最多开仓数")
     parser.add_argument("--out", default="", help="输出目录")
     parser.add_argument("--json", action="store_true", help="输出 JSON 摘要")
     args = parser.parse_args(argv)
@@ -911,7 +975,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     focus = tuple(c.strip() for c in args.focus.split(",") if c.strip())
     rp = DayReplay(
         cache_path=args.cache or None,
-        config=ReplayConfig(top_n=args.top, step=args.step, focus_codes=focus),
+        config=ReplayConfig(top_n=args.top, step=args.step, focus_codes=focus,
+                            fill_mode=args.fill, max_positions_per_day=args.max_pos),
     )
     if not rp.cache:
         print("❌ 找不到可用的分钟线缓存")
