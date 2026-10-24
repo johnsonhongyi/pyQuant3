@@ -49,18 +49,12 @@ def collect(
             if r["tier"] >= 2 and r["code"] not in first:
                 first[r["code"]] = r
         for r in first.values():
-            out.append({
-                "day": day,
-                "code": r["code"],
-                "time": r["time"],
-                "tier": r["tier"],
-                "rar": r["rar"],
-                "pct": r["pct"],
-                "close_ret": r["close_ret"],
-                "mfe": r["mfe"],
-                "patterns": list(r.get("patterns") or []),
-                "key": _key(r.get("patterns") or []),
-            })
+            # 全字段透传：structure/sector/sector_rank/vol_dry 等分层字段一个都不能丢
+            item = dict(r)
+            item["day"] = day
+            item["patterns"] = list(r.get("patterns") or [])
+            item["key"] = _key(item["patterns"])
+            out.append(item)
     return out
 
 
@@ -250,6 +244,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--step", type=int, default=2)
     parser.add_argument("--out", default="")
     parser.add_argument("--rank", action="store_true", help="同时输出盈利排行榜与命中缺口")
+    parser.add_argument("--select", action="store_true", help="输出每日收敛清单(每类最多N只)")
     args = parser.parse_args(argv)
 
     rp = DayReplay(config=ReplayConfig(top_n=args.top, step=args.step))
@@ -268,6 +263,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             for r in g["patterns"]:
                 md += "| {} | {} | {:+.2f}% | {:.1%} | {}x |\n".format(
                     r["pattern"], r["n"], r["avg_ret"], r["win_rate"], r["lift"])
+    if args.select:
+        from ats.fusion.select import select_day, render_selection
+        for day in days:
+            day_events = [e for e in events if e["day"] == day]
+            sel = select_day(day_events)
+            md += "\n" + render_selection(sel, day)
     if args.rank:
         rp2 = DayReplay(config=ReplayConfig(top_n=args.top, step=args.step), cache=rp.cache)
         md += "\n\n## 盈利排行榜 vs 系统命中\n"
