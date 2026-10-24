@@ -132,6 +132,7 @@ class ReplayConfig:
     max_positions_per_day: int = 5   # 每日最多开仓数（按级别+RAR 取前 N）
     fill_mode: str = "limit"         # limit=挂区间限价等回踩；market=次根开盘市价
     require_pattern: bool = True     # L3+ 必须命中至少一种异动形态（千金买马骨）
+    first_only: bool = False         # 每只票首次 L2+ 后不再评估（全市场自选用，省 3~5 倍）
 
 
 @dataclass
@@ -311,7 +312,7 @@ class DayReplay:
         return float(np.max(sub["high"][m2]))
 
     # -- 宇宙与矩阵 -------------------------------------------------------
-    def _universe(self, day: str, focus: Iterable[str] = ()) -> List[str]:
+    def _universe(self, day: str, focus: Iterable[str] = (), active_only: bool = False) -> List[str]:
         scored: List[Tuple[float, str]] = []
         for code in self.cache:
             sl = self._slice_day(code, day)
@@ -320,6 +321,11 @@ class DayReplay:
             prev = self._prev_close(code, day)
             if prev <= 0:
                 continue
+            if active_only:
+                # 候选池预筛：当日从未涨过 0.8% 的票，引擎本来也不会给 L2+，
+                # 先剔掉可以省 2/3 算力（只影响"看谁"，不影响"怎么看"）。
+                if float(np.nanmax(sl["close"])) / prev - 1.0 < 0.008:
+                    continue
             amount_proxy = float(sl["cum_vol"][-1] * sl["close"][-1])
             scored.append((amount_proxy, code))
         scored.sort(reverse=True)
@@ -380,11 +386,15 @@ class DayReplay:
         focus: Iterable[str] = (),
         cuts_override: Optional[Tuple[Tuple[float, int], ...]] = None,
         collect_only: bool = False,
+        first_only: Optional[bool] = None,
+        active_only: bool = False,
     ) -> ReplayResult:
         day = day or today_str()
+        if first_only is not None:
+            self.cfg.first_only = bool(first_only)
         if cuts_override:
             self.engine.cuts = cuts_override
-        codes = self._universe(day, focus)
+        codes = self._universe(day, focus, active_only=active_only)
         aligned = self._align(codes, day)
         if aligned is None:
             return ReplayResult(day=day, meta={"error": "当日无可用分钟线", "codes": 0})
@@ -411,6 +421,14 @@ class DayReplay:
         self._rar_by_t: Dict[int, List[float]] = {}
 
         fut_max, fut_min = _future_extremes(mat["close"])
+        # 预计算滚动基准：把循环里的 4 次小切片变成一次矩阵运算
+        vol_mean20 = _shift1(_roll_mean(mat["volume"], 20))
+        rng_mat = mat["high"] - mat["low"]
+        rng_mean20 = _shift1(_roll_mean(rng_mat, 20))
+        prev_high20 = _shift1(_roll_max(mat["high"], 20))
+        ret5_mat = np.full_like(mat["close"], np.nan)
+        if mat["close"].shape[1] > 5:
+            ret5_mat[:, 5:] = (mat["close"][:, 5:] / np.maximum(mat["close"][:, :-5], 1e-9) - 1.0) * 100.0
 
         # 跨日结构：截至昨日（不含当日），避免未来函数
         try:
@@ -425,6 +443,7 @@ class DayReplay:
             if _sl is not None and len(_sl["open"]):
                 day_open_map[_c] = float(_sl["open"][0])
 
+        done = np.zeros(n_code, dtype=bool)
         launch_idx = np.full(n_code, -1, dtype="int64")
         day_high = np.full(n_code, np.nan)
         day_low = np.full(n_code, np.nan)
@@ -493,14 +512,7 @@ class DayReplay:
                 continue
 
             # 相对强度：个股 5 根 bar 收益 - 全池等权 5 根 bar 收益
-            back5 = max(0, t - 5)
-            prev5 = mat["close"][:, back5]
-            with np.errstate(invalid="ignore", divide="ignore"):
-                ret5_arr = np.where(
-                    np.isfinite(prev5) & (prev5 > 0),
-                    (close / np.maximum(prev5, 1e-9) - 1.0) * 100.0,
-                    np.nan,
-                )
+            ret5_arr = ret5_mat[:, t]
             mkt_ret5 = float(np.nanmean(ret5_arr)) if np.isfinite(ret5_arr).any() else 0.0
             mkt_pct = float(np.mean(pct[v])) if v.any() else 0.0
 
@@ -520,7 +532,7 @@ class DayReplay:
                     base_mae = float(np.nanmean(_bn))
 
             for i in range(n_code):
-                if not valid[i] or prev_close[i] <= 0:
+                if not valid[i] or prev_close[i] <= 0 or done[i]:
                     continue
                 if launch_idx[i] < 0 and pct[i] < 0.5 and codes[i] not in focus_set:
                     continue   # 未启动且无涨幅，跳过（省算力）；验收标的例外，便于诊断"为什么没抓到"
@@ -535,9 +547,8 @@ class DayReplay:
                 if price <= support_proxy:
                     support_proxy = 0.0
 
-                hist_vol = mat["volume"][i, max(0, t - 20): t]
-                hist_vol = hist_vol[~np.isnan(hist_vol)]
-                vol_ratio = float(vol[i] / max(1e-9, float(np.mean(hist_vol)))) if len(hist_vol) >= 3 else 1.0
+                _vm = vol_mean20[i, t]
+                vol_ratio = float(vol[i] / _vm) if np.isfinite(_vm) and _vm > 0 else 1.0
                 vol_ratio = max(0.2, min(8.0, vol_ratio))
 
                 # --- 从 bar 推导的意愿代理（替代实时盘的攻角/意图分） ---
@@ -559,19 +570,13 @@ class DayReplay:
                 # --- 点火强度：与"安全度"分开的弹性指标 ---
                 # 现有四轴偏"确认"（位置/承接），会把刚启动的票判成中庸；
                 # 这里单独量化"量能扩张 + 波动扩张 + 突破前高 + 加速"。
-                vbase = mat["volume"][i, max(0, t - 20): t]
-                vbase = vbase[~np.isnan(vbase)]
-                vbase = float(np.median(vbase)) if len(vbase) >= 5 else 0.0
-                vol_exp = (vol_ratio * (float(np.mean(vbase)) / max(1e-9, vbase))) if vbase > 0 else 1.0
-                vol_exp = float(np.clip(vol_exp, 0.3, 5.0))
+                vol_exp = float(np.clip(vol_ratio, 0.3, 5.0))
+                _rb = rng_mean20[i, t]
                 rng_now = (dh - dl) / max(1e-9, price)
-                rng_base = (mat["high"][i, max(0, t - 20): t] - mat["low"][i, max(0, t - 20): t])
-                rng_base = rng_base[~np.isnan(rng_base)]
-                rng_base = float(np.mean(rng_base)) / max(1e-9, price) if len(rng_base) >= 5 else rng_now
+                rng_base = float(_rb) / max(1e-9, price) if np.isfinite(_rb) and _rb > 0 else rng_now
                 rng_exp = float(np.clip(rng_now / max(1e-6, rng_base), 0.3, 5.0))
-                prev_highs = mat["high"][i, max(0, t - 20): t]
-                prev_highs = prev_highs[~np.isnan(prev_highs)]
-                breakout = 1.0 if (len(prev_highs) >= 5 and price > float(np.max(prev_highs))) else 0.0
+                _ph = prev_high20[i, t]
+                breakout = 1.0 if (np.isfinite(_ph) and price > float(_ph)) else 0.0
                 accel_term = float(np.clip(vel_proxy / 1.5, -2.0, 3.0))
                 ignition = float(np.clip(
                     30.0 + 18.0 * np.log2(vol_exp) + 12.0 * np.log2(rng_exp)
@@ -663,6 +668,9 @@ class DayReplay:
                             "temp": round(regime.temp, 1),
                             "flip": regime.flip_state,
                         }
+
+                if self.cfg.first_only and decision.tier >= 2:
+                    done[i] = True
 
                 if collect_only:
                     continue
@@ -807,7 +815,23 @@ class DayReplay:
             - 召回     = 机会集中被系统选中的比例；
             - 提升     = 命中率 / 全市场基准命中率。
         """
-        res = self.run_day(day)
+        self.cfg.step = max(2, int(self.cfg.step))
+        if self.cfg.cuts_mode == "percentile":
+            try:
+                sample = DayReplay(
+                    cache=self.cache,
+                    engine=FusionEngine(params=self.engine.params),
+                    config=ReplayConfig(top_n=300, step=2, cuts_mode="percentile"),
+                )
+                sample.run(day, collect_only=True)
+                cuts = cross_section_cuts(getattr(sample, "_rar_by_t", {}))
+                res = self.run(day, cuts_override=cuts, first_only=True, active_only=True)
+                res.meta["cuts_used"] = {"L{}".format(t): c for c, t in cuts}
+            except Exception as exc:
+                logger.warning("[replay] 采样分档失败，回退两遍: %s", exc)
+                res = self.run_day(day)
+        else:
+            res = self.run_day(day)
         if res.meta.get("error"):
             return {"day": day, "error": res.meta["error"]}
 
@@ -899,6 +923,34 @@ class DayReplay:
         result = self.run(day, progress=progress, focus=focus, cuts_override=cuts)
         result.meta["cuts_used"] = {"L{}".format(t): c for c, t in cuts}
         return result
+
+
+def _roll_mean(mat: np.ndarray, w: int) -> np.ndarray:
+    """按行滚动均值（忽略 NaN），用于量比/振幅基准，避免循环里反复切片。"""
+    v = np.nan_to_num(mat, nan=0.0)
+    c = np.isfinite(mat).astype("float64")
+    cs = np.cumsum(v, axis=1)
+    cc = np.cumsum(c, axis=1)
+    out = np.full_like(mat, np.nan)
+    out[:, :w] = cs[:, :w] / np.maximum(cc[:, :w], 1.0)
+    if mat.shape[1] > w:
+        out[:, w:] = (cs[:, w:] - cs[:, :-w]) / np.maximum(cc[:, w:] - cc[:, :-w], 1.0)
+    return out
+
+
+def _roll_max(mat: np.ndarray, w: int) -> np.ndarray:
+    out = np.full_like(mat, -np.inf)
+    for k in range(w):
+        out[:, k:] = np.fmax(out[:, k:], mat[:, : mat.shape[1] - k])
+    out[~np.isfinite(out)] = np.nan
+    return out
+
+
+def _shift1(mat: np.ndarray) -> np.ndarray:
+    out = np.full_like(mat, np.nan)
+    if mat.shape[1] > 1:
+        out[:, 1:] = mat[:, :-1]
+    return out
 
 
 def _future_extremes(close: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
