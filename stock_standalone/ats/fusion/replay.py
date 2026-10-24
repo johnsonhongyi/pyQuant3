@@ -51,7 +51,7 @@ from ats.fusion.context import get_daily_context
 from ats.fusion.anomaly import detect_patterns, pattern_score, PATTERN_LATENT_BREAK
 from ats.fusion.premarket import get_premarket
 from ats.fusion.structure import classify as classify_structure
-from ats.fusion.sector import get_sector_map, sector_strength
+from ats.fusion.sector import get_sector_map, get_theme_map, sector_strength, load_external_heat
 from dataclasses import replace
 
 _ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
@@ -458,8 +458,11 @@ class DayReplay:
         try:
             _sm = get_sector_map()
             sec_index = _sm.build_index(codes) if _sm.ok else {}
+            _tm = get_theme_map()
+            theme_index = _tm.build_index(codes) if _tm.ok else {}
+            external_heat = load_external_heat(day)
         except Exception:
-            _sm, sec_index = None, {}
+            _sm, sec_index, _tm, theme_index, external_heat = None, {}, None, {}, {}
 
         day_open_map = {}
         for _c in codes:
@@ -544,6 +547,15 @@ class DayReplay:
             sec_strength: Dict[str, float] = {}
             sec_rank: Dict[str, float] = {}
             sec_breadth: Dict[str, float] = {}
+            theme_strength: Dict[str, float] = {}
+            theme_rank: Dict[str, float] = {}
+            if theme_index:
+                theme_strength = sector_strength(pct, valid, theme_index)
+                if theme_strength:
+                    _tv = np.array(sorted(theme_strength.values()))
+                    for _k, _v in theme_strength.items():
+                        theme_rank[_k] = float(np.searchsorted(_tv, _v) / max(1, len(_tv)))
+
             if sec_index:
                 sec_strength = sector_strength(pct, valid, sec_index)
                 if sec_strength:
@@ -659,7 +671,10 @@ class DayReplay:
                     velocity_pct=vel_proxy,
                     segment_vol_inc=accel,
                     sector_resonance=(
-                        100.0 * (0.6 * sec_rank.get(_sm.get(codes[i]), 0.5) + 0.4 * sec_breadth.get(_sm.get(codes[i]), 0.5))
+                        100.0 * (
+                            0.60 * sec_rank.get(_sm.get(codes[i]), 0.5)
+                            + 0.40 * sec_breadth.get(_sm.get(codes[i]), 0.5)
+                        )
                         if sec_index else 0.0
                     ),
                     is_leader=bool(leader_mask[i]),
@@ -792,6 +807,8 @@ class DayReplay:
                         "patterns": patterns,
                         "structure": classify_structure(_dc, price, float(pct[i])),
                         "sector": _sm.get(codes[i]) if sec_index else "",
+                        "theme": max(_tm.get(codes[i]) or [""], key=lambda t: theme_rank.get(t, 0.0)) if theme_index else "",
+                        "theme_rank": round(max([theme_rank.get(t, 0.5) for t in _tm.get(codes[i])] or [0.5]), 2) if theme_index else 0.0,
                         "sector_rank": round(float(sec_rank.get(_sm.get(codes[i]), 0.5)), 2) if sec_index else 0.0,
                         "below_vwap10": bool(_vw10 > 0 and price < _vw10),
                         "dist_ma20": round(float(_dc.get("dist_ma20_pct", 0.0) or 0.0), 2),

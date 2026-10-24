@@ -82,6 +82,109 @@ def sector_strength(
     return out
 
 
+class ThemeMap:
+    """code -> 概念标签（本地 category 字段，388 个标签，含机器人概念/人形机器人等）。
+
+    本地概念是"第一手"的：盘中就能算强度，不必等外部热榜更新；
+    外部热榜（同花顺/东财/淘股吧）作为"马已经跑起来"的确认，见 load_external_heat。
+    """
+
+    # 过于宽泛的标签不参与"赛道"判断（几乎全市场都有）
+    BROAD = {"深股通", "沪股通", "国企改革", "融资融券", "转融券标的", "MSCI概念", "标普道琼斯A股"}
+
+    def __init__(self, path: Optional[str] = None):
+        self.path = path or next((p for p in _CANDIDATES if os.path.exists(p)), None)
+        self.code2tags: Dict[str, List[str]] = {}
+        self.ok = False
+        if self.path:
+            self._load()
+
+    def _load(self) -> None:
+        try:
+            import pandas as pd
+
+            df = pd.read_hdf(self.path, key="/low_d_120_y_all", columns=["category"])
+            for code, row in df.iterrows():
+                raw = str(row.get("category") or "")
+                tags = [t.strip() for t in raw.split(";") if t.strip() and t.strip() not in self.BROAD]
+                if tags:
+                    self.code2tags[str(code).zfill(6)] = tags
+            self.ok = bool(self.code2tags)
+        except Exception:
+            self.ok = False
+
+    def get(self, code: str) -> List[str]:
+        return self.code2tags.get(str(code).zfill(6), [])
+
+    def build_index(self, codes: List[str], min_members: int = 10) -> Dict[str, np.ndarray]:
+        buckets: Dict[str, List[int]] = {}
+        for i, c in enumerate(codes):
+            for t in self.get(c):
+                buckets.setdefault(t, []).append(i)
+        return {k: np.asarray(v, dtype="int64") for k, v in buckets.items() if len(v) >= min_members}
+
+
+_TMAP: Optional[ThemeMap] = None
+
+
+def get_theme_map() -> ThemeMap:
+    global _TMAP
+    if _TMAP is None:
+        _TMAP = ThemeMap()
+    return _TMAP
+
+
+def load_external_heat(day: str, root: Optional[str] = None) -> Dict[str, int]:
+    """读取外部热榜（同花顺/东财/淘股吧）当日报表，格式：
+        {"themes": [{"name": "机器人", "rank": 1, "pct": 5.2}, ...]}
+    文件不存在则返回空——不联网、不阻塞。
+    """
+    import json
+
+    base = root or os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "logs", "heat_boards")
+    path = os.path.join(base, "{}.json".format(day))
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        out = {}
+        for item in (data.get("themes") or []):
+            name = str(item.get("name") or "").strip()
+            if name:
+                out[name] = int(item.get("rank") or 99)
+        return out
+    except Exception:
+        return {}
+
+
+def verify_heat(
+    local_theme_rank: Dict[str, float],
+    external_heat: Dict[str, int],
+    top_n: int = 20,
+) -> Dict[str, Any]:
+    """热榜对答案：本地概念强度排名 vs 外部热榜排名。
+
+    热榜不参与打分——它是"收盘后核对答案"用的：
+        hit     我们本地排前 N、热榜也排前 N  -> 本地挖掘有效
+        missed  热榜前 N，我们没进前 N        -> 本地漏了（板块不够细/启动更早）
+        noise   我们前 N，热榜没有            -> 本地多报（可能是伪热点）
+    """
+    if not local_theme_rank or not external_heat:
+        return {"ok": False, "reason": "缺少本地或外部热榜数据"}
+
+    local_sorted = [k for k, _ in sorted(local_theme_rank.items(), key=lambda x: -x[1])][:top_n]
+    heat_sorted = [k for k, _ in sorted(external_heat.items(), key=lambda x: x[1])][:top_n]
+    lset, hset = set(local_sorted), set(heat_sorted)
+    return {
+        "ok": True,
+        "hit": sorted(lset & hset),
+        "missed": sorted(hset - lset),
+        "noise": sorted(lset - hset),
+        "recall": round(len(lset & hset) / max(1, len(hset)), 3),
+    }
+
+
 _SMAP: Optional[SectorMap] = None
 
 
