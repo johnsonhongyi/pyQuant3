@@ -119,7 +119,7 @@ MAX_SINGLE_SIZE_PCT = 35.0
 MAX_PENALTY = 60.0
 STALE_SECONDS = 20.0
 
-DEFAULT_WEIGHTS = {"position": 0.30, "support": 0.25, "intent": 0.25, "regime": 0.20}
+DEFAULT_WEIGHTS = {"position": 0.25, "support": 0.20, "intent": 0.20, "regime": 0.15, "relative": 0.20}
 
 DEFAULT_VETO = {"stale_seconds": STALE_SECONDS, "max_bias_pct": 7.0, "min_amount_wan": 3000.0}
 
@@ -348,6 +348,62 @@ def score_regime(event: SignalEvent, regime: Optional[MarketRegime]) -> tuple:
     return _clip(score), notes
 
 
+def multiday_adjust(event: SignalEvent) -> float:
+    """跨日连续性修正（±10）：让"第几根"影响结论，而不是每天从零开始。"""
+    adj = 0.0
+    if event.limit_up_streak >= 3:
+        adj -= 6.0            # 连板高位接力，T+1 风险大
+    elif event.limit_up_streak >= 1:
+        adj += 3.0            # 首板/二板：有资金记忆
+    if event.days_since_high == 0:
+        adj += 4.0            # 昨日刚创 20 日新高
+    elif event.days_since_high >= 15:
+        adj -= 3.0            # 远离高点，趋势未修复
+    if event.ret20d > 15.0:
+        adj -= 4.0            # 20 日已透支
+    elif 0.0 < event.ret20d <= 8.0:
+        adj += 2.0            # 温和上行
+    return adj
+
+
+def score_relative(event: SignalEvent) -> tuple:
+    """相对强度（逆势异动）：大盘在跌、别人在跌，它在涨。
+
+    这是用户反复强调的"异动"本质：不是绝对涨幅，而是**相对全池的超额**。
+    没有相对强度数据时返回中性 50，不奖不罚。
+    """
+    if not event.extra.get("has_rs"):
+        return 50.0, []
+
+    rs = float(event.rs5)
+    mkt = float(event.extra.get("mkt_ret5", 0.0))
+    notes: List[str] = []
+
+    if rs >= 4.0:
+        base = 95.0
+    elif rs >= 2.5:
+        base = 85.0
+    elif rs >= 1.5:
+        base = 75.0
+    elif rs >= 0.5:
+        base = 62.0
+    elif rs >= -0.5:
+        base = 50.0
+    elif rs >= -1.5:
+        base = 38.0
+    else:
+        base = 25.0
+
+    # 逆势加成：全池在跌而它跑赢
+    if mkt < -0.3 and rs > 0.5:
+        base = min(100.0, base + 8.0)
+        notes.append("逆势超额{:+.1f}%(全池{:+.1f}%)".format(rs, mkt))
+    elif rs >= 1.5:
+        notes.append("相对强度{:+.1f}%".format(rs))
+
+    return float(max(0.0, min(100.0, base))), notes
+
+
 def penalty_of(event: SignalEvent, regime: Optional[MarketRegime], params: Optional[Dict[str, Any]] = None) -> tuple:
     """风险惩罚：这些不是"缺点"，是会让你亏钱的东西。"""
     p_cfg = dict(DEFAULT_PENALTY)
@@ -569,17 +625,23 @@ class FusionEngine:
         s, n_sup = score_support(event)
         i, n_itn = score_intent(event)
         r, n_reg = score_regime(event, regime)
+        rel, n_rel = score_relative(event)
         pen, n_pen = penalty_of(event, regime, self.penalty_params)
 
+        w = dict(self.weights)
+        if not event.extra.get("has_rs"):
+            # 没有相对强度数据时，按剩余轴重新归一，避免"缺数据反而加分"
+            w.pop("relative", None)
+        w_sum = sum(w.get(k, 0.0) for k in ("position", "support", "intent", "regime", "relative")) or 1.0
         rar = (
-            self.weights["position"] * p
-            + self.weights["support"] * s
-            + self.weights["intent"] * i
-            + self.weights["regime"] * r
-            - pen
-        )
+            w.get("position", 0.0) * p
+            + w.get("support", 0.0) * s
+            + w.get("intent", 0.0) * i
+            + w.get("regime", 0.0) * r
+            + w.get("relative", 0.0) * rel
+        ) / w_sum - pen + multiday_adjust(event)
         rar = _clip(rar, 0.0, 100.0)
-        axes = AxisScores(position=p, support=s, intent=i, regime=r, penalty=pen, rar=rar)
+        axes = AxisScores(position=p, support=s, intent=i, regime=r, relative=rel, penalty=pen, rar=rar)
 
         tier = tier_of(rar, self.cuts)
         temp_cap, temp_coef = self._temp_cap(regime, event)
@@ -614,7 +676,7 @@ class FusionEngine:
             targets.append({"price": round(r1, 3), "action": "减半"})
             targets.append({"price": round(max(r1, event.price * 1.06), 3), "action": "清仓"})
 
-        evidence = (n_pos + n_sup + n_itn + n_reg + n_pen)[:8]
+        evidence = (n_pos + n_sup + n_itn + n_reg + n_rel + n_pen)[:8]
 
         return FusionDecision(
             code=event.code,

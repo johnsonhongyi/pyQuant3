@@ -47,6 +47,8 @@ from ats.fusion.contract import SignalEvent
 
 logger = logging.getLogger(__name__)
 from ats.fusion.trade_sim import T1Simulator, render_trades, summarize_trades
+from ats.fusion.context import get_daily_context
+from ats.fusion.anomaly import detect_patterns, pattern_score
 
 _ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 _CACHE_DEFAULT = r"G:/minute_kline_cache.pkl"
@@ -129,6 +131,7 @@ class ReplayConfig:
     target_pct: float = 6.0          # 止盈目标
     max_positions_per_day: int = 5   # 每日最多开仓数（按级别+RAR 取前 N）
     fill_mode: str = "limit"         # limit=挂区间限价等回踩；market=次根开盘市价
+    require_pattern: bool = True     # L3+ 必须命中至少一种异动形态（千金买马骨）
 
 
 @dataclass
@@ -342,7 +345,7 @@ class DayReplay:
 
         mat = {
             k: np.full((n_code, n_t), np.nan, dtype="float64")
-            for k in ("close", "high", "low", "vwap", "volume", "cum_vol", "taker", "bid", "above_vwap")
+            for k in ("open", "close", "high", "low", "vwap", "volume", "cum_vol", "taker", "bid", "above_vwap")
         }
         prev_close = np.zeros(n_code, dtype="float64")
         prev_high = np.zeros(n_code, dtype="float64")
@@ -408,6 +411,19 @@ class DayReplay:
         self._rar_by_t: Dict[int, List[float]] = {}
 
         fut_max, fut_min = _future_extremes(mat["close"])
+
+        # 跨日结构：截至昨日（不含当日），避免未来函数
+        try:
+            _dctx = get_daily_context()
+            daily_ctx = {c: _dctx.asof(c, day) for c in codes} if _dctx.ok else {}
+        except Exception:
+            daily_ctx = {}
+
+        day_open_map = {}
+        for _c in codes:
+            _sl = self._slice_day(_c, day)
+            if _sl is not None and len(_sl["open"]):
+                day_open_map[_c] = float(_sl["open"][0])
 
         launch_idx = np.full(n_code, -1, dtype="int64")
         day_high = np.full(n_code, np.nan)
@@ -475,6 +491,18 @@ class DayReplay:
 
             if t % max(1, self.cfg.step) != 0:
                 continue
+
+            # 相对强度：个股 5 根 bar 收益 - 全池等权 5 根 bar 收益
+            back5 = max(0, t - 5)
+            prev5 = mat["close"][:, back5]
+            with np.errstate(invalid="ignore", divide="ignore"):
+                ret5_arr = np.where(
+                    np.isfinite(prev5) & (prev5 > 0),
+                    (close / np.maximum(prev5, 1e-9) - 1.0) * 100.0,
+                    np.nan,
+                )
+            mkt_ret5 = float(np.nanmean(ret5_arr)) if np.isfinite(ret5_arr).any() else 0.0
+            mkt_pct = float(np.mean(pct[v])) if v.any() else 0.0
 
             # 龙头代理：当日涨幅进入全池前 1% 且量比>1.5（无板块数据时的近似）
             leader_mask = np.zeros(n_code, dtype=bool)
@@ -558,6 +586,9 @@ class DayReplay:
                 taker_proxy = float(mat["taker"][i, t]) if np.isfinite(mat["taker"][i, t]) else 50.0
                 bid_proxy = float(mat["bid"][i, t]) if np.isfinite(mat["bid"][i, t]) else 50.0
 
+                _dc = daily_ctx.get(codes[i]) or {}
+                _ma5 = float(_dc.get("ma5", 0.0)); _ma10 = float(_dc.get("ma10", 0.0)); _ma20 = float(_dc.get("ma20", 0.0))
+                _day_open = day_open_map.get(codes[i], price)
                 ev = SignalEvent(
                     code=codes[i],
                     ts=float(clock[t]),
@@ -585,12 +616,33 @@ class DayReplay:
                     segment_vol_inc=accel,
                     sector_resonance=0.0,
                     is_leader=bool(leader_mask[i]),
+                    ma5=float((daily_ctx.get(codes[i]) or {}).get("ma5", 0.0)),
+                    ma10=float((daily_ctx.get(codes[i]) or {}).get("ma10", 0.0)),
+                    ma20=float((daily_ctx.get(codes[i]) or {}).get("ma20", 0.0)),
+                    ret5d=float((daily_ctx.get(codes[i]) or {}).get("ret5d", 0.0)),
+                    ret10d=float((daily_ctx.get(codes[i]) or {}).get("ret10d", 0.0)),
+                    ret20d=float((daily_ctx.get(codes[i]) or {}).get("ret20d", 0.0)),
+                    days_since_high=float((daily_ctx.get(codes[i]) or {}).get("days_since_high", 0.0)),
+                    limit_up_streak=float((daily_ctx.get(codes[i]) or {}).get("limit_up_streak", 0.0)),
+                    dist_ma20_pct=float((daily_ctx.get(codes[i]) or {}).get("dist_ma20_pct", 0.0)),
+                    rs5=float(ret5_arr[i] - mkt_ret5) if np.isfinite(ret5_arr[i]) else 0.0,
+                    rs_day=float(pct[i] - mkt_pct),
                     launch_ts=launch_ts,
                     freshness_s=0.0,
                     trade_date=day,
-                    extra={"support_proxy": True, "replay": True},
+                    extra={"support_proxy": True, "replay": True, "has_rs": True, "mkt_ret5": mkt_ret5},
                 )
                 decision = self.engine.evaluate(ev, regime, now=float(clock[t]))
+                patterns = detect_patterns(
+                    price=price, day_open=_day_open,
+                    ma5=_ma5, ma10=_ma10, ma20=_ma20,
+                    pct=float(pct[i]), ret_std20=float(_dc.get("ret_std20", 0.0)),
+                    vol_ratio=vol_ratio, rs5=float(ret5_arr[i] - mkt_ret5) if np.isfinite(ret5_arr[i]) else 0.0,
+                    mkt_ret5=mkt_ret5, is_leader=bool(leader_mask[i]),
+                )
+                # 千金买马骨：没有明确异动形态的，最多给到 L2
+                if self.cfg.require_pattern and decision.tier >= 3 and not patterns:
+                    decision = self.engine.evaluate(ev, regime, now=float(clock[t]), tier_cap=2)
                 eval_count += 1
                 t_rar.append(decision.rar)
                 if len(rar_samples) < 50000:
@@ -653,6 +705,8 @@ class DayReplay:
                         "base_mfe": round(base_mfe, 2) if np.isfinite(base_mfe) else 0.0,
                         "excess": round(excess, 2),
                         "ignition": round(ignition, 1),
+                        "patterns": patterns,
+                        "pattern_score": round(pattern_score(patterns), 1),
                         "leader": bool(leader_mask[i]),
                         "veto": decision.veto_reason,
                     }
