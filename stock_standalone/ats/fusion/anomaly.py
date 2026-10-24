@@ -19,11 +19,15 @@ from typing import Dict, List, Optional
 PATTERN_PIERCE = "一阳穿三线"
 PATTERN_SELF_ABNORMAL = "超出自身波动"
 PATTERN_LEADERSHIP = "逆势带头"
+PATTERN_VWAP_BREAK = "突破10日VWAP"
+PATTERN_LATENT_BREAK = "潜伏转突破"
 
 PATTERN_LABELS = {
     PATTERN_PIERCE: "🕯️ 一阳穿三线",
     PATTERN_SELF_ABNORMAL: "⚡ 超出自身波动",
     PATTERN_LEADERSHIP: "🧭 逆势带头",
+    PATTERN_VWAP_BREAK: "📈 突破10日VWAP",
+    PATTERN_LATENT_BREAK: "🎯 潜伏转突破",
 }
 
 
@@ -39,6 +43,7 @@ def detect_patterns(
     rs5: float,
     mkt_ret5: float,
     is_leader: bool = False,
+    vwap10: float = 0.0,
     thresholds: Optional[Dict[str, float]] = None,
 ) -> List[str]:
     """返回命中的形态名列表（可能为空）。"""
@@ -72,6 +77,10 @@ def detect_patterns(
     if rs5 >= t["lead_rs"] and (mkt_ret5 <= t["lead_mkt"] or is_leader):
         out.append(PATTERN_LEADERSHIP)
 
+    # 突破 10 日 VWAP 压力区：开盘还在下方，现在站上去
+    if vwap10 > 0 and price > vwap10 and day_open < vwap10:
+        out.append(PATTERN_VWAP_BREAK)
+
     return out
 
 
@@ -79,5 +88,9 @@ def pattern_score(patterns: List[str]) -> float:
     """形态强度 0-100，用于展示与排序辅助（不直接改 RAR）。"""
     if not patterns:
         return 0.0
-    w = {PATTERN_PIERCE: 40.0, PATTERN_LEADERSHIP: 35.0, PATTERN_SELF_ABNORMAL: 30.0}
+    w = {
+        PATTERN_PIERCE: 40.0, PATTERN_LEADERSHIP: 35.0,
+        PATTERN_SELF_ABNORMAL: 30.0, PATTERN_VWAP_BREAK: 35.0,
+        PATTERN_LATENT_BREAK: 45.0,
+    }
     return min(100.0, sum(w.get(p, 20.0) for p in patterns))

@@ -603,6 +603,7 @@ class FusionEngine:
         regime: Optional[MarketRegime] = None,
         now: Optional[float] = None,
         tier_cap: Optional[int] = None,
+        tier_floor: Optional[int] = None,
     ) -> FusionDecision:
         now = float(now if now is not None else (event.ts or time.time()))
 
@@ -655,6 +656,9 @@ class FusionEngine:
             tier = min(tier, 2)
         if tier_cap is not None:
             tier = max(0, min(tier, int(tier_cap)))
+        if tier_floor is not None:
+            # 形态优先：明确异动结构成立时，允许越过 RAR 分档直接给级别
+            tier = max(tier, int(tier_floor))
 
         spec = LADDER[tier]
         size = spec.base_size_pct * temp_coef * age_coef

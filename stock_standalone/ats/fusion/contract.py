@@ -44,6 +44,7 @@ class SignalEvent:
     # 均线与结构锚点
     vwap: float = 0.0            # 今日分时 VWAP
     vwap_5d: float = 0.0         # 5 日累计 VWAP（vwap_cum_5d）
+    vwap_10d: float = 0.0        # 10 日累计 VWAP（盘前 ma10dcum），压力区
     sbc_supp: float = 0.0        # SBC 支撑线
     sbc_rev: float = 0.0         # SBC 反转线
     base_support: float = 0.0    # 底台/箱体下沿（有则优先作为止损锚）

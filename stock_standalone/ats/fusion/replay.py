@@ -48,7 +48,9 @@ from ats.fusion.contract import SignalEvent
 logger = logging.getLogger(__name__)
 from ats.fusion.trade_sim import T1Simulator, render_trades, summarize_trades
 from ats.fusion.context import get_daily_context
-from ats.fusion.anomaly import detect_patterns, pattern_score
+from ats.fusion.anomaly import detect_patterns, pattern_score, PATTERN_LATENT_BREAK
+from ats.fusion.premarket import get_premarket
+from dataclasses import replace
 
 _ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 _CACHE_DEFAULT = r"G:/minute_kline_cache.pkl"
@@ -437,6 +439,13 @@ class DayReplay:
         except Exception:
             daily_ctx = {}
 
+        try:
+            _pm = get_premarket()
+            vwap10_map = {c: _pm.vwap10(c) for c in codes} if _pm.ok else {}
+        except Exception:
+            vwap10_map = {}
+        latent: Dict[str, float] = {}
+
         day_open_map = {}
         for _c in codes:
             _sl = self._slice_day(_c, day)
@@ -630,6 +639,7 @@ class DayReplay:
                     days_since_high=float((daily_ctx.get(codes[i]) or {}).get("days_since_high", 0.0)),
                     limit_up_streak=float((daily_ctx.get(codes[i]) or {}).get("limit_up_streak", 0.0)),
                     dist_ma20_pct=float((daily_ctx.get(codes[i]) or {}).get("dist_ma20_pct", 0.0)),
+                    vwap_10d=float(vwap10_map.get(codes[i], 0.0)),
                     rs5=float(ret5_arr[i] - mkt_ret5) if np.isfinite(ret5_arr[i]) else 0.0,
                     rs_day=float(pct[i] - mkt_pct),
                     launch_ts=launch_ts,
@@ -637,14 +647,43 @@ class DayReplay:
                     trade_date=day,
                     extra={"support_proxy": True, "replay": True, "has_rs": True, "mkt_ret5": mkt_ret5},
                 )
-                decision = self.engine.evaluate(ev, regime, now=float(clock[t]))
-                patterns = detect_patterns(
+                _rs5 = float(ret5_arr[i] - mkt_ret5) if np.isfinite(ret5_arr[i]) else 0.0
+                _vw10 = float(vwap10_map.get(codes[i], 0.0))
+                _pat_early = detect_patterns(
                     price=price, day_open=_day_open,
                     ma5=_ma5, ma10=_ma10, ma20=_ma20,
                     pct=float(pct[i]), ret_std20=float(_dc.get("ret_std20", 0.0)),
-                    vol_ratio=vol_ratio, rs5=float(ret5_arr[i] - mkt_ret5) if np.isfinite(ret5_arr[i]) else 0.0,
+                    vol_ratio=vol_ratio, rs5=_rs5,
                     mkt_ret5=mkt_ret5, is_leader=bool(leader_mask[i]),
+                    vwap10=_vw10,
                 )
+                patterns = list(_pat_early)
+
+                # 潜伏池：大盘在跌、它在悄悄抗跌（涨幅还不大），先记下来
+                if mkt_ret5 < -0.3 and _rs5 >= 1.0 and float(pct[i]) < 3.0:
+                    latent.setdefault(codes[i], float(clock[t]))
+
+                # 潜伏转突破：曾在下跌中抗跌，现在站上 10 日 VWAP，且间隔 <=60 分钟
+                _lt = latent.get(codes[i])
+                if (_lt is not None and _vw10 > 0 and price > _vw10
+                        and 0 <= (float(clock[t]) - _lt) <= 3600):
+                    if PATTERN_LATENT_BREAK not in patterns:
+                        patterns.append(PATTERN_LATENT_BREAK)
+
+                _ps = pattern_score(patterns)
+                _floor = 3 if _ps >= 100 else (2 if _ps >= 70 else None)
+                decision = self.engine.evaluate(
+                    ev, regime, now=float(clock[t]), tier_floor=_floor
+                )
+                if PATTERN_LATENT_BREAK in patterns and decision.tier < 2:
+                    try:
+                        ev2 = replace(ev, launch_ts=float(clock[t]) - 300.0)
+                        d2 = self.engine.evaluate(ev2, regime, now=float(clock[t]))
+                        if d2.tier > decision.tier:
+                            decision = d2
+                    except Exception:
+                        pass
+
                 # 千金买马骨：没有明确异动形态的，最多给到 L2
                 if self.cfg.require_pattern and decision.tier >= 3 and not patterns:
                     decision = self.engine.evaluate(ev, regime, now=float(clock[t]), tier_cap=2)
