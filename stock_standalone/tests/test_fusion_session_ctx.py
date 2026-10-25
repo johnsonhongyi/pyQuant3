@@ -30,6 +30,15 @@ class _Frame:
         return self
 
 
+class _FakeTracker:
+    """最小 tracker 替身：只提供 states()。"""
+
+    def states(self):
+        return [type("S", (), {"stage": "入局"})(),
+                type("S", (), {"stage": "剔除"})(),
+                type("S", (), {"stage": "观察"})()]
+
+
 class _ThemeMap:
     def __init__(self, m):
         self._m = m
@@ -139,6 +148,36 @@ class TestSessionContextStore(unittest.TestCase):
         md = self.store.render_handoff("2026-10-24")
         self.assertIn("上下文交接", md)
         self.assertIn("先锋阵亡", md)
+
+    def test_thin_write_does_not_erase_rich_snapshot(self):
+        """多写入方合并：UI 定时巡检的薄快照不能抹掉回放写出的富快照。"""
+        rich = self._close("2026-10-23", capital_ratio=1.26, amount_wan=9999.0)
+        self.assertEqual(rich.capital["ratio_close"], 1.26)
+        # 第二个写入方只带 phase_path（模拟 UI 收盘巡检）
+        thin = self.store.close_day(
+            "2026-10-23",
+            phase_path=[{"time": "15:00", "phase": "收盘完成", "note": "巡检"}],
+            capital_ratio=1.0,
+        )
+        self.assertEqual(thin.capital["ratio_close"], 1.26, "富快照的资金数据必须保留")
+        self.assertTrue(thin.phase_path, "新写入的阶段路径要生效")
+        back = self.store.load("2026-10-23")
+        self.assertEqual(back.capital["amount_wan"], 9999.0)
+        self.assertEqual(back.source, "live")
+
+    def test_missing_marks_self_heal(self):
+        """缺失标记必须自愈：薄写入留下的 tracker 缺失，富写入补齐后要消失。"""
+        thin = self.store.close_day("2026-10-23", phase_path=[])   # 无 tracker -> 记 missing
+        self.assertIn("tracker", thin.missing)
+        rich = self.store.close_day("2026-10-23", tracker=_FakeTracker(), phase_path=[])
+        self.assertNotIn("tracker", rich.missing, "补齐后缺失标记必须自愈")
+        self.assertTrue(rich.signals.get("states"))
+
+    def test_amount_missing_survives_capital_ratio_fill(self):
+        """amount 与 capital_ratio 同属 capital 但子键不同：补了量能比不能算补了成交额。"""
+        ctx = self.store.close_day("2026-10-23", phase_path=[], capital_ratio=1.26)
+        self.assertEqual(ctx.capital.get("ratio_close"), 1.26)
+        self.assertIn("amount", ctx.missing, "成交额仍缺，不能因为量能比有了就抹掉")
 
     def test_prune_keeps_bounded(self):
         store = SessionContextStore(root=self.root, keep_days=2)

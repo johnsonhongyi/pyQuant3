@@ -14,7 +14,7 @@ import time
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # 仓库根，保证能 import ats
 
 from ats.fusion.live_bridge import FusionLiveBridge
 from ats.fusion.replay import load_minute_cache

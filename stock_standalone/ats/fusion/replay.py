@@ -564,6 +564,7 @@ class DayReplay:
         life = MarketLifecycle()
         life_state = None
         _cap_ratio = 1.0            # 最近一根的资金量能比；无 bar 时保持中性 1.0
+        _s_rate, _s_total = 1.0, 0  # 先锋存活率（最近 60 分钟窗口）；无 bar 时中性
         row_of = {c: i for i, c in enumerate(codes)}
 
         launch_idx = np.full(n_code, -1, dtype="int64")
@@ -771,8 +772,10 @@ class DayReplay:
 
                 launch_ts = float(clock[launch_idx[i]]) if launch_idx[i] >= 0 else 0.0
                 # 结构清晰度代理：最近 10 根 bar 中站上均价的比例
-                clarity_proxy = _mean_small(_clean(mat["above_vwap"][i, max(0, t - 9): t + 1])) * 100.0 \
-                    if len(mat["above_vwap"][i, max(0, t - 9): t + 1]) else 0.0
+                # 注意：mat 初始为 NaN，窗口内可能整段缺失——必须按"清洗后"的长度判断，
+                # 否则 _mean_small([]) 会返回 NaN 并把 NaN 传进 structure_clarity。
+                _av = _clean(mat["above_vwap"][i, max(0, t - 9): t + 1])
+                clarity_proxy = _mean_small(_av) * 100.0 if _av else 0.0
                 taker_proxy = float(mat["taker"][i, t]) if _isfinite(mat["taker"][i, t]) else 50.0
                 bid_proxy = float(mat["bid"][i, t]) if _isfinite(mat["bid"][i, t]) else 50.0
 
@@ -1131,6 +1134,8 @@ class DayReplay:
                     phase_path=phase_path,
                     capital_ratio=float(_cap_ratio),
                     amount_wan=None,
+                    vanguard_survival=float(_s_rate),
+                    vanguard_n=int(_s_total),
                     ledger=ledger_summary(day),
                 )
             except Exception as exc:

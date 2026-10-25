@@ -1325,7 +1325,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 day,
                 phase_path=[{"time": "15:00", "phase": "收盘完成", "note": f"有效梯度标的{len(live_rows)}只"}],
                 amount_wan=None,
-                capital_ratio=1.0,
+                # 巡检不测资金量能：传 None 而不是占位 1.0，避免覆盖回放算出的真实比值
+                capital_ratio=None,
             )
             try:
                 handoff_data = store.handoff(day)
@@ -1503,7 +1504,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 day,
                 phase_path=[{"time": "15:00", "phase": "回补就绪", "note": f"回补标的{len(by_code)}只"}],
                 amount_wan=None,
-                capital_ratio=1.0,
+                capital_ratio=None,
             )
             return len(by_code)
         except Exception as exc:

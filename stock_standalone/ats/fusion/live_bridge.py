@@ -152,7 +152,13 @@ class FusionLiveBridge:
             return []
 
     def _update_phase(self, day: str, ts: float, breadth: float, capital_ratio: float) -> None:
-        """用当帧宽度 + 资金量能推进战役阶段，记录阶段路径（有温度才算，没有就跳过）。"""
+        """用当帧宽度 + 资金量能推进战役阶段，记录阶段路径。
+
+        局限（必须说清，否则 snapshot 会骗人）：实盘侧没有维护先锋名册，
+        所以这里 survival 恒为 1.0、survival_n=0 —— **"先锋阵亡/按存活率退守"
+        这两个分支在实盘阶段路径里不会出现**，只覆盖 冰点/反攻/攻城略地/量能退避。
+        没有温度历史时整段跳过（不猜温度）。
+        """
         recs = self._temp_records(day)
         if not recs:
             return
@@ -195,7 +201,8 @@ class FusionLiveBridge:
                 theme_map=get_theme_map() if frame is not None else None,
                 phase_path=self._phase_path,
                 capital_ratio=capital_ratio,
-                amount_wan=(self._capital_hist[-1] if self._capital_hist else None),
+                # 快照里的 amount_wan 单位是万元；_capital_hist 存的是元，这里换算
+                amount_wan=(self._capital_hist[-1] / 1e4 if self._capital_hist else None),
                 ledger=ledger_summary(day),
             )
             self._closed_days.add(day)
@@ -309,7 +316,8 @@ class FusionLiveBridge:
         except Exception:
             breadth = crowd = 0.5
 
-        # 全市场成交额（万元）：资金冲锋号的原料；没有 amount 列就跳过，不编
+        # 全市场成交额：资金冲锋号的原料；行情 amount 单位是"元"，存快照时换算成万元。
+        # 没有 amount 列就跳过，不编。
         try:
             c_amt = next((c for c in df.columns if str(c).lower() in ("amount", "amount_wan", "成交额")), None)
             if c_amt is not None:

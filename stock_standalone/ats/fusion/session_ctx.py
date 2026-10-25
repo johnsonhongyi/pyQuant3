@@ -140,6 +140,58 @@ class SessionContextStore:
         except Exception:
             return False
 
+    # -- 多写入方合并 --------------------------------------------------------
+    # 同一天的上下文可能由三方先后写：回放沉淀（带温度/存活率/账本，最富）、
+    # live_bridge 收盘沉淀（带帧/主题/资金）、UI 定时巡检（最薄，只有 phase_path）。
+    # 直接覆盖会让"最薄的写"抹掉"最富的写"，所以按组合并：新值非空才覆盖，
+    # 空值保留旧值；source 优先保留 live（实测胜过重建）。
+    _DICT_FIELDS = ("temp", "breadth", "updown", "capital", "vanguard", "signals", "ctx")
+    _LIST_FIELDS = ("phase_path", "themes")
+    # missing  key -> 能把它填上的字段（支持点号子键）。合并后按这个表自愈：
+    # 薄写入方留下的缺失标记，不能因为"曾经缺过"就永久粘在快照上。
+    # 注意 amount 与 capital_ratio 同属 capital，但子键不同——不能一个补齐另一个就算了。
+    _MISSING_FILLED_BY = {
+        "temp": "temp.close",
+        "breadth": "breadth.close",
+        "capital_ratio": "capital.ratio_close",
+        "amount": "capital.amount_wan",
+        "phase_path": "phase_path",
+        "themes": "themes",
+        "tracker": "signals.states",
+        "vanguard_survival": "vanguard.alive",
+        "mkt_hist": "ctx.ice_days",
+    }
+
+    @staticmethod
+    def _filled(ctx: SessionContext, path: str) -> bool:
+        cur: Any = ctx
+        for part in path.split("."):
+            cur = getattr(cur, part, None) if not isinstance(cur, dict) else cur.get(part)
+            if cur in (None, "", [], {}):
+                return False
+        return True
+
+    def _merge(self, base: Optional[SessionContext], new: SessionContext) -> SessionContext:
+        if base is None or base.day != new.day:
+            return new
+        for k in self._DICT_FIELDS:
+            b = getattr(base, k) or {}
+            n = getattr(new, k) or {}
+            filled = {kk: vv for kk, vv in n.items() if vv not in (None, {}, [], "")}
+            if filled or b:
+                setattr(new, k, {**b, **filled})
+        for k in self._LIST_FIELDS:
+            if not getattr(new, k) and getattr(base, k):
+                setattr(new, k, getattr(base, k))
+        if not new.rotation and base.rotation:
+            new.rotation = base.rotation
+        if base.source == "live" and new.source != "live":
+            new.source = "live"
+        # 自愈：字段现在有值的，从 missing 里去掉（否则一次薄写会永久留下缺失标记）
+        healed = {k for k, p in self._MISSING_FILLED_BY.items() if self._filled(new, p)}
+        new.missing = sorted((set(base.missing) | set(new.missing)) - healed)
+        return new
+
     def load(self, day: str) -> Optional[SessionContext]:
         if day in self._cache:
             return self._cache[day]
@@ -187,6 +239,8 @@ class SessionContextStore:
         phase_path: Optional[List[Dict[str, Any]]] = None,
         capital_ratio: Optional[float] = None,
         amount_wan: Optional[float] = None,
+        vanguard_survival: Optional[float] = None,
+        vanguard_n: int = 0,
         ledger: Optional[Dict[str, Any]] = None,
     ) -> SessionContext:
         """把一日上下文固化成快照。任何输入缺失都记 missing，不编数。"""
@@ -234,8 +288,14 @@ class SessionContextStore:
             miss.append("breadth")
 
         # 2) 资金：近5根/前5根量能比 + 当日成交额
-        if _f(capital_ratio) is not None:
-            ctx.capital["ratio_close"] = _r(capital_ratio, 3)
+        # 注意：capital_ratio 恰为 1.0 一律按"没有数据"处理——多个写入方（UI 巡检）
+        # 会用 1.0 当占位符，而真实量能比恰好等于 1.000 的概率可忽略；
+        # 把它当实测值会覆盖掉回放算出的真实比值。
+        cr = _f(capital_ratio)
+        if cr is not None and abs(cr - 1.0) < 1e-9:
+            cr = None
+        if cr is not None:
+            ctx.capital["ratio_close"] = _r(cr, 3)
         else:
             miss.append("capital_ratio")
         if _f(amount_wan) is not None:
@@ -258,6 +318,12 @@ class SessionContextStore:
             miss.append("themes")
 
         # 5) 先锋存活 + 信号计数
+        # vanguard 只放**真实**先锋存活率（回放由 VanguardWatch 算；实盘侧没有维护名册，
+        # 所以留空并记 missing，绝不用"入局事件数"冒充存活率）。
+        if _f(vanguard_survival) is not None:
+            ctx.vanguard = {"alive": _r(vanguard_survival, 3), "total": float(vanguard_n)}
+        else:
+            miss.append("vanguard_survival")
         if tracker is not None:
             try:
                 sts = tracker.states()
@@ -267,9 +333,6 @@ class SessionContextStore:
                     "evicted": int(sum(1 for s in sts if getattr(s, "stage", "") == "剔除")),
                     "states": len(sts),
                 }
-                ev = getattr(tracker, "events", lambda: [])() or []
-                ctx.vanguard = {"alive": float(sum(1 for e in ev if e.get("kind") == "入局")),
-                                "total": float(len(ev))}
             except Exception:
                 miss.append("tracker")
         else:
@@ -293,6 +356,7 @@ class SessionContextStore:
             }
 
         ctx.missing = miss
+        ctx = self._merge(self.load(day), ctx)
         self.save(ctx)
         return ctx
 
