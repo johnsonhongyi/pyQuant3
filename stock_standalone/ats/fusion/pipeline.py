@@ -22,6 +22,7 @@ from ats.fusion.mine import collect, profit_ranking
 from ats.fusion.replay import DayReplay, ReplayConfig
 from ats.fusion.select import STAGE_ORDER, render_selection, select_day
 from ats.fusion.sector import get_theme_map
+from ats.fusion.tracker import deploy_path
 
 
 def theme_board(rp: DayReplay, day: str, top: int = 15) -> List[Dict[str, Any]]:
@@ -66,6 +67,13 @@ def run_day(day: str, top_n: int = 6000, step: int = 3) -> Dict[str, Any]:
     events = collect([day], top_n=top_n, step=step, cache=rp.cache)
     sel = select_day(events)
 
+    # ④ 赛马跟踪：第一波入局 → 可下单（带旧信号的连续判断）
+    track_res = rp.run(day, cuts_override=((68, 4), (60, 3), (52, 2), (45, 1)), active_only=True)
+    entries = sorted(track_res.entries, key=lambda x: -float(x.get("persist") or 0.0))
+    for e in entries:
+        e["path"] = deploy_path(e)
+    deploy = [e for e in entries if e["path"]]
+
     tm = get_theme_map()
     rank_map = {r["code"]: r for r in ranking}
 
@@ -94,6 +102,8 @@ def run_day(day: str, top_n: int = 6000, step: int = 3) -> Dict[str, Any]:
         "hit_events": hit_events,
         "recall_events": round(len(hit_events) / max(1, len(ranking)), 3),
         "n_events": len(events),
+        "entries": entries,
+        "deploy": deploy,
     }
 
 
@@ -103,7 +113,6 @@ def render(res: Dict[str, Any]) -> str:
     lines.append("- 盈利榜前20：**信号层覆盖 {} 只（{:.0%}）**｜收敛清单命中 {} 只（{:.0%}）".format(
         len(res["hit_events"]), res["recall_events"], len(res["hit"]), res["recall"]))
     lines.append("")
-
     lines.append("## ① 本地概念赛道榜（Top15）")
     lines.append("| 排名 | 概念 | 成员 | 平均涨幅 | 上涨占比 |")
     lines.append("|---|---|---|---|---|")
@@ -129,6 +138,22 @@ def render(res: Dict[str, Any]) -> str:
     lines.append("")
 
     lines.append(render_selection(res["selection"], res["day"]))
+    lines.append("## ④ 赛马跟踪：入局 {} 笔 → 可下单 {} 笔".format(
+        len(res.get("entries") or []), len(res.get("deploy") or [])))
+    lines.append("")
+    dep = res.get("deploy") or []
+    if dep:
+        lines.append("| # | 代码 | 路径 | 入局 | 入局价 | 当时涨幅 | 首异动涨幅 | 持续分 | 赛道 | 形态 | 证据链 |")
+        lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
+        for i, e in enumerate(dep, 1):
+            lines.append("| {} | {} | {} | {} | {} | {:+.1f}% | {:+.1f}% | {} | {} | {} | {} |".format(
+                i, e["code"], e["path"], e["enter_time"], e["enter_price"], e["enter_pct"],
+                e["first_pct"], e["persist"], e.get("sector", ""),
+                "、".join((e.get("patterns") or {}).keys()) or "-", (e.get("chain") or "-")[:40]))
+    else:
+        lines.append("- 今日无可下单标的（宁可不做）")
+    lines.append("")
+
     return "\n".join(lines)
 
 
