@@ -349,7 +349,11 @@ def score_regime(event: SignalEvent, regime: Optional[MarketRegime]) -> tuple:
 
 
 def multiday_adjust(event: SignalEvent) -> float:
-    """跨日连续性修正（±10）：让"第几根"影响结论，而不是每天从零开始。"""
+    """跨日连续性修正（±10）：让"第几根"影响结论，而不是每天从零开始。
+
+    其中包含"饥饿度"：连续冰点/低温越久，第一个启动越值钱
+    （"饿了好几天，第一个包子永远最香"）。
+    """
     adj = 0.0
     if event.limit_up_streak >= 3:
         adj -= 6.0            # 连板高位接力，T+1 风险大
@@ -363,10 +367,32 @@ def multiday_adjust(event: SignalEvent) -> float:
         adj -= 4.0            # 20 日已透支
     elif 0.0 < event.ret20d <= 8.0:
         adj += 2.0            # 温和上行
+
+    # 饥饿度：1.0~1.5 -> 0~+6 分；常温不加不减
+    hunger = float(event.extra.get("hunger", 1.0) or 1.0)
+    if hunger > 1.0:
+        adj += min(6.0, (hunger - 1.0) * 12.0)
     return adj
 
 
-def score_relative(event: SignalEvent) -> tuple:
+def leadership_value(temp: float, consensus: float) -> float:
+    """带头价值：温度越低越值钱，趋同越高越没意义。
+
+    用户原话：
+        "市场温度低的时候，带头作用价值度很高——人没有反应过来，出现的才有价值；
+         大家都已经异口同声趋同了，那时候出现的都是诱多，跟单容易被埋。"
+
+    所以"带头"不是一个固定加分，而是一个**随环境衰减**的量：
+        低温(<=28℃) + 低趋同(<=20%) -> 1.00（真正没人反应）
+        高温(>=58℃) + 高趋同(>=80%) -> 0.15（人尽皆知的诱多）
+    """
+    temp_f = _clip((58.0 - float(temp)) / 30.0, 0.25, 1.0)
+    cons_f = _clip(1.0 - 0.70 * float(consensus), 0.25, 1.0)
+    # 下限 0.35：带头永远不是负分，只是"很便宜"；上限 1.0
+    return float(0.35 + 0.65 * temp_f * cons_f)
+
+
+def score_relative(event: SignalEvent, regime: Optional[MarketRegime] = None) -> tuple:
     """相对强度（逆势异动）：大盘在跌、别人在跌，它在涨。
 
     这是用户反复强调的"异动"本质：不是绝对涨幅，而是**相对全池的超额**。
@@ -400,6 +426,16 @@ def score_relative(event: SignalEvent) -> tuple:
         notes.append("逆势超额{:+.1f}%(全池{:+.1f}%)".format(rs, mkt))
     elif rs >= 1.5:
         notes.append("相对强度{:+.1f}%".format(rs))
+
+    # 带头价值衰减：温度越高、趋同越强，"带头"越可能是诱多
+    if regime is not None and rs > 0.5:
+        cons = float(event.extra.get("consensus", 0.0) or 0.0)
+        lv = leadership_value(regime.temp, cons)
+        base = 50.0 + (base - 50.0) * lv
+        if lv < 0.55:
+            notes.append("趋同{:.0%}·温度{:.0f}℃,带头×{:.2f}".format(cons, regime.temp, lv))
+        elif lv >= 0.9:
+            notes.append("低温低趋同,带头×{:.2f}".format(lv))
 
     return float(max(0.0, min(100.0, base))), notes
 
@@ -626,7 +662,7 @@ class FusionEngine:
         s, n_sup = score_support(event)
         i, n_itn = score_intent(event)
         r, n_reg = score_regime(event, regime)
-        rel, n_rel = score_relative(event)
+        rel, n_rel = score_relative(event, regime)
         pen, n_pen = penalty_of(event, regime, self.penalty_params)
 
         w = dict(self.weights)

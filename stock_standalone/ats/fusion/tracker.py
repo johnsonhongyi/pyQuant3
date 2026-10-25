@@ -59,6 +59,11 @@ class TrackConfig:
     trap_persist_penalty: float = 30.0   # 陷阱对持续性分的最大扣分
     gap_risk_block: float = 80.0         # 跨日风险超过此值，禁止入局
     gap_risk_caution: float = 50.0       # 超过此值，要求首异动更早（<=2%）
+    # 趋同：大家都涨了就没有意义，那时的异动多是诱多
+    # 实测：趋同 0.60~1.00 组 T+1 为负；但 0.60~0.65 且温度不高时仍有机会，
+    # 所以入局闸门设在 0.65/55℃，把最坏的"高温+高度趋同"挡掉，其余交给可下单闸门。
+    consensus_max: float = 0.65          # 趋同度上限
+    consensus_hot_temp: float = 55.0     # 高于此温度且趋同>=上限 -> 禁止入局
     spike_evict_drawdown: float = 2.0    # 入局后冲高回落达此幅度即剔除
     max_history: int = 16             # 证据链保留条数
     day_carry_max: int = 5            # 跨日保留几日摘要
@@ -96,6 +101,8 @@ class TrackState:
     patterns_seen: Dict[str, int] = field(default_factory=dict)
     traps_seen: Dict[str, int] = field(default_factory=dict)   # 诱多陷阱计数
     traps: List[str] = field(default_factory=list)             # 当前 bar 命中的陷阱
+    consensus: float = 0.0                                     # 趋同度（0~1）
+    temp: float = 0.0                                          # 市场温度
     gap_risk: float = 0.0                                      # 跨日风险（昨日大涨/长上影）
     risk_notes: List[str] = field(default_factory=list)
     best_tier: int = 0
@@ -181,6 +188,8 @@ class TrackState:
             "traps": list(self.traps),
             "traps_seen": dict(self.traps_seen),
             "gap_risk": round(self.gap_risk, 1),
+            "consensus": round(self.consensus, 3),
+            "temp": round(self.temp, 1),
             "risk_notes": list(self.risk_notes),
             "best_tier": self.best_tier,
             "best_rar": round(self.best_rar, 1),
@@ -277,6 +286,8 @@ class RaceTracker:
         traps: Optional[List[str]] = None,
         gap_risk: float = 0.0,
         risk_notes: Optional[List[str]] = None,
+        consensus: float = 0.0,
+        temp: float = 0.0,
     ) -> TrackState:
         code = str(code).zfill(6)
         st = self._states.get(code)
@@ -299,6 +310,8 @@ class RaceTracker:
         traps = list(traps or [])
         st.traps = traps
         st.gap_risk = float(gap_risk or 0.0)
+        st.consensus = float(consensus or 0.0)
+        st.temp = float(temp or 0.0)
         if risk_notes:
             st.risk_notes = list(risk_notes)[:4]
         for t in traps:
@@ -582,6 +595,10 @@ class RaceTracker:
         if st.gap_risk >= cfg.gap_risk_caution and st.first_pct > 2.0:
             self._block(st, "跨日风险偏高且首异动>2%")
             return
+        # 趋同：大家都异口同声了，此时出现的异动多是诱多（实测 T+1 为负）
+        if st.consensus >= cfg.consensus_max and st.temp >= cfg.consensus_hot_temp:
+            self._block(st, "高温趋同(诱多)")
+            return
 
         if st.persist < cfg.enter_persist:
             return
@@ -656,6 +673,8 @@ class DeployRule:
     safe_persist_min: float = 60.0   # 量能持续（B 路径更严）
     trend_pattern: str = "两阳加速"
     safe_pattern: str = "缩量转放量"
+    consensus_max: float = 0.60      # 趋同度超过此值不下单（大家都涨了，跟单容易被埋）
+    lead_value_min: float = 0.50     # 带头价值下限（低温低趋同才值钱）
 
 
 PATH_TREND = "A 主升延续"
@@ -673,6 +692,10 @@ def deploy_path(entry: Dict[str, Any], rule: Optional[DeployRule] = None) -> str
     if float(entry.get("first_pct") or 0.0) > r.first_pct_max:
         return ""
     if float(entry.get("efficiency") or 0.0) < r.efficiency_min:
+        return ""
+    if float(entry.get("consensus") or 0.0) >= r.consensus_max:
+        return ""
+    if float(entry.get("lead_value") or 0.0) < r.lead_value_min:
         return ""
     persist = float(entry.get("persist") or 0.0)
     if r.trend_pattern in pats and persist >= r.persist_min:

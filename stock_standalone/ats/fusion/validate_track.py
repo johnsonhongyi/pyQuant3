@@ -24,6 +24,7 @@ import numpy as np
 from ats.fusion.names import codes_for
 from ats.fusion.replay import DayReplay, ReplayConfig, day_bounds
 from ats.fusion.tracker import DeployRule, deploy_path, is_deployable
+from ats.fusion.panel import build_panel, lead_value_table, render_panel
 
 WEEK_TOP = """凡拓数创 海天瑞声 利亚德 海洋王 大业股份 索辰科技 奥比中光 长盈精密 兆威机电 安培龙
 华依科技 华阳智能 福莱新材 汉威科技 慧辰股份 敏芯股份 宇树科技 博汇股份 奥普特 嘉晨智能
@@ -200,6 +201,7 @@ def discrimination(data: Dict[str, Any]) -> Dict[str, Any]:
         "codes": len({e["code"] for e in a}), "of": len(ans),
         "list": sorted({e["code"] for e in a}),
     }
+    out["lead_table"] = lead_value_table(rows)
     out["ans_agg"] = _agg(a, ans)
     out["other_agg"] = _agg(b, ans)
     return out
@@ -257,6 +259,17 @@ def render(data: Dict[str, Any]) -> str:
         for f, v in dc["feat"].items():
             lines.append("| {} | {} | {} | {:+} |".format(f, v["ans"], v["other"], v["diff"]))
         lines.append("")
+    lt = dc.get("lead_table") or []
+    if lt:
+        lines.append("## 三、带头价值分档（温度越低、趋同越低，才值钱）")
+        lines.append("")
+        lines.append("| 带头价值 | 笔数 | 当日收盘 | T+1 | T+1胜率 |")
+        lines.append("|---|---|---|---|---|")
+        for r in lt:
+            lines.append("| ×{} | {} | {:+.2f}% | {:+.2f}% | {:.0f}% |".format(
+                r["range"], r["n"], r["close"], r["t1"], r["win"]))
+        lines.append("")
+
     for r in data["per_day"]:
         if "error" in r:
             lines.append("## {}｜{}".format(r["day"], r["error"]))

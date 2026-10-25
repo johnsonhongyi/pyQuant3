@@ -1,5 +1,13 @@
 # -*- coding: utf-8 -*-
-"""ats/fusion/live_bridge.py — 把赛马跟踪层接到**现有的 IPC 信号管道**上。
+"""ats/fusion/live_bridge.py — 把赛马跟踪层接到**现有的 IPC 数据管道**上。
+
+⚠ 重要事实（用户指出）：
+    `ats/ipc_bridge.py` 推的是 **df 全量行情**（UPDATE_DF_ALL / UPDATE_DF_DIFF），
+    **不是**异动信号；异动信号是交易中心那边另行接入的。
+    所以本桥的主入口是 `on_df(df)`：自己从全量行情里算形态、算陷阱、算趋同，
+    再喂给 RaceTracker。`on_signal()` 保留给交易中心的信号（若有）。
+
+
 
 刻意不新开一套系统：
     系统已经在 `ats/ipc_bridge.py` 里把实时行情、异动信号、检测结果通过
@@ -139,7 +147,155 @@ class FusionLiveBridge:
 
         return _cb
 
-    # -- 单条信号 -----------------------------------------------------------
+    # -- df 全量行情（主入口）----------------------------------------------
+    def on_df(self, df, now: Optional[float] = None, day: Optional[str] = None) -> int:
+        """吃一帧全量行情（DataFrame，index=代码），逐票更新跟踪器。
+
+        需要的列（有就用，没有就退化）：
+            trade/price/last/now  现价
+            percent/pct/涨幅      当日涨幅
+            open/high/low         开盘/最高/最低
+            pre_close/prev_close  昨收
+            volume/vol、amount    量、额
+            vol_ratio             量比
+            vwap                  均价
+            name                  名称
+        返回本帧处理的票数。任何异常都吞掉，绝不影响行情线程。
+        """
+        try:
+            import numpy as np
+            import pandas as pd
+        except Exception:
+            return 0
+        if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+            return 0
+
+        ts = float(now or time.time())
+        day = day or time.strftime("%Y-%m-%d", time.localtime(ts))
+        n = 0
+        try:
+            cols = {str(c).lower(): c for c in df.columns}
+        except Exception:
+            return 0
+
+        def col(*names):
+            for nm in names:
+                if nm in cols:
+                    return cols[nm]
+            return None
+
+        c_price = col("trade", "price", "last", "now", "lastp")
+        c_pct = col("percent", "pct", "change_pct", "pct_chg")
+        c_open = col("open", "today_open")
+        c_high = col("high")
+        c_low = col("low")
+        c_pre = col("pre_close", "prev_close", "preclose", "yclose")
+        c_vr = col("vol_ratio", "volume_ratio")
+        c_vwap = col("vwap", "avg_price")
+        c_name = col("name", "stock_name")
+
+        if c_price is None:
+            return 0
+
+        try:
+            from ats.fusion.anomaly import detect_patterns
+            from ats.fusion.context import get_daily_context
+            from ats.fusion.market_ctx import MarketHistory
+            from ats.fusion.trap import cross_day_risk, detect_traps
+
+            dctx = get_daily_context()
+            mkt = MarketHistory()
+        except Exception:
+            detect_patterns = None
+
+        # 市场宽度（用于趋同度）
+        try:
+            pcts = df[c_pct].astype(float) if c_pct is not None else None
+            breadth = float((pcts > 0).mean()) if pcts is not None else 0.5
+            crowd = float((pcts > 1.0).mean()) if pcts is not None else 0.5
+        except Exception:
+            breadth = crowd = 0.5
+
+        for code, row in df.iterrows():
+            try:
+                cd = str(code).split(".")[0].zfill(6)
+                price = float(row[c_price])
+                if price <= 0:
+                    continue
+                pct = float(row[c_pct]) if c_pct is not None else 0.0
+                day_open = float(row[c_open]) if c_open is not None else price
+                day_high = float(row[c_high]) if c_high is not None else price
+                pre = float(row[c_pre]) if c_pre is not None else 0.0
+                vr = float(row[c_vr]) if c_vr is not None else 1.0
+                vw = float(row[c_vwap]) if c_vwap is not None else (day_high + price) / 2.0
+
+                dc = dctx.asof(cd, day) if detect_patterns is not None and dctx.ok else {}
+                vw10 = float(dc.get("vwap10") or 0.0)
+                if vw10 <= 0 and self.vwap10_provider is not None:
+                    vw10 = float(self.vwap10_provider(cd) or 0.0)
+
+                pats = []
+                traps = []
+                grisk = 0.0
+                if detect_patterns is not None and dc:
+                    pats = detect_patterns(
+                        price=price, day_open=day_open,
+                        ma5=float(dc.get("ma5") or 0), ma10=float(dc.get("ma10") or 0),
+                        ma20=float(dc.get("ma20") or 0), pct=pct,
+                        ret_std20=float(dc.get("ret_std20") or 0), vol_ratio=vr,
+                        rs5=float(dc.get("ret5d") or 0) - 0.0,
+                        mkt_ret5=0.0, vwap10=vw10,
+                        vol_dry=float(dc.get("vol_dry") or 1.0),
+                        prev_pct=float(dc.get("prev_pct") or 0),
+                    )
+                    traps = detect_traps(price=price, prev_close=pre or (price / (1 + pct / 100.0)),
+                                         day_open=day_open, day_high=day_high, vwap=vw,
+                                         pct=pct, prev_pct=float(dc.get("prev_pct") or 0),
+                                         vol_ratio=vr)
+                    grisk, _ = cross_day_risk(
+                        prev_pct=float(dc.get("prev_pct") or 0),
+                        prev_close_pos=float(dc.get("prev_close_pos") or 0.5),
+                        prev_upper_shadow=float(dc.get("prev_upper_shadow") or 0),
+                        ret5d=float(dc.get("ret5d") or 0),
+                        prev_amp=float(dc.get("prev_amp") or 0),
+                    )
+
+                consensus = 0.5 * breadth + 0.2 * crowd + 0.3 * 0.5
+                self.stats["signals"] += 1
+                prev_st = self.tracker.get(cd)
+                prev_stage = prev_st.stage if prev_st is not None else ""
+                st = self.tracker.update(
+                    code=cd, ts=ts, price=price, pct=pct, vwap10=vw10, vwap=vw,
+                    vol_ratio=vr, tier=0, rar=0.0, patterns=pats, day=day,
+                    # 盘中无引擎打分，用"放量上行"作为首异动触发（>=1% 且量比>=1.5）
+                    anomaly=bool(pats) or (pct >= 1.0 and vr >= 1.5),
+                    traps=traps, gap_risk=grisk,
+                    consensus=consensus, temp=0.0,
+                )
+                if st.stage == STAGE_ENTER and prev_stage != STAGE_ENTER:
+                    self.stats["entries"] += 1
+                    d = st.to_dict()
+                    d["name"] = str(row[c_name]) if c_name is not None else ""
+                    d["deploy_path"] = deploy_path(d)
+                    self._alerts.append(d)
+                n += 1
+            except Exception:
+                self.stats["errors"] += 1
+                continue
+        return n
+
+    def make_df_callback(self, day: Optional[str] = None):
+        """返回可直接传给 start_realtime_listener(data_callback=...) 的函数。"""
+
+        def _cb(df, *args, **kwargs):
+            try:
+                self.on_df(df, day=day)
+            except Exception:
+                self.stats["errors"] += 1
+
+        return _cb
+
+    # -- 单条信号（交易中心）------------------------------------------------
     def on_signal(self, payload: Dict[str, Any], now: Optional[float] = None) -> Optional[Dict[str, Any]]:
         """处理一条上游信号。永不抛异常（IPC 线程安全优先）。"""
         try:

@@ -23,6 +23,7 @@ from ats.fusion.replay import DayReplay, ReplayConfig
 from ats.fusion.select import STAGE_ORDER, render_selection, select_day
 from ats.fusion.sector import get_theme_map
 from ats.fusion.tracker import deploy_path
+from ats.fusion.panel import build_panel, render_panel
 
 
 def theme_board(rp: DayReplay, day: str, top: int = 15) -> List[Dict[str, Any]]:
@@ -73,6 +74,8 @@ def run_day(day: str, top_n: int = 6000, step: int = 3) -> Dict[str, Any]:
     for e in entries:
         e["path"] = deploy_path(e)
     deploy = [e for e in entries if e["path"]]
+    panel = build_panel(records=track_res.records, entries=entries,
+                        meta=track_res.meta, deploy_count=len(deploy))
 
     tm = get_theme_map()
     rank_map = {r["code"]: r for r in ranking}
@@ -104,6 +107,7 @@ def run_day(day: str, top_n: int = 6000, step: int = 3) -> Dict[str, Any]:
         "n_events": len(events),
         "entries": entries,
         "deploy": deploy,
+        "panel": panel,
     }
 
 
@@ -138,6 +142,8 @@ def render(res: Dict[str, Any]) -> str:
     lines.append("")
 
     lines.append(render_selection(res["selection"], res["day"]))
+    if res.get("panel"):
+        lines.append(render_panel(res["panel"]))
     lines.append("## ④ 赛马跟踪：入局 {} 笔 → 可下单 {} 笔".format(
         len(res.get("entries") or []), len(res.get("deploy") or [])))
     lines.append("")

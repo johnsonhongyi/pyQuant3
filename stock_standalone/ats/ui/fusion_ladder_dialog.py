@@ -42,6 +42,8 @@ from PyQt6.QtWidgets import (
 from ats.fusion.adapter import today_str
 from ats.fusion.replay import DayReplay, ReplayConfig, render_focus, render_report
 from ats.fusion.review import load_records, render_markdown, suggest_cuts, summarize
+from ats.fusion.panel import build_panel, render_panel
+from ats.fusion.tracker import deploy_path
 
 _DARK_QSS = """
 QWidget { background-color: #17171c; color: #d8d8e0; font-size: 9pt; }
@@ -241,6 +243,14 @@ class FusionLadderDialog(QWidget):
         ])
         self.tabs.addTab(self.tbl_track, "赛马跟踪（第一波入局）")
 
+        page_panel = QWidget()
+        vp = QVBoxLayout(page_panel)
+        vp.setContentsMargins(4, 4, 4, 4)
+        self.txt_panel = QTextBrowser()
+        self.txt_panel.setOpenExternalLinks(False)
+        vp.addWidget(self.txt_panel, 1)
+        self.tabs.addTab(page_panel, "信号面板（全部信号统计）")
+
         page3 = QWidget()
         v3 = QVBoxLayout(page3)
         v3.setContentsMargins(4, 4, 4, 4)
@@ -439,6 +449,15 @@ class FusionLadderDialog(QWidget):
             color = QColor("#8fd18f") if float(e.get("close_ret") or 0) >= 0 else QColor("#ff5c5c")
             for c, v in enumerate(vals):
                 t3.setItem(i, c, self._item(v, color if c in (10, 11, 12) else None, bold=(c == 7)))
+
+        # 信号面板：所有信号的统计
+        try:
+            dep_n = sum(1 for e in (getattr(result, "entries", []) or []) if deploy_path(e))
+            panel = build_panel(records=result.records, entries=getattr(result, "entries", []) or [],
+                                meta=result.meta, deploy_count=dep_n)
+            self.txt_panel.setPlainText(render_panel(panel))
+        except Exception as exc:
+            self.txt_panel.setPlainText("信号面板生成失败：{}".format(exc))
 
         self.txt_report.setPlainText(render_report(result))
 

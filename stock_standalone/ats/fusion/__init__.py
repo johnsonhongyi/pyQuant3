@@ -24,7 +24,9 @@ from ats.fusion.contract import (
     SignalEvent,
     TierSpec,
 )
-from ats.fusion.engine import FusionBus, FusionEngine, LADDER, tier_of
+from ats.fusion.engine import FusionBus, FusionEngine, LADDER, leadership_value, tier_of
+from ats.fusion.panel import build_panel, lead_value_table, render_panel
+from ats.fusion.market_ctx import DayContext, MarketHistory, hunger_of, render_context
 from ats.fusion.shadow import FusionShadow
 from ats.fusion.trap import (
     ACT_ADD,
@@ -96,6 +98,14 @@ __all__ = [
     "engine_params",
     "LADDER",
     "tier_of",
+    "leadership_value",
+    "build_panel",
+    "render_panel",
+    "lead_value_table",
+    "DayContext",
+    "MarketHistory",
+    "hunger_of",
+    "render_context",
     "MarketRegime",
     "MarketRegimeTracker",
     "RegimeSample",

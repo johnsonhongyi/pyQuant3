@@ -37,7 +37,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import numpy as np
 
 from ats.fusion.adapter import today_str
-from ats.fusion.engine import FusionEngine
+from ats.fusion.engine import FusionEngine, leadership_value
 from ats.fusion.regime import (
     MarketRegime,
     MarketRegimeTracker,
@@ -53,6 +53,8 @@ from ats.fusion.premarket import get_premarket
 from ats.fusion.structure import classify as classify_structure
 from ats.fusion.tracker import RaceTracker, TrackConfig, render_entries, STAGE_ENTER, STAGE_EVICT
 from ats.fusion.trap import detect_traps, cross_day_risk, render_traps
+from ats.fusion.panel import build_panel, render_panel
+from ats.fusion.market_ctx import MarketHistory, DEFAULT_PATH as MARKET_PATH
 from ats.fusion.sector import get_sector_map, get_theme_map, sector_strength, load_external_heat
 from dataclasses import replace
 
@@ -144,6 +146,7 @@ class ReplayConfig:
     track_enter_persist: float = 55.0   # 入局所需持续性分
     track_max_chase: float = 5.0        # 首异动到入局的最大涨幅（第一波）
     state_path: str = ""             # 跟踪器状态落盘路径（空=不落盘）；用于跨日携带
+    market_path: str = ""            # 市场上下文（温度/冰点天数）落盘路径
 
 
 @dataclass
@@ -422,6 +425,18 @@ class DayReplay:
         clock = aligned["clock"]
         n_code, n_t = mat["close"].shape
 
+        # 大盘情绪上下文：连续冰点/低温天数（"饿了几天"）来自历史，不含当日
+        try:
+            mkt_hist = MarketHistory(self.cfg.market_path or MARKET_PATH)
+            # 用 36 天日线回填宽度历史，才能算出"连续冰点第几天"（不依赖当日重算）
+            if len(mkt_hist.days) < 5:
+                mkt_hist.seed_from_daily()
+        except Exception:
+            mkt_hist = None
+        day_ctx = mkt_hist.context_for(day) if mkt_hist is not None else None
+        if day_ctx is not None:
+            logger.info("[replay] %s 上下文：%s", day, day_ctx.label())
+
         tracker = MarketRegimeTracker()
         regime_series: List[Dict[str, Any]] = []
         records: List[Dict[str, Any]] = []
@@ -595,6 +610,14 @@ class DayReplay:
                     if _m.sum() >= 3:
                         sec_breadth[_k] = float(np.mean(pct[_idx][_m] > 0))
 
+            # 趋同度：全市场上涨占比 + 本赛道上涨占比 + 已动(>1%)占比
+            # 用户："大家都已经异口同声趋同了，那时候出现的都是诱多"
+            if valid.any():
+                _breadth_all = float(np.mean(pct[valid] > 0))
+                _crowd = float(np.mean(pct[valid] > 1.0))
+            else:
+                _breadth_all = _crowd = 0.5
+
             # 龙头代理：当日涨幅进入全池前 1% 且量比>1.5（无板块数据时的近似）
             leader_mask = np.zeros(n_code, dtype=bool)
             t_rar: List[float] = []
@@ -721,7 +744,16 @@ class DayReplay:
                     launch_ts=launch_ts,
                     freshness_s=0.0,
                     trade_date=day,
-                    extra={"support_proxy": True, "replay": True, "has_rs": True, "mkt_ret5": mkt_ret5},
+                    extra={
+                        "support_proxy": True, "replay": True, "has_rs": True,
+                        "mkt_ret5": mkt_ret5,
+                        "hunger": float(day_ctx.hunger) if day_ctx is not None else 1.0,
+                        "ice_days": int(day_ctx.ice_days) if day_ctx is not None else 0,
+                        "consensus": round(
+                            0.5 * _breadth_all
+                            + 0.3 * float(sec_breadth.get(_sm.get(codes[i]), 0.5) if sec_index else 0.5)
+                            + 0.2 * _crowd, 3),
+                    },
                 )
                 _rs5 = float(ret5_arr[i] - mkt_ret5) if np.isfinite(ret5_arr[i]) else 0.0
                 _vw10 = float(vwap10_map.get(codes[i], 0.0))
@@ -793,6 +825,10 @@ class DayReplay:
                         tier=decision.tier, rar=decision.rar, patterns=patterns, day=day,
                         anomaly=bool(patterns) or decision.tier >= 2,
                         traps=_traps, gap_risk=_grisk, risk_notes=_gnotes,
+                        consensus=(0.5 * _breadth_all
+                                   + 0.3 * float(sec_breadth.get(_sm.get(codes[i]), 0.5) if sec_index else 0.5)
+                                   + 0.2 * _crowd),
+                        temp=regime.temp,
                     )
                     if _st.stage == STAGE_ENTER and _prev_stage != STAGE_ENTER:
                         _fm = fut_max[i, t]
@@ -811,6 +847,21 @@ class DayReplay:
                             "sector_rank": round(float(sec_rank.get(_sm.get(codes[i]), 0.5)), 2) if sec_index else 0.0,
                             "structure": classify_structure(_dc, price, float(pct[i])),
                             "session": "AM" if time.localtime(int(clock[t])).tm_hour < 13 else "PM",
+                            "consensus": round(
+                                0.5 * _breadth_all
+                                + 0.3 * float(sec_breadth.get(_sm.get(codes[i]), 0.5) if sec_index else 0.5)
+                                + 0.2 * _crowd, 3),
+                            "lead_value": round(
+                                leadership_value(
+                                    regime.temp,
+                                    0.5 * _breadth_all
+                                    + 0.3 * float(sec_breadth.get(_sm.get(codes[i]), 0.5) if sec_index else 0.5)
+                                    + 0.2 * _crowd,
+                                ), 3),
+                            "temp": round(regime.temp, 1),
+                            "ice_days": int(day_ctx.ice_days) if day_ctx is not None else 0,
+                            "hunger": round(float(day_ctx.hunger), 3) if day_ctx is not None else 1.0,
+                            "ctx": day_ctx.label() if day_ctx is not None else "",
                         })
                         entries.append(_row)
                 eval_count += 1
@@ -900,8 +951,34 @@ class DayReplay:
                         "chain": race.get(codes[i]).chain() if race is not None and race.get(codes[i]) else "",
                         "traps": _traps,
                         "gap_risk": round(_grisk, 1),
+                        "lead_value": round(leadership_value(
+                            regime.temp,
+                            0.5 * _breadth_all
+                            + 0.3 * float(sec_breadth.get(_sm.get(codes[i]), 0.5) if sec_index else 0.5)
+                            + 0.2 * _crowd,
+                        ), 3),
+                        "hunger": float(day_ctx.hunger) if day_ctx is not None else 1.0,
+                        "ice_days": int(day_ctx.ice_days) if day_ctx is not None else 0,
+                        "consensus": round(
+                            0.5 * _breadth_all
+                            + 0.3 * float(sec_breadth.get(_sm.get(codes[i]), 0.5) if sec_index else 0.5)
+                            + 0.2 * _crowd, 3),
+                        "ice_days": int(day_ctx.ice_days) if day_ctx is not None else 0,
+                        "hunger": round(float(day_ctx.hunger), 3) if day_ctx is not None else 1.0,
+                        "ctx": day_ctx.label() if day_ctx is not None else "",
                     }
                 )
+
+            if day_ctx is not None:
+                if t == 0:
+                    day_ctx.temp_open = float(regime.temp)
+                day_ctx.temp_min = min(day_ctx.temp_min if t else float(regime.temp), float(regime.temp))
+                day_ctx.temp_max = max(day_ctx.temp_max if t else float(regime.temp), float(regime.temp))
+                day_ctx.temp_close = float(regime.temp)
+                day_ctx.stage = regime.stage
+                # 宽度以日线全市场为准；只有没有种子数据时才用盘内宽度
+                if day_ctx.breadth <= 0 and valid.any():
+                    day_ctx.breadth = float(np.mean(pct[valid] > 0))
 
             if collect_only and t_rar:
                 self._rar_by_t[int(clock[t])] = t_rar
@@ -911,6 +988,14 @@ class DayReplay:
                     progress(t + 1, n_t)
                 except Exception:
                     pass
+
+        # 收盘落盘：市场上下文（供次日算"冰点第几天"）
+        if mkt_hist is not None and day_ctx is not None:
+            try:
+                mkt_hist.record(day_ctx)
+                mkt_hist.save()
+            except Exception as exc:
+                logger.warning("[replay] 保存市场上下文失败：%s", exc)
 
         # 收盘落盘：明天不是新的一天
         if race is not None and self.cfg.state_path:
@@ -981,6 +1066,7 @@ class DayReplay:
             "evictions": [e for e in (race.events()[_ev0:] if race is not None else []) if e.get("kind") == STAGE_EVICT],
             "t1_decisions": [e for e in (race.events()[_ev0:] if race is not None else []) if e.get("kind") == "T1"],
             "blocked": race.blocked_stats() if race is not None else {},
+            "ctx": day_ctx.to_dict() if day_ctx is not None else {},
             "approximations": [
                 "vwap=3分钟(H+L+C)/3按量加权",
                 "taker/bid 由 bar 推导（外盘占比/收盘位置）",
@@ -1346,6 +1432,15 @@ def render_report(result: ReplayResult, top: int = 20) -> str:
         section = render_focus(result, m["focus"])
         if section:
             lines.append(section)
+
+    # 信号面板：所有信号的统计（不是只列前几名）
+    try:
+        _panel = build_panel(records=result.records, entries=result.entries,
+                             meta=result.meta, deploy_count=0)
+        lines.append(render_panel(_panel))
+    except Exception as exc:
+        lines.append("（信号面板生成失败：{}）".format(exc))
+        lines.append("")
 
     lines.append("## 分档事后表现（MFE=之后最高收盘，MAE=之后最低收盘，超额=相对同时刻全池）")
     lines.append("| 档位 | 样本 | 标的数 | 平均MFE | MFE p90 | 平均MAE | 收盘收益 | 超额 | 跑赢率 | 胜率(≥1.5%) | 平均仓位 |")
