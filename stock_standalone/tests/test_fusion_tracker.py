@@ -165,5 +165,44 @@ class TestDeployRule(unittest.TestCase):
                          "带头价值<0.5（高温高趋同）不下单")
 
 
+class TestPhaseGate(unittest.TestCase):
+    """战役阶段闸门：退守期不再一刀切，放排头兵/夺旗（否则永远没样本）。"""
+
+    PRICES = [10.0, 10.06, 10.12, 10.18, 10.26, 10.34, 10.42]
+    PCTS = [0.6, 1.2, 1.8, 2.4, 3.2, 4.0, 4.8]
+    VOLS = [1.6, 1.8, 1.7, 1.9, 2.0, 1.8, 1.7]
+    PATS = [["逆势带头"], ["缩量转放量"], ["两阳加速"], [], [], [], []]
+
+    def _entries(self, phase, label, allow=True):
+        tr = RaceTracker(TrackConfig(retreat_allow_vanguard=allow))
+        states = []
+        for i, (p, pc, v) in enumerate(zip(self.PRICES, self.PCTS, self.VOLS)):
+            states.append(tr.update(
+                code="300444", ts=T0 + i * BAR, price=p, pct=pc, vwap10=9.95,
+                vol_ratio=v, tier=2, rar=60.0 + i, patterns=self.PATS[i],
+                day="2026-10-23", anomaly=(i == 0),
+                phase=phase, lead_label=label,
+            ))
+        return [s for s in states if s.stage == STAGE_ENTER]
+
+    def test_retreat_allows_vanguard(self):
+        self.assertTrue(self._entries("退守", "排头兵"), "退守期应放排头兵")
+
+    def test_retreat_allows_flag(self):
+        self.assertTrue(self._entries("退守", "夺旗"), "退守期应放夺旗")
+
+    def test_retreat_blocks_followers(self):
+        self.assertFalse(self._entries("退守", "跟风"), "退守期不碰跟风")
+        self.assertFalse(self._entries("退守", "冲锋队"), "退守期不碰冲锋队")
+
+    def test_retreat_switch_can_turn_off(self):
+        self.assertFalse(self._entries("退守", "排头兵", allow=False),
+                         "开关关闭时回到旧口径：退守一律不入局")
+
+    def test_vanguard_death_allows_vanguard_only(self):
+        self.assertTrue(self._entries("先锋阵亡", "夺旗"))
+        self.assertFalse(self._entries("先锋阵亡", "冲锋队"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

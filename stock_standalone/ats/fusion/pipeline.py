@@ -23,6 +23,8 @@ from ats.fusion.replay import DayReplay, ReplayConfig
 from ats.fusion.select import STAGE_ORDER, render_selection, select_day
 from ats.fusion.sector import get_theme_map
 from ats.fusion.tracker import deploy_path
+from ats.fusion.ranking import RankConfig, rank_entries, render_ranked
+from ats.fusion.session_ctx import SessionContextStore
 from ats.fusion.panel import build_panel, render_panel
 
 
@@ -60,7 +62,8 @@ def theme_board(rp: DayReplay, day: str, top: int = 15) -> List[Dict[str, Any]]:
     return rows[:top]
 
 
-def run_day(day: str, top_n: int = 6000, step: int = 3) -> Dict[str, Any]:
+def run_day(day: str, top_n: int = 6000, step: int = 3,
+            rank_cfg: Optional[RankConfig] = None) -> Dict[str, Any]:
     rp = DayReplay(config=ReplayConfig(top_n=top_n, step=step))
 
     themes = theme_board(rp, day)
@@ -74,11 +77,22 @@ def run_day(day: str, top_n: int = 6000, step: int = 3) -> Dict[str, Any]:
     for e in entries:
         e["path"] = deploy_path(e)
     deploy = [e for e in entries if e["path"]]
+    # 打分排序：四道闸门（趋同/跟风/阶段/跨日风险）不再"与"，而是给存活概率后取前 N。
+    # 与闸门清单保留为对照列，便于每天核对"多放进来的是哪些、值不值"。
+    ranked = rank_entries(entries, rank_cfg)
     panel = build_panel(records=track_res.records, entries=entries,
-                        meta=track_res.meta, deploy_count=len(deploy))
+                        meta=track_res.meta, deploy_count=len(ranked))
 
     tm = get_theme_map()
     rank_map = {r["code"]: r for r in ranking}
+
+    # 上下文交接：把"最近 N 日实盘上下文"放到日报最前面——
+    # 这是每日自动迭代的入口，没有它每天都是从零开始判断
+    handoff_md = ""
+    try:
+        handoff_md = SessionContextStore().render_handoff(day, 5)
+    except Exception:
+        handoff_md = ""
 
     # 盈利榜前 20 的赛道分布
     board_themes: Dict[str, int] = defaultdict(int)
@@ -107,12 +121,16 @@ def run_day(day: str, top_n: int = 6000, step: int = 3) -> Dict[str, Any]:
         "n_events": len(events),
         "entries": entries,
         "deploy": deploy,
+        "ranked": ranked,
+        "handoff": handoff_md,
         "panel": panel,
     }
 
 
 def render(res: Dict[str, Any]) -> str:
     lines = ["# 全流程日跑 {}".format(res["day"]), ""]
+    if res.get("handoff"):
+        lines.append(res["handoff"])
     lines.append("- 当日 L2+ 事件 {} 条 → 收敛清单 {} 只".format(res["n_events"], res["selection"]["count"]))
     lines.append("- 盈利榜前20：**信号层覆盖 {} 只（{:.0%}）**｜收敛清单命中 {} 只（{:.0%}）".format(
         len(res["hit_events"]), res["recall_events"], len(res["hit"]), res["recall"]))
@@ -144,20 +162,16 @@ def render(res: Dict[str, Any]) -> str:
     lines.append(render_selection(res["selection"], res["day"]))
     if res.get("panel"):
         lines.append(render_panel(res["panel"]))
-    lines.append("## ④ 赛马跟踪：入局 {} 笔 → 可下单 {} 笔".format(
-        len(res.get("entries") or []), len(res.get("deploy") or [])))
-    lines.append("")
     dep = res.get("deploy") or []
+    ranked = res.get("ranked") or []
+    lines.append("## ④ 赛马跟踪：入局 {} 笔 → 与闸门 {} 笔 → 打分排序 {} 笔".format(
+        len(res.get("entries") or []), len(dep), len(ranked)))
+    lines.append("")
+    lines.append(render_ranked(ranked, res["day"]))
     if dep:
-        lines.append("| # | 代码 | 路径 | 入局 | 入局价 | 当时涨幅 | 首异动涨幅 | 持续分 | 赛道 | 形态 | 证据链 |")
-        lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
-        for i, e in enumerate(dep, 1):
-            lines.append("| {} | {} | {} | {} | {} | {:+.1f}% | {:+.1f}% | {} | {} | {} | {} |".format(
-                i, e["code"], e["path"], e["enter_time"], e["enter_price"], e["enter_pct"],
-                e["first_pct"], e["persist"], e.get("sector", ""),
-                "、".join((e.get("patterns") or {}).keys()) or "-", (e.get("chain") or "-")[:40]))
+        lines.append("旧口径（与闸门）对照：{}".format("、".join(e["code"] for e in dep)))
     else:
-        lines.append("- 今日无可下单标的（宁可不做）")
+        lines.append("旧口径（与闸门）：今日无（七项同时满足太难）")
     lines.append("")
 
     return "\n".join(lines)

@@ -67,6 +67,37 @@ _LIMIT_GROWTH = 19.6
 
 
 # ---------------------------------------------------------------------------
+# 热循环标量助手：np.clip / np.mean / np.isfinite 在 5 位数量级的调用下，
+# numpy 分发开销占掉 30% 以上回放耗时（实测单日 92s → 优化后见 _perf_probe）。
+# 语义与 numpy 完全一致（NaN 原样透传），只省分发开销。
+# ---------------------------------------------------------------------------
+def _clamp(v: float, lo: float, hi: float) -> float:
+    if v != v:                      # NaN 原样返回，与 np.clip 一致
+        return v
+    return lo if v < lo else (hi if v > hi else v)
+
+
+def _mean_small(a) -> float:
+    """短序列（<32 个元素）均值：比 np.mean 快 3~5 倍，空序列返回 NaN（与 np.mean 一致）。"""
+    lst = a.tolist() if hasattr(a, "tolist") else a
+    if not lst:
+        return float("nan")
+    s = 0.0
+    for x in lst:
+        s += x
+    return s / len(lst)
+
+
+def _clean(a) -> List[float]:
+    """去掉 NaN（等价 a[~np.isnan(a)]，但短序列更快）。"""
+    lst = a.tolist() if hasattr(a, "tolist") else list(a)
+    return [x for x in lst if x == x]
+
+
+from math import isfinite as _isfinite, isnan as _isnan  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
 # 数据加载
 # ---------------------------------------------------------------------------
 def _app_root() -> str:
@@ -236,6 +267,7 @@ class DayReplay:
         self._day_cache: Dict[Tuple[str, str], Dict[str, np.ndarray]] = {}
         # 赛马跟踪器：跨日复用同一实例才能携带"昨日入局"状态
         self.tracker: Optional[RaceTracker] = None
+        self._last_day: str = ""   # 上一次 run() 的日期：同一天重跑要先清状态，否则入局数为 0
 
     # -- 基础取数 ---------------------------------------------------------
     def days(self) -> List[str]:
@@ -442,6 +474,8 @@ class DayReplay:
         tracker = MarketRegimeTracker()
         regime_series: List[Dict[str, Any]] = []
         life_series: List[Dict[str, Any]] = []
+        phase_path: List[Dict[str, Any]] = []      # 阶段变化轨迹（当日上下文沉淀用）
+        _last_phase = ""
         records: List[Dict[str, Any]] = []
         veto_counts: Dict[str, int] = {}
         eval_count = 0
@@ -455,6 +489,10 @@ class DayReplay:
         entries: List[Dict[str, Any]] = []
         race: Optional[RaceTracker] = None
         if self.cfg.track:
+            # 同一天重复回放（阈值扫描/参数搜索会这么用）：跟踪器必须回到"当日开盘前"状态，
+            # 否则第二遍所有票都已是 剔除/持有，入局数恒为 0——那不是信号消失，是状态没重置。
+            if self.tracker is not None and self._last_day == day:
+                self.tracker = None
             if self.tracker is None:
                 self.tracker = RaceTracker(
                     TrackConfig(enter_persist=self.cfg.track_enter_persist,
@@ -468,6 +506,7 @@ class DayReplay:
                     except Exception as exc:
                         logger.warning("[replay] 恢复跟踪状态失败：%s", exc)
             race = self.tracker
+        self._last_day = day
         _ev0 = len(race.events()) if race is not None else 0
         self._rar_by_t: Dict[int, List[float]] = {}
 
@@ -524,6 +563,7 @@ class DayReplay:
         capital = CapitalGauge()
         life = MarketLifecycle()
         life_state = None
+        _cap_ratio = 1.0            # 最近一根的资金量能比；无 bar 时保持中性 1.0
         row_of = {c: i for i, c in enumerate(codes)}
 
         launch_idx = np.full(n_code, -1, dtype="int64")
@@ -655,6 +695,11 @@ class DayReplay:
             )
             life_series.append({"time": time.strftime("%H:%M", time.localtime(int(clock[t]))),
                                 **life_state.to_dict()})
+            # 阶段路径：只在阶段变化时记一条，供当日上下文沉淀用
+            if life_state.phase and life_state.phase != _last_phase:
+                _last_phase = life_state.phase
+                phase_path.append({"time": time.strftime("%H:%M", time.localtime(int(clock[t]))),
+                                   "phase": life_state.phase, "note": life_state.note})
 
             # 龙头代理：当日涨幅进入全池前 1% 且量比>1.5（无板块数据时的近似）
             leader_mask = np.zeros(n_code, dtype=bool)
@@ -679,8 +724,8 @@ class DayReplay:
 
                 price = float(close[i])
                 vw = float(vwap[i])
-                dh = float(day_high[i]) if not np.isnan(day_high[i]) else price
-                dl = float(day_low[i]) if not np.isnan(day_low[i]) else price
+                dh = float(day_high[i]) if not _isnan(day_high[i]) else price
+                dl = float(day_low[i]) if not _isnan(day_low[i]) else price
                 # 底台代理：当日最低与均价下方 1.5% 取高者，避免止损距离失真；
                 # 若价格已跌破该代理，则不给底台（否则会误报"跌破底台"），交给偏离度处理。
                 support_proxy = max(dl, vw * 0.985) if vw > 0 else dl
@@ -688,48 +733,48 @@ class DayReplay:
                     support_proxy = 0.0
 
                 _vm = vol_mean20[i, t]
-                vol_ratio = float(vol[i] / _vm) if np.isfinite(_vm) and _vm > 0 else 1.0
+                vol_ratio = float(vol[i] / _vm) if _isfinite(_vm) and _vm > 0 else 1.0
                 vol_ratio = max(0.2, min(8.0, vol_ratio))
 
                 # --- 从 bar 推导的意愿代理（替代实时盘的攻角/意图分） ---
                 base_i = max(0, t - 5)
                 ret5 = (price / float(mat["close"][i, base_i]) - 1.0) * 100.0 if mat["close"][i, base_i] > 0 else 0.0
-                slope_proxy = float(np.clip(40.0 + ret5 * 25.0, 10.0, 100.0))
+                slope_proxy = _clamp(40.0 + ret5 * 25.0, 10.0, 100.0)
                 vel_proxy = (price / float(mat["close"][i, max(0, t - 3)]) - 1.0) * 100.0 if mat["close"][i, max(0, t - 3)] > 0 else 0.0
-                recent = mat["volume"][i, max(0, t - 2): t + 1]
-                older = mat["volume"][i, max(0, t - 8): max(1, t - 2)]
-                recent = recent[~np.isnan(recent)]
-                older = older[~np.isnan(older)]
-                accel = (float(np.mean(recent)) / max(1e-9, float(np.mean(older)))) if len(recent) and len(older) else 1.0
+                recent = _clean(mat["volume"][i, max(0, t - 2): t + 1])
+                older = _clean(mat["volume"][i, max(0, t - 8): max(1, t - 2)])
+                accel = (_mean_small(recent) / max(1e-9, _mean_small(older))) if recent and older else 1.0
                 accel = max(0.3, min(3.0, accel))
-                seg = mat["close"][i, max(0, t - 4): t + 1]
-                seg = seg[~np.isnan(seg)]
-                up_ratio_i = float(np.mean(np.diff(seg) > 0)) if len(seg) >= 2 else 0.5
-                intent_proxy = float(np.clip(50.0 + (accel - 1.0) * 40.0 + (up_ratio_i - 0.5) * 40.0, 15.0, 100.0))
+                seg = _clean(mat["close"][i, max(0, t - 4): t + 1])
+                if len(seg) >= 2:
+                    up_n = sum(1 for a, b in zip(seg, seg[1:]) if b > a)
+                    up_ratio_i = up_n / (len(seg) - 1)
+                else:
+                    up_ratio_i = 0.5
+                intent_proxy = _clamp(50.0 + (accel - 1.0) * 40.0 + (up_ratio_i - 0.5) * 40.0, 15.0, 100.0)
 
                 # --- 点火强度：与"安全度"分开的弹性指标 ---
                 # 现有四轴偏"确认"（位置/承接），会把刚启动的票判成中庸；
                 # 这里单独量化"量能扩张 + 波动扩张 + 突破前高 + 加速"。
-                vol_exp = float(np.clip(vol_ratio, 0.3, 5.0))
+                vol_exp = _clamp(vol_ratio, 0.3, 5.0)
                 _rb = rng_mean20[i, t]
                 rng_now = (dh - dl) / max(1e-9, price)
-                rng_base = float(_rb) / max(1e-9, price) if np.isfinite(_rb) and _rb > 0 else rng_now
-                rng_exp = float(np.clip(rng_now / max(1e-6, rng_base), 0.3, 5.0))
+                rng_base = float(_rb) / max(1e-9, price) if _isfinite(_rb) and _rb > 0 else rng_now
+                rng_exp = _clamp(rng_now / max(1e-6, rng_base), 0.3, 5.0)
                 _ph = prev_high20[i, t]
-                breakout = 1.0 if (np.isfinite(_ph) and price > float(_ph)) else 0.0
-                accel_term = float(np.clip(vel_proxy / 1.5, -2.0, 3.0))
-                ignition = float(np.clip(
+                breakout = 1.0 if (_isfinite(_ph) and price > float(_ph)) else 0.0
+                accel_term = _clamp(vel_proxy / 1.5, -2.0, 3.0)
+                ignition = _clamp(
                     30.0 + 18.0 * np.log2(vol_exp) + 12.0 * np.log2(rng_exp)
                     + 8.0 * accel_term + 22.0 * breakout, 0.0, 100.0
-                ))
+                )
 
                 launch_ts = float(clock[launch_idx[i]]) if launch_idx[i] >= 0 else 0.0
                 # 结构清晰度代理：最近 10 根 bar 中站上均价的比例
-                av = mat["above_vwap"][i, max(0, t - 9): t + 1]
-                av = av[~np.isnan(av)]
-                clarity_proxy = float(np.mean(av) * 100.0) if len(av) else 0.0
-                taker_proxy = float(mat["taker"][i, t]) if np.isfinite(mat["taker"][i, t]) else 50.0
-                bid_proxy = float(mat["bid"][i, t]) if np.isfinite(mat["bid"][i, t]) else 50.0
+                clarity_proxy = _mean_small(_clean(mat["above_vwap"][i, max(0, t - 9): t + 1])) * 100.0 \
+                    if len(mat["above_vwap"][i, max(0, t - 9): t + 1]) else 0.0
+                taker_proxy = float(mat["taker"][i, t]) if _isfinite(mat["taker"][i, t]) else 50.0
+                bid_proxy = float(mat["bid"][i, t]) if _isfinite(mat["bid"][i, t]) else 50.0
 
                 _dc = daily_ctx.get(codes[i]) or {}
                 _ma5 = float(_dc.get("ma5", 0.0)); _ma10 = float(_dc.get("ma10", 0.0)); _ma20 = float(_dc.get("ma20", 0.0))
@@ -767,17 +812,17 @@ class DayReplay:
                         if sec_index else 0.0
                     ),
                     is_leader=bool(leader_mask[i]),
-                    ma5=float((daily_ctx.get(codes[i]) or {}).get("ma5", 0.0)),
-                    ma10=float((daily_ctx.get(codes[i]) or {}).get("ma10", 0.0)),
-                    ma20=float((daily_ctx.get(codes[i]) or {}).get("ma20", 0.0)),
-                    ret5d=float((daily_ctx.get(codes[i]) or {}).get("ret5d", 0.0)),
-                    ret10d=float((daily_ctx.get(codes[i]) or {}).get("ret10d", 0.0)),
-                    ret20d=float((daily_ctx.get(codes[i]) or {}).get("ret20d", 0.0)),
-                    days_since_high=float((daily_ctx.get(codes[i]) or {}).get("days_since_high", 0.0)),
-                    limit_up_streak=float((daily_ctx.get(codes[i]) or {}).get("limit_up_streak", 0.0)),
-                    dist_ma20_pct=float((daily_ctx.get(codes[i]) or {}).get("dist_ma20_pct", 0.0)),
+                    ma5=_ma5,
+                    ma10=_ma10,
+                    ma20=_ma20,
+                    ret5d=float(_dc.get("ret5d", 0.0)),
+                    ret10d=float(_dc.get("ret10d", 0.0)),
+                    ret20d=float(_dc.get("ret20d", 0.0)),
+                    days_since_high=float(_dc.get("days_since_high", 0.0)),
+                    limit_up_streak=float(_dc.get("limit_up_streak", 0.0)),
+                    dist_ma20_pct=float(_dc.get("dist_ma20_pct", 0.0)),
                     vwap_10d=float(vwap10_map.get(codes[i], 0.0)),
-                    rs5=float(ret5_arr[i] - mkt_ret5) if np.isfinite(ret5_arr[i]) else 0.0,
+                    rs5=float(ret5_arr[i] - mkt_ret5) if _isfinite(ret5_arr[i]) else 0.0,
                     rs_day=float(pct[i] - mkt_pct),
                     launch_ts=launch_ts,
                     freshness_s=0.0,
@@ -793,7 +838,7 @@ class DayReplay:
                             + 0.2 * _crowd, 3),
                     },
                 )
-                _rs5 = float(ret5_arr[i] - mkt_ret5) if np.isfinite(ret5_arr[i]) else 0.0
+                _rs5 = float(ret5_arr[i] - mkt_ret5) if _isfinite(ret5_arr[i]) else 0.0
                 _vw10 = float(vwap10_map.get(codes[i], 0.0))
                 _pat_early = detect_patterns(
                     price=price, day_open=_day_open,
@@ -1071,6 +1116,25 @@ class DayReplay:
                 mkt_hist.save()
             except Exception as exc:
                 logger.warning("[replay] 保存市场上下文失败：%s", exc)
+
+        # 收盘落盘：当日实盘上下文快照（阶段路径 / 资金 / 先锋 / 入局计数）。
+        # 回放也沉淀，这样"缺失重建"和"上下文交接"在离线环境里同样可验证。
+        if not collect_only:
+            try:
+                from ats.fusion.session_ctx import SessionContextStore, ledger_summary
+
+                SessionContextStore().close_day(
+                    day,
+                    temp_records=None,
+                    tracker=race,
+                    mkt_hist=mkt_hist,
+                    phase_path=phase_path,
+                    capital_ratio=float(_cap_ratio),
+                    amount_wan=None,
+                    ledger=ledger_summary(day),
+                )
+            except Exception as exc:
+                logger.warning("[replay] 保存当日上下文失败：%s", exc)
 
         # 收盘落盘：明天不是新的一天
         if race is not None and self.cfg.state_path:

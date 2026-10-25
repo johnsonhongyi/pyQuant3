@@ -134,6 +134,60 @@ class TestLiveBridgeDf(unittest.TestCase):
         self.assertEqual(b.on_df(df, day="2026-10-23"), 1)
         self.assertIsNotNone(b.tracker.get("600000"))
 
+    def test_on_df_skips_nan_price(self):
+        """NaN 现价必须跳过，不能当 0 或负数塞进跟踪器（列向量化后的回归保护）。"""
+        import numpy as np
+        import pandas as pd
+
+        from ats.fusion.live_bridge import FusionLiveBridge
+
+        b = FusionLiveBridge(state_path=os.path.join(tempfile.mkdtemp(), "s.json"),
+                             vwap10_provider=lambda c: 9.9)
+        df = pd.DataFrame(
+            [
+                {"trade": np.nan, "percent": 1.0, "open": 10.0, "high": 10.1,
+                 "low": 9.9, "pre_close": 9.95, "vol_ratio": 1.8, "vwap": 10.0},
+                {"trade": 10.2, "percent": 1.0, "open": 10.0, "high": 10.3,
+                 "low": 9.9, "pre_close": 9.95, "vol_ratio": 1.8, "vwap": 10.0},
+            ],
+            index=["000001", "000002"],
+        )
+        self.assertEqual(b.on_df(df, day="2026-10-23"), 1, "只有现价有效的那只应被处理")
+        self.assertIsNone(b.tracker.get("000001"), "NaN 现价的票不应建状态")
+        self.assertIsNotNone(b.tracker.get("000002"))
+        self.assertEqual(b.stats["errors"], 0)
+
+    def test_on_df_auto_closes_session_after_1500(self):
+        """收盘帧（>=15:00）必须自动沉淀当日上下文——不依赖有人记得去存。"""
+        import pandas as pd
+
+        from ats.fusion.live_bridge import FusionLiveBridge
+        from ats.fusion.session_ctx import SessionContextStore
+
+        store = SessionContextStore(root=tempfile.mkdtemp())
+        b = FusionLiveBridge(state_path=os.path.join(tempfile.mkdtemp(), "s.json"),
+                             session_store=store)
+        df = pd.DataFrame(
+            [{"trade": 10.2, "percent": 1.5, "open": 10.0, "high": 10.3,
+              "low": 9.9, "pre_close": 9.95, "vol_ratio": 1.8, "vwap": 10.0,
+              "amount": 5.0e8}],
+            index=["600001"],
+        )
+        # 14:57 不收；15:03 收（用固定时间戳，避免依赖真实时钟）
+        import time as _t
+        ts_am = int(_t.mktime((2026, 10, 23, 14, 57, 0, 0, 0, -1)))
+        ts_pm = int(_t.mktime((2026, 10, 23, 15, 3, 0, 0, 0, -1)))
+        b.on_df(df, now=ts_am, day="2026-10-23")
+        self.assertIsNone(store.load("2026-10-23"), "收盘前不应沉淀")
+        b.on_df(df, now=ts_pm, day="2026-10-23")
+        ctx = store.load("2026-10-23")
+        self.assertIsNotNone(ctx, "收盘后必须沉淀当日上下文")
+        self.assertEqual(ctx.source, "live")
+        self.assertIn("signals", ctx.to_dict())
+        # 再喂一帧不应重复沉淀
+        b.on_df(df, now=ts_pm + 60, day="2026-10-23")
+        self.assertEqual(b.stats.get("sessions_closed"), 1)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -24,6 +24,7 @@ import numpy as np
 from ats.fusion.names import codes_for
 from ats.fusion.replay import DayReplay, ReplayConfig, day_bounds
 from ats.fusion.tracker import DeployRule, deploy_path, is_deployable
+from ats.fusion.ranking import RankConfig, rank_entries, score_entry
 from ats.fusion.panel import build_panel, lead_value_table, render_panel
 
 WEEK_TOP = """凡拓数创 海天瑞声 利亚德 海洋王 大业股份 索辰科技 奥比中光 长盈精密 兆威机电 安培龙
@@ -69,13 +70,15 @@ def _agg(rows: List[Dict[str, Any]], ans: set) -> Dict[str, Any]:
     }
 
 
-def run(days=DAYS, top_n: int = 6000, step: int = 3, rule: Optional[DeployRule] = None) -> Dict[str, Any]:
+def run(days=DAYS, top_n: int = 6000, step: int = 3, rule: Optional[DeployRule] = None,
+        rank_cfg: Optional[RankConfig] = None, rank_top: int = 5) -> Dict[str, Any]:
     ans = set(codes_for(WEEK_TOP).values())
     rp = DayReplay(config=ReplayConfig(top_n=top_n, step=step, first_only=False))
     cache = rp.cache
     per_day: List[Dict[str, Any]] = []
     pool: List[Dict[str, Any]] = []
     deploy_all: List[Dict[str, Any]] = []
+    rank_picked: List[Dict[str, Any]] = []
 
     for day in days:
         res = rp.run(day, cuts_override=CUTS, active_only=True)
@@ -93,14 +96,18 @@ def run(days=DAYS, top_n: int = 6000, step: int = 3, rule: Optional[DeployRule] 
             - 40.0 * max(0.0, float(x.get("consensus") or 0) - 0.4)
         ), reverse=True)
         dep = dep[:3]   # 每日最多 3 只（宁可不做）
+        rk = rank_entries(ents, rank_cfg, top_n=rank_top)
         ev = res.meta.get("evictions") or []
         post = [e for e in ev if e.get("post_entry")]
         pool += ents
         deploy_all += dep
+        rank_picked += rk
         row = {
             "day": day,
             "entries": len(ents),
             "deploy": len(dep),
+            "rank_n": len(rk),
+            "rank_list": rk,
             "evict_watch": len(ev) - len(post),
             "evict_post": len(post),
             "evict_pnl": round(float(np.mean([e.get("pnl_from_enter") or 0.0 for e in post])), 2) if post else 0.0,
@@ -113,18 +120,20 @@ def run(days=DAYS, top_n: int = 6000, step: int = 3, rule: Optional[DeployRule] 
             "dep_hit": sum(1 for e in dep if e["code"] in ans),
         }
         per_day.append(row)
-        print("{} | 入局{:>3} 可下单{:>2} 剔除(持仓){:>3} | 入局Top5命中{} | 可下单命中{}/{} | 平均自首异动{:+.2f}%".format(
-            day, row["entries"], row["deploy"], row["evict_post"], row["hit"][5],
+        print("{} | 入局{:>3} 与闸门{:>2} 打分{:>2} 剔除(持仓){:>3} | 入局Top5命中{} | 与闸门命中{}/{} | 平均自首异动{:+.2f}%".format(
+            day, row["entries"], row["deploy"], row["rank_n"], row["evict_post"], row["hit"][5],
             row["dep_hit"], row["deploy"],
             float(np.mean([e["since_first_pct"] for e in ents])) if ents else 0.0))
 
     ok = [r for r in per_day if "error" not in r]
     pool_agg = _agg(pool, ans)
     dep_agg = _agg(deploy_all, ans)
+    rank_agg = _agg(rank_picked, ans)
     summary = {
         "days": len(ok),
         "entries": sum(r["entries"] for r in ok),
         "deploy": sum(r["deploy"] for r in ok),
+        "rank_n": sum(r["rank_n"] for r in ok),
         "records": sum(r["records"] for r in ok),
         "evict_post": sum(r["evict_post"] for r in ok),
         "evict_watch": sum(r["evict_watch"] for r in ok),
@@ -134,6 +143,9 @@ def run(days=DAYS, top_n: int = 6000, step: int = 3, rule: Optional[DeployRule] 
         "dep_hit": sum(r["dep_hit"] for r in ok),
         "pool": pool_agg,
         "deploy_agg": dep_agg,
+        "rank_agg": rank_agg,
+        "rank_corr": _corr_rank_t1(pool),
+        "rank_reject": _reject_stats(pool),
         "since_first": round(float(np.mean([e["since_first_pct"] for e in pool])), 2) if pool else 0.0,
         "t1_actions": _count_actions(ok),
         "blocked": _sum_blocked(ok),
@@ -145,7 +157,71 @@ def run(days=DAYS, top_n: int = 6000, step: int = 3, rule: Optional[DeployRule] 
         "answers": sorted(ans),
         "pool_agg": pool_agg,
         "deploy_agg": dep_agg,
+        "rank_agg": rank_agg,
+        "sweep": sweep_rank(pool, ans),
     }
+
+
+def _corr_rank_t1(pool: List[Dict[str, Any]]) -> float:
+    """打分与 T+1 的相关系数。这就是"分数到底有没有区分力"的唯一硬指标。"""
+    xs, ys = [], []
+    for e in pool:
+        if e.get("t1") is None:
+            continue
+        xs.append(float(score_entry(e)["score"]))
+        ys.append(float(e["t1"]))
+    if len(xs) < 3:
+        return 0.0
+    try:
+        return round(float(np.corrcoef(xs, ys)[0, 1]), 3)
+    except Exception:
+        return 0.0
+
+
+def _reject_stats(pool: List[Dict[str, Any]]) -> Dict[str, int]:
+    """硬底线拦下的原因分布（无形态/追高/跨日风险极值）。"""
+    from collections import Counter
+
+    c: Counter = Counter()
+    for e in pool:
+        r = score_entry(e)
+        if not r["ok"]:
+            c[r["reason"]] += 1
+    return dict(c)
+
+
+def _rank_by_day(pool: List[Dict[str, Any]], cfg: RankConfig, top_n: int) -> List[Dict[str, Any]]:
+    """按交易日分别取前 N（每日配额，不是全周一次性排序）。"""
+    by_day: Dict[str, List[Dict[str, Any]]] = {}
+    for e in pool:
+        by_day.setdefault(str(e.get("day") or ""), []).append(e)
+    out: List[Dict[str, Any]] = []
+    for _, rows in sorted(by_day.items()):
+        out += rank_entries(rows, cfg, top_n=top_n)
+    return out
+
+
+def sweep_rank(
+    pool: List[Dict[str, Any]],
+    ans: set,
+    top_ns=(1, 2, 3, 5, 8),
+    min_scores=(45.0, 50.0, 55.0, 60.0, 65.0),
+) -> List[Dict[str, Any]]:
+    """阈值扫描：TopN × 分数下限，看"笔数—T+1"的取舍曲线。
+
+    这张表的意义不是挑最好看的那一格（5 天样本必然过拟合），
+    而是确认"下限提高后 T+1 是否单调改善"——单调才说明分数有区分力。
+    """
+    rows: List[Dict[str, Any]] = []
+    for n in top_ns:
+        for ms in min_scores:
+            cfg = RankConfig(min_score=float(ms), top_n=int(n))
+            picked = _rank_by_day(pool, cfg, int(n))
+            a = _agg(picked, ans)
+            a.update({"top_n": int(n), "min_score": float(ms)})
+            rows.append(a)
+    return rows
+
 
 
 def _sum_blocked(rows: List[Dict[str, Any]]) -> Dict[str, int]:
@@ -250,18 +326,30 @@ def render(data: Dict[str, Any]) -> str:
     lines.append("- 入局时自首异动平均涨幅 **{:+.2f}%**（第一波，不是追高）".format(s["since_first"]))
     lines.append("")
     p, d = s["pool"], s["deploy_agg"]
+    r = s.get("rank_agg") or _agg([], set())
     lines.append("| 口径 | 笔数 | 命中榜单 | 当日收盘 | 次日收盘(T+1) | T+1胜率 | 之后MFE | 之后MAE |")
     lines.append("|---|---|---|---|---|---|---|---|")
     lines.append("| 第一波入局（全部） | {} | {} | {:+.2f}% | {:+.2f}% | {:.0f}% | {:+.2f}% | {:+.2f}% |".format(
         p["n"], p["ans"], p["close"], p["t1"], p["win"], p["mfe"], p["mae"]))
-    lines.append("| **可下单清单** | **{}** | **{}** | **{:+.2f}%** | **{:+.2f}%** | **{:.0f}%** | **{:+.2f}%** | **{:+.2f}%** |".format(
+    lines.append("| 可下单清单（与闸门，旧） | {} | {} | {:+.2f}% | {:+.2f}% | {:.0f}% | {:+.2f}% | {:+.2f}% |".format(
         d["n"], d["ans"], d["close"], d["t1"], d["win"], d["mfe"], d["mae"]))
+    lines.append("| **可下单清单（打分排序，新）** | **{}** | **{}** | **{:+.2f}%** | **{:+.2f}%** | **{:.0f}%** | **{:+.2f}%** | **{:+.2f}%** |".format(
+        r["n"], r["ans"], r["close"], r["t1"], r["win"], r["mfe"], r["mae"]))
     lines.append("")
     lines.append("- 入局后剔除 {} 笔｜平均 {:+.2f}%（观察期过期 {} 笔另计）".format(
         s["evict_post"], s["evict_pnl"], s["evict_watch"]))
     if s.get("blocked"):
         lines.append("- 被陷阱/跨日风险拦下：{}".format(
             "｜".join("{} {}".format(k, v) for k, v in sorted(s["blocked"].items(), key=lambda x: -x[1]))))
+    if s.get("rank_corr") is not None:
+        rc = float(s["rank_corr"])
+        lines.append("- 打分与 T+1 相关 **{:+.3f}**（{}）".format(
+            rc,
+            "弱正相关：方向对，但最高分段不可靠 → 默认取前 5 分散，不押 Top1"
+            if rc > 0 else "无/负相关：说明权重还没标定对，只能当过滤器用，不能当排序用"))
+    if s.get("rank_reject"):
+        lines.append("- 硬底线拦下（不是闸门）：{}".format(
+            "｜".join("{} {}".format(k, v) for k, v in sorted(s["rank_reject"].items(), key=lambda x: -x[1]))))
     if s.get("t1_actions"):
         lines.append("- T+1 持仓决策：{}".format(
             "｜".join("{} {}".format(k, v) for k, v in s["t1_actions"].items())))
@@ -276,6 +364,19 @@ def render(data: Dict[str, Any]) -> str:
             lines.append("| {} | {} | {:+.2f}% | {:+.2f}% | {:.0f}% | {:+.2f}% |".format(
                 k, v["n"], v["close"], v["t1"], v["win"], v["mfe"]))
         lines.append("")
+    sw = data.get("sweep") or []
+    if sw:
+        lines.append("## 六、阈值扫描：TopN × 分数下限")
+        lines.append("")
+        lines.append("看的是**单调性**（下限抬高、T+1 是否改善），不是挑最好看的那一格——5 天样本挑出来的必然过拟合。")
+        lines.append("")
+        lines.append("| TopN | 分数下限 | 笔数 | 命中榜单 | 次日收盘(T+1) | T+1胜率 | 当日收盘 |")
+        lines.append("|---|---|---|---|---|---|---|")
+        for x in sw:
+            lines.append("| {} | {:.0f} | {} | {} | {:+.2f}% | {:.0f}% | {:+.2f}% |".format(
+                x["top_n"], x["min_score"], x["n"], x["ans"], x["t1"], x["win"], x["close"]))
+        lines.append("")
+
     dc = data.get("disc") or {}
     if dc.get("feat"):
         lines.append("## 二、答案组 vs 其他组（入局时刻特征）")
@@ -329,9 +430,25 @@ def render(data: Dict[str, Any]) -> str:
         if "error" in r:
             lines.append("## {}｜{}".format(r["day"], r["error"]))
             continue
-        lines.append("## {}｜入局 {}｜可下单 {}".format(r["day"], r["entries"], r["deploy"]))
+        lines.append("## {}｜入局 {}｜与闸门 {}｜打分 {}".format(
+            r["day"], r["entries"], r["deploy"], r.get("rank_n", 0)))
+        lines.append("")
+        if r.get("rank_list"):
+            lines.append("| # | 代码 | 分 | 归因(形态/趋同/领先/阶段/跨日) | 领先度 | 阶段 | 入局 | 当时涨幅 | 首异动 | 持续分 | 形态 | T+1 |")
+            lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
+            for e in r["rank_list"]:
+                lines.append("| {} | {} | {} | {} | {} | {} | {} | {:+.1f}% | {:+.1f}% | {} | {} | {} |".format(
+                    e.get("rank", ""), e["code"], e.get("rank_score", 0), e.get("rank_explain", ""),
+                    e.get("lead_label") or "-", e.get("phase") or "-", e.get("enter_time", ""),
+                    float(e.get("enter_pct") or 0), float(e.get("first_pct") or 0), e.get("persist", 0),
+                    "、".join((e.get("patterns") or {}).keys()) or "-",
+                    "{:+.2f}%".format(e["t1"]) if e.get("t1") is not None else "-"))
+        else:
+            lines.append("- 今日无可下单标的（分数未达下限，宁可不做）")
         lines.append("")
         if r["deploy_list"]:
+            lines.append("旧口径（与闸门）对照：")
+            lines.append("")
             lines.append("| # | 代码 | 路径 | 入局 | 入局价 | 当时涨幅 | 首异动涨幅 | 持续分 | 赛道 | 形态 | T+1 |")
             lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
             for i, e in enumerate(r["deploy_list"], 1):
@@ -341,7 +458,7 @@ def render(data: Dict[str, Any]) -> str:
                     "、".join((e.get("patterns") or {}).keys()) or "-",
                     "{:+.2f}%".format(e["t1"]) if e.get("t1") is not None else "-"))
         else:
-            lines.append("- 今日无可下单标的（宁可不做）")
+            lines.append("旧口径（与闸门）对照：今日无（七项同时满足太难）")
         lines.append("")
     return "\n".join(lines)
 
@@ -357,6 +474,7 @@ if __name__ == "__main__":
     with open("logs/fusion_mine/track_validation.json", "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=1)
     print("\n耗时 {:.0f}s".format(time.time() - t0))
-    print("入局 {} 笔 | 可下单 {} 笔 | 可下单 T+1 {:+.2f}% 胜率 {:.0f}%".format(
-        data["summary"]["entries"], data["summary"]["deploy"],
-        data["summary"]["deploy_agg"]["t1"], data["summary"]["deploy_agg"]["win"]))
+    s = data["summary"]
+    print("入局 {} 笔 | 与闸门 {} 笔 T+1 {:+.2f}% 胜率 {:.0f}% | 打分 {} 笔 T+1 {:+.2f}% 胜率 {:.0f}%".format(
+        s["entries"], s["deploy"], s["deploy_agg"]["t1"], s["deploy_agg"]["win"],
+        s["rank_n"], s["rank_agg"]["t1"], s["rank_agg"]["win"]))

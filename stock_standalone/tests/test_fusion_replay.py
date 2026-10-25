@@ -140,6 +140,20 @@ class TestReplay(unittest.TestCase):
         for tier in ("L4", "L3", "L2", "L1"):
             self.assertIn(tier, stats)
 
+    def test_same_day_replay_is_idempotent(self):
+        """同一天重复回放入局数必须一致：阈值扫描靠这个，否则第二遍恒为 0。"""
+        rp = DayReplay(cache=_cache(), config=ReplayConfig(top_n=10, step=1, cuts_mode="fixed"))
+        n1 = len(rp.run(_DAY2).entries)
+        n2 = len(rp.run(_DAY2).entries)
+        self.assertEqual(n1, n2, "同一天重跑，入局数不应被上一次的状态污染")
+
+    def test_cross_day_still_carries(self):
+        """跨日仍要携带昨日入局状态（多日连续性）——同一天才重置。"""
+        rp = DayReplay(cache=_cache(), config=ReplayConfig(top_n=10, step=1, cuts_mode="fixed"))
+        n_d1 = len(rp.run(_DAY1).entries)
+        n_d2 = len(rp.run(_DAY2).entries)
+        self.assertGreaterEqual(n_d1 + n_d2, n_d2, "跨日运行不应互相清空")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

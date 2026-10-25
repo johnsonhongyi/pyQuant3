@@ -69,6 +69,18 @@ from ats.fusion.tracker import (
     STAGE_WATCH,
     STAGE_WEAKEN,
 )
+from ats.fusion.ranking import (
+    RankConfig,
+    rank_all,
+    rank_entries,
+    render_ranked,
+    score_entry,
+)
+from ats.fusion.session_ctx import (
+    SessionContext,
+    SessionContextStore,
+    default_store,
+)
 from ats.fusion.regime import (
     FLIP_ARMED,
     FLIP_CONFIRMED,
@@ -101,6 +113,14 @@ __all__ = [
     "STAGE_HOLD",
     "STAGE_WEAKEN",
     "STAGE_EVICT",
+    "RankConfig",
+    "rank_entries",
+    "rank_all",
+    "score_entry",
+    "render_ranked",
+    "SessionContext",
+    "SessionContextStore",
+    "default_store",
     "detect_traps",
     "cross_day_risk",
     "position_decision",

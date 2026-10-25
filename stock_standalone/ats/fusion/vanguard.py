@@ -71,12 +71,14 @@ class SectorClock:
         self.launch_pct = float(launch_pct)
         self._launch: Dict[Tuple[str, str], float] = {}          # (sector, code) -> ts
         self._order: Dict[str, List[Tuple[float, str]]] = {}     # sector -> [(ts, code)]
+        self._rank: Dict[str, Dict[str, int]] = {}               # sector -> {code: rank}，避免每根 bar 扫列表
         self._flag: Dict[str, str] = {}                          # sector -> 首个夺旗 code
         self._day = ""
 
     def reset(self, day: str = "") -> None:
         self._launch.clear()
         self._order.clear()
+        self._rank.clear()
         self._flag.clear()
         self._day = day
 
@@ -113,9 +115,10 @@ class SectorClock:
             self._launch[key] = first_ts
             order = self._order.setdefault(sector, [])
             order.append((first_ts, code))
+            self._rank.setdefault(sector, {})[code] = len(order)
 
         order = self._order.get(sector) or []
-        rank = next((i + 1 for i, (_, c) in enumerate(order) if c == code), len(order))
+        rank = self._rank.get(sector, {}).get(code, len(order))
         sector_first_ts = order[0][0] if order else first_ts
         lead_gap = max(0.0, (first_ts - sector_first_ts) / 60.0)
 

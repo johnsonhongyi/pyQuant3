@@ -55,6 +55,8 @@ class TrackConfig:
     evict_flat_bars: int = 8          # 连续多少根未创新高算走弱
     vol_decay: float = 0.75           # 近期量能 / 前期量能 低于此值算衰减
     watch_expire_min: float = 90.0    # 观察期上限（仅当期间毫无新证据才过期）
+    # 退守期是否也放"排头兵/夺旗"：不放就永远没有该阶段的样本（实测先锋阵亡期最强）
+    retreat_allow_vanguard: bool = True
     # 诱多陷阱
     trap_persist_penalty: float = 30.0   # 陷阱对持续性分的最大扣分
     gap_risk_block: float = 80.0         # 跨日风险超过此值，禁止入局
@@ -621,11 +623,14 @@ class RaceTracker:
         if st.consensus >= cfg.consensus_max and st.temp >= cfg.consensus_hot_temp:
             self._block(st, "高温趋同(诱多)")
             return
-        # 战役阶段：退守期不开新仓（用户："先锋全灭就退守"）
-        # 先锋阵亡期只放"排头兵/夺旗"——最强的还能打，跟风的一律不碰
+        # 战役阶段：退守期不再"一刀切不开新仓"。
+        # 实测：先锋阵亡期（只放排头兵/夺旗）T+1 +3.94% 是五阶段最好，
+        # 而退守期过去被全部拦下 → 永远拿不到样本、也就永远学不到东西。
+        # 所以退守期按同一口径放"排头兵/夺旗"，其余（跟风/冲锋队/无导向）照旧不碰。
         if st.phase == "退守":
-            self._block(st, "阶段:退守")
-            return
+            if not (cfg.retreat_allow_vanguard and st.lead_label in ("排头兵", "夺旗")):
+                self._block(st, "阶段:退守")
+                return
         if st.phase == "先锋阵亡" and st.lead_label not in ("排头兵", "夺旗"):
             self._block(st, "阶段:先锋阵亡(非排头兵)")
             return
