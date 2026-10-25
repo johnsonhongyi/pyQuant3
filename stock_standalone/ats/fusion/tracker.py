@@ -55,6 +55,11 @@ class TrackConfig:
     evict_flat_bars: int = 8          # 连续多少根未创新高算走弱
     vol_decay: float = 0.75           # 近期量能 / 前期量能 低于此值算衰减
     watch_expire_min: float = 90.0    # 观察期上限（仅当期间毫无新证据才过期）
+    # 诱多陷阱
+    trap_persist_penalty: float = 30.0   # 陷阱对持续性分的最大扣分
+    gap_risk_block: float = 80.0         # 跨日风险超过此值，禁止入局
+    gap_risk_caution: float = 50.0       # 超过此值，要求首异动更早（<=2%）
+    spike_evict_drawdown: float = 2.0    # 入局后冲高回落达此幅度即剔除
     max_history: int = 16             # 证据链保留条数
     day_carry_max: int = 5            # 跨日保留几日摘要
 
@@ -89,6 +94,10 @@ class TrackState:
     vol_base: float = 1.0             # 首段平均量比
 
     patterns_seen: Dict[str, int] = field(default_factory=dict)
+    traps_seen: Dict[str, int] = field(default_factory=dict)   # 诱多陷阱计数
+    traps: List[str] = field(default_factory=list)             # 当前 bar 命中的陷阱
+    gap_risk: float = 0.0                                      # 跨日风险（昨日大涨/长上影）
+    risk_notes: List[str] = field(default_factory=list)
     best_tier: int = 0
     best_rar: float = 0.0
     evidence: List[Dict[str, Any]] = field(default_factory=list)
@@ -102,6 +111,8 @@ class TrackState:
     evict_reason: str = ""
 
     day_summaries: List[Dict[str, Any]] = field(default_factory=list)
+    carried: bool = False          # 今日是否由昨日持仓延续而来
+    t1_decided_day: str = ""       # 今日 T+1 决策是否已做
 
     # -- 输出 ---------------------------------------------------------------
     @property
@@ -167,6 +178,10 @@ class TrackState:
             "drawdown": round(self.drawdown, 2),
             "evidence_n": self.evidence_count(),
             "patterns": dict(self.patterns_seen),
+            "traps": list(self.traps),
+            "traps_seen": dict(self.traps_seen),
+            "gap_risk": round(self.gap_risk, 1),
+            "risk_notes": list(self.risk_notes),
             "best_tier": self.best_tier,
             "best_rar": round(self.best_rar, 1),
             "chain": self.chain(),
@@ -198,6 +213,7 @@ class RaceTracker:
         self.cfg = config or TrackConfig()
         self._states: Dict[str, TrackState] = {}
         self._events: List[Dict[str, Any]] = []   # 入局/剔除事件流
+        self._blocked: Dict[str, str] = {}        # code|day -> 被拦下的原因（去重计数）
 
     # -- 生命周期 -----------------------------------------------------------
     def get(self, code: str) -> Optional[TrackState]:
@@ -208,6 +224,15 @@ class RaceTracker:
 
     def events(self) -> List[Dict[str, Any]]:
         return list(self._events)
+
+    def _block(self, st: TrackState, reason: str) -> None:
+        self._blocked.setdefault("{}|{}".format(st.code, st.day), reason)
+
+    def blocked_stats(self) -> Dict[str, int]:
+        from collections import Counter
+
+        c: Counter = Counter(self._blocked.values())
+        return dict(c)
 
     def reset(self, keep_cross_day: bool = False) -> None:
         if keep_cross_day:
@@ -226,6 +251,7 @@ class RaceTracker:
                 "persist": round(st.persist, 1),
                 "best_tier": st.best_tier,
                 "enter_pct": round(st.enter_pct, 2),
+                "enter_price": round(st.enter_price, 3),
                 "evicted": st.stage == STAGE_EVICT,
             }
         )
@@ -248,6 +274,9 @@ class RaceTracker:
         day: str = "",
         anomaly: bool = False,
         note: str = "",
+        traps: Optional[List[str]] = None,
+        gap_risk: float = 0.0,
+        risk_notes: Optional[List[str]] = None,
     ) -> TrackState:
         code = str(code).zfill(6)
         st = self._states.get(code)
@@ -262,8 +291,22 @@ class RaceTracker:
             # 跨日携带：昨日入局且未剔除 -> 今天以"持有"开局（多日无法骗人）
             if carry.get("stage") in (STAGE_ENTER, STAGE_HOLD) and not carry.get("evicted"):
                 st.stage = STAGE_HOLD
+                st.carried = True
+                st.enter_price = float(carry.get("enter_price") or 0.0)
+                st.enter_ts = 0.0
 
         patterns = list(patterns or [])
+        traps = list(traps or [])
+        st.traps = traps
+        st.gap_risk = float(gap_risk or 0.0)
+        if risk_notes:
+            st.risk_notes = list(risk_notes)[:4]
+        for t in traps:
+            if t not in st.traps_seen:
+                st.traps_seen[t] = 1
+                self._push_evidence(st, ts, "陷阱:" + t, 0, 0.0, "trap")
+            else:
+                st.traps_seen[t] += 1
         st.day = day or st.day
         st.last_ts = float(ts)
         st.prev_price = st.last_price or float(price)
@@ -283,8 +326,19 @@ class RaceTracker:
             self._push_evidence(st, ts, st.first_kind, tier, rar, "首异动")
 
         if st.first_ts <= 0:
-            st.persist = 0.0
-            return st
+            if st.carried:
+                # 昨日持仓延续：今日首根 bar 作为今日的观察起点，
+                # 不能因为"今天还没出现异动"就把持仓丢掉（这正是 T+1 决策要处理的情形）
+                st.first_ts = float(ts)
+                st.first_price = float(price)
+                st.first_pct = float(pct)
+                st.first_kind = "昨日持仓"
+                st.hi = st.lo = float(price)
+                st.hi_ts = float(ts)
+                st.vol_base = max(1.0, float(vol_ratio))
+            else:
+                st.persist = 0.0
+                return st
 
         # 2) 逐 bar 累积"量能持续 / 想的多回踩的少 / 站得住"
         if vol_ratio >= 1.2:
@@ -326,9 +380,71 @@ class RaceTracker:
         # 4) 持续性分（带旧信号：用累积量，不是快照）
         st.persist = self._persist(st)
 
+        # 由历史累积出来的两条证据：量能持续、持续性达标
+        # （这是"旧信号"里最有价值的两条，必须进证据链，否则单形态票永远凑不够证据）
+        if st.vol_up_bars >= 3 and not any(e["kind"] == "量能持续" for e in st.evidence):
+            self._push_evidence(st, ts, "量能持续", st.best_tier, st.best_rar, "vol")
+        if st.persist >= 60.0 and not any(e["kind"] == "持续性达标" for e in st.evidence):
+            self._push_evidence(st, ts, "持续性达标", st.best_tier, st.best_rar, "persist")
+
         # 5) 阶段推进
         self._advance(st, price, vwap10, ts)
         return st
+
+    # -- 落盘：不能每天都是新的一天 -----------------------------------------
+    _PERSIST_FIELDS = (
+        "code", "day", "first_ts", "first_price", "first_pct", "first_kind",
+        "last_ts", "last_price", "last_pct", "hi", "lo", "bars",
+        "vol_up_bars", "above_vwap10_bars", "up_sum", "down_sum", "stale_bars",
+        "vol_recent", "vol_base", "best_tier", "best_rar",
+        "stage", "persist", "enter_ts", "enter_price", "enter_pct",
+        "evict_ts", "evict_reason", "carried", "t1_decided_day",
+        "patterns_seen", "traps_seen", "day_summaries",
+    )
+
+    def save(self, path: str, keep_days: int = 3) -> int:
+        """把状态落到磁盘。只保留有历史价值的字段，不存临时证据链。"""
+        import json
+        import os
+
+        payload = {"version": 1, "saved_at": time.time(), "states": []}
+        for st in self._states.values():
+            d = {k: getattr(st, k) for k in self._PERSIST_FIELDS}
+            d["evidence"] = [e for e in st.evidence[-6:]]
+            payload["states"].append(d)
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        os.replace(tmp, path)
+        return len(payload["states"])
+
+    def load(self, path: str, keep_days: int = 3) -> int:
+        """从磁盘恢复状态。只恢复近 keep_days 天有活动的票，避免无限膨胀。"""
+        import json
+        import os
+
+        if not os.path.exists(path):
+            return 0
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception:
+            return 0
+        days = sorted({str(d.get("day") or "") for d in payload.get("states") or []})
+        alive = set(days[-keep_days:]) if days else set()
+        n = 0
+        for d in payload.get("states") or []:
+            if str(d.get("day") or "") not in alive:
+                continue
+            try:
+                st = TrackState(**{k: d.get(k) for k in self._PERSIST_FIELDS if k in d})
+            except Exception:
+                continue
+            st.evidence = list(d.get("evidence") or [])
+            self._states[st.code] = st
+            n += 1
+        return n
 
     # -- 内部 ---------------------------------------------------------------
     def _push_evidence(self, st: TrackState, ts: float, kind: str, tier: int, rar: float, src: str) -> None:
@@ -363,7 +479,14 @@ class RaceTracker:
             + 0.06 * fresh
             + 0.08 * carry
         )
-        return round(100.0 * _clip01(score), 1)
+        raw = 100.0 * _clip01(score)
+        # 诱多陷阱扣分：按"最强陷阱"扣，不叠加；跨日风险按比例扣
+        if st.traps:
+            from ats.fusion.trap import trap_severity
+            raw -= self.cfg.trap_persist_penalty * trap_severity(st.traps)
+        if st.gap_risk > 0:
+            raw -= 0.10 * st.gap_risk
+        return round(max(0.0, min(100.0, raw)), 1)
 
     def _advance(self, st: TrackState, price: float, vwap10: float, ts: float) -> None:
         cfg = self.cfg
@@ -374,7 +497,52 @@ class RaceTracker:
             return
 
         if was in (STAGE_ENTER, STAGE_HOLD, STAGE_WEAKEN):
+            # ---- T+1 持仓决策：昨天买的，今天要不要跟（每天只做一次）----
+            if st.carried and st.t1_decided_day != st.day and st.bars >= 1:
+                from ats.fusion.trap import position_decision, ACT_CLEAR, ACT_HALF
+                act, why = position_decision(st.persist, st.traps, st.gap_risk, st.drawdown)
+                st.t1_decided_day = st.day
+                self._events.append({
+                    "kind": "T1",
+                    "code": st.code,
+                    "ts": float(ts),
+                    "time": time.strftime("%H:%M", time.localtime(int(ts))),
+                    "action": act,
+                    "reason": why,
+                    "price": round(st.last_price, 3),
+                    "pct": round(st.last_pct, 2),
+                    "persist": st.persist,
+                    "gap_risk": round(st.gap_risk, 1),
+                    "traps": list(st.traps),
+                    "pnl_from_enter": round(
+                        (st.last_price / st.enter_price - 1.0) * 100.0, 2
+                    ) if st.enter_price > 0 else 0.0,
+                    "chain": st.chain(),
+                })
+                if act == ACT_CLEAR:
+                    self._evict(st, ts, "T+1" + why)
+                    return
+                if act == ACT_HALF:
+                    st.persist = max(0.0, st.persist - 10.0)
+
+            # 昨日大涨、今日杀跌：开盘半小时内出现就清仓（这条不等 VWAP 规则）
+            if st.carried and st.bars <= 10:
+                from ats.fusion.trap import TRAP_PREV_DUMP as _PD
+                if _PD in st.traps:
+                    self._evict(st, ts, "T+1昨日大涨今日杀跌")
+                    return
+
             # ---- 入局之后才开始剔除 ----
+            # 诱多陷阱：冲高回落到一定幅度，或放量跌破均价且量能衰减
+            from ats.fusion.trap import TRAP_SPIKE_FADE, TRAP_GAP_FADE, TRAP_BREAK_VWAP
+            if (TRAP_SPIKE_FADE in st.traps or TRAP_GAP_FADE in st.traps) \
+                    and st.drawdown >= cfg.spike_evict_drawdown:
+                self._evict(st, ts, "诱多{}回撤{:.1f}%".format(
+                    "冲高回落" if TRAP_SPIKE_FADE in st.traps else "高开回落", st.drawdown))
+                return
+            if TRAP_BREAK_VWAP in st.traps and st.vol_recent < st.vol_base * cfg.vol_decay:
+                self._evict(st, ts, "放量跌破均价")
+                return
             if vwap10 > 0 and price < vwap10 * cfg.evict_vwap10_tol:
                 self._evict(st, ts, "跌破10日VWAP")
                 return
@@ -400,6 +568,21 @@ class RaceTracker:
         if st.age_min > cfg.watch_expire_min and st.stale_bars >= cfg.evict_flat_bars:
             self._evict(st, ts, "观察{}分钟无新证据".format(int(st.age_min)))
             return
+        # 跨日风险：昨日大涨/长上影的票，今天只接"更早的第一波"，不接冲高
+        from ats.fusion.trap import TRAP_PREV_DUMP, TRAP_SPIKE_FADE, TRAP_GAP_FADE
+        if TRAP_PREV_DUMP in st.traps:
+            self._block(st, "前日大涨今日杀跌")
+            return
+        if st.gap_risk >= cfg.gap_risk_block:
+            self._block(st, "跨日风险>=80")
+            return
+        if TRAP_SPIKE_FADE in st.traps or TRAP_GAP_FADE in st.traps:
+            self._block(st, "冲高回落中")
+            return   # 正在回落的票不入局，等它重新站住
+        if st.gap_risk >= cfg.gap_risk_caution and st.first_pct > 2.0:
+            self._block(st, "跨日风险偏高且首异动>2%")
+            return
+
         if st.persist < cfg.enter_persist:
             return
         if st.efficiency < cfg.enter_eff_min:
@@ -524,7 +707,7 @@ def render_entries(entries: List[Dict[str, Any]], day: str = "", top: int = 20) 
     if not entries:
         return "## 赛马跟踪·第一波入局 {}｜无\n".format(day)
     lines = ["## 赛马跟踪·第一波入局 {}".format(day), ""]
-    lines.append("| # | 代码 | 入局 | 入局价 | 当时涨幅 | 首异动 | 首异动涨幅 | 首→入 | 持续分 | 证据 | 证据链 |")
+    lines.append("| # | 代码 | 入局 | 入局价 | 当时涨幅 | 首异动 | 首异动涨幅 | 首→入 | 持续分 | 跨日风险 | 证据链 |")
     lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
     for i, e in enumerate(entries[:top], 1):
         t = e.get("enter_time") or e.get("time") or ""
@@ -534,7 +717,7 @@ def render_entries(entries: List[Dict[str, Any]], day: str = "", top: int = 20) 
             "| {} | {} | {} | {} | {:+.1f}% | {} | {:+.1f}% | {:+.1f}% | {} | {} | {} |".format(
                 i, e.get("code", ""), t, px, float(pc or 0), e.get("first_time", ""),
                 float(e.get("first_pct") or 0), float(e.get("since_first_pct") or 0),
-                e.get("persist", 0), e.get("evidence_n", 0), e.get("chain") or "-",
+                e.get("persist", 0), e.get("gap_risk", 0), e.get("chain") or "-",
             )
         )
     lines.append("")

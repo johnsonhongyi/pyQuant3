@@ -52,6 +52,7 @@ from ats.fusion.anomaly import detect_patterns, pattern_score, PATTERN_LATENT_BR
 from ats.fusion.premarket import get_premarket
 from ats.fusion.structure import classify as classify_structure
 from ats.fusion.tracker import RaceTracker, TrackConfig, render_entries, STAGE_ENTER, STAGE_EVICT
+from ats.fusion.trap import detect_traps, cross_day_risk, render_traps
 from ats.fusion.sector import get_sector_map, get_theme_map, sector_strength, load_external_heat
 from dataclasses import replace
 
@@ -142,6 +143,7 @@ class ReplayConfig:
     track: bool = True               # 赛马跟踪：带旧信号、第一波入局、入局后剔除
     track_enter_persist: float = 55.0   # 入局所需持续性分
     track_max_chase: float = 5.0        # 首异动到入局的最大涨幅（第一波）
+    state_path: str = ""             # 跟踪器状态落盘路径（空=不落盘）；用于跨日携带
 
 
 @dataclass
@@ -440,6 +442,13 @@ class DayReplay:
                     TrackConfig(enter_persist=self.cfg.track_enter_persist,
                                 enter_max_chase=self.cfg.track_max_chase)
                 )
+                if self.cfg.state_path:
+                    try:
+                        n_loaded = self.tracker.load(self.cfg.state_path)
+                        if n_loaded:
+                            logger.info("[replay] 已恢复跟踪状态 %d 只：%s", n_loaded, self.cfg.state_path)
+                    except Exception as exc:
+                        logger.warning("[replay] 恢复跟踪状态失败：%s", exc)
             race = self.tracker
         _ev0 = len(race.events()) if race is not None else 0
         self._rar_by_t: Dict[int, List[float]] = {}
@@ -765,11 +774,25 @@ class DayReplay:
                 if race is not None:
                     _before = race.get(codes[i])
                     _prev_stage = _before.stage if _before is not None else ""
+                    # 诱多陷阱 + 跨日风险（昨日大涨/长上影/收在低位）
+                    _traps = detect_traps(
+                        price=price, prev_close=float(prev_close[i]), day_open=_day_open,
+                        day_high=dh, vwap=vw, pct=float(pct[i]),
+                        prev_pct=float(_dc.get("prev_pct", 0.0) or 0.0), vol_ratio=vol_ratio,
+                    )
+                    _grisk, _gnotes = cross_day_risk(
+                        prev_pct=float(_dc.get("prev_pct", 0.0) or 0.0),
+                        prev_close_pos=float(_dc.get("prev_close_pos", 0.5) or 0.5),
+                        prev_upper_shadow=float(_dc.get("prev_upper_shadow", 0.0) or 0.0),
+                        ret5d=float(_dc.get("ret5d", 0.0) or 0.0),
+                        prev_amp=float(_dc.get("prev_amp", 0.0) or 0.0),
+                    )
                     _st = race.update(
                         code=codes[i], ts=float(clock[t]), price=price, pct=float(pct[i]),
                         vwap10=_vw10, vwap=vw, vol_ratio=vol_ratio,
                         tier=decision.tier, rar=decision.rar, patterns=patterns, day=day,
                         anomaly=bool(patterns) or decision.tier >= 2,
+                        traps=_traps, gap_risk=_grisk, risk_notes=_gnotes,
                     )
                     if _st.stage == STAGE_ENTER and _prev_stage != STAGE_ENTER:
                         _fm = fut_max[i, t]
@@ -875,6 +898,8 @@ class DayReplay:
                         "attach_n": race.get(codes[i]).evidence_count() if race is not None and race.get(codes[i]) else 0,
                         "first_pct": round(race.get(codes[i]).first_pct, 2) if race is not None and race.get(codes[i]) else 0.0,
                         "chain": race.get(codes[i]).chain() if race is not None and race.get(codes[i]) else "",
+                        "traps": _traps,
+                        "gap_risk": round(_grisk, 1),
                     }
                 )
 
@@ -886,6 +911,13 @@ class DayReplay:
                     progress(t + 1, n_t)
                 except Exception:
                     pass
+
+        # 收盘落盘：明天不是新的一天
+        if race is not None and self.cfg.state_path:
+            try:
+                race.save(self.cfg.state_path)
+            except Exception as exc:
+                logger.warning("[replay] 保存跟踪状态失败：%s", exc)
 
         stats = summarize_tiers(records)
         self._last_rar_samples = rar_samples
@@ -947,6 +979,8 @@ class DayReplay:
             "entries": len(entries),
             "entries_detail": entries,
             "evictions": [e for e in (race.events()[_ev0:] if race is not None else []) if e.get("kind") == STAGE_EVICT],
+            "t1_decisions": [e for e in (race.events()[_ev0:] if race is not None else []) if e.get("kind") == "T1"],
+            "blocked": race.blocked_stats() if race is not None else {},
             "approximations": [
                 "vwap=3分钟(H+L+C)/3按量加权",
                 "taker/bid 由 bar 推导（外盘占比/收盘位置）",
@@ -1434,13 +1468,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--discover", action="store_true", help="全市场自选模式：系统自己选票并打分")
     parser.add_argument("--top-k", type=int, default=20, help="自选前 K 只")
     parser.add_argument("--cutoff", default="14:00", help="自选时间上限 HH:MM")
+    parser.add_argument("--state", default="", help="跟踪器状态文件（指定则跨日携带，收盘落盘）")
     args = parser.parse_args(argv)
 
     focus = tuple(c.strip() for c in args.focus.split(",") if c.strip())
     rp = DayReplay(
         cache_path=args.cache or None,
         config=ReplayConfig(top_n=args.top, step=args.step, focus_codes=focus,
-                            fill_mode=args.fill, max_positions_per_day=args.max_pos),
+                            fill_mode=args.fill, max_positions_per_day=args.max_pos,
+                            state_path=args.state),
     )
     if not rp.cache:
         print("❌ 找不到可用的分钟线缓存")

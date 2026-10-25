@@ -99,6 +99,8 @@ def run(days=DAYS, top_n: int = 6000, step: int = 3, rule: Optional[DeployRule] 
             "evict_post": len(post),
             "evict_pnl": round(float(np.mean([e.get("pnl_from_enter") or 0.0 for e in post])), 2) if post else 0.0,
             "records": len(res.records),
+            "t1": res.meta.get("t1_decisions") or [],
+            "blocked": res.meta.get("blocked") or {},
             "all_entries": ents,
             "deploy_list": dep,
             "hit": {k: sum(1 for e in ents[:k] if e["code"] in ans) for k in (3, 5, 10)},
@@ -127,6 +129,9 @@ def run(days=DAYS, top_n: int = 6000, step: int = 3, rule: Optional[DeployRule] 
         "pool": pool_agg,
         "deploy_agg": dep_agg,
         "since_first": round(float(np.mean([e["since_first_pct"] for e in pool])), 2) if pool else 0.0,
+        "t1_actions": _count_actions(ok),
+        "blocked": _sum_blocked(ok),
+        "trap_agg": _trap_split(pool, ans),
     }
     return {
         "per_day": per_day,
@@ -135,6 +140,44 @@ def run(days=DAYS, top_n: int = 6000, step: int = 3, rule: Optional[DeployRule] 
         "pool_agg": pool_agg,
         "deploy_agg": dep_agg,
     }
+
+
+def _sum_blocked(rows: List[Dict[str, Any]]) -> Dict[str, int]:
+    from collections import Counter
+
+    c: Counter = Counter()
+    for r in rows:
+        for k, v in (r.get("blocked") or {}).items():
+            c[k] += int(v)
+    return dict(c)
+
+
+def _count_actions(rows: List[Dict[str, Any]]) -> Dict[str, int]:
+    from collections import Counter
+
+    c: Counter = Counter()
+    for r in rows:
+        for e in (r.get("t1") or []):
+            c[e.get("action") or "?"] += 1
+    return dict(c)
+
+
+def _trap_split(rows: List[Dict[str, Any]], ans: set) -> Dict[str, Any]:
+    """有陷阱 vs 无陷阱：验证"冲高回落/昨日大涨今日杀跌"是否真的更差。"""
+    out: Dict[str, Any] = {}
+    for name, pred in (
+        ("无陷阱", lambda e: not (e.get("traps") or [])),
+        ("有陷阱", lambda e: bool(e.get("traps") or [])),
+    ):
+        g = [e for e in rows if pred(e)]
+        if g:
+            out[name] = _agg(g, ans)
+    # 按跨日风险分档
+    for lo, hi in ((0, 30), (30, 60), (60, 101)):
+        g = [e for e in rows if lo <= float(e.get("gap_risk") or 0.0) < hi]
+        if g:
+            out["跨日风险{:d}~{:d}".format(lo, min(hi, 100))] = _agg(g, ans)
+    return out
 
 
 def discrimination(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -181,7 +224,23 @@ def render(data: Dict[str, Any]) -> str:
     lines.append("")
     lines.append("- 入局后剔除 {} 笔｜平均 {:+.2f}%（观察期过期 {} 笔另计）".format(
         s["evict_post"], s["evict_pnl"], s["evict_watch"]))
+    if s.get("blocked"):
+        lines.append("- 被陷阱/跨日风险拦下：{}".format(
+            "｜".join("{} {}".format(k, v) for k, v in sorted(s["blocked"].items(), key=lambda x: -x[1]))))
+    if s.get("t1_actions"):
+        lines.append("- T+1 持仓决策：{}".format(
+            "｜".join("{} {}".format(k, v) for k, v in s["t1_actions"].items())))
     lines.append("")
+    ta = s.get("trap_agg") or {}
+    if len(ta) > 1:
+        lines.append("### 陷阱与跨日风险分组")
+        lines.append("")
+        lines.append("| 分组 | 笔数 | 当日收盘 | 次日收盘(T+1) | T+1胜率 | 之后MFE |")
+        lines.append("|---|---|---|---|---|---|")
+        for k, v in ta.items():
+            lines.append("| {} | {} | {:+.2f}% | {:+.2f}% | {:.0f}% | {:+.2f}% |".format(
+                k, v["n"], v["close"], v["t1"], v["win"], v["mfe"]))
+        lines.append("")
     dc = data.get("disc") or {}
     if dc.get("feat"):
         lines.append("## 二、答案组 vs 其他组（入局时刻特征）")

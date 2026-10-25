@@ -26,6 +26,18 @@ from ats.fusion.contract import (
 )
 from ats.fusion.engine import FusionBus, FusionEngine, LADDER, tier_of
 from ats.fusion.shadow import FusionShadow
+from ats.fusion.trap import (
+    ACT_ADD,
+    ACT_CLEAR,
+    ACT_HALF,
+    ACT_HOLD,
+    TRAP_GAP_FADE,
+    TRAP_PREV_DUMP,
+    TRAP_SPIKE_FADE,
+    cross_day_risk,
+    detect_traps,
+    position_decision,
+)
 from ats.fusion.tracker import (
     RaceTracker,
     TrackConfig,
@@ -68,6 +80,16 @@ __all__ = [
     "STAGE_HOLD",
     "STAGE_WEAKEN",
     "STAGE_EVICT",
+    "detect_traps",
+    "cross_day_risk",
+    "position_decision",
+    "TRAP_SPIKE_FADE",
+    "TRAP_GAP_FADE",
+    "TRAP_PREV_DUMP",
+    "ACT_CLEAR",
+    "ACT_HALF",
+    "ACT_HOLD",
+    "ACT_ADD",
     "LaunchTracker",
     "build_event",
     "load_config",

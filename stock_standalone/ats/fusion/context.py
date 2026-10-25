@@ -105,6 +105,8 @@ class DailyContext:
             "vwap5": 0.0, "vwap10": 0.0,
             "vol_ma5": 0.0, "vol_ma20": 0.0, "vol_dry": 1.0,
             "prev_pct": 0.0, "above_vwap10_days": 0,
+            # 昨日形态：用于"前一日大涨、第二日急速杀跌"的风险预判
+            "prev_amp": 0.0, "prev_close_pos": 0.5, "prev_upper_shadow": 0.0,
         }
         v = self._by_code.get(str(code).zfill(6))
         if v is None:
@@ -162,6 +164,16 @@ class DailyContext:
         # 昨日涨幅（用于"两阳加速"）
         if n >= 2 and c[-2] > 0:
             out["prev_pct"] = (last / float(c[-2]) - 1.0) * 100.0
+
+        # 昨日形态：振幅、收盘在日内位置、上影线占振幅比
+        if n >= 1:
+            ph, pl, pc = float(h[-1]), float(v["low"][idx]), float(c[-1])
+            if pl > 0:
+                out["prev_amp"] = (ph - pl) / pl * 100.0
+            rng = ph - pl
+            if rng > 0:
+                out["prev_close_pos"] = max(0.0, min(1.0, (pc - pl) / rng))
+                out["prev_upper_shadow"] = max(0.0, min(1.0, (ph - pc) / rng))
 
         # 连续多少个交易日收在 VWAP10 上方（多日验证："一天可以骗人，多日骗不了"）
         if n >= 11:
