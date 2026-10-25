@@ -21,6 +21,8 @@
 from __future__ import annotations
 
 import time
+
+import numpy as np
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -392,6 +394,18 @@ def leadership_value(temp: float, consensus: float) -> float:
     return float(0.35 + 0.65 * temp_f * cons_f)
 
 
+def lead_adjust(event: SignalEvent) -> float:
+    """领先度修正（±7）：排头兵加分，跟风扣分。
+
+    用户："跟风的都是没有导向性的，要的就是排头兵、冲锋队、夺旗的生力军。"
+    领先度由 vanguard.SectorClock 给出（板块内第几个启动 / 落后首动多久 / 是否夺旗）。
+    """
+    score = event.extra.get("lead_score")
+    if score is None:
+        return 0.0
+    return float(np.clip((float(score) - 50.0) * 0.16, -7.0, 7.0))
+
+
 def score_relative(event: SignalEvent, regime: Optional[MarketRegime] = None) -> tuple:
     """相对强度（逆势异动）：大盘在跌、别人在跌，它在涨。
 
@@ -676,7 +690,7 @@ class FusionEngine:
             + w.get("intent", 0.0) * i
             + w.get("regime", 0.0) * r
             + w.get("relative", 0.0) * rel
-        ) / w_sum - pen + multiday_adjust(event)
+        ) / w_sum - pen + multiday_adjust(event) + lead_adjust(event)
         rar = _clip(rar, 0.0, 100.0)
         axes = AxisScores(position=p, support=s, intent=i, regime=r, relative=rel, penalty=pen, rar=rar)
 

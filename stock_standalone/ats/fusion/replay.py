@@ -55,6 +55,8 @@ from ats.fusion.tracker import RaceTracker, TrackConfig, render_entries, STAGE_E
 from ats.fusion.trap import detect_traps, cross_day_risk, render_traps
 from ats.fusion.panel import build_panel, render_panel
 from ats.fusion.market_ctx import MarketHistory, DEFAULT_PATH as MARKET_PATH
+from ats.fusion.vanguard import SectorClock, LABEL_FOLLOW, LABEL_VANGUARD, LABEL_FLAG
+from ats.fusion.lifecycle import CapitalGauge, MarketLifecycle, VanguardWatch
 from ats.fusion.sector import get_sector_map, get_theme_map, sector_strength, load_external_heat
 from dataclasses import replace
 
@@ -439,6 +441,7 @@ class DayReplay:
 
         tracker = MarketRegimeTracker()
         regime_series: List[Dict[str, Any]] = []
+        life_series: List[Dict[str, Any]] = []
         records: List[Dict[str, Any]] = []
         veto_counts: Dict[str, int] = {}
         eval_count = 0
@@ -514,6 +517,15 @@ class DayReplay:
                 day_open_map[_c] = float(_sl["open"][0])
 
         done = np.zeros(n_code, dtype=bool)
+        sector_clock = SectorClock()
+        sector_clock.reset(day)
+        # 先锋队名册 + 资金冲锋号 + 阶段状态机（"先锋阵亡 -> 跟风鸟兽散 -> 退守"）
+        vwatch = VanguardWatch()
+        capital = CapitalGauge()
+        life = MarketLifecycle()
+        life_state = None
+        row_of = {c: i for i, c in enumerate(codes)}
+
         launch_idx = np.full(n_code, -1, dtype="int64")
         day_high = np.full(n_code, np.nan)
         day_low = np.full(n_code, np.nan)
@@ -610,6 +622,24 @@ class DayReplay:
                     if _m.sum() >= 3:
                         sec_breadth[_k] = float(np.mean(pct[_idx][_m] > 0))
 
+            # 资金量能（冲锋号）：本根 bar 全市场成交额
+            try:
+                _amt = float(np.nansum(mat["volume"][:, t] * mat["close"][:, t]))
+            except Exception:
+                _amt = 0.0
+            _cap_ratio = capital.update(_amt)
+
+            # 先锋队存活：已登记的排头兵/夺旗，跌破 10 日 VWAP 即阵亡
+            for _vc in vwatch.alive_codes():
+                _vi = row_of.get(_vc)
+                if _vi is None:
+                    continue
+                _vp = float(mat["close"][_vi, t])
+                if not np.isfinite(_vp):
+                    continue
+                vwatch.update(_vc, _vp, float(vwap10_map.get(_vc, 0.0) or 0.0), float(clock[t]))
+            _s_alive, _s_total, _s_rate = vwatch.survival(now=float(clock[t]), window_s=3600.0)
+
             # 趋同度：全市场上涨占比 + 本赛道上涨占比 + 已动(>1%)占比
             # 用户："大家都已经异口同声趋同了，那时候出现的都是诱多"
             if valid.any():
@@ -617,6 +647,14 @@ class DayReplay:
                 _crowd = float(np.mean(pct[valid] > 1.0))
             else:
                 _breadth_all = _crowd = 0.5
+
+            _breadth_now = float(np.mean(pct[valid] > 0)) if valid.any() else 0.5
+            life_state = life.update(
+                temp=float(regime.temp), breadth=_breadth_now,
+                survival=_s_rate, survival_n=_s_total, capital=_cap_ratio,
+            )
+            life_series.append({"time": time.strftime("%H:%M", time.localtime(int(clock[t]))),
+                                **life_state.to_dict()})
 
             # 龙头代理：当日涨幅进入全池前 1% 且量比>1.5（无板块数据时的近似）
             leader_mask = np.zeros(n_code, dtype=bool)
@@ -780,6 +818,22 @@ class DayReplay:
                     if PATTERN_LATENT_BREAK not in patterns:
                         patterns.append(PATTERN_LATENT_BREAK)
 
+                # 领先度：板块内第几个启动 / 落后首动多久 / 是否夺旗
+                _sector = _sm.get(codes[i]) if sec_index else ""
+                _lead = sector_clock.observe(
+                    code=codes[i], sector=_sector, ts=float(clock[t]),
+                    pct=float(pct[i]),
+                    breakout=("突破10日VWAP" in patterns) or bool(
+                        np.isfinite(prev_high20[i, t]) and price > float(prev_high20[i, t])
+                    ),
+                )
+
+                ev.extra = dict(ev.extra or {})
+                ev.extra.update(_lead.to_dict())
+
+                if _lead.label in (LABEL_VANGUARD, LABEL_FLAG):
+                    vwatch.register(codes[i], _sector, float(clock[t]), price, _vw10)
+
                 _ps = pattern_score(patterns)
                 _floor = None
                 if self.cfg.pattern_floor:
@@ -829,6 +883,9 @@ class DayReplay:
                                    + 0.3 * float(sec_breadth.get(_sm.get(codes[i]), 0.5) if sec_index else 0.5)
                                    + 0.2 * _crowd),
                         temp=regime.temp,
+                        lead_label=_lead.label, lead_score=_lead.score,
+                        phase=(life_state.phase if life_state is not None else ""),
+                        allow_entry=(life_state.allow_entry if life_state is not None else True),
                     )
                     if _st.stage == STAGE_ENTER and _prev_stage != STAGE_ENTER:
                         _fm = fut_max[i, t]
@@ -862,6 +919,15 @@ class DayReplay:
                             "ice_days": int(day_ctx.ice_days) if day_ctx is not None else 0,
                             "hunger": round(float(day_ctx.hunger), 3) if day_ctx is not None else 1.0,
                             "ctx": day_ctx.label() if day_ctx is not None else "",
+                            "lead_label": _lead.label,
+                            "lead_score": round(_lead.score, 1),
+                            "lead_rank": _lead.rank,
+                            "lead_gap_min": round(_lead.lead_gap_min, 1),
+                            "is_flag": bool(_lead.is_flag),
+                            "sector_n": _lead.sector_n,
+                            "phase": life_state.phase if life_state is not None else "",
+                            "survival": round(_s_rate, 2),
+                            "capital": round(_cap_ratio, 2),
                         })
                         entries.append(_row)
                 eval_count += 1
@@ -966,6 +1032,15 @@ class DayReplay:
                         "ice_days": int(day_ctx.ice_days) if day_ctx is not None else 0,
                         "hunger": round(float(day_ctx.hunger), 3) if day_ctx is not None else 1.0,
                         "ctx": day_ctx.label() if day_ctx is not None else "",
+                        "lead_label": _lead.label,
+                        "lead_score": round(_lead.score, 1),
+                        "lead_rank": _lead.rank,
+                        "lead_gap_min": round(_lead.lead_gap_min, 1),
+                        "is_flag": bool(_lead.is_flag),
+                        "sector_n": _lead.sector_n,
+                        "phase": life_state.phase if life_state is not None else "",
+                        "survival": round(_s_rate, 2),
+                        "capital": round(_cap_ratio, 2),
                     }
                 )
 
@@ -1067,6 +1142,8 @@ class DayReplay:
             "t1_decisions": [e for e in (race.events()[_ev0:] if race is not None else []) if e.get("kind") == "T1"],
             "blocked": race.blocked_stats() if race is not None else {},
             "ctx": day_ctx.to_dict() if day_ctx is not None else {},
+            "lifecycle": life_series[-1] if life_series else {},
+            "lifecycle_series": life_series,
             "approximations": [
                 "vwap=3分钟(H+L+C)/3按量加权",
                 "taker/bid 由 bar 推导（外盘占比/收盘位置）",

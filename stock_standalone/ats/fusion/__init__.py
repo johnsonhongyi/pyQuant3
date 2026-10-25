@@ -27,6 +27,25 @@ from ats.fusion.contract import (
 from ats.fusion.engine import FusionBus, FusionEngine, LADDER, leadership_value, tier_of
 from ats.fusion.panel import build_panel, lead_value_table, render_panel
 from ats.fusion.market_ctx import DayContext, MarketHistory, hunger_of, render_context
+from ats.fusion.vanguard import (
+    LABEL_FOLLOW,
+    LABEL_STRIKE,
+    LABEL_VANGUARD,
+    LeadInfo,
+    SectorClock,
+)
+from ats.fusion.lifecycle import (
+    CapitalGauge,
+    LifecycleState,
+    MarketLifecycle,
+    PHASE_ACTION,
+    PHASE_ADVANCE,
+    PHASE_ATTACK,
+    PHASE_ICE,
+    PHASE_RETREAT,
+    PHASE_VANGUARD_DYING,
+    VanguardWatch,
+)
 from ats.fusion.shadow import FusionShadow
 from ats.fusion.trap import (
     ACT_ADD,
@@ -106,6 +125,21 @@ __all__ = [
     "MarketHistory",
     "hunger_of",
     "render_context",
+    "SectorClock",
+    "LeadInfo",
+    "LABEL_VANGUARD",
+    "LABEL_STRIKE",
+    "LABEL_FOLLOW",
+    "VanguardWatch",
+    "CapitalGauge",
+    "MarketLifecycle",
+    "LifecycleState",
+    "PHASE_ATTACK",
+    "PHASE_ADVANCE",
+    "PHASE_VANGUARD_DYING",
+    "PHASE_RETREAT",
+    "PHASE_ICE",
+    "PHASE_ACTION",
     "MarketRegime",
     "MarketRegimeTracker",
     "RegimeSample",

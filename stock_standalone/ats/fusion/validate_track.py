@@ -88,6 +88,11 @@ def run(days=DAYS, top_n: int = 6000, step: int = 3, rule: Optional[DeployRule] 
         for e in ents:
             e["path"] = deploy_path(e, rule)
         dep = [e for e in ents if e["path"]]
+        dep.sort(key=lambda x: (
+            float(x.get("persist") or 0) + 0.5 * float(x.get("lead_score") or 0)
+            - 40.0 * max(0.0, float(x.get("consensus") or 0) - 0.4)
+        ), reverse=True)
+        dep = dep[:3]   # 每日最多 3 只（宁可不做）
         ev = res.meta.get("evictions") or []
         post = [e for e in ev if e.get("post_entry")]
         pool += ents
@@ -153,6 +158,32 @@ def _sum_blocked(rows: List[Dict[str, Any]]) -> Dict[str, int]:
     return dict(c)
 
 
+def _label_split(rows: List[Dict[str, Any]], ans: set) -> List[Dict[str, Any]]:
+    """按领先度标签（排头兵/冲锋队/夺旗/跟风/无导向）统计事后表现。"""
+    out = []
+    for lab in ("排头兵", "夺旗", "冲锋队", "无导向", "跟风"):
+        g = [e for e in rows if (e.get("lead_label") or "") == lab]
+        if not g:
+            continue
+        a = _agg(g, ans)
+        a["label"] = lab
+        out.append(a)
+    return out
+
+
+def _phase_split(rows: List[Dict[str, Any]], ans: set) -> List[Dict[str, Any]]:
+    """按战役阶段（反攻/攻城略地/先锋阵亡/退守/冰点）统计事后表现。"""
+    out = []
+    for lab in ("反攻", "攻城略地", "先锋阵亡", "退守", "冰点"):
+        g = [e for e in rows if (e.get("phase") or "") == lab]
+        if not g:
+            continue
+        a = _agg(g, ans)
+        a["phase"] = lab
+        out.append(a)
+    return out
+
+
 def _count_actions(rows: List[Dict[str, Any]]) -> Dict[str, int]:
     from collections import Counter
 
@@ -202,6 +233,8 @@ def discrimination(data: Dict[str, Any]) -> Dict[str, Any]:
         "list": sorted({e["code"] for e in a}),
     }
     out["lead_table"] = lead_value_table(rows)
+    out["lead_label_table"] = _label_split(rows, ans)
+    out["phase_table"] = _phase_split(rows, ans)
     out["ans_agg"] = _agg(a, ans)
     out["other_agg"] = _agg(b, ans)
     return out
@@ -259,6 +292,28 @@ def render(data: Dict[str, Any]) -> str:
         for f, v in dc["feat"].items():
             lines.append("| {} | {} | {} | {:+} |".format(f, v["ans"], v["other"], v["diff"]))
         lines.append("")
+    lbl = dc.get("lead_label_table") or []
+    if lbl:
+        lines.append("## 四、领先度（排头兵 / 冲锋队 / 夺旗 / 跟风）")
+        lines.append("")
+        lines.append("| 领先度 | 笔数 | 命中榜单 | 当日收盘 | T+1 | T+1胜率 |")
+        lines.append("|---|---|---|---|---|---|")
+        for r in lbl:
+            lines.append("| {} | {} | {} | {:+.2f}% | {:+.2f}% | {:.0f}% |".format(
+                r["label"], r["n"], r["ans"], r["close"], r["t1"], r["win"]))
+        lines.append("")
+
+    ph = dc.get("phase_table") or []
+    if ph:
+        lines.append("## 五、战役阶段（反攻 / 攻城略地 / 先锋阵亡 / 退守 / 冰点）")
+        lines.append("")
+        lines.append("| 阶段 | 笔数 | 命中榜单 | 当日收盘 | T+1 | T+1胜率 |")
+        lines.append("|---|---|---|---|---|---|")
+        for r in ph:
+            lines.append("| {} | {} | {} | {:+.2f}% | {:+.2f}% | {:.0f}% |".format(
+                r["phase"], r["n"], r["ans"], r["close"], r["t1"], r["win"]))
+        lines.append("")
+
     lt = dc.get("lead_table") or []
     if lt:
         lines.append("## 三、带头价值分档（温度越低、趋同越低，才值钱）")

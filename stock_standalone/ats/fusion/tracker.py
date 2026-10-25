@@ -102,6 +102,10 @@ class TrackState:
     traps_seen: Dict[str, int] = field(default_factory=dict)   # 诱多陷阱计数
     traps: List[str] = field(default_factory=list)             # 当前 bar 命中的陷阱
     consensus: float = 0.0                                     # 趋同度（0~1）
+    lead_label: str = ""                                       # 排头兵/冲锋队/夺旗/跟风/无导向
+    lead_score: float = 50.0                                   # 领先度分
+    phase: str = ""                                            # 战役阶段（反攻/攻城略地/先锋阵亡/退守/冰点）
+    allow_entry: bool = True                                   # 当前阶段是否允许入局
     temp: float = 0.0                                          # 市场温度
     gap_risk: float = 0.0                                      # 跨日风险（昨日大涨/长上影）
     risk_notes: List[str] = field(default_factory=list)
@@ -189,6 +193,9 @@ class TrackState:
             "traps_seen": dict(self.traps_seen),
             "gap_risk": round(self.gap_risk, 1),
             "consensus": round(self.consensus, 3),
+            "lead_label": self.lead_label,
+            "lead_score": round(self.lead_score, 1),
+            "phase": self.phase,
             "temp": round(self.temp, 1),
             "risk_notes": list(self.risk_notes),
             "best_tier": self.best_tier,
@@ -288,6 +295,10 @@ class RaceTracker:
         risk_notes: Optional[List[str]] = None,
         consensus: float = 0.0,
         temp: float = 0.0,
+        lead_label: str = "",
+        lead_score: float = 50.0,
+        phase: str = "",
+        allow_entry: bool = True,
     ) -> TrackState:
         code = str(code).zfill(6)
         st = self._states.get(code)
@@ -312,6 +323,12 @@ class RaceTracker:
         st.gap_risk = float(gap_risk or 0.0)
         st.consensus = float(consensus or 0.0)
         st.temp = float(temp or 0.0)
+        if lead_label:
+            st.lead_label = lead_label
+            st.lead_score = float(lead_score)
+        if phase:
+            st.phase = phase
+        st.allow_entry = bool(allow_entry)
         if risk_notes:
             st.risk_notes = list(risk_notes)[:4]
         for t in traps:
@@ -499,6 +516,11 @@ class RaceTracker:
             raw -= self.cfg.trap_persist_penalty * trap_severity(st.traps)
         if st.gap_risk > 0:
             raw -= 0.10 * st.gap_risk
+        # 领先度：排头兵/夺旗加分，跟风扣分（跟风额外重罚，但不硬拦）
+        if st.lead_label:
+            raw += (st.lead_score - 50.0) * 0.12
+            if st.lead_label == "跟风":
+                raw -= 15.0
         return round(max(0.0, min(100.0, raw)), 1)
 
     def _advance(self, st: TrackState, price: float, vwap10: float, ts: float) -> None:
@@ -599,6 +621,14 @@ class RaceTracker:
         if st.consensus >= cfg.consensus_max and st.temp >= cfg.consensus_hot_temp:
             self._block(st, "高温趋同(诱多)")
             return
+        # 战役阶段：退守期不开新仓（用户："先锋全灭就退守"）
+        # 先锋阵亡期只放"排头兵/夺旗"——最强的还能打，跟风的一律不碰
+        if st.phase == "退守":
+            self._block(st, "阶段:退守")
+            return
+        if st.phase == "先锋阵亡" and st.lead_label not in ("排头兵", "夺旗"):
+            self._block(st, "阶段:先锋阵亡(非排头兵)")
+            return
 
         if st.persist < cfg.enter_persist:
             return
@@ -674,10 +704,16 @@ class DeployRule:
     trend_pattern: str = "两阳加速"
     safe_pattern: str = "缩量转放量"
     consensus_max: float = 0.60      # 趋同度超过此值不下单（大家都涨了，跟单容易被埋）
+    reject_follow: bool = True       # 跟风票不下单（板块已启动30分钟+才动，没有导向性）
+    # C 路径（排头兵无形态直接下单）默认关闭：
+    # 5 天实测把它打开后，多出的 2 笔 T+1 都是负的——领先度是"归因"维度，
+    # 不能替代"两阳加速/缩量转放量"这个入场维度。要开必须先用 60 日样本验证。
+    allow_vanguard_path: bool = False
     lead_value_min: float = 0.50     # 带头价值下限（低温低趋同才值钱）
 
 
 PATH_TREND = "A 主升延续"
+PATH_VANGUARD = "C 排头兵"
 PATH_SAFE = "B 低风险收敛"
 
 
@@ -697,7 +733,13 @@ def deploy_path(entry: Dict[str, Any], rule: Optional[DeployRule] = None) -> str
         return ""
     if float(entry.get("lead_value") or 0.0) < r.lead_value_min:
         return ""
+
     persist = float(entry.get("persist") or 0.0)
+    # C 排头兵路径：板块内第一个/第二个启动、或第一个夺旗的，不要求"两阳加速"
+    # （用户："要的就是排头兵、冲锋队、夺旗的生力军"——它们启动时本来就没有第二根阳线）
+    if r.allow_vanguard_path and entry.get("lead_label") in ("排头兵", "夺旗") \
+            and persist >= r.persist_min:
+        return PATH_VANGUARD
     if r.trend_pattern in pats and persist >= r.persist_min:
         return PATH_TREND
     if r.safe_pattern in pats and persist >= r.safe_persist_min:

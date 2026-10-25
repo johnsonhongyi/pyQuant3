@@ -68,6 +68,9 @@ def build_panel(
         "session": Counter(),
         "temp_bucket": Counter(),
         "ctx": meta.get("ctx") or {},
+        "lifecycle": meta.get("lifecycle") or {},
+        "lifecycle_series": meta.get("lifecycle_series") or [],
+        "phase": Counter(),
         "consensus": [],
         "lead_value": [],
     }
@@ -77,6 +80,8 @@ def build_panel(
         panel["structure"][r.get("structure") or "OTHER"] += 1
         for p in (r.get("patterns") or []):
             panel["pattern"][p] += 1
+        if r.get("phase"):
+            panel["phase"][r["phase"]] += 1
         for t in (r.get("traps") or []):
             panel["trap"][t] += 1
         tm = str(r.get("time") or "")
@@ -140,6 +145,25 @@ def render_panel(panel: Dict[str, Any]) -> str:
     if panel.get("consensus_mean") is not None:
         lines.append("- 趋同度均值 {:.0%}｜带头价值均值 ×{:.2f}（低温低趋同时更高）".format(
             panel["consensus_mean"], panel.get("lead_value_mean", 0.0)))
+    lines.append("")
+
+    lc = panel.get("lifecycle") or {}
+    if lc:
+        lines.append("- **战役阶段：{}｜{}**｜先锋存活 {:.0%}（{}只）｜量能 {:.2f} {}".format(
+            lc.get("phase", ""), lc.get("action", ""), float(lc.get("survival") or 0),
+            lc.get("survival_n", 0), float(lc.get("capital") or 0), lc.get("capital_label", "")))
+        # 阶段切换时间线（只列变化点）
+        seq = panel.get("lifecycle_series") or []
+        trans, last = [], None
+        for x in seq:
+            if x.get("phase") != last:
+                trans.append("{} {}".format(x.get("time", ""), x.get("phase", "")))
+                last = x.get("phase")
+        if trans:
+            lines.append("- 阶段切换：{}".format(" → ".join(trans[:8])))
+    if panel["phase"]:
+        lines.append("- 阶段分布：{}".format("｜".join(
+            "{} {}".format(k, v) for k, v in panel["phase"].most_common())))
     lines.append("")
 
     lines.append("### 漏斗（每一层损耗）")
