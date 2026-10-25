@@ -129,7 +129,8 @@ class TestDeployRule(unittest.TestCase):
 
     def _entry(self, **kw):
         base = dict(stage=STAGE_ENTER, theme_rank=0.8, first_pct=2.0,
-                    efficiency=0.9, persist=65.0, patterns={"两阳加速": 1})
+                    efficiency=0.9, persist=65.0, patterns={"两阳加速": 1},
+                    consensus=0.30, lead_value=0.70)
         base.update(kw)
         return base
 
@@ -152,6 +153,16 @@ class TestDeployRule(unittest.TestCase):
     def test_reject_no_pattern(self):
         from ats.fusion.tracker import is_deployable
         self.assertFalse(is_deployable(self._entry(patterns={})), "无形态不应下单")
+
+    def test_reject_consensus(self):
+        from ats.fusion.tracker import is_deployable
+        self.assertFalse(is_deployable(self._entry(consensus=0.75)),
+                         "趋同>=0.6 时不下单（大家都涨了，跟单容易被埋）")
+
+    def test_reject_low_lead_value(self):
+        from ats.fusion.tracker import is_deployable
+        self.assertFalse(is_deployable(self._entry(lead_value=0.40)),
+                         "带头价值<0.5（高温高趋同）不下单")
 
 
 if __name__ == "__main__":
