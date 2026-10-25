@@ -1579,6 +1579,24 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"打开决策流水面板失败: {e}\n{traceback.format_exc()}")
             messagebox.showerror("Error", f"Failed to open Decision Flow Panel: {e}")
 
+    def open_fusion_ladder_dialog(self):
+        """打开或快速置顶融合信号梯度监视器 (Alt+R 轮转与快速查看)"""
+        try:
+            from ats.ui.fusion_ladder_dialog import open_fusion_ladder_dialog
+            win = open_fusion_ladder_dialog(parent_window=None)
+            if win:
+                if getattr(win, "is_hidden_state", False):
+                    win.show_normal_position()
+                else:
+                    win.show()
+                win.raise_()
+                win.activateWindow()
+                self.sync_rotator_windows()
+                return win
+        except Exception as e:
+            logger.error(f"[MonitorTK] open_fusion_ladder_dialog error: {e}")
+            return None
+
     def open_ats_panel(self):
         """打开运行 ATS 智能操盘终端 (Alt+P)"""
         # 防重入与防抖保护：限制高频重复触发 (例如 300ms 以内的连续按键或本地/全局双重触发事件)
@@ -16937,6 +16955,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if result["stock_monitor"] == 0 and ("股票异动数据监控" in title or "股票异动" in title):
                     result["stock_monitor"] = hwnd
 
+                if result.get("fusion_ladder", 0) == 0 and any(k in title for k in ["融合信号梯度", "Signal Fusion Ladder", "融合梯度"]):
+                    result["fusion_ladder"] = hwnd
+
                 if result["visualizer"] != 0 and result["stock_monitor"] != 0:
                     return False
 
@@ -17086,6 +17107,27 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if ipo_hwnd not in current_visible_hwnds:
                         current_visible_hwnds.append(ipo_hwnd)
                         name_map[ipo_hwnd] = "🎯 新股次新超短检测 (IPODetector)"
+        except Exception:
+            pass
+
+        # 5.3. 🧬 融合信号梯度监视器 (PyQt6 独立顶级窗口或子进程)
+        try:
+            fusion_hwnd = 0
+            try:
+                from ats.ui.fusion_ladder_dialog import get_open_fusion_ladder_dialog
+                f_win = get_open_fusion_ladder_dialog()
+                if f_win is not None and f_win.isVisible():
+                    fusion_hwnd = int(f_win.winId())
+            except Exception:
+                fusion_hwnd = 0
+            if not fusion_hwnd:
+                fusion_hwnd = self._scan_windows_cached().get('fusion_ladder', 0)
+            if fusion_hwnd:
+                import ctypes
+                if ctypes.windll.user32.IsWindow(fusion_hwnd) and ctypes.windll.user32.IsWindowVisible(fusion_hwnd):
+                    if fusion_hwnd not in current_visible_hwnds:
+                        current_visible_hwnds.append(fusion_hwnd)
+                        name_map[fusion_hwnd] = "🧬 融合信号梯度监视器 (FusionLadder)"
         except Exception:
             pass
 

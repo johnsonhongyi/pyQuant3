@@ -219,6 +219,15 @@ class ATSWindowManager:
         except Exception:
             pass
 
+        # 3.4 全市场融合梯度监视器
+        try:
+            from ats.ui import fusion_ladder_dialog as fld
+            if hasattr(fld, "_INSTANCE") and fld._INSTANCE and not _safe_isdeleted(fld._INSTANCE):
+                if fld._INSTANCE.isVisible() or getattr(fld._INSTANCE, "is_hidden_state", False):
+                    windows["fusion_ladder_dialog"] = fld._INSTANCE
+        except Exception:
+            pass
+
         # 4. 全局扫描 topLevelWidgets，查漏补缺任意其他未注册的可见顶层独立窗口
         try:
             for w in QApplication.topLevelWidgets():

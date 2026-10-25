@@ -2400,9 +2400,9 @@ class ATSMainWindow(QMainWindow):
         self.btn_sector_miner.clicked.connect(self.open_sector_rotation_miner)
         toolbar.addWidget(self.btn_sector_miner)
 
-        self.btn_fusion_ladder = QPushButton("梯度🧬")
-        self.btn_fusion_ladder.setToolTip("打开全市场信号融合梯度监视器：实时影子梯度 / 按日回放 / 验收复盘 (完全独立非模态运行)")
-        self.btn_fusion_ladder.setStyleSheet("QPushButton { background-color: #2a1e3a; color: #c8a2ff; font-weight: bold; border: 1px solid #a97bff; border-radius: 3px; padding: 1px 4px; font-size: 8.5pt; } QPushButton:hover { background-color: #a97bff; color: #000; }")
+        self.btn_fusion_ladder = QPushButton("梯🧬")
+        self.btn_fusion_ladder.setToolTip("融合梯度监视器：实时影子 / 回放 / 回补 (完全独立非模态)")
+        self.btn_fusion_ladder.setStyleSheet("QPushButton { background-color: #2a1e3a; color: #c8a2ff; font-weight: bold; border: 1px solid #a97bff; border-radius: 3px; padding: 1px 3px; font-size: 8.5pt; } QPushButton:hover { background-color: #a97bff; color: #000; }")
         self.btn_fusion_ladder.clicked.connect(self.open_fusion_ladder)
         toolbar.addWidget(self.btn_fusion_ladder)
         
@@ -2418,7 +2418,7 @@ class ATSMainWindow(QMainWindow):
         
         toolbar.addSeparator()
         
-        self.lbl_ipc_status = QLabel("🔌IPC")
+        self.lbl_ipc_status = QLabel("⚡IPC")
         self.lbl_ipc_status.setToolTip("IPC 通道: 🔌 已连接 (实时行情数据流已就绪)")
         self.lbl_ipc_status.setStyleSheet("color: #00ff88; font-weight: bold; font-size: 8.5pt; padding: 0 1px;")
         toolbar.addWidget(self.lbl_ipc_status)
@@ -5055,8 +5055,9 @@ class ATSMainWindow(QMainWindow):
 
         # 4. 更新 UI 显示与计算
         if self.current_df is not None and not self.current_df.empty:
-            self.lbl_ipc_status.setText("  IPC 通道: 🔌 实时接入中  |  ")
-            self.lbl_ipc_status.setStyleSheet("color: #00ff88; font-weight: bold;")
+            self.lbl_ipc_status.setText("⚡IPC")
+            self.lbl_ipc_status.setToolTip("IPC 通道: 🔌 实时接入中 (行情流就绪)")
+            self.lbl_ipc_status.setStyleSheet("color: #00ff88; font-weight: bold; font-size: 8.5pt; padding: 0 1px;")
 
             # ⚡ 策略过滤集合并异步刷新 (50ms 延迟，接入 _queue_latest_ui_task 防饥饿并丢弃中间过期帧)
             if getattr(self, 'query_expr', ''):

@@ -56,6 +56,10 @@ def _read_sector_snapshot_sources():
             path = candidates[-1] if candidates else None
         except Exception:
             pass
+        if path is None:
+            candidates = sorted(f for f in glob.glob(os.path.join(snapshot_dir, 'bidding_*.json.gz'))
+                                if re.search(r'bidding_\d{8}\.json\.gz$', f))
+            path = candidates[-1] if candidates else None
     else:
         try:
             ram_path = cct.get_ramdisk_path('bidding_session_data.json.gz')
@@ -84,7 +88,7 @@ def _read_sector_snapshot_sources():
     usable_sectors = sum(1 for name in sector_data
                          if is_valid_sector_name(name)
                          and not any(ex in name for ex in ('实时报警', '系统报警', '异动汇总', '报警标注')))
-    if usable_sectors >= 3 or non_trade_day:
+    if usable_sectors >= 3:
         return non_trade_day, sector_data, [], {}, {}
 
     try:
@@ -525,14 +529,15 @@ class SectorHeatmapWidget(QWidget):
             finally:
                 self._has_live_ipc_data = had_live_ipc_data
                 self._snapshot_applying = False
+            if getattr(self, 'sectors', None) and len(self.sectors) >= 3:
+                return
             if getattr(self, '_cached_session_sectors', None) is not previous_session:
                 return
         if non_trade_day:
             self._non_trade_snapshot_missing = True
-            self._cached_raw_sector_data = {}
-            self.sectors = []
-            self.sector_to_codes = {}
-            self.render_grid(force=True)
+            if not getattr(self, 'sectors', None) or len(self.sectors) < 3:
+                self.sector_to_codes = {}
+                self.load_mock_sectors()
             return
         self._non_trade_snapshot_missing = False
         if reversal_pool:

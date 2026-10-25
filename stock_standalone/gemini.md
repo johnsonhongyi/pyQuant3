@@ -1,5 +1,46 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-25 23:50 【融合梯度新窗口独立性、磁吸贴边、资金主线级右键联动、TK Alt+R轮转与Ramdisk/盘后上下文全业务闭环】(`docs/tasks/2026-10-25_2250_修复融合梯度新窗口独立性与磁吸贴边功能.md`, `ats/ui/fusion_ladder_dialog.py`, `instock_MonitorTK.py`, `ats/ui/main_window.py`, `ats/ui/heatmap_widget.py`, `tests/test_fusion_ladder_dialog_snapping.py`)
+- [x] **【系统级独立顶级窗口与磁吸贴边全套闭环】**：
+  - 继承 `(QWidget, WindowMixin)` 并通过 `super().__init__(None)` 彻底剥离 Win32 HWND Owner 从属关系，支持独立最小化/最大化/关闭及 Windows 任务栏独立实体；
+  - 支持屏幕顶边、左边、右边 35px 舒适磁吸吸附（`_detect_and_snap`，按最小距离几何精准判定）；
+  - 贴边后鼠标移开 400ms 自动折叠至 5px 感应条（`hide_to_edge`），透明度 0.35；鼠标悬停 200ms 自动平滑滑出（`show_normal_position`），透明度 1.0；
+  - 增加「📌 置顶」支持，置顶与磁吸互斥；快捷键 `T` 切换置顶，`Escape` 优先折叠隐藏；
+  - 纳入 `ats_window_manager.py` 全局管理（支持手动全量快照 F12 及贴边隐藏状态捕获）；
+- [x] **【右侧板块非交易日空白修复与工具栏极简紧凑化】**：
+  - `heatmap_widget.py` 快照缺失时平滑回退最新已有 `bidding_*.json.gz` 快照，拦截空数据清空；
+  - 主窗口工具栏按钮改为极简“梯🧬”，IPC 标签优化为极简“⚡IPC”，彻底杜绝撑爆挤压状态栏空间；
+- [x] **【表格基础字段补齐、字典级 ToolTip 与精准数值排序】**：
+  - 补全股票名称（name）列与当时现价（price）列；
+  - 配备字典级专业 ToolTip 悬浮说明（RAR/位/接/意/环/MFE/MAE/级别定义及好坏标准）；
+  - 采用 `NumericTableWidgetItem` 实现全列高精度数值/文本升降序排序；支持极窄列模式（`chk_narrow`）与防抖持久化；
+- [x] **【右键菜单全面对齐 ATS 资金主线】**：
+  - 📋 复制股票代码与名称（剪贴板直达）；
+  - ⚡ 发送到异动联动：调用 `ats.ui.base_table.send_to_linkage(code, name, self)` 发送到 Win32 管道 `instock_tk_pipe`，同步状态栏；
+  - 📈 打开 SBC 通道走势图与 🔍 查看个股详情；
+  - 🎯 发送到新股次新超短检测工具：调用 `ats.ui.ipo_detector_ipc.send_stock_to_ipo_detector(code, name)`；
+  - 🧬 调出 DNA 特征审计报告：调用 `ats.ui.multi_period_dialog.run_dna_audit_batch_qt`；
+  - ⭐ 设为/取消全系统重点关注：对接 `GlobalFavoriteManager`；
+  - 全局大看板与深挖工具：每日涨停天梯看板、板块雷达、主线回踩深挖；
+- [x] **【添加梯度到 TK 的 Alt+R 轮转功能与快速置顶打开查看】**：
+  - 在 `instock_MonitorTK.py` 的外部窗口缓存扫描与 `_get_all_open_trade_windows` 中纳入融合梯度监视器（`🧬 融合信号梯度监视器 (FusionLadder)`）；
+  - 在 `FusionLadderDialog.changeEvent` 中捕获 `ActivationChange` 事件：当通过 Alt+R 轮转切入激活时，若处于边缘折叠隐藏状态，自动平滑展开（`show_normal_position`）瞬间呈现；
+  - 在 `instock_MonitorTK.py` 中增加 `open_fusion_ladder_dialog(self)` 方法，支持一键打开并快速置顶；
+- [x] **【实时影子流 Ramdisk 双通道定时持久化与异常重启自愈】**：
+  - 探测高速内存虚拟盘（如 `R:\fusion_shadow`, `G:\fusion_shadow`）；
+  - `persist_shadow_records`：同时原子写入 Ramdisk（微秒级防卡顿）与 `logs/fusion_shadow/{day}.jsonl`（高可靠物理落盘）；
+  - `load_live_rows`：启动或刷新时优先从 Ramdisk 读取最新快照，若实盘中发生异常崩溃或强退，重新打开秒级自愈复原当日全部梯度数据；
+  - 跑完回放自动执行 `_persist_replay_shadow_and_context` 回补落盘（回测即回补数据）；
+- [x] **【盘后自动沉淀与次日交接，每日自动更新上下文杜绝反复重启】**：
+  - 启动 15 秒定时巡检：自动感知跨日变更，实时更新日期下拉框并加载当日数据；
+  - 时间 >= 15:00:00 且当日未沉淀时，自动调用 `SessionContextStore.close_day()` 固化沉淀至 `session_ctx/{day}.json` 并执行 `handoff()` 完成次日交接；
+- [x] **【专项自动化测试与全量融合测试 100% 纯绿】**：
+  - 专项测试 `tests/test_fusion_ladder_dialog_snapping.py`（14/14 PASS）；
+  - 全链路闭环深度集成审计 `tests/test_fusion_full_chain_audit.py`（1/1 PASS，覆盖 6 大环节端到端无死角闭环）；
+  - 全量 `pytest tests/ -k fusion` 183 项测试 **全部 100% 纯绿通过（183/183 PASS，耗时 15.32s）**；
+  - 语法编译 `python -m py_compile` 0 错误。
+
+
 ## 2026-10-23 23:25 【修复新股面板启动初期空值KeyError防御闭环】(`docs/tasks/2026-10-23_2315_修复新股面板启动空值KeyError防御闭环.md`, `ats/ui/new_stock_panel.py`, `tests/test_multiday_pct_base_view.py`)
 - [x] **【彻底根绝 ATS 启动报 `IPO preparation failed: 'code'` 警告】**：
   - **前置边界空值守卫**：在 `_merge_ipc_frame` 与 `_prepare_stock_table` 中，增加针对 `data is None or getattr(data, 'empty', True) or 'code' not in data.columns` 的前置防护，启动真空期新股数据未拉取完毕时优雅降级返回，绝不盲目执行 `data['code']`；
