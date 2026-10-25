@@ -26,6 +26,16 @@ from ats.fusion.contract import (
 )
 from ats.fusion.engine import FusionBus, FusionEngine, LADDER, tier_of
 from ats.fusion.shadow import FusionShadow
+from ats.fusion.tracker import (
+    RaceTracker,
+    TrackConfig,
+    TrackState,
+    STAGE_ENTER,
+    STAGE_EVICT,
+    STAGE_HOLD,
+    STAGE_WATCH,
+    STAGE_WEAKEN,
+)
 from ats.fusion.regime import (
     FLIP_ARMED,
     FLIP_CONFIRMED,
@@ -50,6 +60,14 @@ __all__ = [
     "FusionEngine",
     "FusionBus",
     "FusionShadow",
+    "RaceTracker",
+    "TrackConfig",
+    "TrackState",
+    "STAGE_WATCH",
+    "STAGE_ENTER",
+    "STAGE_HOLD",
+    "STAGE_WEAKEN",
+    "STAGE_EVICT",
     "LaunchTracker",
     "build_event",
     "load_config",

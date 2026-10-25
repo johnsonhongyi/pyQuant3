@@ -51,6 +51,7 @@ from ats.fusion.context import get_daily_context
 from ats.fusion.anomaly import detect_patterns, pattern_score, PATTERN_LATENT_BREAK
 from ats.fusion.premarket import get_premarket
 from ats.fusion.structure import classify as classify_structure
+from ats.fusion.tracker import RaceTracker, TrackConfig, render_entries, STAGE_ENTER, STAGE_EVICT
 from ats.fusion.sector import get_sector_map, get_theme_map, sector_strength, load_external_heat
 from dataclasses import replace
 
@@ -138,6 +139,9 @@ class ReplayConfig:
     require_pattern: bool = True     # L3+ 必须命中至少一种异动形态（千金买马骨）
     pattern_floor: bool = False      # 形态是否可以直接抬级别（挖掘显示会稀释质量，默认关）
     first_only: bool = False         # 每只票首次 L2+ 后不再评估（全市场自选用，省 3~5 倍）
+    track: bool = True               # 赛马跟踪：带旧信号、第一波入局、入局后剔除
+    track_enter_persist: float = 55.0   # 入局所需持续性分
+    track_max_chase: float = 5.0        # 首异动到入局的最大涨幅（第一波）
 
 
 @dataclass
@@ -150,6 +154,7 @@ class ReplayResult:
     orders: List[Any] = field(default_factory=list)
     trades: List[Any] = field(default_factory=list)
     trade_stats: Dict[str, Any] = field(default_factory=dict)
+    entries: List[Dict[str, Any]] = field(default_factory=list)   # 赛马入局/剔除事件
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -160,6 +165,7 @@ class ReplayResult:
             "orders": [o.to_dict() for o in self.orders],
             "trades": [t.to_dict() for t in self.trades],
             "trade_stats": self.trade_stats,
+            "entries": self.entries,
             "records": self.records,
         }
 
@@ -221,6 +227,8 @@ class DayReplay:
         self.cfg = config or ReplayConfig()
         self.engine = engine or FusionEngine()
         self._day_cache: Dict[Tuple[str, str], Dict[str, np.ndarray]] = {}
+        # 赛马跟踪器：跨日复用同一实例才能携带"昨日入局"状态
+        self.tracker: Optional[RaceTracker] = None
 
     # -- 基础取数 ---------------------------------------------------------
     def days(self) -> List[str]:
@@ -423,6 +431,17 @@ class DayReplay:
         }
         focus_diag: Dict[str, Dict[str, Any]] = {}
         rar_samples: List[float] = []
+        # 赛马跟踪：一只票一条状态，跨 bar 连续迭代（带旧信号）
+        entries: List[Dict[str, Any]] = []
+        race: Optional[RaceTracker] = None
+        if self.cfg.track:
+            if self.tracker is None:
+                self.tracker = RaceTracker(
+                    TrackConfig(enter_persist=self.cfg.track_enter_persist,
+                                enter_max_chase=self.cfg.track_max_chase)
+                )
+            race = self.tracker
+        _ev0 = len(race.events()) if race is not None else 0
         self._rar_by_t: Dict[int, List[float]] = {}
 
         fut_max, fut_min = _future_extremes(mat["close"])
@@ -739,6 +758,38 @@ class DayReplay:
                 # 千金买马骨：没有明确异动形态的，最多给到 L2
                 if self.cfg.require_pattern and decision.tier >= 3 and not patterns:
                     decision = self.engine.evaluate(ev, regime, now=float(clock[t]), tier_cap=2)
+
+                # ---- 赛马跟踪：把这根 bar 接进这只票的历史（带上旧信号）----
+                # 注意：无论是否被否决、是否达到记录门槛，都要更新，
+                # 否则"被否决一次就永久失联"，正是之前召回上不去的根因。
+                if race is not None:
+                    _before = race.get(codes[i])
+                    _prev_stage = _before.stage if _before is not None else ""
+                    _st = race.update(
+                        code=codes[i], ts=float(clock[t]), price=price, pct=float(pct[i]),
+                        vwap10=_vw10, vwap=vw, vol_ratio=vol_ratio,
+                        tier=decision.tier, rar=decision.rar, patterns=patterns, day=day,
+                        anomaly=bool(patterns) or decision.tier >= 2,
+                    )
+                    if _st.stage == STAGE_ENTER and _prev_stage != STAGE_ENTER:
+                        _fm = fut_max[i, t]
+                        _fn = fut_min[i, t]
+                        _row = _st.to_dict()
+                        _row.update({
+                            "ts": int(clock[t]),
+                            "mfe": round((float(_fm) / price - 1.0) * 100.0, 2) if np.isfinite(_fm) else 0.0,
+                            "mae": round((float(_fn) / price - 1.0) * 100.0, 2) if np.isfinite(_fn) else 0.0,
+                            "close_ret": round(
+                                (float(mat["close"][i, -1]) / price - 1.0) * 100.0, 2
+                            ) if np.isfinite(mat["close"][i, -1]) else 0.0,
+                            "sector": _sm.get(codes[i]) if sec_index else "",
+                            "theme": max(_tm.get(codes[i]) or [""], key=lambda x: theme_rank.get(x, 0.0)) if theme_index else "",
+                            "theme_rank": round(max([theme_rank.get(x, 0.5) for x in _tm.get(codes[i])] or [0.5]), 2) if theme_index else 0.0,
+                            "sector_rank": round(float(sec_rank.get(_sm.get(codes[i]), 0.5)), 2) if sec_index else 0.0,
+                            "structure": classify_structure(_dc, price, float(pct[i])),
+                            "session": "AM" if time.localtime(int(clock[t])).tm_hour < 13 else "PM",
+                        })
+                        entries.append(_row)
                 eval_count += 1
                 t_rar.append(decision.rar)
                 if len(rar_samples) < 50000:
@@ -819,6 +870,11 @@ class DayReplay:
                         "pattern_score": round(pattern_score(patterns), 1),
                         "leader": bool(leader_mask[i]),
                         "veto": decision.veto_reason,
+                        "track_stage": race.get(codes[i]).stage if race is not None and race.get(codes[i]) else "",
+                        "persist": race.get(codes[i]).persist if race is not None and race.get(codes[i]) else 0.0,
+                        "attach_n": race.get(codes[i]).evidence_count() if race is not None and race.get(codes[i]) else 0,
+                        "first_pct": round(race.get(codes[i]).first_pct, 2) if race is not None and race.get(codes[i]) else 0.0,
+                        "chain": race.get(codes[i]).chain() if race is not None and race.get(codes[i]) else "",
                     }
                 )
 
@@ -888,6 +944,9 @@ class DayReplay:
             "orders_filled": sum(1 for o in orders if o.status == "FILLED"),
             "trades": len(trades),
             "trade_stats": trade_stats,
+            "entries": len(entries),
+            "entries_detail": entries,
+            "evictions": [e for e in (race.events()[_ev0:] if race is not None else []) if e.get("kind") == STAGE_EVICT],
             "approximations": [
                 "vwap=3分钟(H+L+C)/3按量加权",
                 "taker/bid 由 bar 推导（外盘占比/收盘位置）",
@@ -899,6 +958,7 @@ class DayReplay:
         return ReplayResult(
             day=day, records=records, regime_series=regime_series,
             tier_stats=stats, meta=meta, orders=orders, trades=trades, trade_stats=trade_stats,
+            entries=entries,
         )
 
     def discover(
@@ -1271,6 +1331,41 @@ def render_report(result: ReplayResult, top: int = 20) -> str:
 
     if result.orders:
         lines.append(render_trades(result.orders, result.trades))
+        lines.append("")
+
+    ents = result.entries or result.meta.get("entries_detail") or []
+    if ents:
+        lines.append(render_entries(ents, result.day, top=20))
+        # 入局后表现
+        _mfe = [float(e.get("mfe") or 0.0) for e in ents]
+        _mae = [float(e.get("mae") or 0.0) for e in ents]
+        _cr = [float(e.get("close_ret") or 0.0) for e in ents]
+        _chase = [float(e.get("since_first_pct") or 0.0) for e in ents]
+        lines.append(
+            "- 入局 {} 笔｜平均自首异动涨幅 {:+.2f}%（第一波）｜之后MFE {:+.2f}%｜MAE {:+.2f}%｜收盘 {:+.2f}%".format(
+                len(ents), float(np.mean(_chase)) if _chase else 0.0,
+                float(np.mean(_mfe)) if _mfe else 0.0,
+                float(np.mean(_mae)) if _mae else 0.0,
+                float(np.mean(_cr)) if _cr else 0.0,
+            )
+        )
+        lines.append("")
+
+    _all_ev = result.meta.get("evictions") or []
+    _ev = [e for e in _all_ev if e.get("post_entry")]
+    if _all_ev:
+        _pnl = [float(e.get("pnl_from_enter") or 0.0) for e in _ev]
+        lines.append("## 入局后剔除（{} 笔）｜观察期过期 {} 笔".format(len(_ev), len(_all_ev) - len(_ev)))
+        lines.append("")
+        lines.append("| 代码 | 剔除 | 剔除价 | 原因 | 入局涨幅 | 入局→剔除 | 证据链 |")
+        lines.append("|---|---|---|---|---|---|---|")
+        for e in _ev[:15]:
+            lines.append("| {} | {} | {} | {} | {:+.1f}% | {:+.2f}% | {} |".format(
+                e["code"], e["time"], e["price"], e["reason"], e["enter_pct"],
+                e["pnl_from_enter"], (e.get("chain") or "-")[:40]))
+        lines.append("")
+        lines.append("- 入局后剔除 {} 笔｜入局→剔除 平均 {:+.2f}%｜其中亏损 {} 笔".format(
+            len(_ev), float(np.mean(_pnl)) if _pnl else 0.0, sum(1 for x in _pnl if x < 0)))
         lines.append("")
 
     lines.append("## 温度轨迹")

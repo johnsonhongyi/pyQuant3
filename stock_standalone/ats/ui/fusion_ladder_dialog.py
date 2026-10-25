@@ -235,6 +235,12 @@ class FusionLadderDialog(QWidget):
         ])
         self.tabs.addTab(self.tbl_trades, "T+1 订单与成交")
 
+        self.tbl_track = self._make_table([
+            "代码", "入局", "入局价", "当时涨幅%", "首异动", "首异动涨幅%", "首→入%",
+            "持续分", "证据数", "证据链", "之后MFE%", "MAE%", "收盘%",
+        ])
+        self.tabs.addTab(self.tbl_track, "赛马跟踪（第一波入局）")
+
         page3 = QWidget()
         v3 = QVBoxLayout(page3)
         v3.setContentsMargins(4, 4, 4, 4)
@@ -394,9 +400,10 @@ class FusionLadderDialog(QWidget):
                 tbl.setItem(i, c, self._item(v, _TIER_COLORS.get(r["tier"]), bold=(c == 2)))
 
         self.lbl_status.setText(
-            "状态：{} 回放完成｜标的 {}｜评估 {}｜记录 {}｜分档 {}".format(
+            "状态：{} 回放完成｜标的 {}｜评估 {}｜记录 {}｜分档 {}｜入局 {}".format(
                 result.day, result.meta.get("codes"), result.meta.get("evaluations"),
                 result.meta.get("records"), result.meta.get("cuts_used") or "固定阈值",
+                result.meta.get("entries", 0),
             )
         )
         self.lbl_status.setStyleSheet("color:#8fd18f; font-weight:bold;")
@@ -416,6 +423,22 @@ class FusionLadderDialog(QWidget):
             color = QColor("#ff5c5c") if d["pnl_pct"] < 0 else QColor("#8fd18f")
             for c, v in enumerate(vals):
                 t2.setItem(i, c, self._item(v, color if c == 6 else None, bold=(c == 6)))
+
+        # 赛马跟踪：入局清单（带旧信号）
+        t3 = self.tbl_track
+        t3.setRowCount(0)
+        for e in sorted(getattr(result, "entries", []) or [], key=lambda x: -float(x.get("persist") or 0)):
+            i = t3.rowCount()
+            t3.insertRow(i)
+            vals = [
+                e.get("code", ""), e.get("enter_time", ""), e.get("enter_price", ""),
+                e.get("enter_pct", 0), e.get("first_time", ""), e.get("first_pct", 0),
+                e.get("since_first_pct", 0), e.get("persist", 0), e.get("evidence_n", 0),
+                e.get("chain", ""), e.get("mfe", 0), e.get("mae", 0), e.get("close_ret", 0),
+            ]
+            color = QColor("#8fd18f") if float(e.get("close_ret") or 0) >= 0 else QColor("#ff5c5c")
+            for c, v in enumerate(vals):
+                t3.setItem(i, c, self._item(v, color if c in (10, 11, 12) else None, bold=(c == 7)))
 
         self.txt_report.setPlainText(render_report(result))
 
