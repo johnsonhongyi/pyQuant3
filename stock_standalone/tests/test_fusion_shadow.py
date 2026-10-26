@@ -163,6 +163,34 @@ class TestShadow(unittest.TestCase):
         self.assertIn("vwap", stats["missing"])
         self.assertGreaterEqual(stats["missing"]["vwap"], 1)
 
+    def test_off_session_same_day_is_skipped(self):
+        """盘后轮询（同一天 21:11）不应写入当日流水，force 可补录。"""
+        lt = time.localtime()
+        after_hours = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 21, 11, 0, 0, 0, -1))
+        self.assertIsNone(
+            self.shadow.observe(code="300888", row=_GOOD_ROW, snap=_GOOD_SNAP, now=after_hours)
+        )
+        self.assertGreaterEqual(self.shadow.stats().get("skipped_off_session", 0), 1)
+        rec = self.shadow.observe(
+            code="300888", row=_GOOD_ROW, snap=_GOOD_SNAP, now=after_hours, force=True
+        )
+        self.assertIsNotNone(rec)
+
+    def test_session_gate_can_be_disabled(self):
+        cfg = dict(_BASE_CFG)
+        cfg["session_gate"] = False
+        root = tempfile.mkdtemp(prefix="fusion_gate_off_")
+        try:
+            sh = FusionShadow(config=cfg, root=root)
+            lt = time.localtime()
+            after_hours = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 21, 11, 0, 0, 0, -1))
+            self.assertIsNotNone(
+                sh.observe(code="300889", row=_GOOD_ROW, snap=_GOOD_SNAP, now=after_hours)
+            )
+            sh.close()
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

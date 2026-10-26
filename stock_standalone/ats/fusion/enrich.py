@@ -142,6 +142,40 @@ def merge_missing(base: Dict[str, Any], extra: Dict[str, Any], keys: Optional[It
     return out
 
 
+def relative_fields(day_closes: Any, mkt_ret5: float = 0.0, lookback: int = 5) -> Dict[str, Any]:
+    """由日线收盘序列算 5 日相对强度：个股 5 日涨幅 − 全池中位涨幅。
+
+    数据来源必须是真实日线（策略侧只读 `get_cached_kline_bars` 的内存缓存，
+    不额外发网络请求）；不足 lookback+1 根就返回空 dict，不拿默认值充数。
+    """
+    vals = [_f(x) for x in (day_closes or [])]
+    vals = [v for v in vals if v > 0]
+    if len(vals) < int(lookback) + 1:
+        return {}
+    base = vals[-int(lookback) - 1]
+    last = vals[-1]
+    if base <= 0:
+        return {}
+    ret5 = (last - base) / base * 100.0
+    return {
+        "has_rs": True,
+        "rs5": round(ret5 - float(mkt_ret5), 3),
+        "mkt_ret5": round(float(mkt_ret5), 3),
+    }
+
+
+def day_ret(day_closes: Any, lookback: int = 5) -> Optional[float]:
+    """个股 N 日涨幅（%），数据不足返回 None。供全池中位基准使用。"""
+    vals = [_f(x) for x in (day_closes or [])]
+    vals = [v for v in vals if v > 0]
+    if len(vals) < int(lookback) + 1:
+        return None
+    base = vals[-int(lookback) - 1]
+    if base <= 0:
+        return None
+    return (vals[-1] - base) / base * 100.0
+
+
 def _extract_series(bars: Any):
     """从 DataFrame 或 list[dict] 里取出 (closes, vols) 两条序列。"""
     closes: List[float] = []

@@ -24,7 +24,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-from ats.fusion.adapter import LaunchTracker, build_event, today_str
+from ats.fusion.adapter import LaunchTracker, build_event, in_trading_session, is_today, today_str
 from ats.fusion.config import engine_params, load_config
 from ats.fusion.engine import FusionBus, FusionEngine
 from ats.fusion.regime import MarketRegime, MarketRegimeTracker, RegimeSample
@@ -119,6 +119,8 @@ class FusionShadow:
         self._log_dir = os.path.join(self._root, self.cfg.get("log_dir", "logs/fusion_shadow"))
         self._max_per_day = int(self.cfg.get("max_records_per_day", 200000))
         self._sample_interval = float(self.cfg.get("sample_interval_s", 3.0))
+        # 交易时段闸门：默认开启，盘后轮询不再污染当日流水（历史/回放不受影响）
+        self._session_gate = bool(self.cfg.get("session_gate", True))
         self._last_sample: Dict[str, float] = {}
 
         self._fh = None
@@ -230,6 +232,7 @@ class FusionShadow:
         name: str = "",
         now: Optional[float] = None,
         source: str = "live_strategy",
+        force: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """记录一条影子决策。返回落盘记录（未落盘返回 None）。永不抛异常。"""
         if not self.enabled:
@@ -238,6 +241,13 @@ class FusionShadow:
         code = str(code or "")
 
         try:
+            # 交易时段闸门：盘后轮询（如 21:11）仍在评估时，不再往当日流水里写记录，
+            # 否则"入局时间/当日 MFE"都会被盘后噪声污染。
+            # 只拦"当天"的记录：历史日期（回放、补数）一律放行；force 用于测试与补录。
+            if not force and self._session_gate and is_today(now) and not in_trading_session(now):
+                self._stats["skipped_off_session"] = self._stats.get("skipped_off_session", 0) + 1
+                return None
+
             day = today_str(now)
             if day != self._day:
                 self._day = day

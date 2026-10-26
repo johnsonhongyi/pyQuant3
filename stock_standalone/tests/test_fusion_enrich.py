@@ -3,7 +3,7 @@
 
 import pytest
 
-from ats.fusion.enrich import depth_fields, intraday_fields, merge_missing
+from ats.fusion.enrich import day_ret, depth_fields, intraday_fields, merge_missing, relative_fields
 
 
 def _bars(closes, vols=None):
@@ -66,3 +66,23 @@ def test_merge_missing_never_overwrites_real_values():
 def test_merge_missing_respects_key_whitelist():
     out = merge_missing({}, {"a": 1, "b": 2}, keys=("a",))
     assert out == {"a": 1}
+
+
+def test_relative_fields_subtracts_market():
+    closes = [10.0, 10.1, 10.2, 10.3, 10.4, 11.0]
+    out = relative_fields(closes, mkt_ret5=2.0, lookback=5)
+    assert out["has_rs"] is True
+    assert abs(out["rs5"] - 8.0) < 0.01      # 个股 10% - 大盘 2%
+    assert out["mkt_ret5"] == 2.0
+
+
+def test_relative_fields_insufficient_data():
+    assert relative_fields([10.0, 10.1], 0.0) == {}
+    assert relative_fields(None, 0.0) == {}
+    assert relative_fields([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 0.0) == {}
+
+
+def test_day_ret_matches_relative_base():
+    closes = [10.0, 10.0, 10.0, 10.0, 10.0, 12.0]
+    assert abs(day_ret(closes, 5) - 20.0) < 1e-6
+    assert day_ret([10.0], 5) is None

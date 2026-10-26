@@ -470,6 +470,10 @@ class StockLiveStrategy:
         self._fusion_depth_ts: float = 0.0
         self._fusion_feat_cache: Dict[str, Any] = {}
         self._fusion_enrich_budget: int = 0
+        # 相对强度（5 日超额）：整表批量缓存（tdx_all_df_900.h5），不逐票发请求
+        self._fusion_rs_map: Optional[Dict[str, float]] = None
+        self._fusion_rs_ts: float = 0.0
+        self._fusion_mkt_ret5: float = 0.0
         
         # [P3 Fix] Store config as instance attributes
         self._stop_loss_pct = stop_loss_pct
@@ -2812,6 +2816,46 @@ class StockLiveStrategy:
     _FUSION_DEPTH_INTERVAL = 15.0   # 五档批量快照刷新间隔（秒）
     _FUSION_FEAT_TTL = 90.0         # 单票分时派生指标缓存（秒）
     _FUSION_FEAT_BUDGET = 24        # 每轮最多新抓多少只分时，控制 TDX 压力
+    _FUSION_RS_TTL = 1800.0         # 5 日相对强度缓存（秒），日线当天不变
+
+    def _fusion_market_ret5(self) -> float:
+        """全池 5 日涨幅中位数（大盘基准），随 rs5 缓存一起刷新。"""
+        return float(self._fusion_mkt_ret5 or 0.0)
+
+    def _fusion_ensure_rs_map(self) -> None:
+        """按 30 分钟 TTL 刷新 rs5 批量缓存；只读本地 HDF5，不联网。"""
+        now = time.time()
+        if self._fusion_rs_map is not None and (now - self._fusion_rs_ts) < self._FUSION_RS_TTL:
+            return
+        try:
+            from ats.fusion.relative_cache import load_rs5_map
+
+            rs_map, mkt = load_rs5_map()
+            self._fusion_rs_map = rs_map
+            self._fusion_mkt_ret5 = mkt
+            self._fusion_rs_ts = now
+            logger.info("[FUSION] rs5 批量缓存刷新：%d 只，全池中位 %+.2f%%", len(rs_map), mkt)
+        except Exception as e:
+            logger.debug(f"[FUSION] rs5 缓存刷新失败: {e}")
+            self._fusion_rs_map = {}
+            self._fusion_rs_ts = now
+
+    def _fusion_rs5(self, code) -> Dict[str, Any]:
+        """5 日相对强度：个股 5 日涨幅 − 全池中位，来自整表批量缓存。
+
+        覆盖不到（新股/停牌/缓存里没有）就返回 {}，让 relative 轴按缺失记账，
+        不拿 0 冒充"和大盘一样"。
+        """
+        try:
+            self._fusion_ensure_rs_map()
+            val = (self._fusion_rs_map or {}).get(str(code).split(".")[0].zfill(6))
+            if val is None:
+                return {}
+            return {"has_rs": True, "rs5": float(val), "mkt_ret5": self._fusion_market_ret5()}
+        except Exception as e:
+            logger.debug(f"[FUSION] 相对强度取值失败 {code}: {e}")
+            return {}
+
 
     def _fusion_refresh_depth(self, fetch_list) -> None:
         """每 15s 批量拉一次五档快照，供融合层补承接字段。失败静默，不影响主循环。"""
@@ -2877,6 +2921,14 @@ class StockLiveStrategy:
             feats = self._fusion_intraday(code, base, row)
             if feats:
                 base = merge_missing(base, feats)
+        except Exception:
+            pass
+        try:
+            from ats.fusion.enrich import merge_missing
+
+            rs = self._fusion_rs5(code)
+            if rs:
+                base = merge_missing(base, rs)
         except Exception:
             pass
         return base

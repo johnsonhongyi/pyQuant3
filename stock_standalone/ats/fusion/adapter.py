@@ -76,6 +76,27 @@ def today_str(ts: Optional[float] = None) -> str:
     return time.strftime("%Y-%m-%d", time.localtime(ts if ts else time.time()))
 
 
+# A 股连续竞价 + 集合竞价的可评估窗口（与监控侧口径一致）
+TRADING_SESSION = ("09:15", "15:05")
+
+
+def in_trading_session(ts: Optional[float] = None) -> bool:
+    """是否落在当日交易时段（09:15~15:05）。"""
+    try:
+        hm = time.strftime("%H:%M", time.localtime(float(ts) if ts else time.time()))
+    except Exception:
+        return False
+    return TRADING_SESSION[0] <= hm <= TRADING_SESSION[1]
+
+
+def is_today(ts: Optional[float] = None) -> bool:
+    """时间戳是否属于今天。"""
+    try:
+        return today_str(ts) == today_str()
+    except Exception:
+        return False
+
+
 class LaunchTracker:
     """记录每个标的"本轮启动"的时刻，用于先手衰减。
 
@@ -200,6 +221,14 @@ def build_event(
 
     is_leader = bool(_get(snap, "is_leader")) or str(_get(snap, "global_fleet_role") or "") == "LEADER"
 
+    # 相对强度（5 日超额）：只有真实算出 rs5 时才置 has_rs，否则计入 missing，
+    # 让覆盖率如实反映"这一轴没有数据"，不按 0 分拉低总分。
+    rs5 = _first_num([(snap, "rs5"), (row, "rs5")], 0.0)
+    has_rs = bool(_get(snap, "has_rs")) or bool(_get(row, "has_rs"))
+    mkt_ret5 = _first_num([(snap, "mkt_ret5"), (row, "mkt_ret5")], 0.0)
+    if not has_rs:
+        missing.append("rs5")
+
     return SignalEvent(
         code=str(code or _first_raw([(row, "code"), (snap, "code")]) or ""),
         ts=now,
@@ -231,5 +260,6 @@ def build_event(
         launch_ts=float(launch_ts or 0.0),
         freshness_s=freshness,
         trade_date=trade_date or today_str(now),
-        extra={"missing": missing},
+        rs5=rs5,
+        extra={"missing": missing, "has_rs": has_rs, "mkt_ret5": mkt_ret5},
     )
