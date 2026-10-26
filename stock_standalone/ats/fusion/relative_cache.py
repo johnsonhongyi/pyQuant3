@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
 """ats/fusion/relative_cache.py — 5 日相对强度（rs5）批量缓存。
 
-数据源：`tdx_all_df_900.h5` 的 `/all_900`（index=(code, date)，含 close），
+数据源：`tdx_all_df_300.h5` 的 `/all_300`（index=(code, date)，含 close），
+路径**不写死**，统一走 `JohnsonUtil.commonTips`（cct）的 ramdisk 解析：
+`cct.get_run_path_tdx_Path("tdx_all_df_300")` → `<RamDisk>\tdx_all_df_300.h5`，
+ramdisk 不可用时自动退到 app_root 同目录。
+
 一次读全市场日线收盘，向量化算出每只票的 5 日涨幅与全池中位涨幅，
 供融合层 relative 轴使用。**不发起任何网络请求**，也不依赖逐票 K 线缓存。
 
@@ -17,25 +21,50 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_H5 = r"G:\tdx_all_df_300.h5"
-DEFAULT_KEY = "/all_300"
-# 主源不可用时按顺序回退（两个文件覆盖一致：5227 只 / 37 个交易日）
-FALLBACK_FILES = (
-    (r"G:\tdx_all_df_300.h5", "/all_300"),
-    (r"G:\tdx_all_df_900.h5", "/all_900"),
+# 数据源候选（文件名 → HDF5 key）。按顺序取第一个存在的。
+SOURCE_CANDIDATES = (
+    ("tdx_all_df_300", "/all_300"),
+    ("tdx_all_df_900", "/all_900"),
 )
+
+
+def _resolve_candidates() -> List[Tuple[str, str]]:
+    """通过 cct 解析每个候选文件的实际路径（ramdisk 优先），只保留存在的。"""
+    out: List[Tuple[str, str]] = []
+    try:
+        from JohnsonUtil import commonTips as cct  # type: ignore
+    except Exception as exc:
+        logger.debug("[fusion] cct 不可用，rs5 数据源解析失败: %s", exc)
+        return out
+
+    for name, key in SOURCE_CANDIDATES:
+        path = ""
+        try:
+            path = cct.get_run_path_tdx_Path(name) or ""
+        except Exception as exc:
+            logger.debug("[fusion] 解析 %s 路径失败: %s", name, exc)
+        if not path:
+            try:
+                ramdisk = cct.get_ramdisk_dir()
+                if ramdisk:
+                    path = os.path.join(ramdisk, "{}.h5".format(name))
+            except Exception:
+                path = ""
+        if path and os.path.exists(path):
+            out.append((path, key))
+    return out
 
 
 def _pick_source(path: Optional[str], key: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     if path and os.path.exists(path):
-        return path, (key or DEFAULT_KEY)
-    for p, k in FALLBACK_FILES:
-        if os.path.exists(p):
-            return p, k
+        return path, (key or "/all_300")
+    candidates = _resolve_candidates()
+    if candidates:
+        return candidates[0]
     return None, None
 
 
@@ -79,6 +108,7 @@ def load_rs5_map(
             str(code).split(".")[0].zfill(6): round(float(v) - mkt, 3)
             for code, v in ret5.items()
         }
+        logger.debug("[fusion] rs5 源=%s key=%s 覆盖=%d 中位=%+.2f%%", src, use_key, len(rs_map), mkt)
         return rs_map, round(mkt, 3)
     except Exception as exc:
         logger.debug("[fusion] rs5 批量缓存加载失败: %s", exc)
