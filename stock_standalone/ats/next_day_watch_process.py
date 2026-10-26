@@ -146,6 +146,7 @@ def _poll(root, manifest=None, sector_snapshot=None):
     codes = sorted(meta)
     quote_count = 0
     quote_gap_count = 0
+    quote_error = ""
     if codes:
         from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
         fetcher = TDXRealtimeFetcher.get_instance()
@@ -158,6 +159,14 @@ def _poll(root, manifest=None, sector_snapshot=None):
         frame_codes = {str(code).strip().zfill(6) for code in frame.index}
         quote_gap_count = len(set(codes) - frame_codes)
         endpoint = getattr(fetcher, "current_host", None) or ("TDX", "?", "?")
+        if quote_count == 0:
+            # 静默返回空行情会让上层只看到 confirmed=0，误判成"没有机会"。
+            # 这里必须把失败原因显式带回父进程，便于定位连接/主站/批次问题。
+            quote_error = "TDX 未返回任何行情: candidates={} endpoint={}:{}:{} connected={}".format(
+                len(codes), endpoint[0], endpoint[1], endpoint[2],
+                bool(getattr(fetcher, "_is_connected", False)),
+            )
+            logger.warning("[NextDayWatch][ATS_TDX] %s", quote_error)
         for code in frame.index:
             candidate = meta.get(str(code).zfill(6), {})
             frame.loc[code, "name"] = candidate.get("name", str(code))
@@ -175,7 +184,7 @@ def _poll(root, manifest=None, sector_snapshot=None):
         events_to_dispatch = pending_events
     return {"events": events_to_dispatch, "endpoint": endpoint,
             "candidate_count": len(codes), "quote_count": quote_count,
-            "quote_gap_count": quote_gap_count}
+            "quote_gap_count": quote_gap_count, "quote_error": quote_error}
 
 
 def _worker_entry(connection, root):

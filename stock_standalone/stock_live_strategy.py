@@ -464,6 +464,12 @@ class StockLiveStrategy:
 
         self.alert_callback = None
         self.realtime_service = realtime_service
+
+        # --- [FUSION] 输入补全：盘口批量快照 + 分时派生指标（只补缺，不改决策）---
+        self._fusion_depth: Dict[str, Dict[str, Any]] = {}
+        self._fusion_depth_ts: float = 0.0
+        self._fusion_feat_cache: Dict[str, Any] = {}
+        self._fusion_enrich_budget: int = 0
         
         # [P3 Fix] Store config as instance attributes
         self._stop_loss_pct = stop_loss_pct
@@ -2661,6 +2667,9 @@ class StockLiveStrategy:
                         all_emotion_scores = self.realtime_service.get_emotion_scores(fetch_list)
                         if hasattr(self.realtime_service, 'get_batch_minute_klines'):
                             all_klines = self.realtime_service.get_batch_minute_klines(fetch_list, n=30)
+
+                    # --- [FUSION] 每轮一次批量五档快照，供融合层补 taker_buy_ratio / bid_pressure ---
+                    self._fusion_refresh_depth(fetch_list)
                             
                     db_codes = [str(k.split('_')[0]) for k in fetch_list]
                     all_loss_streaks = self.trading_logger.get_batch_consecutive_losses(db_codes, resample=resample)
@@ -2796,6 +2805,81 @@ class StockLiveStrategy:
 
 
 
+
+    # =========================
+    # 🧬 融合层输入补全（只补缺，不参与决策）
+    # =========================
+    _FUSION_DEPTH_INTERVAL = 15.0   # 五档批量快照刷新间隔（秒）
+    _FUSION_FEAT_TTL = 90.0         # 单票分时派生指标缓存（秒）
+    _FUSION_FEAT_BUDGET = 24        # 每轮最多新抓多少只分时，控制 TDX 压力
+
+    def _fusion_refresh_depth(self, fetch_list) -> None:
+        """每 15s 批量拉一次五档快照，供融合层补承接字段。失败静默，不影响主循环。"""
+        try:
+            now = time.time()
+            if now - float(self._fusion_depth_ts or 0.0) < self._FUSION_DEPTH_INTERVAL:
+                return
+            self._fusion_depth_ts = now
+            self._fusion_enrich_budget = self._FUSION_FEAT_BUDGET
+            codes = [str(k).split("_")[0] for k in (fetch_list or [])]
+            if not codes:
+                return
+            from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+
+            snap = TDXRealtimeFetcher.get_instance().fetch_batch_stock_snapshots(codes)
+            if isinstance(snap, dict) and snap:
+                self._fusion_depth = snap
+        except Exception as e:
+            logger.debug(f"[FUSION] 五档快照刷新失败: {e}")
+
+    def _fusion_intraday(self, code, snap, row):
+        """单票分时派生指标（带 TTL 与每轮预算），数据不足返回 {}。"""
+        cache = self._fusion_feat_cache
+        now = time.time()
+        hit = cache.get(code)
+        if hit and (now - hit[0]) < self._FUSION_FEAT_TTL:
+            return hit[1]
+        if int(self._fusion_enrich_budget or 0) <= 0:
+            return hit[1] if hit else {}
+        self._fusion_enrich_budget = int(self._fusion_enrich_budget) - 1
+        try:
+            from ats.fusion.enrich import intraday_fields
+            from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+
+            bars = TDXRealtimeFetcher.get_instance().fetch_intraday_bars(code)
+            if bars is None or getattr(bars, "empty", True):
+                cache[code] = (now, {})
+                return {}
+            vwap = float(snap.get("vwap") or (row or {}).get("vwap") or 0.0)
+            price = float((row or {}).get("trade") or (row or {}).get("price") or 0.0)
+            feats = intraday_fields(bars, vwap=vwap, price=price)
+            cache[code] = (now, feats)
+            if len(cache) > 2000:
+                cache.clear()
+            return feats
+        except Exception as e:
+            logger.debug(f"[FUSION] 分时派生失败 {code}: {e}")
+            cache[code] = (now, {})
+            return {}
+
+    def _fusion_enrich_snap(self, code, snap, row):
+        """盘口 + 分时派生合并进快照副本：只补缺失/为 0 的键，绝不覆盖真实值。"""
+        base = dict(snap or {})
+        try:
+            from ats.fusion.enrich import depth_fields, merge_missing
+
+            base = merge_missing(base, depth_fields((self._fusion_depth or {}).get(code)))
+        except Exception:
+            pass
+        try:
+            from ats.fusion.enrich import merge_missing
+
+            feats = self._fusion_intraday(code, base, row)
+            if feats:
+                base = merge_missing(base, feats)
+        except Exception:
+            pass
+        return base
 
     # =========================
     # 🚨 单股处理（核心）
@@ -3512,10 +3596,12 @@ class StockLiveStrategy:
                 from ats.fusion.shadow import FusionShadow
                 _fusion = FusionShadow()
                 self._fusion_shadow = _fusion
+            # 用补全后的快照副本喂融合层：五档承接 + 分时攻角/意图/清晰度
+            _fusion_snap = self._fusion_enrich_snap(code, snap, row)
             _fusion.observe(
                 code=code,
                 row=row,
-                snap=snap,
+                snap=_fusion_snap,
                 decision=decision,
                 vetoed=is_vetoed,
                 veto_reason=veto_reason,

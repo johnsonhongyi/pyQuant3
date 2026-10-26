@@ -241,6 +241,13 @@ class FusionDecision:
     regime_stage: str = ""
     flip_state: str = ""
 
+    # 数据可信度：coverage=参与加权的轴中"有真实数据"的权重占比 (0~1)。
+    # 缺失字段不再按 0 分计入，而是从加权中剔除后归一，避免"缺数据=必死"。
+    # provisional=True 表示本次结论建立在部分缺失数据上，只能作为观察依据。
+    coverage: float = 0.0
+    provisional: bool = False
+    cuts: tuple = ()
+
     @property
     def actionable(self) -> bool:
         return self.tier >= 1 and not self.veto_reason
@@ -303,4 +310,6 @@ class FusionDecision:
             "decision_id": self.decision_id,
             "regime_stage": self.regime_stage,
             "flip_state": self.flip_state,
+            "coverage": round(self.coverage, 3),
+            "provisional": bool(self.provisional),
         }

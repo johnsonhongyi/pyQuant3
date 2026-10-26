@@ -1,5 +1,32 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](stock_standalone/design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-26 17:30 【融合梯度实盘无行情、分级塌陷、多进程对齐与数据输入补全闭环】(`docs/tasks/2026-10-26_1140_融合梯度实盘无行情与分级塌陷修复.md`, `ats/fusion/`, `stock_live_strategy.py`, `ats/ui/fusion_ladder_dialog.py`, `tests/test_fusion_enrich.py`)
+- [x] **【实盘无现价/涨幅恒 0/分级塌陷根因穿透与修复】**：
+  - 穿透排查实盘影子日志只有 L0/L1 且价格恒空的四大根因：① 旧实现只落 fusion 结论不落行情；② 实盘缺失承接与意图数据时被按 0 分打死，导致 RAR 恒在 35 左右，无法达到绝对阈值 L2(>62)；③ 窗口缺乏定时刷新机制；④ 缺乏更新时间列；
+  - **Schema 2 格式升级与时间驱动持久化**：影子日志升级为结构版本 2，补齐 `price / pct / vwap / trade_date / hit / coverage` 及写入进程身份 `writer_pid / writer_exe`；刷盘由 10 行一次优化为 2 秒时间驱动 flush，杜绝低频标的数据丢失；
+  - **缺失项归一与自适应分档（Adaptive Cuts）**：`score_support` 与 `score_intent` 支持缺失项剔除归一，并计算 `coverage` 覆盖率；`FusionShadow` 引入当日 RAR 样本池与 `adaptive_cuts`（按 p98/p92/p80/p60 分位与 68/60/52/45 绝对下限动态分档），数学上彻底解除 L2+ 封死问题；
+- [x] **【双端进程解耦与真实数据输入补全（P2 Enrichment）】**：
+  - **定位双 exe 错位根因**：明确实时链路为 TK 主控（`instock_MonitorTK_Nuita.exe`，写数据）与 ATS 终端（`ATS_Terminal.exe`，看数据）分离，界面增加写入者进程诊断，消除“窗口是新版、数据是旧版”的发布盲区；
+  - **纯函数模块 `ats/fusion/enrich.py`**：实现盘口五档搬运（`depth_fields`）与 1 分钟分时真实派生指标计算（`intraday_fields`：攻角 `slope_score`、净拉升速度 `velocity_pct`、增量量能 `segment_vol_inc`、站上均价分钟 `minutes_above_vwap`、主力意图 `intent_score`、结构清晰度 `structure_clarity`），缺失则返回空，绝不造假；
+  - **`stock_live_strategy.py` 轻量注入**：15s 批量抓取五档快照，90s TTL + 24 只/轮预算按需抓取分时，合并快照副本喂入影子层；实盘覆盖率由 53% 显著提升至 78%+，且全程 try/catch 兜底，0 影响主交易流程；
+- [x] **【UI 交互、列宽持久化与卡片式 ToolTip 升级】**：
+  - **ATS 标准列宽持久化**：接入 `setup_header_persistence` 并独立写入 `fusion_ladder_layout.json`，增加 800ms 防抖 flush，彻底根治重启窗口列宽丢失问题；
+  - **2 秒智能增量刷新与永不白板**：基于文件 mtime/size 增量重绘，保持滚动位置与行选中；无数据时提供明确引导占位行，支持自动回退最近交易日；新增「✅ 只看命中」开关；
+  - **全列三段式富文本 ToolTip**：新增 `HeaderToolTip` 事件过滤器，18 列全部提供「名称 / 定义 / 橙色判断依据」卡片式悬停提示，移出自动收起；
+  - **TDX 抓取 0 行情显式告警**：`next_day_watch_process.py` 与 `main_window.py` 捕获并透传 `quote_error`，避免静默丢失；
+- [x] **【自动化测试全绿通过（194 项 PASS）】**：
+  - 新增 `tests/test_fusion_enrich.py`（8 项全绿）；
+  - 全量 fusion 专项测试 17 个文件 194 项全部 100% 纯绿通过（194 passed in 14.02s）。
+
+## 2026-10-26 11:48 【GG回归通道与通道走势九转数字放大、垂直上移、逆势先锋移植与全功能闭环】(`stock_standalone/docs/tasks/2026-10-26_1148_GG回归通道九转数字放大与垂直上移优化.md`)
+- [x] **【全角大字号数字视觉强化】**：全面采用中文字体全宽单元字符（'１'~'９'），相比窄小半角数字面积接近翻倍，圆润饱满且 K 线缩放清晰；
+- [x] **【悬浮上移与间距参数化控制】**：引入专用悬浮参数 JZ_OFS:=0.038，上升卖九上移至 H*(1+JZ_OFS)，下降买九下移至 L*(1-JZ_OFS)，彻底告别贴线压顶，预留充裕呼吸间距；
+- [x] **【单柱唯一解耦与转折突出】**：增加 JZ_UP6<9 互斥门禁，杜绝第 9 根黄绿重叠绘制毛刺；转折确认柱支持醒目加宽呈现；
+- [x] **【逆势先锋特色信号移植整合】**：将“通道走势”核心特色指标【逆势先锋】（均线密集粘合+放量突破高点）无缝植入“GG回归通道”，自适应通道高低限制边界 `RL` 与 `RH` 绘制垂直虚线与顶部标注；
+- [x] **【60分钟中枢矩形图不一致根因穿透与对齐】**：穿透通达信最大引用周期对 DLL6 历史数据缓冲区长度（DataLen）的决定性影响，补齐 `MA250` 与 `M600` 历史数据基线，彻底根除 60 分钟图上缠论笔起点偏移导致的中枢错位；
+- [x] **【中枢高清绿色方框直观重构】**：彻底剔除原版无 DLL 中枢的 `CROSSDOT,COLORLIRED` 杂乱十字点与品红细线，重构为：中枢高（绿实线粗3）、中枢低（绿实线粗3）、中枢中（蓝实线粗2）与绿色立柱垂直封闭，形成清晰立体的绿色中枢矩形方框；
+- [x] **【全量词法校验 0 错误】**：通过全量大括号闭合性检测、括号配对与单引号校验，100% 纯绿秒级通过。
+
 ## 2026-10-23 00:40 【用户管理全功能修复(CRUD)+密码可见性与登录容错加固闭环】(`stock_standalone/docs/tasks/2026-10-23_0040_用户管理全功能修复与密码登录加固闭环.md`, `source/easy-stock-analysis/backend/internal/httpapi/web_auth.go`, `source/easy-stock-web/src/components/AuthGate.tsx`)
 - [x] **用户管理全能力（增 / 改 / 删 / 查 / 重置密码）前后端彻底闭环**：
   - **后端 `web_auth.go` 接口补全**：扩充支持 `GET`（列表）、`POST`（新增）、`PUT`（角色调整：管理员 ⇋ 普通用户）、`DELETE`（删除用户）；

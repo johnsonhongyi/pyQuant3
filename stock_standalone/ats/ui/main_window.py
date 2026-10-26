@@ -6625,6 +6625,9 @@ class ATSMainWindow(QMainWindow):
                 log_summary("[NextDayWatch][ATS_TDX] service=TDXRealtimeFetcher node=%s endpoint=%s:%s candidates=%d quotes=%d quote_gaps=%d confirmed=%d elapsed=%.0fms",
                             endpoint[0], endpoint[1], endpoint[2], len(codes), quote_count, quote_gap_count,
                             confirmed_count, (time.perf_counter() - started) * 1000)
+                if quote_count == 0 and result.get("quote_error"):
+                    logger.warning("[NextDayWatch][ATS_TDX] 本轮 0 行情，本轮不产生任何确认: %s",
+                                   result["quote_error"])
             except Exception as exc:
                 logger.warning("[NextDayWatch][ATS_TDX] realtime evaluation failed: %s", exc)
             finally:

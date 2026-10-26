@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from PyQt6.QtCore import (
     QEasingCurve,
     QEvent,
+    QObject,
     QParallelAnimationGroup,
     QPropertyAnimation,
     QRect,
@@ -41,7 +42,7 @@ from PyQt6.QtCore import (
     QTimer,
     pyqtSignal,
 )
-from PyQt6.QtGui import QAction, QColor, QCursor, QFont, QKeyEvent
+from PyQt6.QtGui import QAction, QColor, QCursor, QFont, QKeyEvent, QPalette
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -128,69 +129,299 @@ _TIER_COLORS = {
     0: QColor("#6b6b7b"),
 }
 
-# 💡 专业列头 ToolTip 说明字典
+# 💡 专业列头悬浮说明：对齐 TK 指标悬浮卡片（指标名 / 一句话定义 / 判断依据）
+def _tip(title: str, desc: str, rule: str) -> str:
+    """生成统一版式的悬浮卡片 HTML：标题 + 定义 + 判断依据（配色对齐 TK 指标卡）。"""
+    return (
+        '<div style="max-width:360px;">'
+        '<div style="font-size:13px;font-weight:600;color:#4dd0e1;">{}</div>'
+        '<div style="font-size:12px;color:#eceff4;margin-top:5px;line-height:150%;">{}</div>'
+        '<div style="font-size:12px;color:#c3e88d;margin-top:6px;line-height:150%;">判断依据：{}</div>'
+        '</div>'
+    ).format(title, desc, rule)
+
+
 HEADER_TOOLTIPS: Dict[str, str] = {
-    "时间": "【时间】信号触发或更新的分时时点。\n• 09:30~10:00: 早盘先手爆发力最强；\n• 10:30 以后: 随着时间推移先手衰减，追高风险增大。",
-    "代码": "【股票代码】6位证券代码。\n• 支持单击联动主图，上下键跟随，双击查看 SBC 分时图。",
-    "名称": "【股票简称】证券中文简称。",
-    "现价": "【现价 / 当时价格】信号触发瞬间的分时现价，作为买入基准价格参考。",
-    "涨幅%": "【当时涨幅】信号发出时的当日涨幅。\n• 0%~5%: 最佳起爆启动区间；\n• >6%: 日内已透支，追高风险剧增。",
-    "级别": (
-        "【梯度执行级别 (L0~L4)】\n"
-        "• L4 主攻 (仓位上限30%): 首波放量突破且回踩不破均价，大盘翻转确认 + 强板块共振龙头；\n"
-        "• L3 参与 (仓位上限18%): 分时突破前高确认，结构清晰度≥60；\n"
-        "• L2 试仓 (仓位上限10%): 回踩 VWAP 低吸，不追高；\n"
-        "• L1 观察 (4%): 限价试探挂单；\n"
-        "• L0 观察 (0%): 触发风控硬否决，仅监控不下单。"
+    "时间": _tip(
+        "🕒 时间 (time)",
+        "该条信号被写入影子流的分时时点。",
+        "09:30~10:00 先手爆发力最强；10:30 之后每过 10 分钟，追进的容错空间都在收窄。",
     ),
-    "RAR": (
-        "【RAR (Risk-Adjusted Rating 风险调整后综合评分)】\n"
-        "• 定义: 综合评估买入位置、承接盘压、资金意图、大盘环境、相对强度并扣除追高/拥挤风险后的最终总分 (0~100分)。\n"
-        "• 判定好坏标准:\n"
-        "  - ≥80分: 极强 (满足 L4 主攻标准，进攻性强，胜率最高)；\n"
-        "  - 70~80分: 强势 (L3 参与区间，结构清晰承接强)；\n"
-        "  - 60~70分: 中等 (L2 试仓低吸，适合回踩时介入)；\n"
-        "  - <60分: 弱势 (仅做观察，不建议重仓)。"
+    "代码": _tip(
+        "🔖 代码 (code)",
+        "6 位证券代码。单击联动主图，上下键跟随，双击打开 SBC 分时图。",
+        "仅展示当日进入评估池的标的，未进入池子的票不会出现在这里。",
     ),
-    "位": "【位 (Position 位置质量)】买在此处的盈亏比。\n• 衡量到止损底线的距离与上方阻力空间；\n• 止损在 2%~4.5% 且日内位于中位区为最佳，顶部(>85%)重罚。",
-    "接": "【接 (Support 承接盘压)】拉升后是否有资金托底。\n• 外盘买入比(Taker Buy)≥60%、买盘压≥60% 且分时维持在均价上方为优质承接。",
-    "意": "【意 (Intent 资金意图)】拉升是否果断、持续、有主攻攻角。\n• 攻角≥70、主力意图分≥75 且带量突破为佳，非散户脉冲拉升。",
-    "环": "【环 (Regime 大盘环境)】大盘温度配合度、翻转状态与所属板块共振度。\n• 低温拐头与翻转确认期加分，退潮期非龙头重罚。",
-    "仓位%": "【建议仓位%】综合考虑环境系数与时间衰减后的建议执行仓位上限 (占可用资金百分比)。",
-    "进场": "【进场区间】建议挂单或低吸的合理价格区间 (严禁脱离均价追高)。",
-    "止损": "【止损参考】跌破底台、SBC支撑或均线时的建议硬性离场价格。",
-    "先手min": "【先手时间】距离该股当日首次异动过去的分钟数。\n• 先手优势随时间衰减，>40分钟严禁盲目追进。",
-    "来源": "【信号来源】触发该梯度的底层信号源或回补标识。",
-    "MFE%": "【MFE% (Maximum Favorable Excursion 最大潜在浮盈)】\n• 买入后全天最高价相对买入价的最大涨幅，衡量止盈空间与上行天花板。",
-    "MAE%": "【MAE% (Maximum Adverse Excursion 最大回撤风险)】\n• 买入后全天最低价相对买入价的最大跌幅，衡量回踩风险与止损压力。",
-    "收盘%": "【收盘收益%】持有至当天收盘时的收益率，衡量日内封板或承接稳定性。",
-    "温度℃": "【市场温度】全市场多头情绪指标。\n• <30℃ 冰点 (首发排头兵最值钱)；\n• 45~62℃ 温和活跃；\n• >65℃ 过热非龙头易被埋。",
-    "买入": "【买入时间】T+1 模拟成交执行时间。",
-    "买入价": "【买入成交价】执行成交价格。",
-    "时段": "【执行时段】成交所在的分时时间窗口。",
-    "卖出": "【卖出时间】次日 T+1 规则离场时间。",
-    "卖出价": "【卖出成交价】次日平仓成交价格。",
-    "盈亏%": "【T+1 净盈亏%】该笔交易的最终实际盈亏百分比。",
-    "当日最低%": "【买入当日最低回撤%】买入日盘中承受的最大下探幅度。",
-    "被锁止损": "【T+1 是否被锁止损】因 A 股 T+1 规则导致日内触及止损而无法当天卖出的锁定状态。",
-    "原因": "【离场原因】止盈减半、止损清仓或时间到期等退场归因。",
-    "入局": "【入局时间】通过发令枪与证据链确认进入实盘入局阶段的时间。",
-    "入局价": "【入局基准价】入局确认瞬间的股票现价。",
-    "当时涨幅%": "【入局涨幅%】入局确认时的日内涨幅。",
-    "首异动": "【首度异动时间】该股全天首次被系统捕捉到形态或放量突破的时间。",
-    "首异动涨幅%": "【首异动涨幅%】首次异动时的涨幅。",
-    "首→入%": "【首异动至入局涨幅】从首次异动到确认入局之间的涨幅跨度。",
-    "持续分": "【持续性得分 (Persist)】\n• 异动发出后分时维持在均线上方和高位承接的持续性分数，越高代表走势越稳健。",
-    "证据数": "【证据数量】盘中累积确认的结构性量价证据笔数。",
-    "证据链": "【证据链详情】记录突破形态、放量特征、板块带头等连续判断证据日志。",
-    "之后MFE%": "【入局后最大浮盈%】入局后全天达到的最高浮动收益。",
+    "名称": _tip("🏷 名称 (name)", "证券中文简称。", "名称与代码一一对应，缺失时按本地映射表回填。"),
+    "现价": _tip(
+        "💲 现价 (price)",
+        "信号触发瞬间的分时成交价，是仓位与止损的计算基准。",
+        "显示 -- 表示该条记录没有落行情（旧版本记录），不代表价格为 0。",
+    ),
+    "涨幅%": _tip(
+        "📈 涨幅% (percent)",
+        "信号发出时的当日涨幅，最新价相对昨收盘价的涨跌百分比。",
+        "0%~5% 是最佳起爆区间；>6% 日内已透支，追高风险剧增；<0% 属于逆势信号，仅观察。",
+    ),
+    "级别": _tip(
+        "🧬 梯度级别 · L0~L4",
+        "按 RAR 分档给出的执行级别，级别直接决定仓位上限与进场方式。",
+        "L4 主攻 30% / L3 参与 18% / L2 试仓 10% / L1 观察 4% / L0 仅记录；"
+        "级别还会被大盘温度与先手时间双重封顶。",
+    ),
+    "RAR": _tip(
+        "⚖️ RAR 风险调整分 (Risk-Adjusted Rating)",
+        "综合买入位置、承接盘压、资金意图、大盘环境、相对强度，再扣除追高/拥挤/流动性风险后的总分（0~100）。",
+        "分档按当日横截面分位（p98/p92/p80/p60）+ 绝对下限 68/60/52/45，当天排名越靠前级别越高，历史基准 ≥80分 为极强。",
+    ),
+    "位": _tip(
+        "📍 位 · 位置质量 (position)",
+        "买在这里的盈亏比：离止损多远、上方还有多少空间、处于日内什么位置。",
+        "止损距离 2%~4.5% 最佳（太近易被扫、太远亏太多）；日内位置 0.2~0.8 加分，>0.85 顶部重罚。",
+    ),
+    "接": _tip(
+        "🤝 接 · 承接质量 (support)",
+        "拉上去之后有没有人接盘，衡量真实承接力度而不是涨幅本身。",
+        "外盘买入占比 ≥60% 且五档买压 ≥60% 视为优质承接；这两项缺失时按剩余项归一，不按 0 分打死。",
+    ),
+    "意": _tip(
+        "🎯 意 · 资金意图 (intent)",
+        "拉升是果断主攻还是散户脉冲：看攻角、主力意图分、净拉升速度与增量量能。",
+        "攻角 ≥70、意图分 ≥75、带量突破为佳；缺攻角/意图数据时按剩余项归一并在覆盖%里标注。",
+    ),
+    "环": _tip(
+        "🌡 环 · 大盘环境 (regime)",
+        "大盘温度、翻转状态与所属板块共振度的配合情况。",
+        "45~62℃ 温和活跃最有利；<30℃ 冰点时首个排头兵最值钱；退潮期非龙头重罚。",
+    ),
+    "仓位%": _tip(
+        "💰 建议仓位%",
+        "级别基准仓位 × 温度系数 × 先手衰减系数，得到单票可用资金占比上限。",
+        "单票上限 35%；组合总仓位上限 85%；L4 同时最多 2 只，超额自动降档而不是全砍。",
+    ),
+    "进场": _tip(
+        "🚪 进场区间",
+        "建议挂单或低吸的合理价格带，由当前价与 VWAP 推导。",
+        "L2 只在 VWAP±0.5% 低吸不追价；L3 突破前高 2 根确认；L4 首波放量突破后回踩不破 VWAP。",
+    ),
+    "止损": _tip(
+        "🛑 止损参考",
+        "触发离场的硬性价格：底台/SBC 支撑 → 分时均价，逐级兜底。",
+        "跌破即失效；L1/L2 用支撑-1.0%~VWAP-1.2%，L3/L4 用 VWAP-0.6%/支撑-0.5%。",
+    ),
+    "先手min": _tip(
+        "⏱ 先手min (age)",
+        "距离当日首次异动已过去的分钟数。先手越晚成本越高，回撤来临时操盘来不及响应，所以必须按时间衰减。",
+        "≤10min 可到 L4；≤25min 封顶 L3；≤45min 封顶 L2；≤70min 封顶 L1；>70min 直接失效。",
+    ),
+    "来源": _tip(
+        "🔗 来源 (source)",
+        "这条梯度由谁产出。",
+        "live_strategy = 实盘实时链路；REPLAY_BACKFILL = 按日回放回补；多来源会合并显示。",
+    ),
+    "更新时间": _tip(
+        "🕘 更新时间",
+        "该标的最后一次影子记录写入的时刻（HH:MM:SS）。",
+        "超过 60 秒未更新即判定断流，此时价格与涨幅不再代表当前行情，状态栏会高亮告警。",
+    ),
+    "命中": _tip(
+        "✅ 命中标记",
+        "本次融合结论是否达到可执行梯度。",
+        "✅ = 级别 ≥L2 或旧策略给出买入；空白 = 仅观察，不构成任何操作依据。",
+    ),
+    "覆盖%": _tip(
+        "📶 覆盖% (coverage)",
+        "参与加权的四轴中，有多少比例来自真实行情字段，用来判断这条结论有多可信。",
+        "≥80% 视为完整；<80% 表示缺外盘/买压/攻角/意图/结构清晰度，结论标记为临时，只能作观察。",
+    ),
+    "MFE%": _tip(
+        "🚀 MFE% 最大浮盈",
+        "买入后全天最高价相对买入价的最大涨幅，衡量止盈空间。",
+        "≥6% 说明有足够的止盈余量；<2% 表示上行天花板很低，不值得占仓位。",
+    ),
+    "MAE%": _tip(
+        "🌊 MAE% 最大回撤",
+        "买入后全天最低价相对买入价的最大跌幅，衡量回踩压力。",
+        "回撤超过止损距离说明止损会被打掉；接近 0 说明进场点极稳。",
+    ),
+    "收盘%": _tip(
+        "🏁 收盘收益%",
+        "持有至当天收盘的收益率，衡量日内封板或承接的最终结果。",
+        ">0 表示信号方向正确；显著低于 MFE 说明盘中冲高回落、止盈未执行。",
+    ),
+    "温度℃": _tip(
+        "🌡 市场温度",
+        "全市场多头情绪指标，0~100℃。",
+        "<30℃ 冰点（首发排头兵最值钱）；45~62℃ 温和活跃；>65℃ 过热，非龙头容易被埋。",
+    ),
+    "买入": _tip("🟢 买入时间", "T+1 模拟成交的执行时间。", "仅在回放/模拟链路出现，实盘以实际成交为准。"),
+    "买入价": _tip("🟢 买入价", "模拟成交价格。", "用于计算该笔交易的盈亏与回撤基准。"),
+    "时段": _tip("🕒 执行时段", "成交所在的分时时间窗口。", "早盘与尾盘的滑点特征不同，复盘时需分开看。"),
+    "卖出": _tip("🔴 卖出时间", "次日按 T+1 规则离场的时间。", "A 股 T+1，当日买入无法当日卖出。"),
+    "卖出价": _tip("🔴 卖出价", "次日平仓成交价格。", "用于结算该笔交易的最终盈亏。"),
+    "盈亏%": _tip(
+        "📊 盈亏%",
+        "该笔交易扣除滑点后的最终盈亏百分比。",
+        ">0 盈利；<0 亏损；结合 MFE/MAE 判断是信号问题还是执行问题。",
+    ),
+    "当日最低%": _tip(
+        "📉 当日最低%",
+        "买入当日盘中承受的最大下探幅度。",
+        "下探超过止损线说明当日已被扫损，但因 T+1 无法离场，属于被锁风险。",
+    ),
+    "被锁止损": _tip(
+        "🔒 被锁止损",
+        "因 T+1 规则导致日内触及止损却无法当天卖出的锁定状态。",
+        "出现即说明该笔交易的风险敞口被规则放大，需在仓位设计上预留缓冲。",
+    ),
+    "原因": _tip("📝 离场原因", "止盈减半、止损清仓或时间到期等退场归因。", "用于统计各类离场规则的胜率与盈亏比。"),
+    "入局": _tip(
+        "🚩 入局时间",
+        "通过发令枪与证据链确认、进入实盘入局阶段的时间。",
+        "入局越早（首异动后 3~10 分钟）胜率越高；超过 20 分钟才入局多为追高。",
+    ),
+    "入局价": _tip("🚩 入局价", "入局确认瞬间的现价。", "作为该次跟踪的盈亏基准。"),
+    "当时涨幅%": _tip("📈 当时涨幅%", "入局确认时的日内涨幅。", "3%~6% 为常见入局区间，>8% 追高风险显著。"),
+    "首异动": _tip(
+        "⚡ 首异动时间",
+        "该股全天首次被系统捕捉到放量/形态突破的时间。",
+        "首异动与入局的时间差越小，说明信号确认越快、先手越足。",
+    ),
+    "首异动涨幅%": _tip("⚡ 首异动涨幅%", "首次异动时的涨幅。", "首异动涨幅越低，后续空间通常越大。"),
+    "首→入%": _tip(
+        "➡️ 首→入%",
+        "从首次异动到确认入局之间的涨幅跨度。",
+        "跨度 <2% 说明入局及时；>5% 说明确认过程消耗了大部分空间。",
+    ),
+    "持续分": _tip(
+        "🧱 持续分 (persist)",
+        "异动后分时维持在均价上方与高位承接的持续性得分。",
+        "≥70 走势稳健；<40 多为脉冲拉升，容易一日游。",
+    ),
+    "证据数": _tip("🧾 证据数", "盘中累积确认的结构性量价证据笔数。", "证据越多结论越可靠，通常 ≥3 条才算成立。"),
+    "证据链": _tip("🧾 证据链", "突破形态、放量特征、板块带头等连续判断的证据明细。", "可逐条回溯，用于复盘为什么给/不给这个级别。"),
+    "之后MFE%": _tip("🚀 入局后 MFE%", "入局后全天达到的最高浮动收益。", "≥5% 说明入局点选得好；接近 0 说明入局即高点。"),
 }
+
+
+class HeaderToolTip(QObject):
+    """表头悬浮说明：深色卡片（对齐 TK 指标悬浮样式），替代 Qt 默认灰底纯文本提示。
+
+    - 悬停表头即弹出「指标名 / 定义 / 判断依据」三段式卡片；
+    - 自动避开屏幕边缘，鼠标移出表头立即收起；
+    - 不拦截点击，不抢焦点。
+    """
+
+    def __init__(self, table: QTableWidget):
+        super().__init__(table)
+        self.table = table
+        self._label: Optional[QLabel] = None
+        header = table.horizontalHeader()
+        header.setMouseTracking(True)
+        header.installEventFilter(self)
+
+    def _ensure_label(self) -> QLabel:
+        if self._label is not None:
+            return self._label
+        lbl = QLabel()
+        lbl.setWindowFlags(
+            Qt.WindowType.ToolTip
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
+        lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        lbl.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        # 顶层 ToolTip 窗口必须显式开启样式背景，否则 QSS 的深色底不会绘制，
+        # 只剩浅色文字落在系统白底上 —— 这就是"看不清"的原因。
+        lbl.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        lbl.setAutoFillBackground(True)
+        lbl.setTextFormat(Qt.TextFormat.RichText)
+        lbl.setWordWrap(True)
+        lbl.setMaximumWidth(400)
+        pal = lbl.palette()
+        pal.setColor(QPalette.ColorRole.Window, QColor("#1e1f24"))
+        pal.setColor(QPalette.ColorRole.WindowText, QColor("#eceff4"))
+        pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#1e1f24"))
+        pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#eceff4"))
+        lbl.setPalette(pal)
+        lbl.setStyleSheet(
+            "QLabel{background-color:#1e1f24;color:#eceff4;"
+            "border:1px solid #3d4048;border-radius:8px;padding:10px 12px;font-size:12px;}"
+        )
+        self._label = lbl
+        return lbl
+
+    def _hide(self) -> None:
+        if self._label is not None and self._label.isVisible():
+            self._label.hide()
+
+    def _show(self, gpos, html: str) -> None:
+        lbl = self._ensure_label()
+        lbl.setText(html)
+        lbl.adjustSize()
+        w, h = lbl.width(), lbl.height()
+        x, y = gpos.x() + 14, gpos.y() + 20
+        try:
+            screen = QApplication.screenAt(gpos) or QApplication.primaryScreen()
+            geo = screen.availableGeometry() if screen else None
+            if geo is not None:
+                if x + w > geo.right():
+                    x = geo.right() - w - 6
+                if y + h > geo.bottom():
+                    y = gpos.y() - h - 10
+                x = max(geo.left() + 4, x)
+                y = max(geo.top() + 4, y)
+        except Exception:
+            pass
+        lbl.move(x, y)
+        lbl.show()
+
+    def eventFilter(self, obj, event):  # noqa: N802
+        try:
+            et = event.type()
+            if et == QEvent.Type.ToolTip:
+                idx = obj.logicalIndexAt(event.pos())
+                if idx >= 0:
+                    item = self.table.horizontalHeaderItem(idx)
+                    text = item.text().strip() if item is not None else ""
+                    html = HEADER_TOOLTIPS.get(text)
+                    if html:
+                        self._show(event.globalPos(), html)
+                        return True
+                self._hide()
+            elif et in (
+                QEvent.Type.Leave,
+                QEvent.Type.MouseButtonPress,
+                QEvent.Type.Hide,
+                QEvent.Type.Scroll,
+            ):
+                self._hide()
+        except Exception:
+            self._hide()
+        return False
+
+
+# 各表默认列宽（仅在从未保存过布局时使用；用户调整后由 ATS 表头持久化接管）
+_DEFAULT_COL_WIDTHS: Dict[str, List[int]] = {
+    "tbl_live": [56, 74, 104, 76, 78, 64, 52, 52, 52, 52, 64, 108, 78, 70, 104, 82, 52, 62],
+    "tbl_replay": [70, 74, 104, 76, 78, 56, 64, 64, 64, 64, 64, 62],
+    "tbl_trades": [74, 104, 64, 76, 60, 64, 76, 72, 78, 78, 200],
+    "tbl_track": [74, 104, 60, 76, 84, 76, 88, 72, 64, 60, 220, 74, 64, 64],
+}
+
+
+_RAMDISK_DIR_CACHE: List[Optional[str]] = []
 
 
 def _detect_ramdisk_dir() -> Optional[str]:
     """探测高速内存盘 (Ramdisk) 路径 (如 R:\\fusion_shadow, G:\\fusion_shadow 等)。
     若探测到有效 Ramdisk 且可写，返回对应影子快照目录，否则返回 None。
+
+    结果进程内缓存：旧实现每次取路径都要 makedirs + 写探针文件 + 删除探针，
+    在 2 秒级自动刷新下会变成高频磁盘抖动（也是 os.makedirs 被反复触发的来源）。
     """
+    if _RAMDISK_DIR_CACHE:
+        return _RAMDISK_DIR_CACHE[0]
     for drive in ("R:", "G:", "Z:"):
         base = os.path.join(drive, os.sep)
         if os.path.exists(base):
@@ -202,10 +433,114 @@ def _detect_ramdisk_dir() -> Optional[str]:
                     f.write("ok")
                 if os.path.exists(test_f):
                     os.remove(test_f)
+                _RAMDISK_DIR_CACHE.append(candidate)
                 return candidate
             except Exception:
                 continue
+    _RAMDISK_DIR_CACHE.append(None)
     return None
+
+
+def _shadow_dir_candidates() -> List[str]:
+    """所有可能存放影子日志的目录，按"当前运行根优先"排序。
+
+    为什么需要多根：换构建/换部署目录后 app_root 会变，当日流水还留在旧目录，
+    旧实现只读当前根 → 新版本一启动就是白板。读取时多根取最新，写入仍只写当前根。
+    """
+    roots: List[str] = []
+    env_root = os.environ.get("INSTOCK_APP_ROOT")
+    if env_root:
+        roots.append(env_root)
+    try:
+        from sys_utils import get_app_root  # type: ignore
+
+        roots.append(get_app_root())
+    except Exception:
+        pass
+    roots.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    try:
+        import sys as _sys
+
+        exe_dir = os.path.dirname(os.path.abspath(_sys.executable or ""))
+        if exe_dir:
+            roots.append(exe_dir)
+    except Exception:
+        pass
+    try:
+        roots.append(os.getcwd())
+    except Exception:
+        pass
+
+    dirs: List[str] = []
+    for root in roots:
+        if not root:
+            continue
+        d = os.path.join(root, "logs", "fusion_shadow")
+        if d not in dirs:
+            dirs.append(d)
+    return dirs
+
+
+def _day_file_candidates(day: str) -> List[str]:
+    """当日影子文件的所有候选路径（Ramdisk 优先）。"""
+    d_str = day or today_str()
+    out: List[str] = []
+    ramdisk_dir = _detect_ramdisk_dir()
+    if ramdisk_dir:
+        out.append(os.path.join(ramdisk_dir, "{}.jsonl".format(d_str)))
+    for d in _shadow_dir_candidates():
+        p = os.path.join(d, "{}.jsonl".format(d_str))
+        if p not in out:
+            out.append(p)
+    return out
+
+
+def _resolve_day_file(day: str) -> Optional[str]:
+    """当日的可读文件：多个候选里取修改时间最新的那个（Ramdisk 更新时用 Ramdisk）。"""
+    best: Optional[str] = None
+    best_mtime = -1.0
+    for p in _day_file_candidates(day):
+        try:
+            if os.path.exists(p) and os.path.getsize(p) > 0:
+                m = os.path.getmtime(p)
+                if m > best_mtime:
+                    best, best_mtime = p, m
+        except Exception:
+            continue
+    return best
+
+
+def _resolve_shadow_file(day: str) -> Tuple[Optional[str], str]:
+    """返回 (文件路径, 实际交易日)。当日无数据时回退到最近一个有数据的交易日，永不返回白板。"""
+    d_str = day or today_str()
+    path = _resolve_day_file(d_str)
+    if path:
+        return path, d_str
+
+    # 当日没有任何数据：找所有候选目录里最近的一个交易日文件
+    newest_path: Optional[str] = None
+    newest_day = ""
+    newest_mtime = -1.0
+    for d in _shadow_dir_candidates() + ([_detect_ramdisk_dir()] if _detect_ramdisk_dir() else []):
+        if not d or not os.path.isdir(d):
+            continue
+        try:
+            names = os.listdir(d)
+        except Exception:
+            continue
+        for nm in names:
+            if not nm.endswith(".jsonl") or nm.startswith("."):
+                continue
+            p = os.path.join(d, nm)
+            try:
+                if os.path.getsize(p) <= 0:
+                    continue
+                m = os.path.getmtime(p)
+            except Exception:
+                continue
+            if m > newest_mtime:
+                newest_path, newest_day, newest_mtime = p, nm[:-6], m
+    return newest_path, (newest_day or d_str)
 
 
 def _shadow_storage_paths(day: str = "") -> Tuple[str, Optional[str]]:
@@ -229,52 +564,137 @@ def _shadow_log_path(day: str = "") -> str:
     return primary
 
 
-def persist_shadow_records(records: List[Dict[str, Any]], day: str = "") -> int:
-    """双通道原子持久化：同时写入 Ramdisk (微秒级) 与 logs/fusion_shadow (高可靠物理落盘)"""
+def _row_is_hit(rec: Dict[str, Any]) -> bool:
+    """是否命中：L2 及以上，或旧策略给出买入。梯度层只对"命中"负责，不重复播报异动。"""
+    try:
+        tier = int((rec.get("fusion") or {}).get("tier") or 0)
+    except Exception:
+        tier = 0
+    action = str((rec.get("legacy") or {}).get("action") or "")
+    return bool(rec.get("hit")) or tier >= 2 or action in ("买入", "加仓", "BUY", "ADD")
+
+
+def _record_key(rec: Dict[str, Any]) -> Tuple[str, float]:
+    code = str(rec.get("code") or "").split(".")[0].zfill(6)
+    try:
+        ts = round(float(rec.get("ts") or 0.0), 3)
+    except Exception:
+        ts = 0.0
+    return (code, ts)
+
+
+def _merge_records(path: str, records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """把新记录并入已有流水：按 (code, ts) 去重追加，绝不丢弃已有行。
+
+    旧实现是"用新列表整体覆盖文件"，收盘沉淀与回放回补都会把当日几万行流水
+    截断成几十行（10-23 的文件只剩 772 字节就是这么来的）。
+    """
+    kept: List[Dict[str, Any]] = []
+    seen = set()
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
+                    key = _record_key(rec)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    kept.append(rec)
+    except Exception as exc:
+        logger.debug("[FusionLadder] 合并读取旧流水失败: %s", exc)
+
+    added = 0
+    for rec in records:
+        key = _record_key(rec)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(rec)
+        added += 1
+    logger.debug("[FusionLadder] 影子流水合并: 已有 %d 行, 新增 %d 行", len(kept) - added, added)
+    return kept
+
+
+def _atomic_write_lines(path: str, records: List[Dict[str, Any]]) -> None:
+    """对齐 ATS 底层持久化：目录跨进程写锁 + Windows 共享冲突重试 + 原子替换。"""
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    tmp_p = path + ".tmp"
+    try:
+        from ats.persistence_lock import directory_write_lock, replace_with_retry
+
+        with directory_write_lock(directory, timeout=2.0):
+            with open(tmp_p, "w", encoding="utf-8") as f:
+                for r in records:
+                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
+            replace_with_retry(tmp_p, path)
+    except Exception:
+        # 锁不可用（被其他进程占用超时）时，退回无锁原子替换，绝不静默丢数据
+        try:
+            with open(tmp_p, "w", encoding="utf-8") as f:
+                for r in records:
+                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
+                f.flush()
+            os.replace(tmp_p, path)
+        finally:
+            if os.path.exists(tmp_p):
+                try:
+                    os.remove(tmp_p)
+                except Exception:
+                    pass
+
+
+def persist_shadow_records(records: List[Dict[str, Any]], day: str = "", merge: bool = True) -> int:
+    """双通道原子持久化：同时写入 Ramdisk (微秒级) 与 logs/fusion_shadow (高可靠物理落盘)
+
+    merge=True（默认）时与已有流水合并后落盘，只追加不截断。
+    写入走 ATS 统一的目录写锁 + Windows 重试，避免被占用时静默失败。
+    """
     if not records:
         return 0
     primary, ramdisk = _shadow_storage_paths(day)
+    payload = _merge_records(primary, records) if merge else list(records)
 
     # 1. 写入 Ramdisk (高速内存虚拟盘，实盘零阻塞防崩溃)
     if ramdisk:
         try:
-            os.makedirs(os.path.dirname(ramdisk), exist_ok=True)
-            tmp_r = ramdisk + ".tmp"
-            with open(tmp_r, "w", encoding="utf-8") as f:
-                for r in records:
-                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
-            os.replace(tmp_r, ramdisk)
+            _atomic_write_lines(ramdisk, payload)
         except Exception as e:
             logger.debug(f"[FusionLadder] Ramdisk 写入异常: {e}")
 
     # 2. 写入物理主落盘 logs/fusion_shadow/{day}.jsonl
     try:
-        os.makedirs(os.path.dirname(primary), exist_ok=True)
-        tmp_p = primary + ".tmp"
-        with open(tmp_p, "w", encoding="utf-8") as f:
-            for r in records:
-                f.write(json.dumps(r, ensure_ascii=False) + "\n")
-        os.replace(tmp_p, primary)
+        _atomic_write_lines(primary, payload)
     except Exception as e:
         logger.warning(f"[FusionLadder] 主落盘写入异常: {e}")
 
     return len(records)
 
 
-def load_live_rows(day: str = "", max_lines: int = 5000) -> List[Dict[str, Any]]:
-    """读影子日志，优先从 Ramdisk 读取，若无或落后则读落盘主日志，按 code 取最新一条，按级别+RAR 排序。"""
-    primary, ramdisk = _shadow_storage_paths(day)
-    target_path = primary
+def load_live_rows(day: str = "", max_lines: int = 5000, allow_fallback: bool = True) -> List[Dict[str, Any]]:
+    """读影子日志（多根取最新），按 code 取最新一条，按级别+RAR 排序。
 
-    # 优先使用 Ramdisk 镜像（若存在且修改时间更新）
-    if ramdisk and os.path.exists(ramdisk):
-        try:
-            if not os.path.exists(primary) or os.path.getmtime(ramdisk) >= os.path.getmtime(primary):
-                target_path = ramdisk
-        except Exception:
-            target_path = primary
+    allow_fallback=True 时，当日无数据会回退到最近一个有数据的交易日，
+    并在每行打上 `_source_day`，由界面显式标注"展示的是哪一天"，不伪装成今日数据。
+    """
+    if allow_fallback:
+        target_path, src_day = _resolve_shadow_file(day)
+    else:
+        target_path, src_day = _resolve_day_file(day), (day or today_str())
 
-    if not os.path.exists(target_path):
+    if not target_path or not os.path.exists(target_path):
         return []
     try:
         with open(target_path, "r", encoding="utf-8") as f:
@@ -302,9 +722,16 @@ def load_live_rows(day: str = "", max_lines: int = 5000) -> List[Dict[str, Any]]
             latest[code] = rec
 
     rows = list(latest.values())
+    for r in rows:
+        r["_source_day"] = src_day
+        r["_source_file"] = target_path
     rows.sort(key=lambda r: (int((r.get("fusion") or {}).get("tier") or 0),
                              float((r.get("fusion") or {}).get("rar") or 0)), reverse=True)
     return rows
+
+
+class _ReplayCancelled(Exception):
+    """用户/退出流程取消回放时，用于从进度回调里快速退出。"""
 
 
 class ReplayWorker(QThread):
@@ -321,6 +748,12 @@ class ReplayWorker(QThread):
         self.step = step
         self.cuts_mode = cuts_mode
 
+    def _on_progress(self, cur: int, total: int) -> None:
+        # 进度回调是唯一贯穿全程的钩子：在这里响应取消，退出时才能及时收敛线程
+        if self.isInterruptionRequested():
+            raise _ReplayCancelled()
+        self.progress.emit(cur, total)
+
     def run(self) -> None:  # noqa: D401
         try:
             rp = DayReplay(config=ReplayConfig(
@@ -331,8 +764,10 @@ class ReplayWorker(QThread):
                 self.failed.emit("找不到分钟线缓存（G:/minute_kline_cache.pkl）")
                 return
             day = self.day or (rp.days()[-1] if rp.days() else today_str())
-            result = rp.run_day(day, progress=lambda a, b: self.progress.emit(a, b), focus=self.focus)
+            result = rp.run_day(day, progress=self._on_progress, focus=self.focus)
             self.done.emit(result)
+        except _ReplayCancelled:
+            logger.info("[FusionLadder] 回放已按请求中断")
         except Exception as exc:  # 线程内异常必须自己吞，否则整个窗口崩
             self.failed.emit("{}: {}".format(type(exc).__name__, exc))
 
@@ -396,6 +831,18 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self._closing_settle_timer.timeout.connect(self._check_and_auto_settle_closing)
         self._closing_settle_timer.start(15000)
 
+        # 实时梯度自动刷新：2s 巡检一次，仅在影子文件真的变化时重绘（静止不重绘，零额外开销）
+        self._live_sig = None
+        self._last_init_scan_t = 0.0
+        self._init_scan_started = False
+        self._replay_backfill_started = False
+        self._live_timer = QTimer(self)
+        self._live_timer.timeout.connect(self._auto_refresh_live)
+        self._live_timer.start(2000)
+
+        # 启动即初始化：每次打开窗口都保证跑一次（非交易时段自动豁免），绝不白板
+        QTimer.singleShot(1200, self._startup_init_scan)
+
         self._init_ui()
         self._load_saved_geometry()
         self._init_days()
@@ -427,6 +874,19 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self.chk_on_top.setToolTip("开启置顶 (快捷键 T)；置顶状态下窗口始终浮于最前，停用边缘折叠隐藏")
         self.chk_on_top.toggled.connect(self._on_stays_on_top_toggled)
         bar.addWidget(self.chk_on_top)
+
+        # 只看命中：梯度层是"打分命中"，不是把异动列表再显示一遍
+        self.chk_hit_only = QCheckBox("✅ 只看命中")
+        self.chk_hit_only.setToolTip(
+            "只显示 L2 及以上（或旧策略给出买入）的命中标的。\n"
+            "关掉可看全池梯度分布，用于观察 L0/L1 的边缘标的。"
+        )
+        try:
+            self.chk_hit_only.setChecked(bool(load_config_node("fusion_ladder_hit_only", False)))
+        except Exception:
+            pass
+        self.chk_hit_only.toggled.connect(self._on_hit_only_toggled)
+        bar.addWidget(self.chk_hit_only)
 
         bar.addWidget(QLabel("交易日"))
         self.cmb_day = QComboBox()
@@ -469,9 +929,10 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self.tabs = QTabWidget()
         root.addWidget(self.tabs, 1)
 
-        # Tab 0: 实时梯度 [级别, 代码, 名称, 现价, 涨幅%, RAR, 位, 接, 意, 环, 仓位%, 进场, 止损, 先手min, 来源]
+        # Tab 0: 实时梯度 [级别, 代码, 名称, 现价, 涨幅%, RAR, 位, 接, 意, 环, 仓位%, 进场, 止损, 先手min, 来源, 更新时间, 命中, 覆盖%]
         self.tbl_live = self._create_interactive_table([
             "级别", "代码", "名称", "现价", "涨幅%", "RAR", "位", "接", "意", "环", "仓位%", "进场", "止损", "先手min", "来源",
+            "更新时间", "命中", "覆盖%",
         ], "tbl_live")
         self.tabs.addTab(self.tbl_live, "实时梯度（影子流）")
 
@@ -539,12 +1000,69 @@ class FusionLadderDialog(QWidget, WindowMixin):
         tbl.horizontalHeader().setStretchLastSection(True)
         tbl.setSortingEnabled(True)
 
-        # 💡 设置字典级专业列头 ToolTip
+        # 💡 设置字典级专业列头 ToolTip（富文本三段式，供默认提示与自定义卡片共用）
         for col_idx, h_name in enumerate(headers):
             item = tbl.horizontalHeaderItem(col_idx)
             if item:
-                tip = HEADER_TOOLTIPS.get(h_name) or f"【{h_name}】点击列头可按数值升/降序切换排序"
+                tip = HEADER_TOOLTIPS.get(h_name) or _tip(
+                    h_name, "该列的数值含义。", "点击列头可按数值升/降序切换排序。"
+                )
                 item.setToolTip(tip)
+
+        # 🖱 深色卡片式表头悬浮说明（对齐 TK 指标悬浮样式）
+        try:
+            tbl._header_tip = HeaderToolTip(tbl)
+        except Exception as exc:
+            logger.debug("[FusionLadder] 表头悬浮说明挂载失败 %s: %s", name, exc)
+
+        # 🔗 直接复用 ATS 成熟的表头持久化（列宽/列序/隐藏 + 退出前 flush），不重复实现。
+        # 用独立布局文件：window_config.json 会被其他窗口/退出流程反复整体重写，
+        # 与本窗口的异步布局写入互相覆盖，正是"重启 ATS 后列宽丢失"的根因之一。
+        try:
+            from ats.ui.styles import setup_header_persistence
+            from sys_utils import get_app_root, get_conf_path
+
+            layout_path = get_conf_path("fusion_ladder_layout.json", get_app_root())
+            setup_header_persistence(
+                tbl,
+                config_key="fusion_ladder_{}_state".format(name),
+                default_widths=_DEFAULT_COL_WIDTHS.get(name),
+                storage_path=layout_path,
+            )
+            # 恢复完成后重新套用极窄模式，避免历史隐藏状态覆盖当前模式
+            flt = getattr(tbl, "_show_event_filter", None)
+            if flt is not None:
+                prev_cb = getattr(flt, "restore_callback", None)
+
+                def _restore_then_narrow(_prev=prev_cb):
+                    if callable(_prev):
+                        _prev()
+                    self._apply_all_narrow_modes()
+
+                flt.restore_callback = _restore_then_narrow
+
+            # 🛡️ 落盘兜底：TK 主循环退出时 Qt 的 aboutToQuit 不一定会触发，
+            # 只靠退出前 flush 会让"重启 ATS 后列宽丢失"。这里在调整结束后主动 flush。
+            from ats.ui.styles import flush_config_writer
+
+            _flush_timer = QTimer(tbl)
+            _flush_timer.setSingleShot(True)
+            _flush_timer.setInterval(800)
+
+            def _persist_layout_now(_tbl=tbl):
+                try:
+                    _tbl.save_header_state(sync=True)
+                    flush_config_writer(timeout_sec=1.0)
+                except Exception as exc:
+                    logger.debug("[FusionLadder] 布局落盘失败 %s: %s", name, exc)
+
+            _flush_timer.timeout.connect(_persist_layout_now)
+            _hdr = tbl.horizontalHeader()
+            _hdr.sectionResized.connect(lambda *_: _flush_timer.start())
+            _hdr.sectionMoved.connect(lambda *_: _flush_timer.start())
+            tbl._layout_flush_timer = _flush_timer
+        except Exception as exc:
+            logger.debug("[FusionLadder] 表头持久化挂载失败 %s: %s", name, exc)
 
         # 1. 鼠标点击联动
         tbl.itemClicked.connect(self._on_table_item_clicked)
@@ -886,6 +1404,13 @@ class FusionLadderDialog(QWidget, WindowMixin):
         day = text.strip()
         if day:
             self.refresh_live()
+
+    def _on_hit_only_toggled(self, checked: bool) -> None:
+        try:
+            save_config_node("fusion_ladder_hit_only", bool(checked))
+        except Exception:
+            pass
+        self._render_live(force=True)
 
     @staticmethod
     def _num_item(text: Any, raw_val: Any = None, color: Optional[QColor] = None, bold: bool = False) -> NumericTableWidgetItem:
@@ -1316,9 +1841,10 @@ class FusionLadderDialog(QWidget, WindowMixin):
             from ats.fusion.session_ctx import default_store
             store = default_store()
 
-            live_rows = load_live_rows(day)
+            # 只读当日文件，绝不把"回退展示的其他交易日"写进今天
+            live_rows = load_live_rows(day, allow_fallback=False)
             if live_rows:
-                # 双通道持久化：Ramdisk + 物理落盘
+                # 双通道持久化（合并语义，保留当日全量流水不被截断）
                 persist_shadow_records(live_rows, day)
 
             store.close_day(
@@ -1358,18 +1884,219 @@ class FusionLadderDialog(QWidget, WindowMixin):
     # 实时与回补数据展示
     # ------------------------------------------------------------------
     def refresh_live(self) -> None:
+        self._render_live(force=True)
+
+    def _live_source_signature(self, day: str) -> tuple:
+        """影子文件指纹：路径 + 大小 + 修改时间。用于判断是否需要重绘。"""
+        try:
+            path, src_day = _resolve_shadow_file(day)
+            if not path or not os.path.exists(path):
+                return (day, "", 0, 0.0)
+            st = os.stat(path)
+            return (day, path, st.st_size, round(st.st_mtime, 3))
+        except Exception:
+            return (day, "", 0, 0.0)
+
+    def _auto_refresh_live(self) -> None:
+        """定时静默刷新：只有影子文件真的变了才重绘，避免无谓重建表格。"""
+        if getattr(self, "_is_closing", False) or not self.isVisible():
+            return
+        if self.tabs.currentIndex() != 0:
+            return
+        if self._worker is not None:
+            return
         day = self.cmb_day.currentText().strip() or today_str()
+        sig = self._live_source_signature(day)
+        if sig == getattr(self, "_live_sig", None):
+            self._maybe_ensure_data()
+            return
+        self._render_live(force=False)
+
+    # ------------------------------------------------------------------
+    # 初始化扫描（永远执行一次；非交易时段豁免；永不白板）
+    # ------------------------------------------------------------------
+    def _is_trading_window(self) -> bool:
+        """交易时段判定：工作日 09:15~15:05（非交易时段豁免自动扫描）。"""
+        try:
+            now = datetime.datetime.now()
+            if now.weekday() >= 5:
+                return False
+            hm = now.strftime("%H:%M")
+            if not ("09:15" <= hm <= "15:05"):
+                return False
+            try:
+                from ats.tdx_realtime_fetcher import TDXGlobalCachePool
+
+                today = now.strftime("%Y-%m-%d")
+                return bool(TDXGlobalCachePool.is_trading_day(today))
+            except Exception:
+                return True
+        except Exception:
+            return False
+
+    def _trigger_host_scan(self) -> bool:
+        """请宿主（TK 主控 / ATS 主窗）跑一轮实时逻辑扫描，产出影子记录。"""
+        targets = []
+        parent = getattr(self, "_py_parent", None)
+        if parent is not None:
+            targets.append(parent)
+            for attr in ("master", "app", "_tk_app", "_root_window"):
+                obj = getattr(parent, attr, None)
+                if obj is not None:
+                    targets.append(obj)
+        if not targets:
+            # TK 入口打开窗口时 parent 传 None，这里回落到主控全局实例
+            try:
+                import instock_MonitorTK as _tk
+
+                app_inst = getattr(_tk, "_global_app_instance", None)
+                if app_inst is not None:
+                    targets.append(app_inst)
+            except Exception:
+                pass
+        for obj in targets:
+            fn = getattr(obj, "_run_live_strategy_process", None)
+            if not callable(fn):
+                continue
+            try:
+                schedule = getattr(obj, "_schedule_after", None)
+                if callable(schedule):
+                    schedule(0, lambda f=fn: f(manual_scan=True))
+                else:
+                    fn(manual_scan=True)
+                logger.info("[FusionLadder] 已请求宿主执行一轮实时逻辑扫描（初始化）")
+                return True
+            except Exception as exc:
+                logger.debug("[FusionLadder] 触发宿主扫描失败: %s", exc)
+        return False
+
+    def _startup_init_scan(self) -> None:
+        """窗口打开后的初始化：先渲染已有数据，再确保交易时段内至少跑过一轮扫描。"""
+        try:
+            self._render_live(force=True)
+        except Exception as exc:
+            logger.debug("[FusionLadder] 首次渲染异常: %s", exc)
+        try:
+            if not self._is_trading_window():
+                logger.info("[FusionLadder] 非交易时段，跳过初始化扫描（豁免）")
+                return
+            self._init_scan_started = True
+            self._maybe_ensure_data()
+        except Exception as exc:
+            logger.warning("[FusionLadder] 初始化扫描异常: %s", exc)
+
+    def _maybe_ensure_data(self) -> None:
+        """交易时段内：当日无数据或数据断流超过 180s 时，自动拉起一次初始化扫描（5 分钟限频）。"""
+        if not self._is_trading_window():
+            return
+        if self._worker is not None and self._worker.isRunning():
+            return
+        day = self.cmb_day.currentText().strip() or today_str()
+        rows = load_live_rows(day, allow_fallback=False)
+        has_data = bool(rows)
+        if has_data:
+            try:
+                latest = max(float(r.get("ts") or 0.0) for r in rows)
+            except Exception:
+                latest = 0.0
+            if latest > 0 and (time.time() - latest) <= 180:
+                return
+        now = time.time()
+        if (now - float(getattr(self, "_last_init_scan_t", 0.0) or 0.0)) < 300:
+            return
+        self._last_init_scan_t = now
+        if self._trigger_host_scan():
+            self.lbl_status.setText("状态：{} 已请求主程序执行一轮逻辑扫描，等待影子数据…".format(day))
+            self.lbl_status.setStyleSheet("color:#ffd75e; font-weight:bold;")
+            return
+        # 宿主没有扫描入口时不自动跑全市场回放：回放要加载全量分钟缓存，
+        # 与实时扫描抢 CPU，且线程长跑难以在退出时收敛。这里给出明确指引，仍不白板。
+        self.lbl_status.setText(
+            "状态：{} 未找到主程序扫描入口｜请确认主程序在运行，或点 [▶ 跑回放(回补)] 初始化".format(day)
+        )
+        self.lbl_status.setStyleSheet("color:#ffa64d; font-weight:bold;")
+
+    def _render_live(self, force: bool = True) -> None:
+        day = self.cmb_day.currentText().strip() or today_str()
+        sig = self._live_source_signature(day)
+        if not force and sig == getattr(self, "_live_sig", None):
+            return
         rows = load_live_rows(day)
         tbl = self.tbl_live
+        total_rows = len(rows)
+        hit_only = bool(getattr(self, "chk_hit_only", None) is not None and self.chk_hit_only.isChecked())
+        if hit_only and rows:
+            rows = [r for r in rows if _row_is_hit(r)]
+            if not rows:
+                tbl.setSortingEnabled(False)
+                tbl.setRowCount(0)
+                tbl.insertRow(0)
+                it = self._num_item("当前无命中（L2 及以上）——取消勾选 [只看命中] 可查看全池 L0/L1 梯度", "no_hit")
+                it.setForeground(QColor("#ffa64d"))
+                tbl.setItem(0, 0, it)
+                for c in range(1, tbl.columnCount()):
+                    tbl.setItem(0, c, self._num_item("", 0))
+                tbl.setSpan(0, 0, 1, max(1, tbl.columnCount()))
+                self.lbl_status.setText(
+                    "状态：{} 全池 {} 条｜命中 0｜等待 L2+ 信号（取消勾选可看全池）".format(day, total_rows)
+                )
+                self.lbl_status.setStyleSheet("color:#ffa64d; font-weight:bold;")
+                tbl.setSortingEnabled(True)
+                return
+
+        # 保留滚动位置与当前选中代码，避免定时刷新把用户视线拽走
+        scroll = tbl.verticalScrollBar().value()
+        selected_code = ""
+        try:
+            cur = tbl.currentRow()
+            if cur >= 0:
+                selected_code = self._get_row_code_name(tbl, cur)[0]
+        except Exception:
+            selected_code = ""
+
         tbl.setSortingEnabled(False)
         tbl.setRowCount(0)
+        self._live_sig = sig
         if not rows:
-            self.lbl_status.setText(f"状态：{day} 暂无影子记录（可点击 [▶ 跑回放(回补)] 自动生成）")
+            # 永不白板：放一行占位说明，并按交易时段自动拉起初始化
+            tbl.insertRow(0)
+            hint = ("正在初始化扫描…（交易时段会自动拉起一轮逻辑扫描，无需手动操作）"
+                    if self._is_trading_window() else
+                    "非交易时段暂无当日记录：{} 无影子数据，可点 [▶ 跑回放(回补)] 生成".format(day))
+            it = self._num_item(hint, hint)
+            it.setForeground(QColor("#ffa64d"))
+            tbl.setItem(0, 0, it)
+            for c in range(1, tbl.columnCount()):
+                tbl.setItem(0, c, self._num_item("", 0))
+            tbl.setSpan(0, 0, 1, max(1, tbl.columnCount()))
+            self.lbl_status.setText("状态：{} 暂无影子记录｜{}".format(day, "初始化中" if self._is_trading_window() else "非交易时段"))
             self.lbl_status.setStyleSheet("color:#ffa64d; font-weight:bold;")
             tbl.setSortingEnabled(True)
+            self._maybe_ensure_data()
             return
 
+        source_day = str(rows[0].get("_source_day") or day)
+        # 写盘进程版本自检：旧版本写的记录没有 price/pct/coverage，
+        # 界面必须直接说明"是 exe 旧"而不是让用户以为数据没更新。
+        try:
+            schema_ver = int(rows[0].get("schema") or 0)
+        except Exception:
+            schema_ver = 0
+        schema_note = "" if schema_ver >= 2 else "｜⚠ 记录由旧版 exe 写入（无现价/涨幅/覆盖），请更新 exe"
+        writer_note = ""
+        try:
+            _wexe = str(rows[0].get("writer_exe") or "")
+            _wpid = rows[0].get("writer_pid")
+            if _wexe:
+                writer_note = "｜写:{}".format(_wexe if not _wpid else "{}#{}".format(_wexe, _wpid))
+        except Exception:
+            writer_note = ""
+
         tier_count = {4: 0, 3: 0, 2: 0, 1: 0, 0: 0}
+        coverage_sum = 0.0
+        coverage_n = 0
+        latest_ts = 0.0
+        hit_count = 0
         for r in rows:
             fusion = r.get("fusion") or {}
             tier = int(fusion.get("tier") or 0)
@@ -1385,16 +2112,41 @@ class FusionLadderDialog(QWidget, WindowMixin):
 
             code = str(r.get("code", "")).split(".")[0].zfill(6)
             name = str(r.get("name") or "") or name_of(code)
-            price = float(r.get("price") or (entry.get("price_lo") or 0.0) or 0.0)
-            pct = float(r.get("pct") or 0.0)
+
+            # 现价/涨幅必须来自真实落盘行情；缺失就显示 "--"，绝不伪造成 0.00%
+            raw_price = r.get("price")
+            raw_pct = r.get("pct")
+            price = float(raw_price) if isinstance(raw_price, (int, float)) else 0.0
+            pct = float(raw_pct) if isinstance(raw_pct, (int, float)) else None
+            price_txt = "{:.2f}".format(price) if price > 0 else "--"
+            pct_txt = "{:+.2f}%".format(pct) if pct is not None else "--"
+
+            ts = float(r.get("ts") or 0.0)
+            latest_ts = max(latest_ts, ts)
+            time_txt = datetime.datetime.fromtimestamp(ts).strftime("%H:%M:%S") if ts > 0 else "--"
+
+            cov = r.get("coverage")
+            if cov is None:
+                cov = fusion.get("coverage")
+            cov_val = float(cov) if isinstance(cov, (int, float)) else 0.0
+            if isinstance(cov, (int, float)):
+                coverage_sum += cov_val
+                coverage_n += 1
+
+            legacy_action = str((r.get("legacy") or {}).get("action") or "")
+            hit = bool(r.get("hit")) or tier >= 2 or legacy_action in ("买入", "加仓", "BUY", "ADD")
+            if hit:
+                hit_count += 1
+
+            pct_color = QColor("#c8c8d0") if pct is None else (QColor("#ff5c5c") if pct >= 0 else QColor("#00ff88"))
 
             # 各列严格接入 NumericTableWidgetItem 保证高精度数值排序
-            # 表头: [级别, 代码, 名称, 现价, 涨幅%, RAR, 位, 接, 意, 环, 仓位%, 进场, 止损, 先手min, 来源]
+            # 表头: [级别, 代码, 名称, 现价, 涨幅%, RAR, 位, 接, 意, 环, 仓位%, 进场, 止损, 先手min, 来源, 更新时间, 命中, 覆盖%]
             tbl.setItem(i, 0, self._num_item(f"L{tier}", tier, _TIER_COLORS.get(tier), bold=True))
             tbl.setItem(i, 1, self._num_item(code, code))
             tbl.setItem(i, 2, self._num_item(name, name))
-            tbl.setItem(i, 3, self._num_item(f"{price:.2f}" if price > 0 else "-", price))
-            tbl.setItem(i, 4, self._num_item(f"{pct:+.2f}%", pct, color=QColor("#ff5c5c") if pct >= 0 else QColor("#00ff88"), bold=True))
+            tbl.setItem(i, 3, self._num_item(price_txt, price))
+            tbl.setItem(i, 4, self._num_item(pct_txt, pct if pct is not None else 0.0, color=pct_color, bold=True))
             tbl.setItem(i, 5, self._num_item(fusion.get("rar", 0), float(fusion.get("rar", 0) or 0)))
             tbl.setItem(i, 6, self._num_item(axes.get("position", 0), float(axes.get("position", 0) or 0)))
             tbl.setItem(i, 7, self._num_item(axes.get("support", 0), float(axes.get("support", 0) or 0)))
@@ -1405,14 +2157,47 @@ class FusionLadderDialog(QWidget, WindowMixin):
             tbl.setItem(i, 12, self._num_item(stop.get("price", "-"), float(stop.get("price") or 0) if stop.get("price") not in ("-", None) else 0.0))
             tbl.setItem(i, 13, self._num_item(fusion.get("age_min", 0), float(fusion.get("age_min", 0) or 0)))
             tbl.setItem(i, 14, self._num_item(",".join(fusion.get("sources") or []), ",".join(fusion.get("sources") or [])))
+            tbl.setItem(i, 15, self._num_item(time_txt, ts))
+            tbl.setItem(i, 16, self._num_item("✅" if hit else "", 1 if hit else 0,
+                                             color=QColor("#ffd24d") if hit else None, bold=hit))
+            tbl.setItem(i, 17, self._num_item(f"{cov_val * 100:.0f}%", cov_val,
+                                              color=QColor("#8fd18f") if cov_val >= 0.8 else QColor("#ffa64d")))
 
         tbl.setSortingEnabled(True)
+
+        if selected_code:
+            try:
+                for r_i in range(tbl.rowCount()):
+                    if self._get_row_code_name(tbl, r_i)[0] == selected_code:
+                        tbl.selectRow(r_i)
+                        break
+            except Exception:
+                pass
+        try:
+            tbl.verticalScrollBar().setValue(scroll)
+        except Exception:
+            pass
+
+        cov_avg = (coverage_sum / coverage_n) if coverage_n else 0.0
+        now_txt = datetime.datetime.now().strftime("%H:%M:%S")
+        stale = ""
+        if latest_ts > 0:
+            age_s = time.time() - latest_ts
+            if age_s > 60:
+                stale = "｜⚠ 最新记录已 {}s 未更新".format(int(age_s))
+        day_note = ""
+        if source_day and source_day != day:
+            day_note = "｜⚠ 今日暂无记录，展示 {} 数据".format(source_day)
+        count_txt = ("命中 {} / 共 {} 条".format(len(rows), total_rows) if hit_only
+                     else "影子 {} 条".format(len(rows)))
         self.lbl_status.setText(
-            "状态：{} 影子 {} 条｜L4 {} / L3 {} / L2 {} / L1 {} / L0 {}".format(
-                day, len(rows), tier_count[4], tier_count[3], tier_count[2], tier_count[1], tier_count[0]
+            "状态：{} {}｜L4 {} / L3 {} / L2 {} / L1 {} / L0 {}｜命中 {}｜覆盖 {:.0f}%｜刷新 {}{}{}{}{}".format(
+                day, count_txt, tier_count[4], tier_count[3], tier_count[2], tier_count[1], tier_count[0],
+                hit_count, cov_avg * 100, now_txt, stale, day_note, schema_note, writer_note,
             )
         )
-        self.lbl_status.setStyleSheet("color:#8fd18f; font-weight:bold;")
+        warn = bool(stale or day_note or schema_note)
+        self.lbl_status.setStyleSheet("color:#ffa64d; font-weight:bold;" if warn else "color:#8fd18f; font-weight:bold;")
 
     # ------------------------------------------------------------------
     # 回放与回补持久化
@@ -1437,6 +2222,22 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self._worker.done.connect(self._on_replay_done)
         self._worker.failed.connect(self._on_replay_failed)
         self._worker.start()
+        # 进程退出时若回放线程仍在跑，QThread 被销毁会触发 Qt Fatal；退出前做一次有界等待
+        try:
+            import atexit
+
+            atexit.register(self._wait_worker_on_exit)
+        except Exception:
+            pass
+
+    def _wait_worker_on_exit(self) -> None:
+        try:
+            w = self._worker
+            if w is not None and w.isRunning():
+                w.requestInterruption()
+                w.wait(3000)
+        except Exception:
+            pass
 
     def _on_progress(self, cur: int, total: int) -> None:
         pct = int(cur * 100 / max(1, total))
@@ -1649,6 +2450,12 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 self._worker.progress.disconnect()
                 self._worker.done.disconnect()
                 self._worker.failed.disconnect()
+            except Exception:
+                pass
+            # 有界等待，避免 QThread 在运行中被销毁（进程退出时的 Qt Fatal）
+            try:
+                self._worker.requestInterruption()
+                self._worker.wait(2000)
             except Exception:
                 pass
         self._save_window_states(is_open=False)

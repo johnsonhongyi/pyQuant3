@@ -123,6 +123,29 @@ STALE_SECONDS = 20.0
 
 DEFAULT_WEIGHTS = {"position": 0.25, "support": 0.20, "intent": 0.20, "regime": 0.15, "relative": 0.20}
 
+# 轴内子项权重：(子项名, 权重)。子项名为 None 表示该子项总有数据。
+# 缺失子项从加权中剔除后归一，并用于计算 coverage（数据覆盖率）。
+_SUPPORT_PARTS = (
+    ("taker_buy_ratio", 0.30),
+    ("bid_pressure", 0.25),
+    ("structure_clarity", 0.25),
+    (None, 0.20),
+)
+_INTENT_PARTS = (
+    ("slope_score", 0.35),
+    ("intent_score", 0.30),
+    (None, 0.20),
+    (None, 0.15),
+)
+
+
+def _axis_availability(parts: tuple, missing: frozenset) -> float:
+    """轴内可用子权重占比 (0~1)。"""
+    total = sum(w for _n, w in parts) or 1.0
+    avail = sum(w for name, w in parts if not name or name not in missing)
+    return max(0.0, min(1.0, avail / total))
+
+
 DEFAULT_VETO = {"stale_seconds": STALE_SECONDS, "max_bias_pct": 7.0, "min_amount_wan": 3000.0}
 
 DEFAULT_PENALTY = {
@@ -262,8 +285,15 @@ def score_position(event: SignalEvent) -> tuple:
     return _clip(score), notes
 
 
-def score_support(event: SignalEvent) -> tuple:
-    """承接质量：拉上去有没有人接。"""
+def score_support(event: SignalEvent, missing: Optional[frozenset] = None) -> tuple:
+    """承接质量：拉上去有没有人接。
+
+    缺失处理（关键）：实盘链路目前拿不到外盘占比 / 五档买压 / 结构清晰度，
+    旧实现把它们当 0 分计入加权，导致本轴被结构性锁死在 35 分左右，
+    RAR 永远够不到 L2 以上——这就是"只有 L0"的根因。
+    现在缺失项直接从加权中剔除并按剩余权重归一，同时由 evaluate 记录覆盖率。
+    """
+    missing = missing or frozenset()
     notes: List[str] = []
 
     s_taker = _band(event.taker_buy_ratio, 58.0, 78.0, 45.0, 95.0)
@@ -281,16 +311,31 @@ def score_support(event: SignalEvent) -> tuple:
     if event.structure_clarity >= 60:
         notes.append("结构清晰{:.0f}".format(event.structure_clarity))
 
-    score = 100.0 * (0.30 * s_taker + 0.25 * s_bid + 0.25 * s_clarity + 0.20 * s_minutes)
-    return _clip(score), notes
+    parts = (
+        (0.30, s_taker, "taker_buy_ratio"),
+        (0.25, s_bid, "bid_pressure"),
+        (0.25, s_clarity, "structure_clarity"),
+        (0.20, s_minutes, None),
+    )
+    w_sum = 0.0
+    acc = 0.0
+    for weight, sub, field_name in parts:
+        if field_name and field_name in missing:
+            continue
+        w_sum += weight
+        acc += weight * sub
+    if w_sum <= 0:
+        return 50.0, notes
+    return _clip(100.0 * acc / w_sum), notes
 
-
-def score_intent(event: SignalEvent) -> tuple:
+def score_intent(event: SignalEvent, missing: Optional[frozenset] = None) -> tuple:
     """意愿强度：拉升是否明确且持续。
 
     注意这里不用"涨幅"作为主变量——涨幅是结果，不是意愿。
     意愿由攻角、主力意图分、净拉升速度、增量量能共同刻画。
+    缺失的攻角/意图分按剩余权重归一（同上，避免缺失即 0 分）。
     """
+    missing = missing or frozenset()
     notes: List[str] = []
 
     s_slope = _clip((event.slope_score - 40.0) / 55.0, 0.0, 1.0)
@@ -307,8 +352,22 @@ def score_intent(event: SignalEvent) -> tuple:
     if event.velocity_pct >= 0.6:
         notes.append("净拉升{:+.1f}%".format(event.velocity_pct))
 
-    score = 100.0 * (0.35 * s_slope + 0.30 * s_intent + 0.20 * s_vel + 0.15 * s_vol)
-    return _clip(score), notes
+    parts = (
+        (0.35, s_slope, "slope_score"),
+        (0.30, s_intent, "intent_score"),
+        (0.20, s_vel, None),
+        (0.15, s_vol, None),
+    )
+    w_sum = 0.0
+    acc = 0.0
+    for weight, sub, field_name in parts:
+        if field_name and field_name in missing:
+            continue
+        w_sum += weight
+        acc += weight * sub
+    if w_sum <= 0:
+        return 50.0, notes
+    return _clip(100.0 * acc / w_sum), notes
 
 
 def score_regime(event: SignalEvent, regime: Optional[MarketRegime]) -> tuple:
@@ -654,6 +713,7 @@ class FusionEngine:
         now: Optional[float] = None,
         tier_cap: Optional[int] = None,
         tier_floor: Optional[int] = None,
+        cuts: Optional[tuple] = None,
     ) -> FusionDecision:
         now = float(now if now is not None else (event.ts or time.time()))
 
@@ -672,9 +732,10 @@ class FusionEngine:
                 evidence=[veto],
             )
 
+        missing = frozenset(event.extra.get("missing") or ())
         p, n_pos = score_position(event)
-        s, n_sup = score_support(event)
-        i, n_itn = score_intent(event)
+        s, n_sup = score_support(event, missing)
+        i, n_itn = score_intent(event, missing)
         r, n_reg = score_regime(event, regime)
         rel, n_rel = score_relative(event, regime)
         pen, n_pen = penalty_of(event, regime, self.penalty_params)
@@ -694,7 +755,20 @@ class FusionEngine:
         rar = _clip(rar, 0.0, 100.0)
         axes = AxisScores(position=p, support=s, intent=i, regime=r, relative=rel, penalty=pen, rar=rar)
 
-        tier = tier_of(rar, self.cuts)
+        # 数据覆盖率：只有真实数据参与加权的比例，用于标注"结论可信度"。
+        # 缺失轴不再按 0 分拉低分数，但必须让下游知道这次结论建立在部分数据上。
+        avail = {
+            "position": 1.0 if event.price > 0 else 0.0,
+            "support": _axis_availability(_SUPPORT_PARTS, missing),
+            "intent": _axis_availability(_INTENT_PARTS, missing),
+            "regime": 1.0 if regime is not None else 0.0,
+            "relative": 1.0 if event.extra.get("has_rs") else 0.0,
+        }
+        w_all = sum(self.weights.get(k, 0.0) for k in avail) or 1.0
+        coverage = sum(self.weights.get(k, 0.0) * v for k, v in avail.items()) / w_all
+
+        used_cuts = tuple(cuts) if cuts else self.cuts
+        tier = tier_of(rar, used_cuts)
         temp_cap, temp_coef = self._temp_cap(regime, event)
         age_min, age_cap, age_coef = self._age(event, now)
         tier = min(tier, temp_cap, age_cap)
@@ -752,6 +826,9 @@ class FusionEngine:
             decision_id="{}:{}".format(event.code, int(now * 1000)),
             regime_stage=regime.stage if regime else "",
             flip_state=regime.flip_state if regime else "",
+            coverage=round(coverage, 3),
+            provisional=bool(coverage < 0.80),
+            cuts=used_cuts,
         )
 
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
@@ -31,6 +32,43 @@ from ats.fusion.regime import MarketRegime, MarketRegimeTracker, RegimeSample
 logger = logging.getLogger(__name__)
 
 _BUY_ACTIONS = ("买入", "加仓", "BUY", "ADD")
+
+# 自适应分档的绝对下限：防止"整段行情都很烂"时也评出 L4。
+# 与回放 percentile_cuts 的 floors 保持一致（68/60/52/45）：
+# 补全盘口与分时后，实盘 RAR 量纲已与回放对齐，下限也必须对齐，
+# 否则 58 分就能评 L4，梯度会失去区分意义。
+_DEFAULT_CUT_FLOORS = {4: 68.0, 3: 60.0, 2: 52.0, 1: 45.0}
+_CUT_QUANTILES = ((4, 98.0), (3, 92.0), (2, 80.0), (1, 60.0))
+
+
+def _quantile(sorted_vals: List[float], q: float) -> float:
+    """纯 Python 线性插值分位（避免为一行统计引入 numpy 依赖）。"""
+    n = len(sorted_vals)
+    if n == 0:
+        return 0.0
+    if n == 1:
+        return float(sorted_vals[0])
+    pos = (q / 100.0) * (n - 1)
+    lo = int(pos)
+    hi = min(n - 1, lo + 1)
+    frac = pos - lo
+    return float(sorted_vals[lo]) * (1.0 - frac) + float(sorted_vals[hi]) * frac
+
+
+def adaptive_cuts(samples: List[float], floors: Optional[Dict[int, float]] = None) -> tuple:
+    """按当日 RAR 分布取分位阈值，并受绝对下限约束，保证 4>3>2>1 严格递减。"""
+    floors = floors or _DEFAULT_CUT_FLOORS
+    vals = sorted(float(x) for x in samples)
+    out: List[tuple] = []
+    prev = 101.0
+    for tier, q in _CUT_QUANTILES:
+        cut = max(float(floors.get(tier, 0.0)), _quantile(vals, q))
+        cut = round(cut, 1)
+        # 四舍五入后仍须严格递减，否则相邻档位会被合并
+        cut = min(cut, round(prev - 0.1, 1))
+        out.append((cut, tier))
+        prev = cut
+    return tuple(out)
 
 
 def _app_root() -> str:
@@ -87,17 +125,56 @@ class FusionShadow:
         self._fh_day = ""
         self._written_today = 0
         self._buf: List[str] = []
+        self._last_flush = 0.0
 
         self._regime: Optional[MarketRegime] = None
         self._regime_ts = 0.0
         self._day = ""
         self._last_rebalance = 0.0
 
+        # ---- 自适应分档（当日横截面分位）----
+        # 固定绝对阈值（82/72/62/50）是按"回放全量数据"标定的；实盘四轴覆盖不足时
+        # RAR 天花板只有 ~60，导致永远评不出 L2~L4。这里改为当日分位自适应，
+        # 让梯度真实展开，同时用 coverage 标注"这次结论建立在多少真实数据上"。
+        self._cuts_mode = str(self.cfg.get("tier_cuts_mode", "adaptive") or "adaptive").lower()
+        self._cuts_min_samples = int(self.cfg.get("tier_cuts_min_samples", 30) or 30)
+        self._cuts_floors = dict(_DEFAULT_CUT_FLOORS)
+        cfg_floors = self.cfg.get("tier_cuts_floors")
+        if isinstance(cfg_floors, dict):
+            try:
+                self._cuts_floors.update({int(k): float(v) for k, v in cfg_floors.items()})
+            except Exception:
+                pass
+        self._rar_samples: List[float] = []
+        self._cuts: Optional[tuple] = None
+        self._last_cut_n = 0
+
         if self.enabled:
             try:
                 os.makedirs(self._log_dir, exist_ok=True)
             except Exception as exc:
                 logger.warning("[fusion] 影子日志目录创建失败，降级为仅内存: %s", exc)
+
+    # ------------------------------------------------------------------
+    # 自适应分档
+    # ------------------------------------------------------------------
+    def _refresh_cuts(self) -> None:
+        """当日样本足够时，用横截面分位重算 L0~L4 阈值；样本不足则沿用引擎固定阈值。"""
+        if self._cuts_mode != "adaptive":
+            return
+        n = len(self._rar_samples)
+        if n < self._cuts_min_samples:
+            return
+        if self._cuts is not None and (n - self._last_cut_n) < 20:
+            return
+        try:
+            self._cuts = adaptive_cuts(self._rar_samples, self._cuts_floors)
+            self._last_cut_n = n
+        except Exception as exc:  # 分档失败不能影响主循环
+            logger.debug("[fusion] adaptive cuts failed: %s", exc)
+
+    def current_cuts(self) -> tuple:
+        return tuple(self._cuts) if self._cuts else tuple(self.engine.cuts)
 
     # ------------------------------------------------------------------
     # 温度
@@ -166,6 +243,9 @@ class FusionShadow:
                 self._day = day
                 self.launch.reset()
                 self._last_sample.clear()
+                self._rar_samples.clear()
+                self._cuts = None
+                self._last_cut_n = 0
 
             last = self._last_sample.get(code, 0.0)
             if now - last < self._sample_interval:
@@ -200,7 +280,11 @@ class FusionShadow:
                 trade_date=day,
             )
             regime = self.current_regime(now)
-            fusion = self.engine.evaluate(event, regime, now=now)
+            self._refresh_cuts()
+            fusion = self.engine.evaluate(event, regime, now=now, cuts=self._cuts)
+            self._rar_samples.append(float(fusion.rar))
+            if len(self._rar_samples) > 4000:
+                del self._rar_samples[:1000]
             self.bus.update(event, regime)
             if now - self._last_rebalance >= 60.0:
                 try:
@@ -223,11 +307,25 @@ class FusionShadow:
                 divergence = "both_skip"
 
             record = {
+                # 记录结构版本：2 = 含 price/pct/vwap/hit/coverage。
+                # 界面据此判断"写盘进程是不是新版本"，旧版本写的记录会缺字段。
+                "schema": 2,
+                # 写入方身份：排查"窗口是新的、数据是旧的"时，一眼看出是哪个进程在写。
+                "writer_pid": os.getpid(),
+                "writer_exe": os.path.basename(sys.executable or ""),
                 "ts": round(now, 3),
                 "day": day,
                 "code": code,
                 "name": name or str((snap or {}).get("name") or ""),
                 "source": source,
+                # 行情快照：界面"现价/涨幅/更新时间"直接读这三个字段。
+                # 旧实现只落 fusion 结论，不落行情，导致监视器全部显示 "-" 与 +0.00%。
+                "price": round(float(price or 0.0), 3),
+                "pct": round(float(pct or 0.0), 3),
+                "vwap": round(float(vwap or 0.0), 3),
+                "trade_date": day,
+                "hit": bool(fusion.tier >= 2),
+                "coverage": round(float(getattr(fusion, "coverage", 0.0) or 0.0), 3),
                 "legacy": {
                     "action": legacy_action,
                     "reason": str((decision or {}).get("reason") or "")[:120],
@@ -278,9 +376,13 @@ class FusionShadow:
                 self._fh.write(line + "\n")
                 self._buf.append(line)
                 self._written_today += 1
-                if len(self._buf) >= 10:
+                # 时间驱动 flush：旧实现每 10 行才刷一次，低频标的的记录会长时间停在
+                # 缓冲区里，进程被强杀就永久丢失（表现为"上午的梯度没有持久化"）。
+                now_ts = time.time()
+                if len(self._buf) >= 10 or (now_ts - self._last_flush) >= 2.0:
                     self._fh.flush()
                     self._buf.clear()
+                    self._last_flush = now_ts
             except Exception as exc:
                 self._stats["errors"] += 1
                 logger.debug("[fusion] 写影子日志失败: %s", exc)
@@ -331,6 +433,8 @@ class FusionShadow:
             "positions": len(self.bus.portfolio()),
             "l4": sum(1 for d in self.bus.portfolio() if d.get("tier") == 4),
         }
+        out["cuts"] = [list(c) for c in self.current_cuts()]
+        out["rar_samples"] = len(self._rar_samples)
         return out
 
     def top(self, n: int = 10) -> List[Dict[str, Any]]:
