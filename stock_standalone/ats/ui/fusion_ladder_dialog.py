@@ -26,6 +26,7 @@ import datetime
 import json
 import logging
 import os
+import re
 import time
 from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
@@ -42,7 +43,7 @@ from PyQt6.QtCore import (
     QTimer,
     pyqtSignal,
 )
-from PyQt6.QtGui import QAction, QColor, QCursor, QFont, QKeyEvent, QPalette
+from PyQt6.QtGui import QAction, QColor, QCursor, QFont, QKeyEvent, QPainter, QPalette, QPen
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -84,6 +85,7 @@ _DARK_QSS = """
 QWidget { background-color: #17171c; color: #d8d8e0; font-size: 9pt; }
 QLabel { color: #b9b9c8; }
 QCheckBox { color: #d8d8e0; spacing: 5px; }
+QCheckBox[hitOnly="true"] { color: #4dd0e1; font-weight: bold; }
 QCheckBox::indicator { width: 14px; height: 14px; border: 1px solid #3a3a48; border-radius: 3px; background: #202028; }
 QCheckBox::indicator:checked { background: #5a4b81; border-color: #a97bff; }
 QPushButton {
@@ -304,6 +306,90 @@ HEADER_TOOLTIPS: Dict[str, str] = {
 }
 
 
+class _TipCard(QWidget):
+    """自绘深色卡片：不依赖 QSS 与系统主题，底色/对比度稳定。
+
+    为什么不用 QLabel + QSS：带 ToolTip 标志的顶层窗口在部分环境下不会绘制
+    QSS 背景，浅色文字会直接落在系统白底上（实测就是"看不清"）。
+    这里改为 WA_TranslucentBackground + paintEvent 自己画圆角矩形。
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            None,
+            Qt.WindowType.ToolTip
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint,
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._body = QLabel(self)
+        self._body.setTextFormat(Qt.TextFormat.RichText)
+        self._body.setWordWrap(True)
+        self._body.setStyleSheet("background:transparent;border:none;")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(14, 12, 14, 12)
+        lay.addWidget(self._body)
+
+    def set_html(self, html: str) -> None:
+        self._body.setMaximumWidth(360)
+        self._body.setText(html)
+        self._body.adjustSize()
+        self.adjustSize()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        p.setBrush(QColor("#1e1f24"))
+        p.setPen(QPen(QColor("#3d4048"), 1))
+        p.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 8, 8)
+
+
+class _KeyNavLinker(QObject):
+    """上下键联动：键盘移动当前行后主动联动主图。
+
+    为什么不只靠 selectionModel().currentChanged：
+    表格每 2 秒会按影子文件变化重建，重建过程中 current 索引会被清空/恢复，
+    期间键盘移动产生的 currentChanged 可能被吞掉，表现为"只有点击联动"。
+    这里在按键后延迟一拍读当前行，直接联动，不依赖信号时序。
+    """
+
+    _KEYS = (
+        Qt.Key.Key_Up,
+        Qt.Key.Key_Down,
+        Qt.Key.Key_PageUp,
+        Qt.Key.Key_PageDown,
+        Qt.Key.Key_Home,
+        Qt.Key.Key_End,
+    )
+
+    def __init__(self, dialog, table: QTableWidget):
+        super().__init__(table)
+        self.dialog = dialog
+        self.table = table
+        table.installEventFilter(self)
+
+    def eventFilter(self, obj, event):  # noqa: N802
+        try:
+            if event.type() == QEvent.Type.KeyPress and event.key() in self._KEYS:
+                QTimer.singleShot(0, self._link_current)
+        except Exception:
+            pass
+        return False
+
+    def _link_current(self) -> None:
+        try:
+            row = self.table.currentRow()
+            if row < 0:
+                return
+            code, name = self.dialog._get_row_code_name(self.table, row)
+            if code:
+                self.dialog._link_main_stock(code, name)
+        except Exception:
+            pass
+
+
 class HeaderToolTip(QObject):
     """表头悬浮说明：深色卡片（对齐 TK 指标悬浮样式），替代 Qt 默认灰底纯文本提示。
 
@@ -315,50 +401,46 @@ class HeaderToolTip(QObject):
     def __init__(self, table: QTableWidget):
         super().__init__(table)
         self.table = table
-        self._label: Optional[QLabel] = None
+        self._label: Optional["_TipCard"] = None
+        self._hover_idx = -1
+        self._pending_html = ""
+        self._pending_pos = None
         header = table.horizontalHeader()
         header.setMouseTracking(True)
         header.installEventFilter(self)
+        try:
+            header.viewport().installEventFilter(self)
+        except Exception:
+            pass
+        # 用"悬停 450ms"驱动卡片，不依赖 Qt 的 ToolTip 事件路由（实测会被系统提示抢走）
+        self._delay = QTimer(self)
+        self._delay.setSingleShot(True)
+        self._delay.setInterval(450)
+        self._delay.timeout.connect(self._show_pending)
 
-    def _ensure_label(self) -> QLabel:
+    def _ensure_label(self) -> "_TipCard":
         if self._label is not None:
-            return self._label
-        lbl = QLabel()
-        lbl.setWindowFlags(
-            Qt.WindowType.ToolTip
-            | Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
-        )
-        lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        lbl.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
-        # 顶层 ToolTip 窗口必须显式开启样式背景，否则 QSS 的深色底不会绘制，
-        # 只剩浅色文字落在系统白底上 —— 这就是"看不清"的原因。
-        lbl.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        lbl.setAutoFillBackground(True)
-        lbl.setTextFormat(Qt.TextFormat.RichText)
-        lbl.setWordWrap(True)
-        lbl.setMaximumWidth(400)
-        pal = lbl.palette()
-        pal.setColor(QPalette.ColorRole.Window, QColor("#1e1f24"))
-        pal.setColor(QPalette.ColorRole.WindowText, QColor("#eceff4"))
-        pal.setColor(QPalette.ColorRole.ToolTipBase, QColor("#1e1f24"))
-        pal.setColor(QPalette.ColorRole.ToolTipText, QColor("#eceff4"))
-        lbl.setPalette(pal)
-        lbl.setStyleSheet(
-            "QLabel{background-color:#1e1f24;color:#eceff4;"
-            "border:1px solid #3d4048;border-radius:8px;padding:10px 12px;font-size:12px;}"
-        )
-        self._label = lbl
-        return lbl
+            try:
+                self._label.isVisible()   # C++ 对象已被销毁时会抛 RuntimeError
+                return self._label
+            except RuntimeError:
+                self._label = None
+        self._label = _TipCard()
+        return self._label
 
     def _hide(self) -> None:
-        if self._label is not None and self._label.isVisible():
-            self._label.hide()
+        lbl = self._label
+        if lbl is None:
+            return
+        try:
+            if lbl.isVisible():
+                lbl.hide()
+        except RuntimeError:
+            self._label = None
 
     def _show(self, gpos, html: str) -> None:
         lbl = self._ensure_label()
-        lbl.setText(html)
-        lbl.adjustSize()
+        lbl.set_html(html)
         w, h = lbl.width(), lbl.height()
         x, y = gpos.x() + 14, gpos.y() + 20
         try:
@@ -376,25 +458,57 @@ class HeaderToolTip(QObject):
         lbl.move(x, y)
         lbl.show()
 
+    def _html_at(self, obj, pos) -> str:
+        """取鼠标所在列头的说明 HTML；取不到返回空串。"""
+        try:
+            idx = obj.logicalIndexAt(pos)
+        except Exception:
+            return ""
+        if idx is None or idx < 0:
+            return ""
+        item = self.table.horizontalHeaderItem(int(idx))
+        text = item.text().strip() if item is not None else ""
+        return HEADER_TOOLTIPS.get(text, "")
+
+    def _show_pending(self) -> None:
+        if self._pending_html and self._pending_pos is not None:
+            self._show(self._pending_pos, self._pending_html)
+
     def eventFilter(self, obj, event):  # noqa: N802
         try:
             et = event.type()
-            if et == QEvent.Type.ToolTip:
-                idx = obj.logicalIndexAt(event.pos())
-                if idx >= 0:
-                    item = self.table.horizontalHeaderItem(idx)
-                    text = item.text().strip() if item is not None else ""
-                    html = HEADER_TOOLTIPS.get(text)
+            if et == QEvent.Type.MouseMove:
+                idx = -1
+                try:
+                    idx = int(obj.logicalIndexAt(event.pos()))
+                except Exception:
+                    idx = -1
+                if idx != self._hover_idx:
+                    self._hover_idx = idx
+                    self._delay.stop()
+                    self._hide()
+                    html = self._html_at(obj, event.pos())
                     if html:
-                        self._show(event.globalPos(), html)
-                        return True
-                self._hide()
-            elif et in (
+                        self._pending_html = html
+                        self._pending_pos = event.globalPosition().toPoint()
+                        self._delay.start()
+                return False
+            if et == QEvent.Type.ToolTip:
+                # 系统提示一律拦掉，改由自绘卡片呈现，避免白底浅字
+                html = self._html_at(obj, event.pos())
+                if html:
+                    self._pending_html = html
+                    self._pending_pos = event.globalPos()
+                    self._show_pending()
+                return True
+            if et in (
                 QEvent.Type.Leave,
                 QEvent.Type.MouseButtonPress,
                 QEvent.Type.Hide,
                 QEvent.Type.Scroll,
             ):
+                self._delay.stop()
+                self._hover_idx = -1
                 self._hide()
         except Exception:
             self._hide()
@@ -564,6 +678,47 @@ def _shadow_log_path(day: str = "") -> str:
     return primary
 
 
+def _plain_tip(html: str) -> str:
+    """把卡片 HTML 降级成纯文本，作为系统提示的兜底（白底黑字至少可读）。"""
+    txt = re.sub(r"<br\s*/?>", "\n", html or "")
+    txt = re.sub(r"</div>", "\n", txt)
+    txt = re.sub(r"<[^>]+>", "", txt)
+    return txt.strip()
+
+
+def _fmt_hms(ts: float) -> str:
+    """epoch 秒 → HH:MM:SS；无效值返回空串。"""
+    try:
+        v = float(ts)
+    except Exception:
+        return ""
+    if v <= 0:
+        return ""
+    try:
+        return datetime.datetime.fromtimestamp(v).strftime("%H:%M:%S")
+    except Exception:
+        return ""
+
+
+def _in_trading_session(ts: float) -> bool:
+    """记录是否落在当日交易时段（09:15~15:05）。
+
+    盘后程序仍在轮询时会产生 21:11 这类记录，直接拿来当"入局"是错的，
+    赛马跟踪必须只看盘中过程。
+    """
+    try:
+        v = float(ts)
+    except Exception:
+        return False
+    if v <= 0:
+        return False
+    try:
+        hm = datetime.datetime.fromtimestamp(v).strftime("%H:%M")
+        return "09:15" <= hm <= "15:05"
+    except Exception:
+        return False
+
+
 def _row_is_hit(rec: Dict[str, Any]) -> bool:
     """是否命中：L2 及以上，或旧策略给出买入。梯度层只对"命中"负责，不重复播报异动。"""
     try:
@@ -572,6 +727,41 @@ def _row_is_hit(rec: Dict[str, Any]) -> bool:
         tier = 0
     action = str((rec.get("legacy") or {}).get("action") or "")
     return bool(rec.get("hit")) or tier >= 2 or action in ("买入", "加仓", "BUY", "ADD")
+
+
+def load_live_series(day: str = "", max_lines: int = 20000) -> Dict[str, List[Dict[str, Any]]]:
+    """按 code 返回当日全部影子记录（时间升序），供赛马跟踪等"过程类"视图使用。
+
+    与 `load_live_rows` 的区别：那个只保留每只票最新一条（看板用），
+    这个保留整条时间序列，才能算出入局时间、入局后 MFE/MAE、持续分。
+    """
+    path, _src_day = _resolve_shadow_file(day)
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            tail = deque(f, maxlen=max_lines)
+    except Exception:
+        return {}
+
+    series: Dict[str, List[Dict[str, Any]]] = {}
+    for line in tail:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        code = str(rec.get("code") or "").split(".")[0].zfill(6)
+        if not code:
+            continue
+        if not rec.get("name"):
+            rec["name"] = name_of(code)
+        series.setdefault(code, []).append(rec)
+    for recs in series.values():
+        recs.sort(key=lambda r: float(r.get("ts") or 0.0))
+    return series
 
 
 def _record_key(rec: Dict[str, Any]) -> Tuple[str, float]:
@@ -875,8 +1065,9 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self.chk_on_top.toggled.connect(self._on_stays_on_top_toggled)
         bar.addWidget(self.chk_on_top)
 
-        # 只看命中：梯度层是"打分命中"，不是把异动列表再显示一遍
-        self.chk_hit_only = QCheckBox("✅ 只看命中")
+        # 只看命中：梯度层是"打分命中"，不是把异动列表再显示一遍。
+        # 文字里不带 ✅（勾号会和复选框状态混淆），改用颜色表达选中态。
+        self.chk_hit_only = QCheckBox("只看命中")
         self.chk_hit_only.setToolTip(
             "只显示 L2 及以上（或旧策略给出买入）的命中标的。\n"
             "关掉可看全池梯度分布，用于观察 L0/L1 的边缘标的。"
@@ -886,6 +1077,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
         except Exception:
             pass
         self.chk_hit_only.toggled.connect(self._on_hit_only_toggled)
+        self._style_hit_only(self.chk_hit_only.isChecked())
         bar.addWidget(self.chk_hit_only)
 
         bar.addWidget(QLabel("交易日"))
@@ -927,6 +1119,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
 
         # ---- 页签 ----
         self.tabs = QTabWidget()
+        self.tabs.currentChanged.connect(self._on_tab_changed)
         root.addWidget(self.tabs, 1)
 
         # Tab 0: 实时梯度 [级别, 代码, 名称, 现价, 涨幅%, RAR, 位, 接, 意, 环, 仓位%, 进场, 止损, 先手min, 来源, 更新时间, 命中, 覆盖%]
@@ -1000,14 +1193,15 @@ class FusionLadderDialog(QWidget, WindowMixin):
         tbl.horizontalHeader().setStretchLastSection(True)
         tbl.setSortingEnabled(True)
 
-        # 💡 设置字典级专业列头 ToolTip（富文本三段式，供默认提示与自定义卡片共用）
+        # 💡 设置字典级专业列头 ToolTip（富文本三段式，供自绘卡片使用；
+        #    系统提示只放纯文本兜底，避免白底浅字看不清）
         for col_idx, h_name in enumerate(headers):
             item = tbl.horizontalHeaderItem(col_idx)
             if item:
                 tip = HEADER_TOOLTIPS.get(h_name) or _tip(
                     h_name, "该列的数值含义。", "点击列头可按数值升/降序切换排序。"
                 )
-                item.setToolTip(tip)
+                item.setToolTip(_plain_tip(tip))
 
         # 🖱 深色卡片式表头悬浮说明（对齐 TK 指标悬浮样式）
         try:
@@ -1070,6 +1264,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
         tbl.selectionModel().currentChanged.connect(
             lambda cur, prev, t=tbl: self._on_table_current_changed(t, cur)
         )
+        # 2b. 键盘联动兜底：重建表格期间 currentChanged 可能被吞，按键后主动补一次
+        tbl._key_nav_linker = _KeyNavLinker(self, tbl)
         # 3. 双击秒开通达信同款 SBC 分时走势图
         tbl.itemDoubleClicked.connect(self._on_table_item_double_clicked)
         # 4. ATS 标准右键上下文菜单
@@ -1130,6 +1326,14 @@ class FusionLadderDialog(QWidget, WindowMixin):
             self.open_sbc_chart(code, name)
 
     def _link_main_stock(self, code: str, name: str = "") -> None:
+        code = str(code or "").split(".")[0].zfill(6)
+        if not code or code == "000000":
+            return
+        # 去重：表格每 2 秒重建会重新 selectRow，若不去重会反复联动同一只票、
+        # 把主图刷得来回跳，用户就会觉得"键盘联动没生效"。
+        if getattr(self, "_last_link_code", "") == code:
+            return
+        self._last_link_code = code
         main_app = self._get_main_app()
         if main_app and hasattr(main_app, "link_stock"):
             try:
@@ -1410,7 +1614,19 @@ class FusionLadderDialog(QWidget, WindowMixin):
             save_config_node("fusion_ladder_hit_only", bool(checked))
         except Exception:
             pass
+        self._style_hit_only(bool(checked))
         self._render_live(force=True)
+
+    def _style_hit_only(self, checked: bool) -> None:
+        """选中态用颜色表达：走窗口 QSS 的属性选择器，避免覆盖原生指示器样式。"""
+        try:
+            self.chk_hit_only.setProperty("hitOnly", "true" if checked else "false")
+            st = self.chk_hit_only.style()
+            st.unpolish(self.chk_hit_only)
+            st.polish(self.chk_hit_only)
+            self.chk_hit_only.update()
+        except Exception:
+            pass
 
     @staticmethod
     def _num_item(text: Any, raw_val: Any = None, color: Optional[QColor] = None, bold: bool = False) -> NumericTableWidgetItem:
@@ -1863,8 +2079,33 @@ class FusionLadderDialog(QWidget, WindowMixin):
             self._last_auto_settle_day = day
             save_config_node("fusion_last_auto_settle_day", day)
             self.lbl_status.setText(f"✅ 今日收盘上下文已自动沉淀 (session_ctx/{day}.json)")
+
+            # 收盘后补跑当日回放：T+1 订单 / 信号面板 / 验收复盘 三张表的数据源是回放结果，
+            # 实盘影子流不产生成交，不补跑就会一直是空的。
+            self._maybe_auto_replay_after_close(day)
         except Exception as e:
             logger.warning(f"[FusionLadderDialog] 收盘沉淀失败: {e}")
+
+    def _maybe_auto_replay_after_close(self, day: str) -> None:
+        """收盘后自动回放一次，把 T+1/信号面板/验收 三张表补齐（每日一次，可配置关闭）。"""
+        try:
+            if not bool(load_config_node("fusion_auto_replay_after_close", True)):
+                return
+            if getattr(self, "_auto_replay_day", "") == day:
+                return
+            if self._worker is not None and self._worker.isRunning():
+                return
+            result = self._result
+            if result is not None and str(getattr(result, "day", "")) == day:
+                return
+            idx = self.cmb_day.findText(day)
+            if idx >= 0 and self.cmb_day.currentText().strip() != day:
+                self.cmb_day.setCurrentIndex(idx)
+            self._auto_replay_day = day
+            logger.info("[FusionLadder] 收盘后自动回放 %s：补齐 T+1/信号面板/验收复盘", day)
+            self._start_worker([])
+        except Exception as exc:
+            logger.warning("[FusionLadder] 收盘后自动回放触发失败: %s", exc)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
         """快捷键：T 切换置顶，Escape 优先贴边隐藏"""
@@ -1901,7 +2142,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
         """定时静默刷新：只有影子文件真的变了才重绘，避免无谓重建表格。"""
         if getattr(self, "_is_closing", False) or not self.isVisible():
             return
-        if self.tabs.currentIndex() != 0:
+        idx = self.tabs.currentIndex()
+        if idx not in (0, 3):
             return
         if self._worker is not None:
             return
@@ -1909,6 +2151,10 @@ class FusionLadderDialog(QWidget, WindowMixin):
         sig = self._live_source_signature(day)
         if sig == getattr(self, "_live_sig", None):
             self._maybe_ensure_data()
+            return
+        if idx == 3:
+            self._live_sig = sig
+            self._render_track_from_shadow(day)
             return
         self._render_live(force=False)
 
@@ -2046,6 +2292,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
 
         # 保留滚动位置与当前选中代码，避免定时刷新把用户视线拽走
         scroll = tbl.verticalScrollBar().value()
+        had_focus = tbl.hasFocus()
         selected_code = ""
         try:
             cur = tbl.currentRow()
@@ -2177,6 +2424,12 @@ class FusionLadderDialog(QWidget, WindowMixin):
             tbl.verticalScrollBar().setValue(scroll)
         except Exception:
             pass
+        if had_focus:
+            # 重建后把焦点还给表格，否则方向键会落到别的控件上，联动就"失灵"了
+            try:
+                tbl.setFocus(Qt.FocusReason.OtherFocusReason)
+            except Exception:
+                pass
 
         cov_avg = (coverage_sum / coverage_n) if coverage_n else 0.0
         now_txt = datetime.datetime.now().strftime("%H:%M:%S")
@@ -2198,6 +2451,138 @@ class FusionLadderDialog(QWidget, WindowMixin):
         )
         warn = bool(stale or day_note or schema_note)
         self.lbl_status.setStyleSheet("color:#ffa64d; font-weight:bold;" if warn else "color:#8fd18f; font-weight:bold;")
+
+    # ------------------------------------------------------------------
+    # 赛马跟踪（实盘影子流直出，不依赖回放）
+    # ------------------------------------------------------------------
+    def _track_entries_from_shadow(self, day: str) -> List[Dict[str, Any]]:
+        """从当日影子时间序列还原"第一波入局"清单。
+
+        入局口径：该票当日首次达到 L2（可执行梯度）的那一条记录。
+        入局后 MFE/MAE/收盘% 用后续记录里的真实 price 计算，不依赖回放。
+        """
+        series = load_live_series(day)
+        out: List[Dict[str, Any]] = []
+        for code, recs in series.items():
+            # 只保留盘中记录：盘后轮询写进来的 21:xx 记录不能当作"入局"
+            recs = [r for r in recs if _in_trading_session(r.get("ts"))]
+            if not recs:
+                continue
+            entry_i = None
+            for i, r in enumerate(recs):
+                try:
+                    tier = int((r.get("fusion") or {}).get("tier") or 0)
+                except Exception:
+                    tier = 0
+                if tier >= 2:
+                    entry_i = i
+                    break
+            if entry_i is None:
+                continue
+            first = recs[0]
+            entry = recs[entry_i]
+            ep = float(entry.get("price") or 0.0)
+            after = recs[entry_i:]
+            prices = [float(x.get("price") or 0.0) for x in after if float(x.get("price") or 0.0) > 0]
+            mfe = mae = close_ret = 0.0
+            if ep > 0 and prices:
+                mfe = (max(prices) - ep) / ep * 100.0
+                mae = (min(prices) - ep) / ep * 100.0
+                close_ret = (prices[-1] - ep) / ep * 100.0
+            keep = 0
+            for x in after:
+                try:
+                    t = int((x.get("fusion") or {}).get("tier") or 0)
+                except Exception:
+                    t = 0
+                if t >= 1:
+                    keep += 1
+            ev = list((entry.get("fusion") or {}).get("evidence") or [])
+            out.append({
+                "code": code,
+                "name": entry.get("name") or name_of(code),
+                "tier": int((entry.get("fusion") or {}).get("tier") or 0),
+                "enter_ts": float(entry.get("ts") or 0.0),
+                "enter_price": ep,
+                "enter_pct": float(entry.get("pct") or 0.0),
+                "first_ts": float(first.get("ts") or 0.0),
+                "first_pct": float(first.get("pct") or 0.0),
+                "since_first": float(entry.get("pct") or 0.0) - float(first.get("pct") or 0.0),
+                "persist": round(keep * 100.0 / max(1, len(after)), 1),
+                "evidence_n": len(ev),
+                "chain": " · ".join(ev)[:160],
+                "mfe": mfe,
+                "mae": mae,
+                "close_ret": close_ret,
+            })
+        out.sort(key=lambda e: (-e["tier"], -e["persist"]))
+        return out
+
+    def _render_track_from_shadow(self, day: str) -> None:
+        t3 = self.tbl_track
+        entries = self._track_entries_from_shadow(day)
+        t3.setSortingEnabled(False)
+        t3.setRowCount(0)
+        if not entries:
+            self._fill_table_hint(
+                t3,
+                "今日暂无 L2+ 入局（赛马跟踪只收录命中 L2 及以上的标的）。"
+                "若要看全池过程，请在[实时梯度]取消勾选[只看命中]。",
+            )
+            t3.setSortingEnabled(True)
+            return
+        for e in entries:
+            i = t3.rowCount()
+            t3.insertRow(i)
+            ret = float(e.get("close_ret") or 0.0)
+            color = QColor("#ff5c5c") if ret >= 0 else QColor("#00ff88")
+            t3.setItem(i, 0, self._num_item(e["code"], e["code"]))
+            t3.setItem(i, 1, self._num_item(e["name"], e["name"]))
+            t3.setItem(i, 2, self._num_item(_fmt_hms(e["enter_ts"]), e["enter_ts"]))
+            t3.setItem(i, 3, self._num_item(f"{e['enter_price']:.2f}" if e["enter_price"] > 0 else "--", e["enter_price"]))
+            t3.setItem(i, 4, self._num_item(f"{e['enter_pct']:+.2f}%", e["enter_pct"]))
+            t3.setItem(i, 5, self._num_item(_fmt_hms(e["first_ts"]), e["first_ts"]))
+            t3.setItem(i, 6, self._num_item(f"{e['first_pct']:+.2f}%", e["first_pct"]))
+            t3.setItem(i, 7, self._num_item(f"{e['since_first']:+.2f}%", e["since_first"]))
+            t3.setItem(i, 8, self._num_item(e["persist"], float(e["persist"]), bold=True))
+            t3.setItem(i, 9, self._num_item(e["evidence_n"], int(e["evidence_n"])))
+            t3.setItem(i, 10, self._num_item(e["chain"], e["chain"]))
+            t3.setItem(i, 11, self._num_item(f"{e['mfe']:+.2f}%", e["mfe"], color=color))
+            t3.setItem(i, 12, self._num_item(f"{e['mae']:+.2f}%", e["mae"]))
+            t3.setItem(i, 13, self._num_item(f"{ret:+.2f}%", ret, color=color, bold=True))
+        t3.setSortingEnabled(True)
+
+    def _fill_table_hint(self, tbl: QTableWidget, text: str) -> None:
+        """空表占位：写清"为什么没有数据"，不留白板。"""
+        tbl.setRowCount(0)
+        tbl.insertRow(0)
+        it = self._num_item(text, text)
+        it.setForeground(QColor("#ffa64d"))
+        tbl.setItem(0, 0, it)
+        for c in range(1, tbl.columnCount()):
+            tbl.setItem(0, c, self._num_item("", 0))
+        try:
+            tbl.setSpan(0, 0, 1, max(1, tbl.columnCount()))
+        except Exception:
+            pass
+
+    def _on_tab_changed(self, index: int) -> None:
+        day = self.cmb_day.currentText().strip() or today_str()
+        if index == 3:
+            try:
+                self._render_track_from_shadow(day)
+            except Exception as exc:
+                logger.debug("[FusionLadder] 赛马跟踪渲染失败: %s", exc)
+        elif index == 2 and self.tbl_trades.rowCount() == 0:
+            self._fill_table_hint(
+                self.tbl_trades,
+                "T+1 订单由回放撮合产生：实盘影子流不下单。点 [▶ 跑回放(回补)] 后这里显示当日模拟成交。",
+            )
+        elif index == 4 and not self.txt_panel.toPlainText().strip():
+            self.txt_panel.setPlainText(
+                "信号面板由回放统计生成。实盘阶段可先看[实时梯度]与[赛马跟踪]；"
+                "收盘后点 [▶ 跑回放(回补)] 即可得到完整统计。"
+            )
 
     # ------------------------------------------------------------------
     # 回放与回补持久化
