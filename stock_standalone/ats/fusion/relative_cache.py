@@ -21,8 +21,9 @@ from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_H5 = r"G:\tdx_all_df_900.h5"
-DEFAULT_KEY = "/all_900"
+DEFAULT_H5 = r"G:\tdx_all_df_300.h5"
+DEFAULT_KEY = "/all_300"
+# 主源不可用时按顺序回退（两个文件覆盖一致：5227 只 / 37 个交易日）
 FALLBACK_FILES = (
     (r"G:\tdx_all_df_300.h5", "/all_300"),
     (r"G:\tdx_all_df_900.h5", "/all_900"),
