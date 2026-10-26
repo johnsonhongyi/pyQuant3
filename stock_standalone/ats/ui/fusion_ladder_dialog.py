@@ -951,7 +951,7 @@ class ReplayWorker(QThread):
                 focus_codes=tuple(self.focus), cuts_mode=self.cuts_mode,
             ))
             if not rp.cache:
-                self.failed.emit("找不到分钟线缓存（G:/minute_kline_cache.pkl）")
+                self.failed.emit("找不到分钟线缓存（cct ramdisk: minute_kline_cache.pkl）")
                 return
             day = self.day or (rp.days()[-1] if rp.days() else today_str())
             result = rp.run_day(day, progress=self._on_progress, focus=self.focus)
@@ -2653,18 +2653,27 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 entry_p = float(r.get("entry") or 0.0)
                 pct_val = float(r.get("pct") or 0.0)
                 row = {
+                    # 回补记录必须与实盘记录同构：否则界面会把它当成"旧版 exe 写入"，
+                    # 覆盖% / 命中 / 证据链也会集体缺失。
+                    "schema": 2,
+                    "writer_pid": 0,
+                    "writer_exe": "REPLAY_BACKFILL",
                     "ts": float(r.get("ts") or time.time()),
                     "code": cd,
                     "name": r.get("name") or name_of(cd),
                     "price": entry_p,
                     "pct": pct_val,
                     "trade_date": day,
+                    "hit": bool(tier >= 2),
+                    "coverage": 1.0,
                     "fusion": {
                         "tier": tier,
                         "tier_name": str(r.get("tier_name") or ""),
                         "rar": rar,
                         "size_pct": float(r.get("size_pct") or 0.0),
                         "age_min": float(r.get("age_min") or 0.0),
+                        "coverage": 1.0,
+                        "provisional": False,
                         "entry": {"price_lo": entry_p, "price_hi": entry_p},
                         "stop": {"price": r.get("stop") or "-"},
                         "axes": {
@@ -2672,7 +2681,11 @@ class FusionLadderDialog(QWidget, WindowMixin):
                             "support": float((r.get("axes") or {}).get("support") or 50.0),
                             "intent": float((r.get("axes") or {}).get("intent") or 50.0),
                             "regime": float((r.get("axes") or {}).get("regime") or 50.0),
+                            "relative": float((r.get("axes") or {}).get("relative") or 50.0),
+                            "penalty": float((r.get("axes") or {}).get("penalty") or 0.0),
+                            "rar": rar,
                         },
+                        "evidence": list(r.get("evidence") or [])[:6],
                         "sources": ["REPLAY_BACKFILL"],
                     },
                 }

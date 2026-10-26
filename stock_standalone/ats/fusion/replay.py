@@ -61,7 +61,6 @@ from ats.fusion.sector import get_sector_map, get_theme_map, sector_strength, lo
 from dataclasses import replace
 
 _ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
-_CACHE_DEFAULT = r"G:/minute_kline_cache.pkl"
 _LIMIT_MAIN = 9.8
 _LIMIT_GROWTH = 19.6
 
@@ -110,15 +109,26 @@ def _app_root() -> str:
 
 
 def default_cache_path() -> str:
-    if os.path.exists(_CACHE_DEFAULT):
-        return _CACHE_DEFAULT
+    """分钟线缓存路径：走 cct 解析 ramdisk（不写死盘符），找不到返回空串。
+
+    注意用 `get_ramdisk_path`（保留原扩展名），不能用 `get_run_path_tdx_Path`
+    ——后者固定拼 `.h5`，对 `.pkl` 会解析出错误路径。
+    """
+    try:
+        from JohnsonUtil import commonTips as cct  # type: ignore
+
+        p = cct.get_ramdisk_path("minute_kline_cache.pkl")
+        if p and os.path.exists(p):
+            return p
+    except Exception:
+        pass
     for cand in (
         os.path.join(_app_root(), "logs", "minute_kline_cache.pkl"),
         os.path.join(_app_root(), "minute_kline_cache.pkl"),
     ):
         if os.path.exists(cand):
             return cand
-    return _CACHE_DEFAULT
+    return ""
 
 
 def load_minute_cache(path: Optional[str] = None) -> Dict[str, np.ndarray]:

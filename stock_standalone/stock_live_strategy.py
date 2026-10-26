@@ -2876,6 +2876,36 @@ class StockLiveStrategy:
         except Exception as e:
             logger.debug(f"[FUSION] 五档快照刷新失败: {e}")
 
+    def _fusion_intraday_bars(self, code):
+        """取当日分时序列：优先同进程内存缓存（零 IO），再退回 TDX 分时接口。
+
+        `MinuteKlineCache` 里就是实时的 1 分钟 bar（每股最近 200 根），
+        比落盘的 `minute_kline_cache.pkl`（5 分钟才快照一次）新鲜得多，
+        也不需要跨进程读 21MB 文件。
+        """
+        # 1. 同进程内存缓存
+        try:
+            svc = getattr(self, "realtime_service", None)
+            cache = getattr(svc, "kline_cache", None) if svc is not None else None
+            if cache is None:
+                from realtime_data_service import get_global_kline_cache
+
+                cache = get_global_kline_cache()
+            if cache is not None and hasattr(cache, "get_klines"):
+                bars = cache.get_klines(code, 60)
+                if bars:
+                    return bars
+        except Exception as e:
+            logger.debug(f"[FUSION] 内存分时取用失败 {code}: {e}")
+        # 2. TDX 分时（网络，2.5s 缓存）
+        try:
+            from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+
+            return TDXRealtimeFetcher.get_instance().fetch_intraday_bars(code)
+        except Exception as e:
+            logger.debug(f"[FUSION] TDX 分时取用失败 {code}: {e}")
+            return None
+
     def _fusion_intraday(self, code, snap, row):
         """单票分时派生指标（带 TTL 与每轮预算），数据不足返回 {}。"""
         cache = self._fusion_feat_cache
@@ -2888,10 +2918,9 @@ class StockLiveStrategy:
         self._fusion_enrich_budget = int(self._fusion_enrich_budget) - 1
         try:
             from ats.fusion.enrich import intraday_fields
-            from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
 
-            bars = TDXRealtimeFetcher.get_instance().fetch_intraday_bars(code)
-            if bars is None or getattr(bars, "empty", True):
+            bars = self._fusion_intraday_bars(code)
+            if bars is None or getattr(bars, "empty", False) or (hasattr(bars, "__len__") and len(bars) == 0):
                 cache[code] = (now, {})
                 return {}
             vwap = float(snap.get("vwap") or (row or {}).get("vwap") or 0.0)
