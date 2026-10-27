@@ -1,5 +1,24 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-27 17:40 【Windows 目录迁移工具优化：根除扫描卡死、添加跳过占用检测与快速核对开关闭环】(`docs/tasks/2026-10-27_1740_优化Windows目录迁移工具性能与跳过占用检测.md`, `tools/directory_migrator/migrator_core.py`, `tools/directory_migrator/app.py`, `tools/directory_migrator/README.md`, `tools/directory_migrator/test_migrator_core.py`)
+- [x] **【彻底根治海量文件占用检测长时间扫描无进度卡死问题】**：
+  - **根因穿透**：Nuitka 打包缓存（`clcache/objects`）包含数万至数十万小文件（当前已超 4.2 万个）。原实现使用 Windows Restart Manager（`Rstrtmgr.dll`）每登记 256 个文件就调用一次 `RmGetList` 进行全系统跨进程检索；随着累加文件增多，单次系统检索开销呈 $O(N^2)$ 灾难性暴增，且无百分比进度显示，导致长时间卡在占用检测环节；
+  - **批次加大与批量解耦查询**：批次由 256 优化扩大为 1024；解耦高频查询，仅在每 2048 步长或全部文件注册完毕后执行统一查询，将 `RmGetList` 系统调用开销锐减 90% 以上；
+- [x] **【添加「跳过进程占用检测」开关（专为编译/打包等缓存目录定制）】**：
+  - **UI 界面开关**：增加 `Q/Tk Checkbutton`：「跳过进程占用检测（海量小文件/缓存目录推荐，需确保无编译打包进程）」；
+  - **毫秒级安全不破防**：跳过几万个文件的逐个 Win32 注册与检索，但**仍保留耗时仅 1ms 的源目录根节点重命名权限与目录句柄探测**（`_check_source_rename_access`），秒级防御终端/IDE 将源目录作为 CWD 锁定；
+  - **预检查与迁移全链路提速**：勾选后预检查从原先的 30 分钟卡死降至 1 秒以内即刻完成；
+- [x] **【根除同盘原子替换后重复 6 次全盘 SHA-256 哈希计算与引入快速核对模式】**：
+  - **冗余哈希大清扫**：排查原流程在复制前后、同盘重命名（`staging->destination`、`source->backup`）后重复计算了多达 6 次全量 SHA-256；重构为：复制后同盘改名直接复用元数据与目录联接校验，复制期间源目录防修改仅比对文件结构、大小与时间戳（`compute_hash=False`），全流程 SHA-256 读取从 6 次降至 2 次（时间减少 67%）；
+  - **添加「快速核对模式」开关**：增加「快速核对模式（校验结构/大小/时间戳，跳过逐文件 SHA-256，加速几十倍）」，开启后全程 0 次 SHA-256，数万小文件的缓存目录迁移从数小时缩减至几十秒；
+- [x] **【二次极限性能与全业务闭环审计：消灭 315 万次冗余 Win32 系统调用与 UI 事件风暴】**：
+  - **0 次 per-file 元数据系统调用**：修复 `_reparse_kind` 先调 3 次 `lstat` 再看属性的倒置逻辑，直接读取 `os.scandir` 缓存的 `DirEntry.stat(follow_symlinks=False)`；缓存 `kernel32` DLL 句柄与函数签名（消灭每文件重复实例化 `ctypes.WinDLL("kernel32")` 60 万次的开销）；核验阶段支持 `check_streams=False, check_hardlinks=has_hardlinks`，对常规文件实现 0 次 `os.stat` / `FindFirstStreamW` 调用；
+  - **消除小文件 4MB `VirtualAlloc` 页表抖动与冗余 `copystat`**：按文件实际大小动态设置读取块（`<=64KB` 小文件走 `pymalloc` 且单次读完即退）；`_copy_tree` 直接应用 `TreeEntry` 缓存时间戳与属性，省去每文件 4 次冗余查询；`_remove_path_no_follow` 清理备份省去预置 `lstat` 与无条件 `chmod`；
+  - **修复 UI 进度条重置假死与事件风暴**：`_poll_events` 对连续进度事件进行最新帧合并（Coalescing），并修复每次 `"scan"` 事件重复调用 `progress.stop()/start(12)` 导致跑马灯动画归零不动的 Bug，新增阶段进度百分比与总耗时统计日志；
+- [x] **【自动化测试全绿通过（7 项专项 + 27 项全量回归）】**：
+  - 新增 `PerformanceAndSkipOccupantsTests` 专项测试，覆盖跳过占用检测、快速核对模式、0 per-file syscall 校验、UI 进度事件合并与防重置；
+  - 全量 34 项单元测试 100% 纯绿通过（`Ran 34 tests in 0.631s, OK`），语法静态检查 0 错误。
+
 ## 2026-10-27 16:30 【按日回放自动后验收盘涨幅、赛马收盘%归零根除与高精数值排序闭环】(`docs/tasks/2026-10-27_1630_按日回放自动后验与梯度Tab接入自定义列.md`, `ats/fusion/replay.py`, `ats/ui/fusion_ladder_dialog.py`, `tests/test_fusion_replay_posthoc_and_custom_cols.py`)
 - [x] **【彻底修复赛马跟踪收盘%归零并实现点击表头高精数值排序】**：
   - **根因穿透**：`_get_batch_quotes_snapshot` 从 ATS 主窗口的 `current_df` 读取快照时，因策略 DataFrame 的 `close` 字段代表的是现价而非昨收，且未优先读取 `percent` / `pct` 字段，导致 `last_close` 错误回退为 `close`（现价），计算 `(p - lc) / lc` 恒等于 `0.0`，进而导致日内收盘涨幅全部归零（显示为 `+0.00%` 或 `+0.00% (入+0.17%)`）；

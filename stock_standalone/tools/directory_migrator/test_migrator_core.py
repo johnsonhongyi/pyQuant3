@@ -725,5 +725,157 @@ class MigrationTransactionTests(unittest.TestCase):
             )
 
 
+class PerformanceAndSkipOccupantsTests(unittest.TestCase):
+    def test_skip_occupants_check_bypasses_file_scan_in_preflight(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "source"
+            destination = Path(temp) / "migrated"
+            source.mkdir()
+            (source / "file.bin").write_bytes(b"data")
+
+            with mock.patch.object(
+                migrator_core, "_restart_manager_occupants"
+            ) as check_rm, mock.patch.object(
+                migrator_core, "_check_source_rename_access"
+            ) as check_rename, mock.patch.object(
+                migrator_core, "_check_volume_and_space",
+                return_value=("NTFS", "NTFS", 10 * 1024 ** 3),
+            ):
+                report = build_preflight_report(
+                    str(source), str(destination), skip_occupants_check=True
+                )
+
+            check_rm.assert_not_called()
+            check_rename.assert_called_once()
+            self.assertEqual(report["occupants"], [])
+            self.assertTrue(report["skipped_occupants_check"])
+            self.assertIsNotNone(report["inventory"])
+
+    def test_quick_verify_skips_sha256_computation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "source"
+            source.mkdir()
+            (source / "file.bin").write_bytes(b"payload")
+
+            with mock.patch.object(
+                migrator_core, "_sha256_file"
+            ) as sha256_mock:
+                inventory = inspect_tree(str(source), compute_hash=False)
+
+            sha256_mock.assert_not_called()
+            self.assertIn("file.bin", inventory.entries)
+            self.assertEqual(inventory.entries["file.bin"].sha256, "")
+            self.assertEqual(inventory.entries["file.bin"].size, 7)
+
+    def test_compare_inventories_without_sha256_passes_when_metadata_matches(self):
+        left_entry = TreeEntry(relative_path="a.txt", kind="file", size=10, sha256="", mtime_ns=100)
+        right_entry = TreeEntry(relative_path="a.txt", kind="file", size=10, sha256="", mtime_ns=100)
+        expected = TreeInventory(root="left", entries={"a.txt": left_entry}, total_bytes=10)
+        actual = TreeInventory(root="right", entries={"a.txt": right_entry}, total_bytes=10)
+        res = compare_inventories(expected, actual)
+        self.assertEqual(res["file_count"], 1)
+
+    def _fake_junction(self, link, target):
+        os.symlink(target, link, target_is_directory=True)
+
+    def test_skip_occupants_check_in_migration_does_not_call_restart_manager(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "source"
+            destination = Path(temp) / "migrated"
+            source.mkdir()
+            (source / "clcache.obj").write_bytes(b"mock object")
+
+            with mock.patch.object(
+                migrator_core, "_restart_manager_occupants"
+            ) as check_rm:
+                result = migrate_directory(
+                    str(source),
+                    str(destination),
+                    confirm_apps_closed=True,
+                    junction_factory=self._fake_junction,
+                    platform_checks=False,
+                    skip_occupants_check=True,
+                    quick_verify=True,
+                )
+
+            check_rm.assert_not_called()
+            self.assertTrue(result.backup_cleaned)
+            self.assertTrue(destination.is_dir())
+            self.assertEqual((destination / "clcache.obj").read_bytes(), b"mock object")
+
+    def test_app_ui_variables_and_preflight_forwarding(self):
+        instance = migrator_app.DirectoryMigratorApp.__new__(
+            migrator_app.DirectoryMigratorApp
+        )
+        instance.skip_occupancy_var = mock.Mock()
+        instance.skip_occupancy_var.get.return_value = True
+        instance.quick_verify_var = mock.Mock()
+        instance.quick_verify_var.get.return_value = True
+        instance._paths_from_fields = mock.Mock(return_value=("C:\\src", "D:\\dst"))
+        instance._start_worker = mock.Mock()
+        instance._post_progress = mock.Mock()
+        instance.cancel_event = mock.Mock()
+
+        instance._start_preflight()
+
+        self.assertTrue(instance._start_worker.called)
+        call_args = instance._start_worker.call_args[0]
+        self.assertEqual(call_args[0], "preflight")
+
+    def test_fast_inspect_tree_zero_per_file_syscalls(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "source"
+            source.mkdir()
+            for i in range(10):
+                (source / f"obj_{i}.bin").write_bytes(b"123456")
+
+            with mock.patch.object(
+                migrator_core.os, "stat", wraps=os.stat
+            ) as stat_spy, mock.patch.object(
+                migrator_core, "_alternate_data_streams"
+            ) as ads_spy, mock.patch.object(
+                migrator_core, "_sha256_file"
+            ) as sha_spy:
+                inventory = inspect_tree(
+                    str(source),
+                    compute_hash=False,
+                    check_streams=False,
+                    check_hardlinks=False,
+                )
+
+            # os.stat 仅在 os.path.isdir(root) 时对根目录调用 1 次，10 个文件均为 0 次系统调用
+            self.assertEqual(stat_spy.call_count, 1)
+            ads_spy.assert_not_called()
+            sha_spy.assert_not_called()
+            self.assertEqual(inventory.file_count, 10)
+            self.assertEqual(inventory.total_bytes, 60)
+
+    def test_ui_poll_events_coalesces_progress_burst_and_avoids_progress_reset(self):
+        instance = migrator_app.DirectoryMigratorApp.__new__(
+            migrator_app.DirectoryMigratorApp
+        )
+        instance.events = migrator_app.queue.Queue()
+        instance.root = mock.Mock()
+        instance.status_var = mock.Mock()
+        instance.cancel_button = mock.Mock()
+        instance.progress = {"mode": "indeterminate", "value": 0}
+        instance.progress = mock.MagicMock()
+        instance.progress.__getitem__.side_effect = lambda k: "indeterminate" if k == "mode" else 0
+        instance.quick_verify_var = mock.Mock()
+        instance.quick_verify_var.get.return_value = True
+
+        for i in range(1, 51):
+            instance._post_progress({"stage": "scan", "current": i, "path": f"f_{i}.obj"})
+
+        with mock.patch.object(
+            instance, "_handle_progress", wraps=instance._handle_progress
+        ) as progress_spy:
+            instance._poll_events()
+
+        # 50 个连续进度事件应合并为 1 次 UI 刷新，且已是 indeterminate 模式时不再调用 progress.stop() 重置动画
+        self.assertEqual(progress_spy.call_count, 1)
+        instance.progress.stop.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

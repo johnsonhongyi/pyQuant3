@@ -4,6 +4,7 @@
 import os
 import queue
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -20,12 +21,14 @@ class DirectoryMigratorApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Windows 目录迁移工具")
-        self.root.geometry("900x680")
-        self.root.minsize(760, 560)
+        self.root.geometry("920x720")
+        self.root.minsize(780, 600)
 
         self.source_var = tk.StringVar()
         self.destination_var = tk.StringVar()
         self.closed_var = tk.BooleanVar(value=False)
+        self.skip_occupancy_var = tk.BooleanVar(value=False)
+        self.quick_verify_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="选择源目录和目标位置后，先运行预检查。")
         self.events = queue.Queue()
         self.cancel_event = threading.Event()
@@ -46,7 +49,7 @@ class DirectoryMigratorApp:
         frame = ttk.Frame(self.root, padding=16)
         frame.pack(fill="both", expand=True)
         frame.columnconfigure(1, weight=1)
-        frame.rowconfigure(7, weight=1)
+        frame.rowconfigure(10, weight=1)
 
         ttk.Label(
             frame,
@@ -86,14 +89,27 @@ class DirectoryMigratorApp:
             frame,
             text="我已关闭使用源目录的程序，并确认它们不会在迁移期间写入",
             variable=self.closed_var,
-        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(2, 8))
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(2, 4))
         self.occupancy_button = ttk.Button(
             frame, text="检测占用程序", command=self._start_occupancy_check
         )
-        self.occupancy_button.grid(row=5, column=2, sticky="e", pady=(2, 8))
+        self.occupancy_button.grid(row=5, column=2, sticky="e", pady=(2, 4))
+
+        options_frame = ttk.Frame(frame)
+        options_frame.grid(row=6, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        ttk.Checkbutton(
+            options_frame,
+            text="跳过进程占用检测（海量小文件/缓存目录推荐，需确保无编译打包进程）",
+            variable=self.skip_occupancy_var,
+        ).pack(side="left")
+        ttk.Checkbutton(
+            options_frame,
+            text="快速核对模式（校验结构/大小/时间戳，跳过逐文件 SHA-256，加速几十倍）",
+            variable=self.quick_verify_var,
+        ).pack(side="left", padx=(16, 0))
 
         buttons = ttk.Frame(frame)
-        buttons.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+        buttons.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(0, 8))
         self.preflight_button = ttk.Button(
             buttons, text="运行预检查", command=self._start_preflight
         )
@@ -108,27 +124,26 @@ class DirectoryMigratorApp:
         self.cancel_button.pack(side="left", padx=(8, 0))
 
         self.progress = ttk.Progressbar(frame, mode="indeterminate")
-        self.progress.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(2, 4))
+        self.progress.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(2, 4))
         ttk.Label(frame, textvariable=self.status_var).grid(
-            row=8, column=0, columnspan=3, sticky="w", pady=(0, 6)
+            row=9, column=0, columnspan=3, sticky="w", pady=(0, 6)
         )
 
         self.log = tk.Text(frame, height=18, wrap="word", state="disabled")
-        self.log.grid(row=9, column=0, columnspan=3, sticky="nsew")
-        frame.rowconfigure(9, weight=1)
+        self.log.grid(row=10, column=0, columnspan=3, sticky="nsew")
         scrollbar = ttk.Scrollbar(frame, orient="vertical", command=self.log.yview)
-        scrollbar.grid(row=9, column=3, sticky="ns")
+        scrollbar.grid(row=10, column=3, sticky="ns")
         self.log.configure(yscrollcommand=scrollbar.set)
 
         note = (
-            "核对项目：目录结构、文件大小与 SHA-256、修改时间、常见文件属性、"
-            "符号链接/目录联接目标及目录内硬链接关系。"
+            "核对项目：目录结构、文件大小与修改时间、常见文件属性、"
+            "符号链接/目录联接目标及目录内硬链接关系（未勾选快速核对时核对 SHA-256）。"
             "遇到 NTFS 备用数据流等未支持内容会中止。"
             "NTFS 权限、所有者和 ACL 由目标父目录继承。"
         )
         ttk.Label(
             frame, text=note, wraplength=850, foreground="#555555"
-        ).grid(row=10, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ).grid(row=11, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
     def _choose_source(self):
         selected = filedialog.askdirectory(
@@ -186,10 +201,14 @@ class DirectoryMigratorApp:
         except ValueError as exc:
             messagebox.showwarning("路径未填写", str(exc), parent=self.root)
             return
+        skip_occ = self.skip_occupancy_var.get()
+        quick_ver = self.quick_verify_var.get()
         self._start_worker(
             "preflight",
             lambda: build_preflight_report(
-                source, destination, self._post_progress, self.cancel_event
+                source, destination, self._post_progress, self.cancel_event,
+                skip_occupants_check=skip_occ,
+                quick_verify=quick_ver,
             ),
         )
 
@@ -207,13 +226,22 @@ class DirectoryMigratorApp:
             messagebox.showwarning("路径未填写", str(exc), parent=self.root)
             return
 
+        skip_occ = self.skip_occupancy_var.get()
+        quick_ver = self.quick_verify_var.get()
+        verify_desc = (
+            "工具会先复制并快速核对结构、大小与时间戳（快速核对模式），再把原路径切换为目录联接。"
+            if quick_ver
+            else "工具会先复制并核对 SHA-256、结构和链接，再把原路径切换为目录联接。"
+        )
+        occ_desc = "已开启跳过进程占用检测，请务必确保无后台程序写入源目录。\n\n" if skip_occ else ""
+
         accepted = messagebox.askyesno(
             "确认迁移",
             "源目录：\n{}\n\n目标目录：\n{}\n\n"
-            "工具会先复制并核对 SHA-256、结构和链接，再把原路径切换为目录联接。"
+            "{}{}"
             "只有最终核验通过后才会自动清理回退副本。\n\n"
             "目标文件继承目标父目录的 ACL；源目录所有者和 ACL 不会复制。"
-            "\n\n继续迁移？".format(source, destination),
+            "\n\n继续迁移？".format(source, destination, occ_desc, verify_desc),
             parent=self.root,
         )
         if not accepted:
@@ -226,6 +254,8 @@ class DirectoryMigratorApp:
                 confirm_apps_closed=True,
                 progress=self._post_progress,
                 cancel_event=self.cancel_event,
+                skip_occupants_check=skip_occ,
+                quick_verify=quick_ver,
             ),
         )
 
@@ -249,11 +279,23 @@ class DirectoryMigratorApp:
         label = labels[kind]
         self.status_var.set("正在执行{}…".format(label))
         self._append_log("\n=== {} ===".format(label))
+        if kind != "occupancy":
+            if self.skip_occupancy_var.get():
+                self._append_log("模式：已开启「跳过进程占用检测」（仅快速探测源目录重命名锁定）")
+            if self.quick_verify_var.get():
+                self._append_log("模式：已开启「快速核对模式」（核对结构/大小/时间戳，跳过全盘 SHA-256）")
 
         def worker():
+            started_at = time.perf_counter()
             try:
                 result = operation()
-                self.events.put({"type": "result", "kind": kind, "result": result})
+                elapsed = time.perf_counter() - started_at
+                self.events.put({
+                    "type": "result",
+                    "kind": kind,
+                    "result": result,
+                    "elapsed": elapsed,
+                })
             except MigrationCancelled as exc:
                 self.events.put({"type": "cancelled", "message": str(exc)})
             except Exception as exc:
@@ -275,12 +317,28 @@ class DirectoryMigratorApp:
                 self.status_var.set("正在请求取消；原路径切换开始后会完成安全核验。")
 
     def _poll_events(self):
+        latest_progress = None
         try:
             while True:
                 event = self.events.get_nowait()
-                self._handle_event(event)
+                if event.get("type") == "progress":
+                    stage = event["event"].get("stage", "")
+                    if stage in ("switch_source", "complete"):
+                        if latest_progress is not None:
+                            self._handle_progress(latest_progress)
+                            latest_progress = None
+                        self._handle_progress(event["event"])
+                    else:
+                        latest_progress = event["event"]
+                else:
+                    if latest_progress is not None:
+                        self._handle_progress(latest_progress)
+                        latest_progress = None
+                    self._handle_event(event)
         except queue.Empty:
             pass
+        if latest_progress is not None:
+            self._handle_progress(latest_progress)
         self.root.after(100, self._poll_events)
 
     def _handle_event(self, event):
@@ -288,12 +346,15 @@ class DirectoryMigratorApp:
         if kind == "progress":
             self._handle_progress(event["event"])
         elif kind == "result":
+            elapsed = event.get("elapsed")
             if event["kind"] == "preflight":
                 self._show_preflight(event["result"])
             elif event["kind"] == "occupancy":
                 self._show_occupants(event["result"])
             else:
                 self._show_result(event["result"])
+            if elapsed is not None:
+                self._append_log("总耗时：{:.2f} 秒。".format(elapsed))
         elif kind == "error":
             self._append_log("失败：{}".format(event["message"]))
             self.status_var.set("操作未完成，请查看检测结果。")
@@ -315,11 +376,12 @@ class DirectoryMigratorApp:
     def _handle_progress(self, event):
         stage = event.get("stage", "")
         path = event.get("path", "")
+        quick_mode = getattr(self, "quick_verify_var", None) and self.quick_verify_var.get()
         labels = {
             "check_occupants": "检测源目录占用进程",
             "scan_source": "扫描源目录",
-            "scan": "计算 SHA-256",
-            "hash": "读取文件",
+            "scan": "扫描目录与元数据" if quick_mode else "扫描并计算 SHA-256",
+            "hash": "读取文件计算哈希",
             "copy_start": "复制到目标临时目录",
             "copy": "复制文件",
             "copy_link": "复制链接",
@@ -336,19 +398,31 @@ class DirectoryMigratorApp:
         if label:
             if stage == "check_occupants" and "checked" in event:
                 label = "{}（已登记 {} 个文件）".format(label, event["checked"])
+            elif stage == "scan" and "current" in event:
+                label = "{}（已扫描 {} 个文件）".format(label, event["current"])
+            elif stage == "copy" and "current" in event and "total" in event:
+                percent = min(
+                    100,
+                    int(event.get("bytes", 0) * 100 / max(1, event.get("total_bytes", 1))),
+                )
+                label = "{}（{}/{}，{}%）".format(
+                    label, event["current"], event["total"], percent
+                )
             self.status_var.set("{}{}".format(label, "：{}".format(path) if path else "…"))
         if stage in (
             "scan_source", "scan", "hash", "verify_copy",
             "verify_source_unchanged", "verify_destination", "verify_final",
         ):
-            self.progress.stop()
-            self.progress.configure(mode="indeterminate")
-            self.progress.start(12)
+            if str(self.progress["mode"]) != "indeterminate":
+                self.progress.stop()
+                self.progress.configure(mode="indeterminate")
+                self.progress.start(12)
         if stage == "switch_source":
             self.cancel_button.configure(state="disabled")
         if stage in ("copy", "hash") and event.get("total_bytes"):
-            self.progress.stop()
-            self.progress.configure(mode="determinate", maximum=100)
+            if str(self.progress["mode"]) != "determinate":
+                self.progress.stop()
+                self.progress.configure(mode="determinate", maximum=100)
             percent = min(
                 100,
                 int(event.get("bytes", 0) * 100 / max(1, event["total_bytes"])),
@@ -395,7 +469,13 @@ class DirectoryMigratorApp:
             )
         )
         self._append_occupant_lines(occupants)
-        self.status_var.set("预检查通过；未发现占用进程，迁移前会再次检查。")
+        if report.get("skipped_occupants_check"):
+            self.status_var.set("预检查通过；已跳过文件级占用扫描，源目录可正常访问与重命名。")
+            self._append_log("占用检测：已跳过文件级占用扫描（已做目录重命名锁定快速探测）。")
+        else:
+            self.status_var.set("预检查通过；未发现占用进程，迁移前会再次检查。")
+        if report.get("quick_verify"):
+            self._append_log("核验模式：已开启快速核对模式（核对结构/大小/时间戳，跳过逐文件 SHA-256）。")
 
     def _append_occupant_lines(self, occupants):
         if not occupants:
@@ -426,9 +506,14 @@ class DirectoryMigratorApp:
 
     def _show_result(self, result):
         inventory = result.inventory
-        self._append_log(
-            "SHA-256、文件大小/时间戳/属性、目录结构、硬链接组与链接目标对照完全一致。"
-        )
+        if self.quick_verify_var.get():
+            self._append_log(
+                "文件大小/时间戳/属性、目录结构、硬链接组与链接目标对照完全一致（快速核对模式）。"
+            )
+        else:
+            self._append_log(
+                "SHA-256、文件大小/时间戳/属性、目录结构、硬链接组与链接目标对照完全一致。"
+            )
         self._append_log(
             "统计：{} 个文件，{} 个目录，{} 个链接，数据 {:.2f} GB。".format(
                 inventory.file_count,

@@ -183,6 +183,13 @@ def _join_relative(root, relative):
     return os.path.join(root, *relative.split("/")) if relative else root
 
 
+def _entry_lstat(child):
+    stat_fn = getattr(child, "stat", None)
+    if stat_fn is not None:
+        return stat_fn(follow_symlinks=False)
+    return os.lstat(child.path)
+
+
 def _is_junction(path):
     checker = getattr(os.path, "isjunction", None)
     if checker is not None:
@@ -203,12 +210,25 @@ def _is_junction(path):
 
 
 def _reparse_kind(path, file_stat):
+    attributes = getattr(file_stat, "st_file_attributes", None)
+    mode = getattr(file_stat, "st_mode", 0)
+    if isinstance(attributes, int) and isinstance(mode, int):
+        if not (attributes & FILE_ATTRIBUTE_REPARSE_POINT) and not stat.S_ISLNK(mode):
+            return ""
+        tag = getattr(file_stat, "st_reparse_tag", 0)
+        if isinstance(tag, int):
+            if tag == IO_REPARSE_TAG_MOUNT_POINT:
+                return "junction"
+            if tag == IO_REPARSE_TAG_SYMLINK:
+                return "symlink"
+
     if _is_junction(path):
         return "junction"
     if os.path.islink(path):
         return "symlink"
 
-    attributes = getattr(file_stat, "st_file_attributes", 0)
+    if not isinstance(attributes, int):
+        attributes = 0
     if not attributes & FILE_ATTRIBUTE_REPARSE_POINT:
         return ""
 
@@ -250,16 +270,26 @@ def _target_is_directory(path, raw_target):
         return False
 
 
-def _sha256_file(path, progress=None, cancel_event=None, path_label=""):
+def _sha256_file(path, progress=None, cancel_event=None, path_label="",
+                 file_size=None, emit_progress=True):
     digest = hashlib.sha256()
+    if file_size is not None and file_size <= 65536:
+        chunk_size = 65536
+    elif file_size is not None and file_size < 4 * 1024 * 1024:
+        chunk_size = file_size + 1
+    else:
+        chunk_size = 4 * 1024 * 1024
     with open(path, "rb") as stream:
         while True:
             _check_cancel(cancel_event)
-            chunk = stream.read(4 * 1024 * 1024)
+            chunk = stream.read(chunk_size)
             if not chunk:
                 break
             digest.update(chunk)
-            _emit(progress, "hash", path=path_label, bytes=len(chunk))
+            if emit_progress:
+                _emit(progress, "hash", path=path_label, bytes=len(chunk))
+            if file_size is not None and len(chunk) == file_size and file_size < chunk_size:
+                break
     return digest.hexdigest()
 
 
@@ -276,7 +306,7 @@ def _iter_source_resources(source, cancel_event=None, directory_callback=None):
                 for child in iterator:
                     _check_cancel(cancel_event)
                     try:
-                        child_stat = os.lstat(child.path)
+                        child_stat = _entry_lstat(child)
                         kind = _reparse_kind(child.path, child_stat)
                     except OSError as exc:
                         raise MigrationError(
@@ -339,7 +369,8 @@ def _restart_manager_processes(get_list, session_id):
     raise MigrationError("占用进程变化过快，请重新检测。")
 
 
-def _restart_manager_occupants(resource_paths, progress=None, cancel_event=None):
+def _restart_manager_occupants(resource_paths, progress=None, cancel_event=None,
+                               query_interval=2048):
     restart_manager = ctypes.WinDLL("Rstrtmgr", use_last_error=True)
     start_session = restart_manager.RmStartSession
     start_session.argtypes = [
@@ -375,8 +406,9 @@ def _restart_manager_occupants(resource_paths, progress=None, cancel_event=None)
     try:
         batch = []
         registered = 0
+        last_query_count = 0
 
-        def register_batch(paths):
+        def register_batch_files(paths):
             nonlocal registered
             array_type = ctypes.c_wchar_p * len(paths)
             file_names = array_type(*paths)
@@ -394,24 +426,26 @@ def _restart_manager_occupants(resource_paths, progress=None, cancel_event=None)
                 progress, "check_occupants", checked=registered,
                 path=paths[-1],
             )
-            return _restart_manager_processes(get_list, session.value)
 
         for resource_path in resource_paths:
             _check_cancel(cancel_event)
             batch.append(resource_path)
-            if len(batch) >= 256:
-                occupants = register_batch(batch)
-                if occupants:
-                    return occupants
+            if len(batch) >= 1024:
+                register_batch_files(batch)
                 batch = []
+                # 只有达到查询步长时才做中途探测，避免每批都调用全系统 RmGetList 导致 O(N^2) 雪崩
+                if registered - last_query_count >= query_interval:
+                    occupants = _restart_manager_processes(get_list, session.value)
+                    if occupants:
+                        return occupants
+                    last_query_count = registered
         if batch:
-            occupants = register_batch(batch)
-            if occupants:
-                return occupants
+            register_batch_files(batch)
         if registered == 0:
             return []
 
-        return []
+        # 所有文件登记完毕后执行统一查询
+        return _restart_manager_processes(get_list, session.value)
     finally:
         end_session(session.value)
 
@@ -507,7 +541,7 @@ def _check_source_rename_access(source, progress=None, cancel_event=None,
 
 
 def find_source_occupants(source, progress=None, cancel_event=None,
-                          inventory=None):
+                          inventory=None, skip_file_scan=False):
     """Check rename-blocking directory handles and processes using source files."""
     if os.name != "nt":
         raise MigrationError("源目录占用检测只支持 Windows。")
@@ -518,6 +552,8 @@ def find_source_occupants(source, progress=None, cancel_event=None,
         raise MigrationError("占用检测要求选择实际源目录，不能选择链接目录。")
     _emit(progress, "check_occupants", path=source)
     _check_source_rename_access(source, progress, cancel_event)
+    if skip_file_scan:
+        return []
     directories_checked = 0
 
     def check_directory_handle(path):
@@ -558,9 +594,14 @@ def format_source_occupants(occupants):
     )
 
 
-def _alternate_data_streams(path):
-    if os.name != "nt":
-        return []
+_CACHED_KERNEL32_FACTORY = None
+_CACHED_KERNEL32 = None
+
+
+def _get_kernel32():
+    global _CACHED_KERNEL32_FACTORY, _CACHED_KERNEL32
+    if _CACHED_KERNEL32 is not None and _CACHED_KERNEL32_FACTORY is ctypes.WinDLL:
+        return _CACHED_KERNEL32
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     find_first = kernel32.FindFirstStreamW
     find_first.argtypes = [
@@ -574,6 +615,27 @@ def _alternate_data_streams(path):
     find_close = kernel32.FindClose
     find_close.argtypes = [ctypes.c_void_p]
     find_close.restype = ctypes.c_int
+    if hasattr(kernel32, "GetFileAttributesW"):
+        get_attributes = kernel32.GetFileAttributesW
+        get_attributes.argtypes = [ctypes.c_wchar_p]
+        get_attributes.restype = ctypes.c_uint
+    if hasattr(kernel32, "SetFileAttributesW"):
+        set_attributes = kernel32.SetFileAttributesW
+        set_attributes.argtypes = [ctypes.c_wchar_p, ctypes.c_uint]
+        set_attributes.restype = ctypes.c_int
+    if isinstance(ctypes.WinDLL, type):
+        _CACHED_KERNEL32_FACTORY = ctypes.WinDLL
+        _CACHED_KERNEL32 = kernel32
+    return kernel32
+
+
+def _alternate_data_streams(path):
+    if os.name != "nt":
+        return []
+    kernel32 = _get_kernel32()
+    find_first = kernel32.FindFirstStreamW
+    find_next = kernel32.FindNextStreamW
+    find_close = kernel32.FindClose
 
     data = _Win32FindStreamData()
     handle = find_first(path, 0, ctypes.byref(data), 0)
@@ -608,7 +670,8 @@ def _alternate_data_streams(path):
     return streams
 
 
-def inspect_tree(root, progress=None, cancel_event=None, internal_roots=None):
+def inspect_tree(root, progress=None, cancel_event=None, internal_roots=None,
+                 compute_hash=True, check_streams=True, check_hardlinks=True):
     """Inventory content without following symlinks, junctions, or mount points."""
     root = _absolute(root)
     if not os.path.isdir(root):
@@ -646,7 +709,7 @@ def inspect_tree(root, progress=None, cancel_event=None, internal_roots=None):
             path = child.path
             relative = _relative_name(os.path.relpath(path, root))
             try:
-                item_stat = os.lstat(path)
+                item_stat = _entry_lstat(child)
                 kind = _reparse_kind(path, item_stat)
             except OSError as exc:
                 raise MigrationError("无法读取文件信息 {}：{}".format(path, exc))
@@ -677,41 +740,54 @@ def inspect_tree(root, progress=None, cancel_event=None, internal_roots=None):
                     target_is_directory=target_is_dir,
                 )
             elif stat.S_ISDIR(item_stat.st_mode):
+                try:
+                    dir_stat = os.lstat(path)
+                except OSError as exc:
+                    raise MigrationError("无法读取目录信息 {}：{}".format(path, exc))
                 inventory.entries[relative] = TreeEntry(
                     relative_path=relative,
                     kind="directory",
-                    mtime_ns=item_stat.st_mtime_ns,
-                    mode=stat.S_IMODE(item_stat.st_mode),
+                    mtime_ns=dir_stat.st_mtime_ns,
+                    mode=stat.S_IMODE(dir_stat.st_mode),
                     attributes=attributes & COPYABLE_ATTRIBUTES,
                 )
                 directories.append(path)
             elif stat.S_ISREG(item_stat.st_mode):
-                # Windows DirEntry.stat(follow_symlinks=False) may return
-                # zero for st_ino/st_nlink on ordinary files. The path was
-                # already classified as a non-reparse regular file above.
-                try:
-                    item_stat = os.stat(path, follow_symlinks=True)
-                except OSError as exc:
-                    raise MigrationError("无法读取文件信息 {}：{}".format(path, exc))
-                if not stat.S_ISREG(item_stat.st_mode):
-                    raise MigrationError(
-                        "扫描期间文件类型发生变化，请关闭相关程序后重试：{}".format(path)
-                    )
-                streams = _alternate_data_streams(path)
-                if streams:
-                    raise UnsupportedEntryError(
-                        "发现未支持的 NTFS 备用数据流，已停止以避免遗漏：{} ({})".format(
-                            path, ", ".join(streams)
+                if check_hardlinks:
+                    # Windows DirEntry.stat(follow_symlinks=False) may return
+                    # zero for st_ino/st_nlink on ordinary files. The path was
+                    # already classified as a non-reparse regular file above.
+                    try:
+                        item_stat = os.stat(path, follow_symlinks=True)
+                    except OSError as exc:
+                        raise MigrationError("无法读取文件信息 {}：{}".format(path, exc))
+                    if not stat.S_ISREG(item_stat.st_mode):
+                        raise MigrationError(
+                            "扫描期间文件类型发生变化，请关闭相关程序后重试：{}".format(path)
                         )
+                    if getattr(item_stat, "st_nlink", 1) > 1:
+                        identity = (item_stat.st_dev, item_stat.st_ino)
+                        hardlinks.setdefault(identity, []).append(
+                            (relative, int(item_stat.st_nlink))
+                        )
+                if check_streams:
+                    streams = _alternate_data_streams(path)
+                    if streams:
+                        raise UnsupportedEntryError(
+                            "发现未支持的 NTFS 备用数据流，已停止以避免遗漏：{} ({})".format(
+                                path, ", ".join(streams)
+                            )
+                        )
+                scanned += 1
+                emit_now = (scanned == 1 or scanned % 128 == 0 or item_stat.st_size >= 4 * 1024 * 1024)
+                if compute_hash:
+                    digest = _sha256_file(
+                        path, progress, cancel_event, relative,
+                        file_size=item_stat.st_size,
+                        emit_progress=emit_now,
                     )
-                if getattr(item_stat, "st_nlink", 1) > 1:
-                    identity = (item_stat.st_dev, item_stat.st_ino)
-                    hardlinks.setdefault(identity, []).append(
-                        (relative, int(item_stat.st_nlink))
-                    )
-                digest = _sha256_file(
-                    path, progress, cancel_event, relative
-                )
+                else:
+                    digest = ""
                 inventory.entries[relative] = TreeEntry(
                     relative_path=relative,
                     kind="file",
@@ -722,14 +798,14 @@ def inspect_tree(root, progress=None, cancel_event=None, internal_roots=None):
                     attributes=attributes & COPYABLE_ATTRIBUTES,
                 )
                 inventory.total_bytes += item_stat.st_size
-                scanned += 1
-                _emit(
-                    progress,
-                    "scan",
-                    current=scanned,
-                    path=relative,
-                    bytes=inventory.total_bytes,
-                )
+                if emit_now:
+                    _emit(
+                        progress,
+                        "scan",
+                        current=scanned,
+                        path=relative,
+                        bytes=inventory.total_bytes,
+                    )
             else:
                 raise UnsupportedEntryError(
                     "发现不支持的特殊文件，已停止迁移：{}".format(path)
@@ -770,10 +846,12 @@ def compare_inventories(expected, actual):
     for relative in sorted(expected_paths & actual_paths):
         left = expected.entries[relative]
         right = actual.entries[relative]
-        fields = ("kind", "size", "sha256", "mtime_ns", "mode", "attributes",
-                  "link_semantic", "target_is_directory", "hardlink_group")
+        fields = ["kind", "size", "sha256", "mtime_ns", "mode", "attributes",
+                  "link_semantic", "target_is_directory", "hardlink_group"]
+        if not left.sha256 or not right.sha256:
+            fields.remove("sha256")
         if left.kind in ("symlink", "junction"):
-            fields = ("kind", "link_semantic", "target_is_directory")
+            fields = ["kind", "link_semantic", "target_is_directory"]
         for field_name in fields:
             if getattr(left, field_name) != getattr(right, field_name):
                 differences.append(
@@ -984,12 +1062,13 @@ def _is_reparse_point(path):
     ) or os.path.islink(path) or _is_junction(path)
 
 
-def _remove_path_no_follow(path):
+def _remove_path_no_follow(path, item_stat=None):
     """Remove a tree without ever traversing a symbolic link or junction."""
-    try:
-        item_stat = os.lstat(path)
-    except FileNotFoundError:
-        return
+    if item_stat is None:
+        try:
+            item_stat = os.lstat(path)
+        except FileNotFoundError:
+            return
 
     reparse_kind = _reparse_kind(path, item_stat)
     if reparse_kind:
@@ -1001,21 +1080,27 @@ def _remove_path_no_follow(path):
 
     if stat.S_ISDIR(item_stat.st_mode):
         with os.scandir(path) as children:
-            child_paths = [child.path for child in children]
-        for child_path in child_paths:
-            _remove_path_no_follow(child_path)
+            child_entries = [(child.path, _entry_lstat(child)) for child in children]
+        for child_path, child_stat in child_entries:
+            _remove_path_no_follow(child_path, child_stat)
         try:
-            os.chmod(path, stat.S_IREAD | stat.S_IWRITE | stat.S_IEXEC)
-        except OSError:
-            pass
-        os.rmdir(path)
+            os.rmdir(path)
+        except PermissionError:
+            try:
+                os.chmod(path, stat.S_IREAD | stat.S_IWRITE | stat.S_IEXEC)
+            except OSError:
+                pass
+            os.rmdir(path)
         return
 
     try:
-        os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
-    except OSError:
-        pass
-    os.unlink(path)
+        os.unlink(path)
+    except PermissionError:
+        try:
+            os.chmod(path, stat.S_IREAD | stat.S_IWRITE)
+        except OSError:
+            pass
+        os.unlink(path)
 
 
 def _create_symlink(source_path, link_path, staging_root, final_root, entry):
@@ -1041,9 +1126,27 @@ def _create_copied_junction(source_path, link_path, staging_root, entry):
     _create_junction(link_path, target)
 
 
+def _apply_file_entry_metadata(source_path, destination_path, entry):
+    if entry.mtime_ns:
+        os.utime(destination_path, ns=(entry.mtime_ns, entry.mtime_ns))
+    else:
+        shutil.copystat(source_path, destination_path, follow_symlinks=False)
+    if os.name == "nt":
+        attributes = entry.attributes & COPYABLE_ATTRIBUTES
+        if attributes:
+            kernel32 = _get_kernel32()
+            if not kernel32.SetFileAttributesW(destination_path, attributes):
+                raise ctypes.WinError(ctypes.get_last_error())
+        if entry.mode and not (entry.mode & stat.S_IWRITE) and not (attributes & FILE_ATTRIBUTE_READONLY):
+            os.chmod(destination_path, entry.mode)
+    elif entry.mode:
+        os.chmod(destination_path, entry.mode)
+
+
 def _copy_tree(source, staging, final_destination, inventory,
                progress=None, cancel_event=None):
     os.mkdir(staging)
+    created_dirs = {staging}
     directories = sorted(
         (entry for entry in inventory.entries.values()
          if entry.kind == "directory" and entry.relative_path),
@@ -1051,39 +1154,60 @@ def _copy_tree(source, staging, final_destination, inventory,
     )
     for entry in directories:
         _check_cancel(cancel_event)
-        os.mkdir(_join_relative(staging, entry.relative_path))
+        dir_path = _join_relative(staging, entry.relative_path)
+        os.mkdir(dir_path)
+        created_dirs.add(dir_path)
 
     regular_files = sorted(
         (entry for entry in inventory.entries.values() if entry.kind == "file"),
         key=lambda entry: entry.relative_path,
     )
+    total_files = len(regular_files)
     hardlink_first = {}
     bytes_done = 0
+    last_emit_bytes = 0
     for number, entry in enumerate(regular_files, 1):
         _check_cancel(cancel_event)
         source_path = _join_relative(source, entry.relative_path)
         dest_path = _join_relative(staging, entry.relative_path)
-        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        parent_dir = os.path.dirname(dest_path)
+        if parent_dir not in created_dirs:
+            os.makedirs(parent_dir, exist_ok=True)
+            created_dirs.add(parent_dir)
         if entry.hardlink_group and entry.hardlink_group in hardlink_first:
             os.link(hardlink_first[entry.hardlink_group], dest_path)
         else:
+            if entry.size <= 65536:
+                chunk_size = 65536
+            elif entry.size < 4 * 1024 * 1024:
+                chunk_size = entry.size + 1
+            else:
+                chunk_size = 4 * 1024 * 1024
             with open(source_path, "rb") as source_stream:
                 with open(dest_path, "wb") as dest_stream:
                     while True:
                         _check_cancel(cancel_event)
-                        chunk = source_stream.read(4 * 1024 * 1024)
+                        chunk = source_stream.read(chunk_size)
                         if not chunk:
                             break
                         dest_stream.write(chunk)
                         bytes_done += len(chunk)
-                        _emit(
-                            progress, "copy", current=number,
-                            total=len(regular_files), bytes=bytes_done,
-                            total_bytes=inventory.total_bytes,
-                            path=entry.relative_path,
-                        )
-            shutil.copystat(source_path, dest_path, follow_symlinks=False)
-            _set_copyable_attributes(source_path, dest_path)
+                        if (
+                            number == 1
+                            or number == total_files
+                            or number % 64 == 0
+                            or (bytes_done - last_emit_bytes) >= 4 * 1024 * 1024
+                        ):
+                            last_emit_bytes = bytes_done
+                            _emit(
+                                progress, "copy", current=number,
+                                total=total_files, bytes=bytes_done,
+                                total_bytes=inventory.total_bytes,
+                                path=entry.relative_path,
+                            )
+                        if len(chunk) == entry.size and entry.size < chunk_size:
+                            break
+            _apply_file_entry_metadata(source_path, dest_path, entry)
             if entry.hardlink_group:
                 hardlink_first[entry.hardlink_group] = dest_path
 
@@ -1096,7 +1220,10 @@ def _copy_tree(source, staging, final_destination, inventory,
         _check_cancel(cancel_event)
         source_path = _join_relative(source, entry.relative_path)
         link_path = _join_relative(staging, entry.relative_path)
-        os.makedirs(os.path.dirname(link_path), exist_ok=True)
+        parent_dir = os.path.dirname(link_path)
+        if parent_dir not in created_dirs:
+            os.makedirs(parent_dir, exist_ok=True)
+            created_dirs.add(parent_dir)
         if entry.kind == "symlink":
             _create_symlink(
                 source_path, link_path, staging, final_destination, entry
@@ -1118,13 +1245,9 @@ def _set_copyable_attributes(source_path, destination_path):
     if os.name != "nt":
         return
     try:
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = _get_kernel32()
         get_attributes = kernel32.GetFileAttributesW
-        get_attributes.argtypes = [ctypes.c_wchar_p]
-        get_attributes.restype = ctypes.c_uint
         set_attributes = kernel32.SetFileAttributesW
-        set_attributes.argtypes = [ctypes.c_wchar_p, ctypes.c_uint]
-        set_attributes.restype = ctypes.c_int
         source_attributes = get_attributes(source_path)
         invalid = ctypes.c_uint(-1).value
         if source_attributes == invalid:
@@ -1213,11 +1336,14 @@ def _cleanup_backup(source, backup):
 
 
 def build_preflight_report(source, destination, progress=None, cancel_event=None,
-                           platform_checks=True):
+                           platform_checks=True, skip_occupants_check=False,
+                           quick_verify=False):
     source, destination = validate_paths(source, destination)
     occupants = []
     if platform_checks:
-        occupants = find_source_occupants(source, progress, cancel_event)
+        occupants = find_source_occupants(
+            source, progress, cancel_event, skip_file_scan=skip_occupants_check
+        )
         if occupants:
             return {
                 "source": source,
@@ -1227,8 +1353,14 @@ def build_preflight_report(source, destination, progress=None, cancel_event=None
                 "destination_filesystem": "未检测",
                 "free_bytes": 0,
                 "occupants": occupants,
+                "skipped_occupants_check": skip_occupants_check,
+                "quick_verify": quick_verify,
             }
-    inventory = inspect_tree(source, progress, cancel_event)
+    inventory = inspect_tree(
+        source, progress, cancel_event,
+        compute_hash=not quick_verify,
+        check_streams=not quick_verify,
+    )
     if platform_checks:
         source_fs, destination_fs, free_bytes = _check_volume_and_space(
             source, destination, inventory.total_bytes
@@ -1246,18 +1378,23 @@ def build_preflight_report(source, destination, progress=None, cancel_event=None
         "destination_filesystem": destination_fs,
         "free_bytes": free_bytes,
         "occupants": occupants,
+        "skipped_occupants_check": skip_occupants_check,
+        "quick_verify": quick_verify,
     }
 
 
 def migrate_directory(source, destination, confirm_apps_closed=False,
                       progress=None, cancel_event=None,
-                      junction_factory=None, platform_checks=True):
+                      junction_factory=None, platform_checks=True,
+                      skip_occupants_check=False, quick_verify=False):
     """Copy, compare, switch the source path to a junction, then clean rollback."""
     if not confirm_apps_closed:
         raise MigrationError("请先关闭使用源目录的程序并确认该项。")
     source, destination = validate_paths(source, destination)
     if platform_checks:
-        occupants = find_source_occupants(source, progress, cancel_event)
+        occupants = find_source_occupants(
+            source, progress, cancel_event, skip_file_scan=skip_occupants_check
+        )
         if occupants:
             raise SourceInUseError(
                 "检测到仍在使用源目录的程序，请关闭后重新检测，再启动迁移：\n{}".format(
@@ -1285,7 +1422,15 @@ def migrate_directory(source, destination, confirm_apps_closed=False,
 
     try:
         _emit(progress, "scan_source", path=source)
-        source_before = inspect_tree(source, progress, cancel_event)
+        source_before = inspect_tree(
+            source, progress, cancel_event,
+            compute_hash=not quick_verify,
+            check_streams=not quick_verify,
+        )
+        has_hardlinks = any(
+            bool(entry.hardlink_group)
+            for entry in source_before.entries.values()
+        )
         if platform_checks:
             _check_volume_and_space(source, destination, source_before.total_bytes)
         _check_cancel(cancel_event)
@@ -1295,11 +1440,22 @@ def migrate_directory(source, destination, confirm_apps_closed=False,
             source, staging, destination, source_before, progress, cancel_event
         )
         _emit(progress, "verify_copy", path=staging)
-        stage_inventory = inspect_tree(staging, progress, cancel_event)
+        stage_inventory = inspect_tree(
+            staging, progress, cancel_event,
+            compute_hash=not quick_verify,
+            check_streams=False,
+            check_hardlinks=has_hardlinks,
+        )
         summary = compare_inventories(source_before, stage_inventory)
 
         _emit(progress, "verify_source_unchanged", path=source)
-        source_after = inspect_tree(source, progress, cancel_event)
+        # 复制期间源目录防修改检查：核对文件结构、大小与修改时间，避免重复全盘二次哈希
+        source_after = inspect_tree(
+            source, progress, cancel_event,
+            compute_hash=False,
+            check_streams=False,
+            check_hardlinks=has_hardlinks,
+        )
         compare_inventories(source_before, source_after)
         _check_cancel(cancel_event)
 
@@ -1330,14 +1486,22 @@ def migrate_directory(source, destination, confirm_apps_closed=False,
             )
 
         _emit(progress, "verify_destination", path=destination)
-        destination_inventory = inspect_tree(destination, progress)
+        # 同盘原子替换安装后文件数据未变，仅需快速核对元数据与内部联接
+        destination_inventory = inspect_tree(
+            destination, progress,
+            compute_hash=False,
+            check_streams=False,
+            check_hardlinks=has_hardlinks,
+        )
         summary = compare_inventories(source_before, destination_inventory)
         destination_verified = True
         _check_cancel(cancel_event)
 
         if platform_checks:
             _emit(progress, "check_occupants", path=source)
-            occupants = find_source_occupants(source, progress, cancel_event)
+            occupants = find_source_occupants(
+                source, progress, cancel_event, skip_file_scan=skip_occupants_check
+            )
             if occupants:
                 raise SourceInUseError(
                     "切换前发现仍在使用源目录的程序；已保留源目录并取消迁移：\n{}".format(
@@ -1357,10 +1521,19 @@ def migrate_directory(source, destination, confirm_apps_closed=False,
         )
 
         _emit(progress, "verify_final", path=backup)
+        # 原子重命名后源目录作为回退副本，仅需快速核对元数据与目录联接有效性
         backup_inventory = inspect_tree(
-            backup, progress, internal_roots=[source]
+            backup, progress, internal_roots=[source],
+            compute_hash=False,
+            check_streams=False,
+            check_hardlinks=has_hardlinks,
         )
-        destination_inventory = inspect_tree(destination, progress)
+        destination_inventory = inspect_tree(
+            destination, progress,
+            compute_hash=False,
+            check_streams=False,
+            check_hardlinks=has_hardlinks,
+        )
         summary = compare_inventories(backup_inventory, destination_inventory)
         compare_inventories(source_before, destination_inventory)
         _verify_junction(
