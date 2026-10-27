@@ -757,18 +757,21 @@ def inspect_tree(root, progress=None, cancel_event=None, internal_roots=None,
                     # Windows DirEntry.stat(follow_symlinks=False) may return
                     # zero for st_ino/st_nlink on ordinary files. The path was
                     # already classified as a non-reparse regular file above.
+                    # Do not overwrite item_stat with stat_res because os.stat()
+                    # synthesizes S_IEXEC (0o111) for .exe/.bat/.cmd on Windows CRT,
+                    # which would cause mode divergence against DirEntry.stat().
                     try:
-                        item_stat = os.stat(path, follow_symlinks=True)
+                        hl_stat = os.stat(path, follow_symlinks=True)
                     except OSError as exc:
                         raise MigrationError("无法读取文件信息 {}：{}".format(path, exc))
-                    if not stat.S_ISREG(item_stat.st_mode):
+                    if not stat.S_ISREG(hl_stat.st_mode):
                         raise MigrationError(
                             "扫描期间文件类型发生变化，请关闭相关程序后重试：{}".format(path)
                         )
-                    if getattr(item_stat, "st_nlink", 1) > 1:
-                        identity = (item_stat.st_dev, item_stat.st_ino)
+                    if getattr(hl_stat, "st_nlink", 1) > 1:
+                        identity = (hl_stat.st_dev, hl_stat.st_ino)
                         hardlinks.setdefault(identity, []).append(
-                            (relative, int(item_stat.st_nlink))
+                            (relative, int(hl_stat.st_nlink))
                         )
                 if check_streams:
                     streams = _alternate_data_streams(path)
@@ -853,7 +856,16 @@ def compare_inventories(expected, actual):
         if left.kind in ("symlink", "junction"):
             fields = ["kind", "link_semantic", "target_is_directory"]
         for field_name in fields:
-            if getattr(left, field_name) != getattr(right, field_name):
+            left_val = getattr(left, field_name)
+            right_val = getattr(right, field_name)
+            if left_val != right_val:
+                if os.name == "nt" and field_name == "mode":
+                    # Windows NTFS does not store POSIX permission bits or execution bits.
+                    # Python CRT synthesizes S_IEXEC (0o111) for .exe/.bat/.cmd only via
+                    # os.stat(), but never in os.scandir() DirEntry.stat(). Only S_IWRITE
+                    # reflects true read-only filesystem state on Windows.
+                    if (left_val & stat.S_IWRITE) == (right_val & stat.S_IWRITE):
+                        continue
                 differences.append(
                     "{} 的 {} 不一致".format(relative, field_name)
                 )
@@ -1360,6 +1372,7 @@ def build_preflight_report(source, destination, progress=None, cancel_event=None
         source, progress, cancel_event,
         compute_hash=not quick_verify,
         check_streams=not quick_verify,
+        check_hardlinks=not quick_verify,
     )
     if platform_checks:
         source_fs, destination_fs, free_bytes = _check_volume_and_space(
@@ -1426,6 +1439,7 @@ def migrate_directory(source, destination, confirm_apps_closed=False,
             source, progress, cancel_event,
             compute_hash=not quick_verify,
             check_streams=not quick_verify,
+            check_hardlinks=not quick_verify,
         )
         has_hardlinks = any(
             bool(entry.hardlink_group)

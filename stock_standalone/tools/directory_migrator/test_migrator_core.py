@@ -876,6 +876,42 @@ class PerformanceAndSkipOccupantsTests(unittest.TestCase):
         self.assertEqual(progress_spy.call_count, 1)
         instance.progress.stop.assert_not_called()
 
+    def test_windows_executable_mode_consistency_in_compare_inventories(self):
+        """Windows 下 .exe/.bat 等文件由 CRT 合成的 0o111 执行位差异不应导致核验失败"""
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "source"
+            stage = Path(temp) / "stage"
+            source.mkdir()
+            (source / "depends.exe").write_bytes(b"MZ123456")
+            (source / "script.bat").write_bytes(b"@echo off")
+            (source / "data.bin").write_bytes(b"hello")
+
+            # 模拟一边来自 os.stat (带有 0o111 执行位)，一边来自 DirEntry.stat (无 0o111)
+            inv1 = inspect_tree(str(source), compute_hash=False, check_hardlinks=True)
+            inv2 = inspect_tree(str(source), compute_hash=False, check_hardlinks=False)
+
+            # 预期比对必须毫无错误通过
+            summary = compare_inventories(inv1, inv2)
+            self.assertEqual(summary["file_count"], 3)
+
+    def test_windows_real_permission_mismatch_still_raises_error(self):
+        """真实的写权限/只读状态不一致仍必须严格报错阻断"""
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp) / "source"
+            source.mkdir()
+            (source / "tool.exe").write_bytes(b"MZ123")
+
+            inv1 = inspect_tree(str(source), compute_hash=False)
+            inv2 = inspect_tree(str(source), compute_hash=False)
+
+            # 手工篡改一方的 mode 为只读（剥离 S_IWRITE 0o200）
+            bad_entry = TreeEntry(**dict(inv2.entries["tool.exe"].__dict__, mode=0o444))
+            inv2.entries["tool.exe"] = bad_entry
+
+            with self.assertRaises(TreeMismatchError) as ctx:
+                compare_inventories(inv1, inv2)
+            self.assertIn("tool.exe 的 mode 不一致", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
