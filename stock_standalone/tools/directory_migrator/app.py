@@ -28,7 +28,7 @@ class DirectoryMigratorApp:
         self.destination_var = tk.StringVar()
         self.closed_var = tk.BooleanVar(value=False)
         self.skip_occupancy_var = tk.BooleanVar(value=False)
-        self.quick_verify_var = tk.BooleanVar(value=False)
+        self.quick_verify_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="选择源目录和目标位置后，先运行预检查。")
         self.events = queue.Queue()
         self.cancel_event = threading.Event()
@@ -104,7 +104,7 @@ class DirectoryMigratorApp:
         ).pack(side="left")
         ttk.Checkbutton(
             options_frame,
-            text="快速核对模式（校验结构/大小/时间戳，跳过逐文件 SHA-256，加速几十倍）",
+            text="快速核对模式（默认开启：校验结构/大小/时间戳，跳过逐文件 SHA-256，加速几十倍）",
             variable=self.quick_verify_var,
         ).pack(side="left", padx=(16, 0))
 
