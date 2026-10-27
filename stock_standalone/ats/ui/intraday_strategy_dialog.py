@@ -550,7 +550,7 @@ class SBCChartCanvas(QWidget):
     """
     # 📐 极致高屏占比四周紧凑边距 (左侧预留 62px 容纳上下两行加大粗体价格与涨跌幅标尺，右侧 52px 容纳开盘/VWAP)
     MARGIN_LEFT = 62
-    MARGIN_RIGHT = 52
+    MARGIN_RIGHT = 58
     MARGIN_TOP = 22
     MARGIN_BOTTOM = 22
     _amplitude_data_ready = pyqtSignal(str, object)
@@ -1858,6 +1858,20 @@ class SBCChartCanvas(QWidget):
 
         # 🚀 极致性能优化：增加 30ms 严格时间窗悬停渲染节流与像素位移阈值，彻底阻断 1000Hz 鼠标滑动导致 CPU 飙高
         self._hover_pos = mouse_pos
+        # 🎯 鼠标进入图表有效区域自动呈现十字星手势 (对齐 TDX)
+        if hasattr(self, '_coord_info') and self._coord_info.get("ready"):
+            _ci = self._coord_info
+            _ml = _ci.get("margin_left", self.MARGIN_LEFT)
+            _mt = _ci.get("margin_top", self.MARGIN_TOP)
+            _cw = _ci.get("chart_w", self.width() - _ml - self.MARGIN_RIGHT)
+            _mh = _ci.get("main_h", int((self.height() - _mt) * 0.74))
+            _vh = _ci.get("vol_h", 0)
+            if _ml <= mouse_pos.x() <= _ml + _cw and _mt <= mouse_pos.y() <= _mt + _mh + _vh:
+                if not self._is_panning and not getattr(self, '_is_right_panning', False) and not getattr(self, '_is_box_zooming', False):
+                    self.setCursor(Qt.CursorShape.CrossCursor)
+            else:
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+
         now_t = time.time()
         last_hover_t = getattr(self, '_last_hover_update_t', 0.0)
         last_hover_pt = getattr(self, '_last_hover_pos', None)
@@ -1871,6 +1885,8 @@ class SBCChartCanvas(QWidget):
     def leaveEvent(self, event):
         """鼠标离开画布：清除光标价格与十字线"""
         self._hover_pos = None
+        self._last_hover_pos = None
+        self.setCursor(Qt.CursorShape.ArrowCursor)
         self.update()
         super().leaveEvent(event)
 
@@ -2380,10 +2396,26 @@ class SBCChartCanvas(QWidget):
                 painter.drawRoundedRect(int(rx), tag_y, 130, 16, 2, 2)
                 painter.drawText(int(rx + 4), tag_y + 12, lbl_tip)
 
-            # 4. 🎯 鼠标双击激活十字查价锁定：十字光标、动态 Y 轴精确价格胶囊与通达信同款当时情况数据 HUD (操盘手要求：默认悬停彻底不显示，双击才显示)
-            is_active_cross = getattr(self, '_crosshair_active', False) and getattr(self, '_crosshair_idx', -1) >= 0
-            if is_active_cross and self._coord_info.get("ready"):
-                c_info = self._coord_info
+            # 4. 🎯 十字查价星与选择位置价格 (对齐 TDX：鼠标悬停无需点击实时显示选择位置价格与当时情况，同时兼容双击/按键锁定)
+            c_info = self._coord_info if getattr(self, '_coord_info', {}).get("ready") else {}
+            hover_pos = getattr(self, '_hover_pos', None)
+            is_locked_cross = getattr(self, '_crosshair_active', False) and getattr(self, '_crosshair_idx', -1) >= 0
+
+            # 判定鼠标当前是否悬停在主图或副图有效区域
+            is_hovering_chart = False
+            if hover_pos is not None and c_info and not getattr(self, '_is_panning', False) and not getattr(self, '_is_right_panning', False) and not getattr(self, '_is_box_zooming', False):
+                ml = c_info["margin_left"]
+                mt = c_info["margin_top"]
+                cw = c_info["chart_w"]
+                mh = c_info["main_h"]
+                vh = c_info.get("vol_h", 0)
+                mx = hover_pos.x()
+                my = hover_pos.y()
+                if (ml <= mx <= ml + cw + 4) and (mt <= my <= mt + mh + vh + 10):
+                    is_hovering_chart = True
+
+            show_crosshair = bool(c_info) and (is_hovering_chart or is_locked_cross)
+            if show_crosshair:
                 ml = c_info["margin_left"]
                 mt = c_info["margin_top"]
                 cw = c_info["chart_w"]
@@ -2395,45 +2427,73 @@ class SBCChartCanvas(QWidget):
                 b_step = c_info.get("bar_step")
                 is_kline = c_info.get("is_kline", False)
 
-                idx_hover = max(0, min(total_times - 1, self._crosshair_idx)) if total_times > 0 else -1
+                idx_hover = -1
                 hx = -1.0
                 hy = -1.0
                 p_hover = 0.0
 
-                if idx_hover >= 0:
-                    if b_step and b_step > 0:
-                        hx = ml + (idx_hover + 0.5) * b_step
-                    else:
-                        cw_use = float(c_info.get("active_chart_w", cw))
-                        hx = ml + (idx_hover / max(1, total_times - 1)) * cw_use
-                    # 获取对应点的收盘价/现价作为 Y 轴基准
-                    closes_arr = c_info.get("closes") if is_kline else c_info.get("prices")
-                    if closes_arr is not None and 0 <= idx_hover < len(closes_arr):
-                        p_hover = float(closes_arr[idx_hover])
-                        p_ratio = (p_hover - min_p) / max(1e-4, max_p - min_p)
-                        hy = mt + mh - p_ratio * mh
-                    else:
-                        p_hover = (min_p + max_p) / 2.0
-                        hy = mt + mh / 2.0
+                if is_hovering_chart and hover_pos is not None:
+                    # 鼠标悬停实时跟随模式 (无需点击，对齐通达信)
+                    mx = hover_pos.x()
+                    my = hover_pos.y()
+                    if total_times > 0:
+                        if is_kline and b_step and b_step > 0:
+                            idx_hover = max(0, min(total_times - 1, int((mx - ml) / float(b_step))))
+                            hx = ml + (idx_hover + 0.5) * b_step
+                        else:
+                            cw_use = float(c_info.get("active_chart_w", cw))
+                            idx_hover = max(0, min(total_times - 1, int(round(((mx - ml) / max(1.0, cw_use)) * (total_times - 1)))))
+                            hx = ml + (idx_hover / max(1, total_times - 1)) * cw_use
 
-                if idx_hover >= 0 and ml <= hx <= (ml + cw + 2) and mt <= hy <= (mt + mh):
-                    # ① 十字虚线 (贯穿主图与下方成交量图)
-                    cross_bottom = self.height() - self.MARGIN_BOTTOM
-                    painter.setPen(QPen(QColor("#4a5578"), 1, Qt.PenStyle.DashLine))
-                    painter.drawLine(int(ml), int(hy), int(ml + cw), int(hy))
+                    # 计算鼠标当前位置的选择价格 (对齐 TDX)
+                    if mt <= my <= mt + mh:
+                        hy = float(my)
+                        p_hover = max_p - ((hy - mt) / max(1e-4, mh)) * (max_p - min_p)
+                    else:
+                        hy = float(my)
+                        closes_arr = c_info.get("closes") if is_kline else c_info.get("prices")
+                        if closes_arr is not None and 0 <= idx_hover < len(closes_arr):
+                            p_hover = float(closes_arr[idx_hover])
+                        else:
+                            p_hover = (min_p + max_p) / 2.0
+                elif is_locked_cross:
+                    # 键盘漫游/双击锁定模式
+                    idx_hover = max(0, min(total_times - 1, self._crosshair_idx)) if total_times > 0 else -1
+                    if idx_hover >= 0:
+                        if is_kline and b_step and b_step > 0:
+                            hx = ml + (idx_hover + 0.5) * b_step
+                        else:
+                            cw_use = float(c_info.get("active_chart_w", cw))
+                            hx = ml + (idx_hover / max(1, total_times - 1)) * cw_use
+                        closes_arr = c_info.get("closes") if is_kline else c_info.get("prices")
+                        if closes_arr is not None and 0 <= idx_hover < len(closes_arr):
+                            p_hover = float(closes_arr[idx_hover])
+                            p_ratio = (p_hover - min_p) / max(1e-4, max_p - min_p)
+                            hy = mt + mh - p_ratio * mh
+                        else:
+                            p_hover = (min_p + max_p) / 2.0
+                            hy = mt + mh / 2.0
+
+                cross_bottom = self.height() - self.MARGIN_BOTTOM
+                if idx_hover >= 0 and ml <= hx <= (ml + cw + 4):
+                    # ① 十字虚线 (横虚线穿过选择位置，竖虚线对齐 Bar 贯穿主副图)
+                    painter.setPen(QPen(QColor("#5c6b94"), 1, Qt.PenStyle.DashLine))
+                    if mt <= hy <= cross_bottom:
+                        painter.drawLine(int(ml), int(hy), int(ml + cw), int(hy))
                     painter.drawLine(int(hx), int(mt), int(hx), int(cross_bottom))
 
-                    # ② 右侧 Y 轴动态价格高亮胶囊 (醒目青底白字)
-                    tag_w = 48
-                    tag_h = 18
-                    tag_y = max(mt, min(mt + mh - tag_h, int(hy - tag_h / 2)))
-                    painter.setPen(QPen(QColor("#00E5FF"), 1.2))
-                    painter.setBrush(QBrush(QColor("#002b3d")))
-                    painter.drawRoundedRect(int(ml + cw + 2), tag_y, tag_w, tag_h, 3, 3)
+                    # ② 右侧 Y 轴选择位置价格高亮方框 (对齐 TDX 灰白底黑色粗体胶囊)
+                    if mt <= hy <= mt + mh + 4:
+                        tag_w = 54
+                        tag_h = 17
+                        tag_y = max(mt, min(mt + mh - tag_h, int(hy - tag_h / 2)))
+                        painter.setPen(QPen(QColor("#00E5FF"), 1.2))
+                        painter.setBrush(QBrush(QColor("#E2E8F0")))  # TDX 灰白明亮底色
+                        painter.drawRoundedRect(int(ml + cw + 2), tag_y, tag_w, tag_h, 2, 2)
 
-                    painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
-                    painter.setPen(QPen(QColor("#00FFFF")))
-                    painter.drawText(int(ml + cw + 5), tag_y + 13, f"{p_hover:.2f}")
+                        painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+                        painter.setPen(QPen(QColor("#0F172A")))  # 醒目黑色粗体
+                        painter.drawText(QRect(int(ml + cw + 2), tag_y, tag_w, tag_h), Qt.AlignmentFlag.AlignCenter, f"{p_hover:.2f}")
 
                     # ③ 十字光标右上角跟随微浮标
                     tip_str = f"{p_hover:.2f}"
@@ -3087,7 +3147,7 @@ class SBCChartCanvas(QWidget):
             painter.drawLine(int(margin_left), int(y_last), int(margin_left + chart_w), int(y_last))
 
             # 右侧现价高亮标签框
-            p_box_w = 52
+            p_box_w = 54
             p_box_h = 16
             p_box_y = max(margin_top, min(margin_top + chart_h - p_box_h, int(y_last - p_box_h / 2)))
             reserved_right_y.append(p_box_y + p_box_h / 2)
@@ -3104,19 +3164,19 @@ class SBCChartCanvas(QWidget):
             y_op = price_to_y(op_ref)
             painter.setPen(QPen(QColor("#ff4444"), 1, Qt.PenStyle.DashLine))
             painter.drawLine(margin_left, int(y_op), margin_left + chart_w, int(y_op))
-            right_axis_labels.append((y_op, f"开盘:{op_ref:.2f}", QColor("#ff4444")))
+            right_axis_labels.append((y_op, f"开:{op_ref:.2f}", QColor("#ff4444")))
 
         # 🟢 目标止盈线 (保持在右侧显示)
         if self.target_sell_min > 0:
             y_target = price_to_y(self.target_sell_min)
             painter.setPen(QPen(QColor("#00ff88"), 1, Qt.PenStyle.DashDotLine))
             painter.drawLine(margin_left, int(y_target), margin_left + chart_w, int(y_target))
-            right_axis_labels.append((y_target, f"目标:{self.target_sell_min:.2f}", QColor("#00ff88")))
+            right_axis_labels.append((y_target, f"目:{self.target_sell_min:.2f}", QColor("#00ff88")))
 
         # 🟡 最新 VWAP 标签 (保持在右侧显示)
         if len(vwaps) > 0 and vwaps[-1] > 1.0:
             y_vwap = price_to_y(vwaps[-1])
-            right_axis_labels.append((y_vwap, f"VWAP:{vwaps[-1]:.2f}", QColor("#ffd700")))
+            right_axis_labels.append((y_vwap, f"均:{vwaps[-1]:.2f}", QColor("#ffd700")))
 
         if multi_vwap is not None:
             current_ref = {"1m": "1D", "5d": "5D", "10d": "10D"}.get(str(self.period_mode).lower())
@@ -4254,39 +4314,39 @@ class SBCChartCanvas(QWidget):
         ch_dn_last = float(ch_dn[-1]) if len(ch_dn) > 0 else 0.0
 
         if ch_up_last > 0 and min_p <= ch_up_last <= max_p:
-            right_axis_labels.append((k_to_y(ch_up_last), f"上轨:{ch_up_last:.2f}", QColor("#FFFFFF"), QFont("Microsoft YaHei", 7, QFont.Weight.Bold)))
+            right_axis_labels.append((k_to_y(ch_up_last), f"上:{ch_up_last:.2f}", QColor("#FFFFFF"), QFont("Microsoft YaHei", 7, QFont.Weight.Bold)))
         if ch_mid_last > 0 and min_p <= ch_mid_last <= max_p:
-            right_axis_labels.append((k_to_y(ch_mid_last), f"中轨:{ch_mid_last:.2f}", QColor("#B0B0C0"), QFont("Microsoft YaHei", 7)))
+            right_axis_labels.append((k_to_y(ch_mid_last), f"中:{ch_mid_last:.2f}", QColor("#B0B0C0"), QFont("Microsoft YaHei", 7)))
         if ch_dn_last > 0 and min_p <= ch_dn_last <= max_p:
-            right_axis_labels.append((k_to_y(ch_dn_last), f"下轨:{ch_dn_last:.2f}", QColor("#FFFFFF"), QFont("Microsoft YaHei", 7, QFont.Weight.Bold)))
+            right_axis_labels.append((k_to_y(ch_dn_last), f"下:{ch_dn_last:.2f}", QColor("#FFFFFF"), QFont("Microsoft YaHei", 7, QFont.Weight.Bold)))
 
         # 8.3 上涨支撑线 (ch_supp_p) 右侧标签与短水平虚线
         if ch_supp_p > 0 and min_p <= ch_supp_p <= max_p:
             y_supp_line = k_to_y(ch_supp_p)
             painter.setPen(QPen(QColor("#FF4444"), 1, Qt.PenStyle.DashLine))
             painter.drawLine(int(margin_left + chart_w * 0.50), int(y_supp_line), int(margin_left + chart_w), int(y_supp_line))
-            right_axis_labels.append((y_supp_line, f"支撑:{ch_supp_p:.2f}", QColor("#FF4444"), QFont("Microsoft YaHei", 7, QFont.Weight.Bold)))
+            right_axis_labels.append((y_supp_line, f"撑:{ch_supp_p:.2f}", QColor("#FF4444"), QFont("Microsoft YaHei", 7, QFont.Weight.Bold)))
 
         # 8.3 翻转线 (rev_last) 右侧标签与短水平虚线
         if rev_last > 0 and min_p <= rev_last <= max_p:
             y_rev_line = k_to_y(rev_last)
             painter.setPen(QPen(QColor("#00FF88"), 1, Qt.PenStyle.DashLine))
             painter.drawLine(int(margin_left + chart_w * 0.50), int(y_rev_line), int(margin_left + chart_w), int(y_rev_line))
-            right_axis_labels.append((y_rev_line, f"反转:{rev_last:.2f}", QColor("#00FF88"), QFont("Microsoft YaHei", 7, QFont.Weight.Bold)))
+            right_axis_labels.append((y_rev_line, f"转:{rev_last:.2f}", QColor("#00FF88"), QFont("Microsoft YaHei", 7, QFont.Weight.Bold)))
 
         # 8.4 开盘基准线 (self.open_price) 右侧标签
         if self.open_price > 0 and min_p <= self.open_price <= max_p:
             y_op_line = k_to_y(self.open_price)
             painter.setPen(QPen(QColor("#FF4444"), 1, Qt.PenStyle.DashLine))
             painter.drawLine(int(margin_left + chart_w * 0.35), int(y_op_line), int(margin_left + chart_w), int(y_op_line))
-            right_axis_labels.append((y_op_line, f"开盘:{self.open_price:.2f}", QColor("#FF4444"), QFont("Microsoft YaHei", 7, QFont.Weight.Bold)))
+            right_axis_labels.append((y_op_line, f"开:{self.open_price:.2f}", QColor("#FF4444"), QFont("Microsoft YaHei", 7, QFont.Weight.Bold)))
 
         # 8.5 止盈目标线 (self.target_sell_min) 右侧标签
         if self.target_sell_min > 0 and min_p <= self.target_sell_min <= max_p:
             y_tmin_line = k_to_y(self.target_sell_min)
             painter.setPen(QPen(QColor("#00FF88"), 1, Qt.PenStyle.DashDotLine))
             painter.drawLine(int(margin_left + chart_w * 0.35), int(y_tmin_line), int(margin_left + chart_w), int(y_tmin_line))
-            right_axis_labels.append((y_tmin_line, f"目标:{self.target_sell_min:.2f}", QColor("#00FF88"), QFont("Microsoft YaHei", 7, QFont.Weight.Bold)))
+            right_axis_labels.append((y_tmin_line, f"目:{self.target_sell_min:.2f}", QColor("#00FF88"), QFont("Microsoft YaHei", 7, QFont.Weight.Bold)))
 
         # 🌟 统一渲染右侧 Y 轴标签（带垂直防重叠智能微调）
         if right_axis_labels:
@@ -4617,7 +4677,7 @@ class SBCChartCanvas(QWidget):
             painter.drawLine(int(x_last_bar), int(y_last), int(margin_left + chart_w), int(y_last))
 
             # 右侧现价高亮标签框
-            p_box_w = 52
+            p_box_w = 54
             p_box_h = 16
             p_box_y = max(margin_top, min(margin_top + main_h - p_box_h, int(y_last - p_box_h / 2)))
             painter.setPen(QPen(col_last, 1.2))

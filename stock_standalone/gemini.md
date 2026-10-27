@@ -1,5 +1,32 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-27 10:20 【修复TK并发读取HDF5导致AccessViolation闪退与TradingHub方法缺失】(`docs/tasks/2026-10-27_1020_修复TK并发读取HDF5导致AccessViolation闪退与TradingHub方法缺失.md`, `ats/fusion/relative_cache.py`, `stock_live_strategy.py`, `trading_hub.py`, `ats/ui/fusion_ladder_dialog.py`)
+- [x] **【彻底修复 Windows fatal exception: access violation 闪退根因】**：
+  - **根因穿透**：10/26 22:07 的 commit `fd289295` 引入 relative 轴，在 `_detect_signals_single_stock` 多线程并发（30 线程）中并发调用 `_fusion_rs5` -> `load_rs5_map`；`relative_cache.py` 裸用 `pd.HDFStore` 且无锁，导致 Windows 下 PyTables / HDF5 C 底层指针发生竞态破坏（`tables\table.py:1843 in _read`），抛出 `0xC0000005` Access Violation 强杀进程；
+  - **HDF5 全局线程锁保护**：`relative_cache.py` 接入 `JSONData.tdx_hdf5_api._HDF_GLOBAL_LOCK`，且采用 `SafeHDFStore` 替代裸 `pd.HDFStore`，杜绝任何并发底层冲突；
+  - **模块级 30 分钟内存缓存**：增加 `_CACHE_LOCK` 与 `_CACHED_RS5_MAP`，并发请求直接走纯内存字典，0 次磁盘 I/O 穿透；
+  - **并发分发前主线程预热（零 I/O 穿透）**：在 `_check_strategies` 的准备阶段提前调用 `_fusion_ensure_rs_map()`；分发到 30 个工作线程后仅读取常驻内存，耗时 0 纳秒，彻底消除子线程触碰 HDF5；
+  - **双重检查锁定 (DCL)**：`StockLiveStrategy` 增加 `self._fusion_rs_lock`，内置防抖重试，绝不破坏已有有效数据；
+- [x] **【彻底根治 Data sync partially failed: 'TradingHub' object has no attribute 'get_open_trades'】**：
+  - **双向平滑对接**：在 `stock_live_strategy.py` 中优先读取缓存及 `self.trading_logger`，统一 6 位数字代码并容错；在 `trading_hub.py` 为 `TradingHub` 补充 `get_open_trades` 兼容方法，消除 `AttributeError`；
+- [x] **【自动化测试全绿通过（199 项 PASS）】**：
+  - 全量 fusion 专项测试 18 个文件 199 项全部 100% 纯绿通过（199 passed in 37.44s），词法扫描 0 错误。
+
+## 2026-10-27 10:20 【SBC走势图右侧价格防遮挡精简、TDX十字星查价功能闭环及TDX性能穿透】(docs/tasks/2026-10-27_1020_SBC走势图右侧价格防遮挡精简与TDX十字星查价功能闭环及TDX性能穿透.md, ts/ui/intraday_strategy_dialog.py, tests/test_sbc_crosshair_and_right_axis.py)
+- [x] **【SBC 右侧价格标签精简与防遮挡优化】**：
+  - MARGIN_RIGHT 由 52 优化扩展为 58，现价标签方框 p_box_w 拓宽为 54；
+  - 分时走势图标签精简：开盘: -> 开:、目标: -> 目:、VWAP: -> 均:；
+  - K 线模式标签精简：上轨/中轨/下轨 -> 上:/中:/下:、支撑/反转/开盘/目标 -> 撑:/转:/开:/目:；
+  - 彻底杜绝文字被右边缘截断（如 VWAP:12.、开盘:12.、目标:12.），留有舒适呼吸边距；
+- [x] **【对齐通达信免点击十字星查价与选择位置价格实时显示】**：
+  - 鼠标移动悬停（无需点击）即可自动切换十字光标（CrossCursor），实时呈现双向十字虚线与对应 Bar 的开高低收 HUD 数据看板；
+  - 水平虚线跟随鼠标当前高度，反算精确物理价格 p_selected；
+  - 右侧 Y 轴以 TDX 同款灰白底色（#E2E8F0）+ 黑色粗体胶囊高亮显示当前选择位置的绝对价格，鼠标移出画布（leaveEvent）瞬间彻底隐去，保持界面清爽；
+- [x] **【TDX API 频繁超时与 quote_gaps 暴增根因穿透分析】**：
+  - **周期性 60 秒风暴根因**：ts/tdx_realtime_fetcher.py 内部 cooldown_sec = 60.0，异常代码每 60 秒冷却过期重新入批导致 40 票批次超时，进而触发单票循环串行重试，耗时飙升至 3.5 秒；
+  - **并发加剧**：昨天引入的 stock_live_strategy.py 每 15 秒大批量拉五档快照及逐票抓分时 K 线，与 ATS 主进程 NextDayWatchProcess 116 股行情并发争夺通达信服务端带宽与限流配额；
+  - **Clash 规则补充**：建议在 Clash 规则中前置增加通达信全主站端口直接直连规则：- DST-PORT,7709,DIRECT 与 - DST-PORT,7711,DIRECT。
+
 ## 2026-10-26 17:30 【融合梯度实盘无行情、分级塌陷、多进程对齐与数据输入补全闭环】(`docs/tasks/2026-10-26_1140_融合梯度实盘无行情与分级塌陷修复.md`, `ats/fusion/`, `stock_live_strategy.py`, `ats/ui/fusion_ladder_dialog.py`, `tests/test_fusion_enrich.py`)
 - [x] **【实盘无现价/涨幅恒 0/分级塌陷根因穿透与修复】**：
   - 穿透排查实盘影子日志只有 L0/L1 且价格恒空的四大根因：① 旧实现只落 fusion 结论不落行情；② 实盘缺失承接与意图数据时被按 0 分打死，导致 RAR 恒在 35 左右，无法达到绝对阈值 L2(>62)；③ 窗口缺乏定时刷新机制；④ 缺乏更新时间列；
