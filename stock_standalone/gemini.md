@@ -1,5 +1,22 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-27 10:55 【窗口布局管理器添加 Alt+Shift+F 探测并应用推荐布局全局热键、快捷键编辑与开关功能闭环】(`docs/tasks/2026-10-27_0930_管理器添加探测推荐布局全局热键及编辑开关.md`, `webTools/window_manager/ui.py`, `tests/test_manager_detect_apply_hotkey.py`)
+- [x] **【独立子线程与 Win32 全局热键多 ID 解耦】**：
+  - `ManagerHotkeyThread` 扩展支持 `hotkey_id` 参数（默认 `0xAFC0`，探测推荐使用 `0xAFC1`），彻底杜绝 Windows 热键 ID 冲突；
+  - 基于非阻塞 `PeekMessageW` 与子线程隔离轮询，捕获系统 `WM_HOTKEY` 并安全分发至 Qt 信号（`detect_apply_signal.emit()`），0 阻塞主 UI；
+- [x] **【探测并应用推荐布局公共逻辑抽象】**：
+  - 将原托盘触发逻辑抽取为公共入口 `detect_and_apply_recommended_layout(source, show_tray_message)`，统一支持托盘右键与全局快捷键随时触发屏幕分辨率探测与推荐布局应用（并显示托盘气泡提示）；
+- [x] **【UI 控件布局、快捷键编辑录入与防冲突校验】**：
+  - 在底部栏左侧紧随“全局热键”之后添加“探测推荐:”标签、`HotkeyLineEdit`（默认 `alt+shift+f`，支持点击按键录入）、“绑定”测试保存按钮与“启用”开关复选框；
+  - `FlowLayout` 自适应分水岭对齐设置为 `align_right_from_index=8`，保证底部两组热键配置与开机自启整齐居左，工具操作平稳右对齐；
+  - 增加热键冲突互斥检测：防止将探测推荐热键与全局呼出热键设为相同按键；
+- [x] **【跨会话配置持久化与退出生命周期管理】**：
+  - `window_layout_config.json` 自动同步保存 `detect_apply_hotkey` 与 `detect_apply_hotkey_enabled`，窗口关闭与强制退出时严格注销并清理子线程；
+- [x] **【自动化测试全绿通过（6 项专项 + 5 项回归）】**：
+  - 新增 `tests/test_manager_detect_apply_hotkey.py`（6 项测试 100% PASS）；
+  - `tests/test_window_layout_double_click_and_column_persistence.py` 5 项回归测试 100% PASS；
+  - 源码文件 `python -m py_compile webTools/window_manager/ui.py` 0 语法错误。
+
 ## 2026-10-27 10:20 【修复TK并发读取HDF5导致AccessViolation闪退与TradingHub方法缺失】(`docs/tasks/2026-10-27_1020_修复TK并发读取HDF5导致AccessViolation闪退与TradingHub方法缺失.md`, `ats/fusion/relative_cache.py`, `stock_live_strategy.py`, `trading_hub.py`, `ats/ui/fusion_ladder_dialog.py`)
 - [x] **【彻底修复 Windows fatal exception: access violation 闪退根因】**：
   - **根因穿透**：10/26 22:07 的 commit `fd289295` 引入 relative 轴，在 `_detect_signals_single_stock` 多线程并发（30 线程）中并发调用 `_fusion_rs5` -> `load_rs5_map`；`relative_cache.py` 裸用 `pd.HDFStore` 且无锁，导致 Windows 下 PyTables / HDF5 C 底层指针发生竞态破坏（`tables\table.py:1843 in _read`），抛出 `0xC0000005` Access Violation 强杀进程；

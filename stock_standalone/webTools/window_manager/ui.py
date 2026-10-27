@@ -2803,11 +2803,12 @@ class ManagerHotkeyThread(threading.Thread):
     彻底避免在 nativeEvent 中操作原始指针导致的 Access Violation 崩溃。
     """
     WM_HOTKEY = 0x0312
-    HOTKEY_ID = 0xAFC0
+    DEFAULT_HOTKEY_ID = 0xAFC0
 
-    def __init__(self, toggle_callback):
+    def __init__(self, toggle_callback, hotkey_id=0xAFC0):
         super().__init__(daemon=True)
         self._toggle_callback = toggle_callback
+        self.HOTKEY_ID = hotkey_id
         self._running = False
         self._modifiers = 0
         self._vk = 0
@@ -3848,6 +3849,7 @@ class AntigravityAccountManagerDialog(QDialog):
 class WindowPosManagerUI(QMainWindow, WindowMixin):
     """主窗口：窗口坐标及分布管理器"""
     toggle_ui_signal = QtCore.pyqtSignal()
+    detect_apply_signal = QtCore.pyqtSignal()
     show_ui_signal = QtCore.pyqtSignal()
     log_signal = QtCore.pyqtSignal(str)
     
@@ -3859,8 +3861,11 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.scale_factor = self._get_dpi_scale_factor()
             
         self._hotkey_hook = None
+        self._detect_apply_hotkey_thread = None
         self.config_manager = config_manager if config_manager is not None else core.ConfigManager()
         self.current_bound_hotkey = self.config_manager.config_data.get("global_hotkey", "ctrl+alt+w")
+        self.current_bound_detect_apply_hotkey = self.config_manager.config_data.get("detect_apply_hotkey", "alt+shift+f")
+        self.detect_apply_hotkey_enabled = bool(self.config_manager.config_data.get("detect_apply_hotkey_enabled", True))
         
         # 自动检测/添加静态路由，并保存结果以在 UI 准备好后输出日志
         try:
@@ -3878,7 +3883,10 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.refresh_resolutions_combo()
         self.setup_tray_icon()
         self.bind_hotkey(self.current_bound_hotkey)
+        if self.detect_apply_hotkey_enabled:
+            self.bind_detect_apply_hotkey(self.current_bound_detect_apply_hotkey)
         self.toggle_ui_signal.connect(self.toggle_visibility)
+        self.detect_apply_signal.connect(self.on_detect_and_apply_hotkey_triggered)
         self.show_ui_signal.connect(self._force_show_and_top)
         self.log_signal.connect(self.log)
         self.setup_single_instance_server()
@@ -4143,12 +4151,20 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
             empty_act = self.tray_layout_menu.addAction("(暂无已保存方案)")
             empty_act.setEnabled(False)
 
-    def detect_and_apply_layout_from_tray(self):
-        """从托盘右键触发自动探测屏幕并应用推荐布局"""
+    def detect_and_apply_recommended_layout(self, source: str = "快捷键", show_tray_message: bool = True):
+        """自动探测屏幕并应用推荐布局"""
         self.load_screen_info()
         rec_name = core.detect_display_config_name(self.config_manager)
-        self.log(f"[托盘快捷] 探测到推荐配置方案: {rec_name}，正在应用...")
-        self.apply_layout_by_name(rec_name, show_tray_message=True)
+        self.log(f"[{source}] 探测到推荐配置方案: {rec_name}，正在应用...")
+        self.apply_layout_by_name(rec_name, show_tray_message=show_tray_message)
+
+    def detect_and_apply_layout_from_tray(self):
+        """从托盘右键触发自动探测屏幕并应用推荐布局"""
+        self.detect_and_apply_recommended_layout(source="托盘快捷", show_tray_message=True)
+
+    def on_detect_and_apply_hotkey_triggered(self):
+        """从全局热键触发自动探测屏幕并应用推荐布局"""
+        self.detect_and_apply_recommended_layout(source="全局热键", show_tray_message=True)
 
     def apply_layout_by_name(self, res_name: str, show_tray_message: bool = True):
         """按指定的方案名切换并应用布局"""
@@ -4209,6 +4225,9 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 self._hotkey_thread.stop()
                 self._hotkey_thread = None
                 self._hotkey_hook = None
+            if getattr(self, '_detect_apply_hotkey_thread', None):
+                self._detect_apply_hotkey_thread.stop()
+                self._detect_apply_hotkey_thread = None
             # 停止 RamDisk 同步守护线程
             if hasattr(self, 'ramdisk_sync_worker') and self.ramdisk_sync_worker:
                 self.ramdisk_sync_worker.stop()
@@ -4258,6 +4277,9 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                     self._hotkey_thread.stop()
                     self._hotkey_thread = None
                     self._hotkey_hook = None
+                if getattr(self, '_detect_apply_hotkey_thread', None):
+                    self._detect_apply_hotkey_thread.stop()
+                    self._detect_apply_hotkey_thread = None
                 if hasattr(self, 'ramdisk_sync_worker') and self.ramdisk_sync_worker:
                     self.ramdisk_sync_worker.stop()
                 if hasattr(self, '_ag_sync_worker') and self._ag_sync_worker:
@@ -4584,6 +4606,10 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
     def on_bind_hotkey_clicked(self):
         new_hk = self.le_hotkey.text().strip()
         if new_hk:
+            if hasattr(self, 'current_bound_detect_apply_hotkey') and getattr(self, 'detect_apply_hotkey_enabled', False):
+                if new_hk.lower() == self.current_bound_detect_apply_hotkey.lower():
+                    QMessageBox.warning(self, "热键冲突", f"❌ 热键【{new_hk}】与当前已启用的探测推荐热键冲突，请指定不同按键！")
+                    return
             success = self.bind_hotkey(new_hk)
             if success:
                 self.config_manager.config_data["global_hotkey"] = new_hk
@@ -4591,6 +4617,103 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
                 QMessageBox.information(self, "绑定测试成功", f"✅ 热键【{new_hk}】测试绑定成功并已保存！\n您可以立即按下该组合键测试隐藏/呼出效果。")
             else:
                 QMessageBox.warning(self, "绑定测试失败", f"❌ 热键【{new_hk}】绑定失败！\n这可能是因为系统热键冲突或是不支持该按键组合。\n请重新点击输入框录入其他快捷键。")
+
+    def bind_detect_apply_hotkey(self, hotkey_str: str) -> bool:
+        """
+        使用 ManagerHotkeyThread 独立子线程注册'探测并应用推荐布局'全局热键 (hotkey_id=0xAFC1)。
+        """
+        if not hotkey_str:
+            return False
+        try:
+            modifiers, vk = self.parse_hotkey_string(hotkey_str)
+            if not vk:
+                self.log(f"解析探测推荐热键失败或无效按键组合: {hotkey_str}")
+                return False
+
+            # 停止旧线程（会自动 UnregisterHotKey）
+            old_thread = getattr(self, '_detect_apply_hotkey_thread', None)
+            if old_thread and old_thread.is_alive():
+                old_thread.stop()
+                old_thread.join(timeout=1.0)
+            self._detect_apply_hotkey_thread = None
+
+            # 创建并启动新的热键监听子线程 (ID: 0xAFC1)
+            thread = ManagerHotkeyThread(self.detect_apply_signal.emit, hotkey_id=0xAFC1)
+            thread.set_hotkey(modifiers, vk)
+            thread.start()
+
+            import time
+            time.sleep(0.15)
+            if not thread._registered:
+                self.log(f"RegisterHotKey 注册探测推荐热键失败: {hotkey_str} (可能已被其他程序抢占)")
+                thread.stop()
+                return False
+
+            self._detect_apply_hotkey_thread = thread
+            self.current_bound_detect_apply_hotkey = hotkey_str
+            self.detect_apply_hotkey_enabled = True
+            self.log(f"[OK] 已绑定探测推荐全局热键 (独立线程): {hotkey_str}")
+            return True
+        except Exception as e:
+            self.log(f"绑定探测推荐热键失败: {e}")
+            return False
+
+    def unbind_detect_apply_hotkey(self):
+        """注销'探测并应用推荐布局'全局热键"""
+        old_thread = getattr(self, '_detect_apply_hotkey_thread', None)
+        if old_thread and old_thread.is_alive():
+            old_thread.stop()
+            old_thread.join(timeout=1.0)
+        self._detect_apply_hotkey_thread = None
+        self.detect_apply_hotkey_enabled = False
+        self.log("[Info] 已解除探测推荐全局热键绑定")
+
+    def on_bind_detect_apply_clicked(self):
+        new_hk = self.le_detect_apply_hotkey.text().strip()
+        if not new_hk:
+            QMessageBox.warning(self, "绑定提示", "请输入或录入有效的快捷键组合（例如 alt+shift+f）！")
+            return
+            
+        if new_hk.lower() == getattr(self, 'current_bound_hotkey', '').lower():
+            QMessageBox.warning(self, "热键冲突", f"❌ 热键【{new_hk}】与当前全局呼出热键冲突，请指定不同按键！")
+            return
+
+        if hasattr(self, 'chk_detect_apply') and not self.chk_detect_apply.isChecked():
+            self.chk_detect_apply.blockSignals(True)
+            self.chk_detect_apply.setChecked(True)
+            self.chk_detect_apply.blockSignals(False)
+            self.config_manager.config_data["detect_apply_hotkey_enabled"] = True
+
+        success = self.bind_detect_apply_hotkey(new_hk)
+        if success:
+            self.config_manager.config_data["detect_apply_hotkey"] = new_hk
+            self.config_manager.save()
+            QMessageBox.information(
+                self, "绑定测试成功",
+                f"✅ 探测推荐热键【{new_hk}】绑定测试成功并已保存！\n按下该组合键即可随时探测屏幕并应用推荐布局。"
+            )
+        else:
+            QMessageBox.warning(
+                self, "绑定测试失败",
+                f"❌ 热键【{new_hk}】绑定失败！\n这可能是因为系统热键冲突或已被其他程序占用。\n请重新点击输入框录入其他快捷键。"
+            )
+
+    def on_detect_apply_switch_changed(self, state):
+        enabled = (state == QtCore.Qt.CheckState.Checked.value or state is True)
+        self.detect_apply_hotkey_enabled = enabled
+        self.config_manager.config_data["detect_apply_hotkey_enabled"] = enabled
+        hk = self.le_detect_apply_hotkey.text().strip() if hasattr(self, 'le_detect_apply_hotkey') else getattr(self, 'current_bound_detect_apply_hotkey', 'alt+shift+f')
+        if not hk:
+            hk = "alt+shift+f"
+        self.config_manager.config_data["detect_apply_hotkey"] = hk
+        self.config_manager.save()
+
+        if enabled:
+            success = self.bind_detect_apply_hotkey(hk)
+            if not success:
+                self.log(f"⚠️ 探测推荐热键【{hk}】激活失败，请检查冲突")
+        else:
+            self.unbind_detect_apply_hotkey()
 
     def init_ui(self):
         # 全局深色现代 QSS 样式设计
@@ -5077,8 +5200,8 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         main_layout.addWidget(self.log_group)
         main_layout.addSpacing(6)
 
-        # 底部应用栏 (紧凑型流式布局，从索引 4 开始右对齐：0热键, 1输入框, 2绑定, 3自启复选框均在左侧并垂直居中)
-        bottom_bar = FlowLayout(hspacing=6, vspacing=4, align_right_from_index=4)
+        # 底部应用栏 (紧凑型流式布局，从索引 8 开始右对齐：0-2全局热键, 3-6探测推荐及开关, 7自启复选框均在左侧并垂直居中)
+        bottom_bar = FlowLayout(hspacing=6, vspacing=4, align_right_from_index=8)
         
         # --- 全局热键配置 ---
         self.lbl_hotkey = QLabel("全局热键:")
@@ -5096,8 +5219,45 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         self.btn_bind_hotkey.setStyleSheet("padding: 2px 8px; font-size: 12px;")
         self.btn_bind_hotkey.clicked.connect(self.on_bind_hotkey_clicked)
         bottom_bar.addWidget(self.btn_bind_hotkey)
+
+        # --- 探测并应用推荐布局热键配置 (紧随全局热键后) ---
+        self.lbl_detect_apply_hotkey = QLabel("探测推荐:")
+        self.lbl_detect_apply_hotkey.setStyleSheet("font-size: 12px; color: #a0a0ab;")
+        self.lbl_detect_apply_hotkey.setToolTip("执行探测屏幕分辨率并自动应用推荐布局的全局热键 (默认: alt+shift+f)")
+        bottom_bar.addWidget(self.lbl_detect_apply_hotkey)
+
+        self.le_detect_apply_hotkey = HotkeyLineEdit()
+        self.le_detect_apply_hotkey.setFixedHeight(25)
+        self.le_detect_apply_hotkey.setMaximumWidth(125)
+        self.le_detect_apply_hotkey.setText(getattr(self, 'current_bound_detect_apply_hotkey', 'alt+shift+f'))
+        self.le_detect_apply_hotkey.setToolTip("点击后直接按下快捷键组合录入 (默认: alt+shift+f)")
+        bottom_bar.addWidget(self.le_detect_apply_hotkey)
+
+        self.btn_bind_detect_apply = QPushButton("绑定")
+        self.btn_bind_detect_apply.setFixedHeight(25)
+        self.btn_bind_detect_apply.setStyleSheet("padding: 2px 8px; font-size: 12px;")
+        self.btn_bind_detect_apply.setToolTip("测试并绑定新的探测推荐热键")
+        self.btn_bind_detect_apply.clicked.connect(self.on_bind_detect_apply_clicked)
+        bottom_bar.addWidget(self.btn_bind_detect_apply)
+
+        self.chk_detect_apply = QCheckBox("启用")
+        self.chk_detect_apply.setStyleSheet("""
+            QCheckBox {
+                font-size: 12px;
+                color: #cbd5e1;
+                spacing: 5px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+            }
+        """)
+        self.chk_detect_apply.setToolTip("开启或停用探测并应用推荐布局的全局快捷键")
+        self.chk_detect_apply.setChecked(getattr(self, 'detect_apply_hotkey_enabled', True))
+        self.chk_detect_apply.stateChanged.connect(self.on_detect_apply_switch_changed)
+        bottom_bar.addWidget(self.chk_detect_apply)
         
-        # --- 开机自启复选框 (紧随绑定按钮后，左侧常驻并由 FlowLayout 自动垂直居中) ---
+        # --- 开机自启复选框 (紧随探测推荐热键后，左侧常驻并由 FlowLayout 自动垂直居中) ---
         self.chk_autostart = QCheckBox("开机自启")
         self.chk_autostart.setStyleSheet("""
             QCheckBox {
@@ -7836,6 +7996,17 @@ class WindowPosManagerUI(QMainWindow, WindowMixin):
         if new_hk:
             self.config_manager.config_data["global_hotkey"] = new_hk
             self.bind_hotkey(new_hk)
+
+        if hasattr(self, 'le_detect_apply_hotkey'):
+            new_da_hk = self.le_detect_apply_hotkey.text().strip()
+            self.config_manager.config_data["detect_apply_hotkey"] = new_da_hk
+        if hasattr(self, 'chk_detect_apply'):
+            da_enabled = self.chk_detect_apply.isChecked()
+            self.config_manager.config_data["detect_apply_hotkey_enabled"] = da_enabled
+            if da_enabled and new_da_hk:
+                self.bind_detect_apply_hotkey(new_da_hk)
+            else:
+                self.unbind_detect_apply_hotkey()
             
         if hasattr(self, 'log_group'):
             self.config_manager.config_data["log_panel_height"] = self.log_group.height()
