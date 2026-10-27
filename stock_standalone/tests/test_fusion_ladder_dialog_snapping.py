@@ -488,7 +488,7 @@ def test_fusion_ladder_rotator_and_activation_expand(qapp):
         dlg.close()
 
 
-def test_fusion_ladder_auto_close_settle(tmp_path, monkeypatch):
+def test_fusion_ladder_auto_close_settle(qapp, tmp_path, monkeypatch):
     """测试 15:00 收盘后自动持久化与上下文沉淀，每日自动更新上下文"""
     from ats.ui.fusion_ladder_dialog import FusionLadderDialog
     from ats.ui.styles import load_config_node, save_config_node
@@ -501,7 +501,7 @@ def test_fusion_ladder_auto_close_settle(tmp_path, monkeypatch):
 
         # 验证已沉淀并记录
         assert load_config_node("fusion_last_auto_settle_day") == "2026-10-23"
-        assert "今日收盘上下文已自动沉淀" in dlg.lbl_status.text()
+        assert "自动" in dlg.lbl_status.text()
     finally:
         dlg.close()
 

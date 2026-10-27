@@ -109,6 +109,7 @@ def test_fusion_full_chain_end_to_end_audit(qapp, tmp_path, monkeypatch):
     # =========================================================================
     save_config_node("fusion_ladder_stays_on_top", False)
     save_config_node("fusion_last_auto_settle_day", "")
+    save_config_node("fusion_auto_replay_after_close", False)
 
     dlg = fld.open_fusion_ladder_dialog()
     assert dlg is not None
@@ -242,4 +243,7 @@ def test_fusion_full_chain_end_to_end_audit(qapp, tmp_path, monkeypatch):
     assert load_config_node("fusion_last_auto_settle_day") == test_day
     assert "今日收盘上下文已自动沉淀" in dlg.lbl_status.text()
 
+    if dlg._worker and dlg._worker.isRunning():
+        dlg._worker.requestInterruption()
+        dlg._worker.wait(2000)
     dlg.close()

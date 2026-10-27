@@ -21,9 +21,25 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
 from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+# ⚡ [CORE-LOCK] 全局 HDF5 线程安全锁：保护所有 PyTables/HDF5 的底层 IO 与初始化
+try:
+    from JSONData.tdx_hdf5_api import _HDF_GLOBAL_LOCK
+    _H5_LOCK = _HDF_GLOBAL_LOCK
+except Exception:
+    _H5_LOCK = threading.RLock()
+
+# 模块级内存缓存，避免多线程 / 多次调用重复穿透读取磁盘 HDF5
+_CACHE_LOCK = threading.RLock()
+_CACHED_RS5_MAP: Dict[str, float] = {}
+_CACHED_MKT_RET5: float = 0.0
+_CACHED_TS: float = 0.0
+_CACHE_TTL: float = 1800.0  # 30 分钟缓存
 
 # 数据源候选（文件名 → HDF5 key）。按顺序取第一个存在的。
 SOURCE_CANDIDATES = (
@@ -72,44 +88,82 @@ def load_rs5_map(
     path: Optional[str] = None,
     key: Optional[str] = None,
     lookback: int = 5,
+    force_reload: bool = False,
 ) -> Tuple[Dict[str, float], float]:
-    """返回 ({code: rs5}, mkt_ret5)。任何异常都返回空结果，绝不阻塞调用方。"""
+    """返回 ({code: rs5}, mkt_ret5)。任何异常都返回空结果，绝不阻塞调用方。
+    
+    线程安全保证：
+    1. 模块级内存缓存（TTL=30min），并发调用直接返回内存字典；
+    2. 穿透刷新时进入 _H5_LOCK 互斥锁，严格杜绝底层 PyTables/HDF5 C 库多线程 access violation；
+    3. 任何 I/O 或解析异常优雅降级，返回已有缓存或空字典，绝不崩溃。
+    """
+    global _CACHED_RS5_MAP, _CACHED_MKT_RET5, _CACHED_TS
+    now = time.time()
+
+    with _CACHE_LOCK:
+        if not force_reload and _CACHED_RS5_MAP and (now - _CACHED_TS) < _CACHE_TTL:
+            return _CACHED_RS5_MAP, _CACHED_MKT_RET5
+
     src, h5key = _pick_source(path, key)
     if not src:
-        return {}, 0.0
-    try:
-        import pandas as pd
+        with _CACHE_LOCK:
+            return _CACHED_RS5_MAP, _CACHED_MKT_RET5
 
-        with pd.HDFStore(src, "r") as store:
-            keys = list(store.keys())
-            use_key = h5key if h5key in keys else (keys[0] if keys else None)
-            if not use_key:
-                return {}, 0.0
-            df = store.select(use_key, columns=["close"])
-        if df is None or df.empty or "close" not in df.columns:
-            return {}, 0.0
+    with _H5_LOCK:
+        with _CACHE_LOCK:
+            now = time.time()
+            if not force_reload and _CACHED_RS5_MAP and (now - _CACHED_TS) < _CACHE_TTL:
+                return _CACHED_RS5_MAP, _CACHED_MKT_RET5
 
-        # (code, date) 偶有重复行（多次抓取叠加），保留最后一条再透视
-        if df.index.has_duplicates:
-            df = df[~df.index.duplicated(keep="last")]
-        wide = df["close"].unstack(level=0).sort_index()
-        if len(wide) < lookback + 1:
-            return {}, 0.0
-        last = wide.iloc[-1]
-        base = wide.iloc[-lookback - 1]
-        ret5 = (last / base - 1.0) * 100.0
-        ret5 = ret5.replace([float("inf"), float("-inf")], pd.NA).dropna()
-        ret5 = ret5[(base > 0) & (last > 0)]
-        if ret5.empty:
-            return {}, 0.0
+        try:
+            import pandas as pd
 
-        mkt = float(ret5.median())
-        rs_map = {
-            str(code).split(".")[0].zfill(6): round(float(v) - mkt, 3)
-            for code, v in ret5.items()
-        }
-        logger.debug("[fusion] rs5 源=%s key=%s 覆盖=%d 中位=%+.2f%%", src, use_key, len(rs_map), mkt)
-        return rs_map, round(mkt, 3)
-    except Exception as exc:
-        logger.debug("[fusion] rs5 批量缓存加载失败: %s", exc)
-        return {}, 0.0
+            store_cls = pd.HDFStore
+            try:
+                from JSONData.tdx_hdf5_api import SafeHDFStore
+                store_cls = SafeHDFStore
+            except Exception:
+                pass
+
+            with store_cls(src, "r") as store:
+                keys = list(store.keys())
+                use_key = h5key if h5key in keys else (keys[0] if keys else None)
+                if not use_key:
+                    with _CACHE_LOCK:
+                        return _CACHED_RS5_MAP, _CACHED_MKT_RET5
+                df = store.select(use_key, columns=["close"])
+            if df is None or df.empty or "close" not in df.columns:
+                with _CACHE_LOCK:
+                    return _CACHED_RS5_MAP, _CACHED_MKT_RET5
+
+            # (code, date) 偶有重复行（多次抓取叠加），保留最后一条再透视
+            if df.index.has_duplicates:
+                df = df[~df.index.duplicated(keep="last")]
+            wide = df["close"].unstack(level=0).sort_index()
+            if len(wide) < lookback + 1:
+                with _CACHE_LOCK:
+                    return _CACHED_RS5_MAP, _CACHED_MKT_RET5
+            last = wide.iloc[-1]
+            base = wide.iloc[-lookback - 1]
+            ret5 = (last / base - 1.0) * 100.0
+            ret5 = ret5.replace([float("inf"), float("-inf")], pd.NA).dropna()
+            ret5 = ret5[(base > 0) & (last > 0)]
+            if ret5.empty:
+                with _CACHE_LOCK:
+                    return _CACHED_RS5_MAP, _CACHED_MKT_RET5
+
+            mkt = float(ret5.median())
+            rs_map = {
+                str(code).split(".")[0].zfill(6): round(float(v) - mkt, 3)
+                for code, v in ret5.items()
+            }
+            logger.debug("[fusion] rs5 源=%s key=%s 覆盖=%d 中位=%+.2f%%", src, use_key, len(rs_map), mkt)
+            with _CACHE_LOCK:
+                _CACHED_RS5_MAP = rs_map
+                _CACHED_MKT_RET5 = round(mkt, 3)
+                _CACHED_TS = time.time()
+            return rs_map, round(mkt, 3)
+        except Exception as exc:
+            logger.debug("[fusion] rs5 批量缓存加载失败: %s", exc)
+            with _CACHE_LOCK:
+                return _CACHED_RS5_MAP, _CACHED_MKT_RET5

@@ -474,6 +474,7 @@ class StockLiveStrategy:
         self._fusion_rs_map: Optional[Dict[str, float]] = None
         self._fusion_rs_ts: float = 0.0
         self._fusion_mkt_ret5: float = 0.0
+        self._fusion_rs_lock = threading.Lock()
         
         # [P3 Fix] Store config as instance attributes
         self._stop_loss_pct = stop_loss_pct
@@ -2674,12 +2675,31 @@ class StockLiveStrategy:
 
                     # --- [FUSION] 每轮一次批量五档快照，供融合层补 taker_buy_ratio / bid_pressure ---
                     self._fusion_refresh_depth(fetch_list)
+                    # --- [FUSION] 预热相对强度缓存（并发任务分发前就绪，彻底避免子线程并发读 HDF5）---
+                    self._fusion_ensure_rs_map()
                             
                     db_codes = [str(k.split('_')[0]) for k in fetch_list]
                     all_loss_streaks = self.trading_logger.get_batch_consecutive_losses(db_codes, resample=resample)
-                    hub = get_trading_hub()
-                    trades_info = hub.get_open_trades(resample=resample)
-                    open_trades = {(str(t['code']), t.get('resample', 'd')): t for t in trades_info}
+                    trades_info = []
+                    try:
+                        hub = get_trading_hub()
+                        if hasattr(hub, 'get_open_trades'):
+                            trades_info = hub.get_open_trades(resample=resample)
+                    except Exception:
+                        trades_info = []
+                    if not trades_info:
+                        if self._open_trades_cache:
+                            trades_info = self._open_trades_cache
+                        elif hasattr(self, 'trading_logger') and self.trading_logger:
+                            try:
+                                trades_info = self.trading_logger.get_trades(resample=resample)
+                            except Exception:
+                                trades_info = []
+                    open_trades = {
+                        (str(t['code']).split('.')[0].zfill(6), t.get('resample', 'd')): t 
+                        for t in trades_info 
+                        if isinstance(t, dict) and t.get('status') == 'OPEN'
+                    }
                 except Exception as e_prep:
                     logger.debug(f"📊 [PREP_ERROR] Data sync partially failed: {e_prep}")
 
@@ -2823,22 +2843,38 @@ class StockLiveStrategy:
         return float(self._fusion_mkt_ret5 or 0.0)
 
     def _fusion_ensure_rs_map(self) -> None:
-        """按 30 分钟 TTL 刷新 rs5 批量缓存；只读本地 HDF5，不联网。"""
+        """按 30 分钟 TTL 刷新 rs5 批量缓存；只读本地 HDF5，不联网。双重检查锁定保障线程安全。"""
         now = time.time()
         if self._fusion_rs_map is not None and (now - self._fusion_rs_ts) < self._FUSION_RS_TTL:
             return
-        try:
-            from ats.fusion.relative_cache import load_rs5_map
+        lock = getattr(self, '_fusion_rs_lock', None)
+        if lock is None:
+            import threading
+            self._fusion_rs_lock = threading.Lock()
+            lock = self._fusion_rs_lock
+        with lock:
+            now = time.time()
+            if self._fusion_rs_map is not None and (now - self._fusion_rs_ts) < self._FUSION_RS_TTL:
+                return
+            try:
+                from ats.fusion.relative_cache import load_rs5_map
 
-            rs_map, mkt = load_rs5_map()
-            self._fusion_rs_map = rs_map
-            self._fusion_mkt_ret5 = mkt
-            self._fusion_rs_ts = now
-            logger.info("[FUSION] rs5 批量缓存刷新：%d 只，全池中位 %+.2f%%", len(rs_map), mkt)
-        except Exception as e:
-            logger.debug(f"[FUSION] rs5 缓存刷新失败: {e}")
-            self._fusion_rs_map = {}
-            self._fusion_rs_ts = now
+                rs_map, mkt = load_rs5_map()
+                if rs_map:
+                    self._fusion_rs_map = rs_map
+                    self._fusion_mkt_ret5 = mkt
+                    self._fusion_rs_ts = now
+                    logger.info("[FUSION] rs5 批量缓存刷新：%d 只，全池中位 %+.2f%%", len(rs_map), mkt)
+                else:
+                    if self._fusion_rs_map is None:
+                        self._fusion_rs_map = {}
+                    # 避免反复穿透刷盘，设置短重试窗口
+                    self._fusion_rs_ts = now - self._FUSION_RS_TTL + 60.0
+            except Exception as e:
+                logger.debug(f"[FUSION] rs5 缓存刷新失败: {e}")
+                if self._fusion_rs_map is None:
+                    self._fusion_rs_map = {}
+                self._fusion_rs_ts = now - self._FUSION_RS_TTL + 60.0
 
     def _fusion_rs5(self, code) -> Dict[str, Any]:
         """5 日相对强度：个股 5 日涨幅 − 全池中位，来自整表批量缓存。

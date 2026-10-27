@@ -896,6 +896,34 @@ class TradingHub:
                 notes=str(row[10]) if row[10] else ""
             ))
         return positions
+
+    def get_open_trades(self, resample: Optional[str] = None) -> list[dict[str, Any]]:
+        """获取当前未平仓交易记录列表（兼容接口，打通 TradingLogger 与 positions）"""
+        try:
+            from trading_logger import get_trading_logger
+            tl = get_trading_logger()
+            if tl:
+                trades = tl.get_trades(resample=resample)
+                return [t for t in trades if isinstance(t, dict) and t.get("status") == "OPEN"]
+        except Exception:
+            pass
+        try:
+            positions = self.get_positions(status="HOLDING")
+            return [
+                {
+                    "code": str(p.code).zfill(6),
+                    "name": p.name,
+                    "buy_date": p.entry_date,
+                    "buy_price": p.entry_price,
+                    "buy_amount": p.quantity,
+                    "current_price": p.current_price,
+                    "status": "OPEN",
+                    "resample": resample or "d",
+                }
+                for p in positions
+            ]
+        except Exception:
+            return []
     
     def update_position_price(self, code: str, current_price: float) -> bool:
         """更新持仓现价和盈亏"""

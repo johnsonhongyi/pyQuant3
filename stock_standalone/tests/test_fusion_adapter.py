@@ -44,6 +44,9 @@ class TestBuildEvent(unittest.TestCase):
             "sbc_supp_price": 12.55,
             "is_leader": True,
             "minutes_above_vwap": 28.0,
+            "has_rs": True,
+            "rs5": 2.5,
+            "mkt_ret5": 1.2,
         }
         ev = build_event(row, snap, code="300111", now=_NOW, launch_ts=_NOW - 300, trade_date="2026-10-23")
 

@@ -2104,6 +2104,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
             self._auto_replay_day = day
             logger.info("[FusionLadder] 收盘后自动回放 %s：补齐 T+1/信号面板/验收复盘", day)
             self._start_worker([])
+            self.lbl_status.setText(f"状态：今日收盘上下文已自动沉淀，自动回放 {day} 中…")
         except Exception as exc:
             logger.warning("[FusionLadder] 收盘后自动回放触发失败: %s", exc)
 
