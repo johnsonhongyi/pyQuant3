@@ -46,6 +46,7 @@ from ats.fusion.regime import (
 from ats.fusion.contract import SignalEvent
 
 logger = logging.getLogger(__name__)
+from ats.fusion.names import name_of
 from ats.fusion.trade_sim import T1Simulator, render_trades, summarize_trades
 from ats.fusion.context import get_daily_context
 from ats.fusion.anomaly import detect_patterns, pattern_score, PATTERN_LATENT_BREAK
@@ -951,11 +952,16 @@ class DayReplay:
                         _row = _st.to_dict()
                         _row.update({
                             "ts": int(clock[t]),
+                            "name": name_of(codes[i]),
                             "mfe": round((float(_fm) / price - 1.0) * 100.0, 2) if np.isfinite(_fm) else 0.0,
                             "mae": round((float(_fn) / price - 1.0) * 100.0, 2) if np.isfinite(_fn) else 0.0,
                             "close_ret": round(
                                 (float(mat["close"][i, -1]) / price - 1.0) * 100.0, 2
                             ) if np.isfinite(mat["close"][i, -1]) else 0.0,
+                            "day_close": round(float(mat["close"][i, -1]), 3) if np.isfinite(mat["close"][i, -1]) else 0.0,
+                            "day_close_pct": round(
+                                (float(mat["close"][i, -1]) / float(prev_close[i]) - 1.0) * 100.0, 2
+                            ) if (np.isfinite(mat["close"][i, -1]) and prev_close[i] > 0) else round(float(pct[i]), 2),
                             "sector": _sm.get(codes[i]) if sec_index else "",
                             "theme": max(_tm.get(codes[i]) or [""], key=lambda x: theme_rank.get(x, 0.0)) if theme_index else "",
                             "theme_rank": round(max([theme_rank.get(x, 0.5) for x in _tm.get(codes[i])] or [0.5]), 2) if theme_index else 0.0,
@@ -1029,11 +1035,20 @@ class DayReplay:
                 close_ret = (float(mat["close"][i, -1]) / price - 1.0) * 100.0 if not np.isnan(mat["close"][i, -1]) else 0.0
                 excess = mfe - base_mfe if np.isfinite(base_mfe) else 0.0
 
+                # 🌟 自动后验能力：计算当日最终收盘价与最终收盘涨跌幅 (终收%)
+                _last_c = float(mat["close"][i, -1]) if not np.isnan(mat["close"][i, -1]) else 0.0
+                _p_close = float(prev_close[i]) if prev_close[i] > 0 else 0.0
+                if _p_close > 0 and _last_c > 0:
+                    day_close_pct = (_last_c / _p_close - 1.0) * 100.0
+                else:
+                    day_close_pct = float(pct[i]) + close_ret
+
                 records.append(
                     {
                         "ts": int(clock[t]),
                         "time": time.strftime("%H:%M", time.localtime(int(clock[t]))),
                         "code": codes[i],
+                        "name": name_of(codes[i]),
                         "tier": decision.tier,
                         "tier_name": decision.tier_name,
                         "rar": round(decision.rar, 2),
@@ -1047,6 +1062,8 @@ class DayReplay:
                         "temp": round(regime.temp, 1),
                         "flip": regime.flip_state,
                         "pct": round(float(pct[i]), 2),
+                        "day_close": round(_last_c, 3),
+                        "day_close_pct": round(day_close_pct, 2),
                         "mfe": round(mfe, 2),
                         "mae": round(mae, 2),
                         "close_ret": round(close_ret, 2),

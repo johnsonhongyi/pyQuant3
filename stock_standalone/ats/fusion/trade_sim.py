@@ -25,6 +25,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from ats.fusion.names import name_of
+
 _ENTRY_WINDOWS = (
     (9 * 60 + 30, 10 * 60 + 30, "开盘30分"),
     (10 * 60 + 30, 13 * 60, "上午"),
@@ -105,6 +107,7 @@ class Trade:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "code": self.code,
+            "name": name_of(self.code),
             "tier": self.tier,
             "entry_time": time.strftime("%m-%d %H:%M", time.localtime(self.entry_ts)),
             "entry_price": round(self.entry_price, 3),

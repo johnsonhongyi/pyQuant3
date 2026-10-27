@@ -30,6 +30,7 @@ import re
 import time
 from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
+import numpy as np
 
 from PyQt6.QtCore import (
     QEasingCurve,
@@ -246,6 +247,13 @@ HEADER_TOOLTIPS: Dict[str, str] = {
         "买入后全天最低价相对买入价的最大跌幅，衡量回踩压力。",
         "回撤超过止损距离说明止损会被打掉；接近 0 说明进场点极稳。",
     ),
+    "终收%": _tip(
+        "🏁 终收%（全天最终收盘涨跌幅）",
+        "标的在当日 15:00 最终收盘时的绝对涨跌幅（相对昨日收盘价）。",
+        "【自动后验对照】：对比「涨幅%」（入局触发时）与「终收%」（全天收盘），\n"
+        "若终收% > 涨幅%，说明入局后持续走强甚至封板；\n"
+        "若终收% < 涨幅%，说明入局后发生冲高回落。",
+    ),
     "收盘%": _tip(
         "🏁 收盘收益%",
         "持有至当天收盘的收益率，衡量日内封板或承接的最终结果。",
@@ -457,18 +465,32 @@ class HeaderToolTip(QObject):
             pass
         lbl.move(x, y)
         lbl.show()
+        lbl.raise_()
 
-    def _html_at(self, obj, pos) -> str:
-        """取鼠标所在列头的说明 HTML；取不到返回空串。"""
+    def _get_logical_index(self, obj, pos) -> int:
+        header = self.table.horizontalHeader()
         try:
-            idx = obj.logicalIndexAt(pos)
+            p = pos
+            if obj is header and hasattr(header, "viewport") and header.viewport():
+                p = header.viewport().mapFrom(header, pos)
+            return int(header.logicalIndexAt(p))
         except Exception:
-            return ""
-        if idx is None or idx < 0:
+            return -1
+
+    def _html_at_index(self, idx: int) -> str:
+        """取指定逻辑列索引的说明 HTML；取不到返回空串。"""
+        if idx < 0:
             return ""
         item = self.table.horizontalHeaderItem(int(idx))
-        text = item.text().strip() if item is not None else ""
-        return HEADER_TOOLTIPS.get(text, "")
+        if item is None:
+            return ""
+        text = item.text().strip()
+        if text in HEADER_TOOLTIPS:
+            return HEADER_TOOLTIPS[text]
+        for k, v in HEADER_TOOLTIPS.items():
+            if k == text or text.startswith(k) or k.startswith(text):
+                return v
+        return ""
 
     def _show_pending(self) -> None:
         if self._pending_html and self._pending_pos is not None:
@@ -478,29 +500,36 @@ class HeaderToolTip(QObject):
         try:
             et = event.type()
             if et == QEvent.Type.MouseMove:
-                idx = -1
-                try:
-                    idx = int(obj.logicalIndexAt(event.pos()))
-                except Exception:
-                    idx = -1
+                idx = self._get_logical_index(obj, event.pos())
                 if idx != self._hover_idx:
                     self._hover_idx = idx
                     self._delay.stop()
                     self._hide()
-                    html = self._html_at(obj, event.pos())
-                    if html:
-                        self._pending_html = html
-                        self._pending_pos = event.globalPosition().toPoint()
-                        self._delay.start()
+                    if idx >= 0:
+                        html = self._html_at_index(idx)
+                        if html:
+                            self._pending_html = html
+                            self._pending_pos = (
+                                event.globalPosition().toPoint()
+                                if hasattr(event, "globalPosition")
+                                else event.globalPos()
+                            )
+                            self._delay.start()
                 return False
             if et == QEvent.Type.ToolTip:
-                # 系统提示一律拦掉，改由自绘卡片呈现，避免白底浅字
-                html = self._html_at(obj, event.pos())
-                if html:
-                    self._pending_html = html
-                    self._pending_pos = event.globalPos()
-                    self._show_pending()
-                return True
+                idx = self._get_logical_index(obj, event.pos())
+                if idx >= 0:
+                    html = self._html_at_index(idx)
+                    if html:
+                        self._pending_html = html
+                        self._pending_pos = (
+                            event.globalPosition().toPoint()
+                            if hasattr(event, "globalPosition")
+                            else event.globalPos()
+                        )
+                        self._show_pending()
+                        return True
+                return False
             if et in (
                 QEvent.Type.Leave,
                 QEvent.Type.MouseButtonPress,
@@ -515,10 +544,65 @@ class HeaderToolTip(QObject):
         return False
 
 
+def get_ats_custom_extra_cols() -> List[str]:
+    """获取用户在 global.ini 中配置的 ats_col 自定义扩展列（排除已有的基础固定字段）"""
+    try:
+        from JohnsonUtil import commonTips as cct
+        cfg_cols = getattr(cct, 'ats_col', []) or getattr(cct.CFG, 'ats_col', []) or []
+    except Exception:
+        cfg_cols = ['ch_bc2']
+
+    BASE_EXCLUDE = {
+        'code', 'name', 'price', 'close', 'trade', 'pct', 'percent',
+        'tier', 'rar', 'size_pct', 'entry', 'stop', 'mfe', 'mae', 'time',
+        'update_time', 'source', 'hit', 'coverage', 'temp', 'position',
+        'support', 'intent', 'regime', 'enter_time', 'enter_price',
+        'enter_pct', 'first_time', 'first_pct', 'since_first_pct',
+        'persist', 'evidence_n', 'chain', 'close_ret', 'day_close', 'day_close_pct'
+    }
+    extra = []
+    seen = set(BASE_EXCLUDE)
+    for c in cfg_cols:
+        c_str = str(c).strip()
+        if c_str and c_str.lower() not in seen:
+            extra.append(c_str)
+            seen.add(c_str.lower())
+    return extra
+
+
+def get_ats_col_display_name(col_name: str) -> str:
+    """根据 vis_column_map 将自定义列名转换为界面中文/展示名"""
+    try:
+        from JohnsonUtil import commonTips as cct
+        col_map = getattr(cct, 'vis_column_map', {}) or {}
+    except Exception:
+        col_map = {}
+    return col_map.get(col_name, col_map.get(col_name.lower(), col_name.upper()))
+
+
+# 各表基础固定表头定义
+_LIVE_BASE_HEADERS = [
+    "级别", "代码", "名称", "现价", "涨幅%", "RAR", "位", "接", "意", "环", "仓位%", "进场", "止损", "先手min", "来源",
+    "更新时间", "命中", "覆盖%",
+]
+
+_REPLAY_BASE_HEADERS = [
+    "时间", "代码", "名称", "现价", "涨幅%", "终收%", "级别", "RAR", "仓位%", "MFE%", "MAE%", "收盘%", "温度℃",
+]
+
+_TRADES_BASE_HEADERS = [
+    "代码", "名称", "买入", "买入价", "时段", "卖出", "卖出价", "盈亏%", "当日最低%", "被锁止损", "原因",
+]
+
+_TRACK_BASE_HEADERS = [
+    "代码", "名称", "入局", "入局价", "当时涨幅%", "首异动", "首异动涨幅%", "首→入%",
+    "持续分", "证据数", "证据链", "之后MFE%", "MAE%", "收盘%",
+]
+
 # 各表默认列宽（仅在从未保存过布局时使用；用户调整后由 ATS 表头持久化接管）
 _DEFAULT_COL_WIDTHS: Dict[str, List[int]] = {
     "tbl_live": [56, 74, 104, 76, 78, 64, 52, 52, 52, 52, 64, 108, 78, 70, 104, 82, 52, 62],
-    "tbl_replay": [70, 74, 104, 76, 78, 56, 64, 64, 64, 64, 64, 62],
+    "tbl_replay": [70, 74, 104, 76, 78, 78, 56, 64, 64, 64, 64, 64, 62],
     "tbl_trades": [74, 104, 64, 76, 60, 64, 76, 72, 78, 78, 200],
     "tbl_track": [74, 104, 60, 76, 84, 76, 88, 72, 64, 60, 220, 74, 64, 64],
 }
@@ -700,11 +784,11 @@ def _fmt_hms(ts: float) -> str:
         return ""
 
 
-def _in_trading_session(ts: float) -> bool:
-    """记录是否落在当日交易时段（09:15~15:05）。
+def _in_trading_session(ts: float, allow_premarket: bool = False) -> bool:
+    """记录是否落在交易时段。默认仅认连续竞价时段（09:30~11:30, 13:00~15:00）。
 
-    盘后程序仍在轮询时会产生 21:11 这类记录，直接拿来当"入局"是错的，
-    赛马跟踪必须只看盘中过程。
+    09:15~09:29 为集合竞价阶段，未发生正式连续竞价撮合，报价为虚拟快照；
+    赛马跟踪入局必须从 09:30 正式开盘连续竞价开始，绝不能把集合竞价试盘假价格当作入局点。
     """
     try:
         v = float(ts)
@@ -713,8 +797,10 @@ def _in_trading_session(ts: float) -> bool:
     if v <= 0:
         return False
     try:
-        hm = datetime.datetime.fromtimestamp(v).strftime("%H:%M")
-        return "09:15" <= hm <= "15:05"
+        hm = datetime.datetime.fromtimestamp(v).strftime("%H:%M:%S")
+        if allow_premarket:
+            return "09:15:00" <= hm <= "15:05:00"
+        return ("09:30:00" <= hm <= "11:30:05") or ("13:00:00" <= hm <= "15:00:05")
     except Exception:
         return False
 
@@ -985,6 +1071,10 @@ class ReplayWorker(QThread):
 
 
 class FusionLadderDialog(QWidget, WindowMixin):
+    _LIVE_BASE_HEADERS = _LIVE_BASE_HEADERS
+    _REPLAY_BASE_HEADERS = _REPLAY_BASE_HEADERS
+    _TRADES_BASE_HEADERS = _TRADES_BASE_HEADERS
+    _TRACK_BASE_HEADERS = _TRACK_BASE_HEADERS
     """融合梯度监视器主窗口（系统级独立顶层窗口，对齐 ATS 专业看板体系）。"""
 
     def __init__(self, parent=None):
@@ -1045,6 +1135,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
 
         # 实时梯度自动刷新：2s 巡检一次，仅在影子文件真的变化时重绘（静止不重绘，零额外开销）
         self._live_sig = None
+        self._tab_signatures: Dict[int, Any] = {}
         self._last_init_scan_t = 0.0
         self._init_scan_started = False
         self._replay_backfill_started = False
@@ -1079,6 +1170,14 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self.chk_narrow.setToolTip("开启极窄列模式：仅保留核心关键列，适合靠边停靠或小屏查看")
         self.chk_narrow.toggled.connect(self._on_narrow_mode_toggled)
         bar.addWidget(self.chk_narrow)
+
+        # 📊 自定义列扩展开关
+        self.show_custom_cols = self._load_show_custom_cols()
+        self.chk_custom_cols = QCheckBox("📊 自定义列")
+        self.chk_custom_cols.setChecked(self.show_custom_cols)
+        self.chk_custom_cols.setToolTip("开启/关闭 ATS 策略 DataFrame 动态自定义列扩展 (如 DFF, Rank, ch_bc2 等)")
+        self.chk_custom_cols.toggled.connect(self._on_custom_cols_toggled)
+        bar.addWidget(self.chk_custom_cols)
 
         # 置顶复选框 (置顶与磁吸互斥)
         self.chk_on_top = QCheckBox("📌 置顶")
@@ -1144,30 +1243,24 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self.tabs.currentChanged.connect(self._on_tab_changed)
         root.addWidget(self.tabs, 1)
 
-        # Tab 0: 实时梯度 [级别, 代码, 名称, 现价, 涨幅%, RAR, 位, 接, 意, 环, 仓位%, 进场, 止损, 先手min, 来源, 更新时间, 命中, 覆盖%]
-        self.tbl_live = self._create_interactive_table([
-            "级别", "代码", "名称", "现价", "涨幅%", "RAR", "位", "接", "意", "环", "仓位%", "进场", "止损", "先手min", "来源",
-            "更新时间", "命中", "覆盖%",
-        ], "tbl_live")
+        # 获取用户配置的动态自定义扩展列 (ats_col)
+        self.extra_cols = get_ats_custom_extra_cols()
+        extra_headers = [get_ats_col_display_name(c) for c in self.extra_cols]
+
+        # Tab 0: 实时梯度 [级别, 代码, 名称, 现价, 涨幅%, RAR, 位, 接, 意, 环, 仓位%, 进场, 止损, 先手min, 来源, 更新时间, 命中, 覆盖%] + 自定义列
+        self.tbl_live = self._create_interactive_table(self._LIVE_BASE_HEADERS + extra_headers, "tbl_live")
         self.tabs.addTab(self.tbl_live, "实时梯度（影子流）")
 
-        # Tab 1: 按日回放 [时间, 代码, 名称, 现价, 涨幅%, 级别, RAR, 仓位%, MFE%, MAE%, 收盘%, 温度℃]
-        self.tbl_replay = self._create_interactive_table([
-            "时间", "代码", "名称", "现价", "涨幅%", "级别", "RAR", "仓位%", "MFE%", "MAE%", "收盘%", "温度℃",
-        ], "tbl_replay")
+        # Tab 1: 按日回放 [时间, 代码, 名称, 现价, 涨幅%, 终收%, 级别, RAR, 仓位%, MFE%, MAE%, 收盘%, 温度℃] + 自定义列
+        self.tbl_replay = self._create_interactive_table(self._REPLAY_BASE_HEADERS + extra_headers, "tbl_replay")
         self.tabs.addTab(self.tbl_replay, "按日回放")
 
         # Tab 2: T+1 订单与成交
-        self.tbl_trades = self._create_interactive_table([
-            "代码", "名称", "买入", "买入价", "时段", "卖出", "卖出价", "盈亏%", "当日最低%", "被锁止损", "原因",
-        ], "tbl_trades")
+        self.tbl_trades = self._create_interactive_table(self._TRADES_BASE_HEADERS, "tbl_trades")
         self.tabs.addTab(self.tbl_trades, "T+1 订单与成交")
 
-        # Tab 3: 赛马跟踪
-        self.tbl_track = self._create_interactive_table([
-            "代码", "名称", "入局", "入局价", "当时涨幅%", "首异动", "首异动涨幅%", "首→入%",
-            "持续分", "证据数", "证据链", "之后MFE%", "MAE%", "收盘%",
-        ], "tbl_track")
+        # Tab 3: 赛马跟踪 [代码, 名称, 入局, 入局价, 当时涨幅%, 首异动, 首异动涨幅%, 首→入%, 持续分, 证据数, 证据链, 之后MFE%, MAE%, 收盘%] + 自定义列
+        self.tbl_track = self._create_interactive_table(self._TRACK_BASE_HEADERS + extra_headers, "tbl_track")
         self.tabs.addTab(self.tbl_track, "赛马跟踪（第一波入局）")
 
         # Tab 4: 信号面板
@@ -1239,10 +1332,13 @@ class FusionLadderDialog(QWidget, WindowMixin):
             from sys_utils import get_app_root, get_conf_path
 
             layout_path = get_conf_path("fusion_ladder_layout.json", get_app_root())
+            def_widths = list(_DEFAULT_COL_WIDTHS.get(name, []))
+            if len(def_widths) < len(headers):
+                def_widths.extend([68] * (len(headers) - len(def_widths)))
             setup_header_persistence(
                 tbl,
                 config_key="fusion_ladder_{}_state".format(name),
-                default_widths=_DEFAULT_COL_WIDTHS.get(name),
+                default_widths=def_widths,
                 storage_path=layout_path,
             )
             # 恢复完成后重新套用极窄模式，避免历史隐藏状态覆盖当前模式
@@ -1561,15 +1657,90 @@ class FusionLadderDialog(QWidget, WindowMixin):
         save_config_node("fusion_ladder_narrow_mode", self.is_narrow_mode)
         self._apply_all_narrow_modes()
 
+    def _load_show_custom_cols(self) -> bool:
+        try:
+            return bool(load_config_node("fusion_ladder_show_custom_cols", False))
+        except Exception:
+            return False
+
+    def _on_custom_cols_toggled(self, checked: bool) -> None:
+        self.show_custom_cols = bool(checked)
+        save_config_node("fusion_ladder_show_custom_cols", self.show_custom_cols)
+        self._apply_all_narrow_modes()
+
+    def _resolve_ats_strategy_df(self) -> Optional[pd.DataFrame]:
+        """递归获取当前系统运行中的策略主 DataFrame (提取 dff, rank, custom_cols)"""
+        try:
+            from ats.sector_data_aggregator import SectorDataAggregator
+            df, _ = SectorDataAggregator.get_instance().resolve_active_strategy_df(self)
+            if df is not None and not df.empty:
+                return df
+        except Exception:
+            pass
+        main_app = self._get_main_app()
+        if main_app is not None:
+            for attr in ('current_df', '_last_flat_df', 'last_result_df', 'flat_df', 'result_df', 'df_all', 'top_now'):
+                cand = getattr(main_app, attr, None)
+                if cand is not None and not cand.empty:
+                    return cand
+        return None
+
+    def _extract_stock_custom_val(self, df: Optional[pd.DataFrame], code: str, col_key: str) -> tuple[str, Any]:
+        """从策略 DataFrame 中提取指定股票代码的自定义列值与数值表示 (供 NumericTableWidgetItem 排序)"""
+        if df is None or df.empty:
+            return "--", 0.0
+        try:
+            from JohnsonUtil import commonTips as cct
+            format_fn = getattr(cct, 'format_col_value', None)
+        except Exception:
+            format_fn = None
+
+        cd = str(code).split(".")[0].zfill(6)
+        row = None
+        if cd in df.index:
+            row = df.loc[cd]
+        elif 'code' in df.columns:
+            matched = df[df['code'].astype(str).str.zfill(6) == cd]
+            if not matched.empty:
+                row = matched.iloc[0]
+
+        if row is not None:
+            for k in (col_key, col_key.lower(), col_key.upper()):
+                if k in row:
+                    raw_v = row[k]
+                    if raw_v is None or (isinstance(raw_v, float) and np.isnan(raw_v)):
+                        return "--", 0.0
+                    txt = format_fn(col_key, raw_v) if callable(format_fn) else str(raw_v)
+                    try:
+                        num_v = float(raw_v)
+                        if not np.isfinite(num_v):
+                            num_v = 0.0
+                    except (ValueError, TypeError):
+                        num_v = str(raw_v)
+                    return txt, num_v
+        return "--", 0.0
+
     def _apply_all_narrow_modes(self) -> None:
-        # Tab 0: 实时梯度 [级别(0), 代码(1), 名称(2), 现价(3), 涨幅%(4), RAR(5), 仓位%(10), 进场(11), 止损(12)]
-        self._set_cols_visibility(self.tbl_live, [0, 1, 2, 3, 4, 5, 10, 11, 12] if self.is_narrow_mode else None)
-        # Tab 1: 按日回放 [时间(0), 代码(1), 名称(2), 现价(3), 涨幅%(4), 级别(5), RAR(6), 收盘%(10)]
-        self._set_cols_visibility(self.tbl_replay, [0, 1, 2, 3, 4, 5, 6, 10] if self.is_narrow_mode else None)
-        # Tab 2: T+1 订单 [代码(0), 名称(1), 买入价(3), 卖出价(6), 盈亏%(7), 原因(10)]
-        self._set_cols_visibility(self.tbl_trades, [0, 1, 3, 6, 7, 10] if self.is_narrow_mode else None)
-        # Tab 3: 赛马跟踪 [代码(0), 名称(1), 入局价(3), 当时涨幅%(4), 持续分(8), 证据链(10), 收盘%(13)]
-        self._set_cols_visibility(self.tbl_track, [0, 1, 3, 4, 8, 10, 13] if self.is_narrow_mode else None)
+        if self.is_narrow_mode:
+            # 极窄模式下仅显示核心列，自定义列全部自动隐藏
+            self._set_cols_visibility(self.tbl_live, [0, 1, 2, 3, 4, 5, 10, 11, 12])
+            self._set_cols_visibility(self.tbl_replay, [0, 1, 2, 3, 4, 5, 6, 7, 11])
+            self._set_cols_visibility(self.tbl_trades, [0, 1, 3, 6, 7, 10])
+            self._set_cols_visibility(self.tbl_track, [0, 1, 3, 4, 8, 10, 13])
+        else:
+            # 非极窄模式下：基础列全部展示，自定义列依据 self.show_custom_cols 状态展示/隐藏
+            for tbl, base_len in (
+                (self.tbl_live, len(self._LIVE_BASE_HEADERS)),
+                (self.tbl_replay, len(self._REPLAY_BASE_HEADERS)),
+                (self.tbl_trades, len(self._TRADES_BASE_HEADERS)),
+                (self.tbl_track, len(self._TRACK_BASE_HEADERS)),
+            ):
+                col_count = tbl.columnCount()
+                for c in range(col_count):
+                    if c < base_len:
+                        tbl.setColumnHidden(c, False)
+                    else:
+                        tbl.setColumnHidden(c, not self.show_custom_cols)
 
     @staticmethod
     def _set_cols_visibility(tbl: QTableWidget, keep_cols: Optional[List[int]]) -> None:
@@ -1669,6 +1840,189 @@ class FusionLadderDialog(QWidget, WindowMixin):
             self.chk_hit_only.update()
         except Exception:
             pass
+
+    def _resolve_name(self, code: str, fallback_dict: Optional[Dict[str, Any]] = None) -> str:
+        """多通道极速解析股票名称，带多层兜底与常驻缓存，确保绝不返回空白。"""
+        cd = str(code or "").strip().split(".")[0].zfill(6)
+        if not cd or cd == "000000":
+            return ""
+        # 1. 优先从 fallback_dict 中获取现有有效中文名
+        if fallback_dict and isinstance(fallback_dict, dict):
+            fn = str(fallback_dict.get("name") or "").strip()
+            if fn and fn != cd and not fn.isdigit() and not fn.startswith("个股_") and fn != "未知":
+                return fn
+        # 2. 调起加强版 name_of
+        nm = name_of(cd)
+        if nm and nm != cd and not nm.isdigit() and not nm.startswith("个股_") and nm != "未知":
+            return nm
+        # 3. 尝试从父窗口/主程序的 name_cache 提取
+        for p_obj in (getattr(self, "_py_parent", None), getattr(self, "parent_window", None)):
+            if p_obj is not None:
+                nc = getattr(p_obj, "name_cache", None)
+                if isinstance(nc, dict) and cd in nc:
+                    v = str(nc[cd]).strip()
+                    if v and v != cd and not v.isdigit() and not v.startswith("个股_") and v != "未知":
+                        return v
+                if hasattr(p_obj, "get_stock_name"):
+                    try:
+                        v = str(p_obj.get_stock_name(cd)).strip()
+                        if v and v != cd and not v.isdigit() and not v.startswith("个股_") and v != "未知":
+                            return v
+                    except Exception:
+                        pass
+        # 4. 终极兜底：调起全局权威解析器 sys_utils.resolve_stock_name
+        try:
+            from sys_utils import resolve_stock_name
+            sn = resolve_stock_name(cd, cached_only=True)
+            if sn and sn != cd and not sn.isdigit() and not sn.startswith("个股_") and sn != "未知":
+                return sn
+        except Exception:
+            pass
+        return nm or cd
+
+    def _get_live_quote_snapshot(self, code: str) -> Tuple[float, float, float]:
+        """微秒级获取个股的 (现价, 当日最高, 当日最低)，无锁只读内存缓存，0 网络 I/O。"""
+        cd = str(code or "").strip().split(".")[0].zfill(6)
+        if not cd:
+            return 0.0, 0.0, 0.0
+        # 1. 尝试从父窗口的 current_df / df_realtime 获取
+        for p_obj in (getattr(self, "_py_parent", None), getattr(self, "parent_window", None)):
+            if p_obj is not None:
+                for attr in ("df_realtime", "current_df"):
+                    df = getattr(p_obj, attr, None)
+                    if df is not None and not getattr(df, "empty", True):
+                        try:
+                            row = None
+                            if cd in df.index:
+                                row = df.loc[cd]
+                            elif "code" in df.columns:
+                                m = df[df["code"] == cd]
+                                if not m.empty:
+                                    row = m.iloc[0]
+                            if row is not None:
+                                p = float(row.get("trade", row.get("price", 0.0)) or 0.0)
+                                h = float(row.get("high", p) or p)
+                                l = float(row.get("low", p) or p)
+                                if p > 0:
+                                    return p, h, l
+                        except Exception:
+                            pass
+        # 2. 尝试从 TDXGlobalCachePool 内存缓存获取
+        try:
+            from ats.tdx_realtime_fetcher import TDXGlobalCachePool
+            pool = getattr(TDXGlobalCachePool, "_instance", None)
+            if pool is not None:
+                bars = pool.get_today_bars(cd) if hasattr(pool, "get_today_bars") else None
+                if bars and len(bars) > 0:
+                    last_b = bars[-1]
+                    p = float(last_b.get("close", 0.0) or 0.0)
+                    h = max(float(b.get("high", 0.0) or 0.0) for b in bars)
+                    l = min(float(b.get("low", 999999.0) or 999999.0) for b in bars)
+                    if p > 0:
+                        return p, h, l
+        except Exception:
+            pass
+        return 0.0, 0.0, 0.0
+
+    def _get_batch_quotes_snapshot(self, codes: List[str]) -> Dict[str, Dict[str, float]]:
+        """批量获取标的权威行情快照（通达信实时/收盘对齐），包含 price, high, low, last_close, day_pct"""
+        out: Dict[str, Dict[str, float]] = {}
+        clean_codes = [str(c).split(".")[0].zfill(6) for c in codes if c]
+        if not clean_codes:
+            return out
+        # 1. 优先从父窗口 current_df / df_realtime 批量读取
+        for p_obj in (getattr(self, "_py_parent", None), getattr(self, "parent_window", None)):
+            if p_obj is not None:
+                for attr in ("df_realtime", "current_df"):
+                    df = getattr(p_obj, attr, None)
+                    if df is not None and not getattr(df, "empty", True):
+                        for cd in clean_codes:
+                            if cd in out:
+                                continue
+                            try:
+                                row = None
+                                if cd in df.index:
+                                    row = df.loc[cd]
+                                elif "code" in df.columns:
+                                    m = df[df["code"] == cd]
+                                    if not m.empty:
+                                        row = m.iloc[0]
+                                if row is not None:
+                                    p = float(row.get("trade", row.get("price", row.get("close", 0.0))) or 0.0)
+                                    h = float(row.get("high", p) or p)
+                                    l = float(row.get("low", p) or p)
+                                    # 优先提取权威 percent / pct
+                                    dp = None
+                                    for k in ("percent", "pct", "change_pct", "chg", "day_pct"):
+                                        if k in row and row[k] is not None:
+                                            try:
+                                                v = float(row[k])
+                                                if np.isfinite(v):
+                                                    dp = v
+                                                    break
+                                            except Exception:
+                                                pass
+                                    # 提取真正昨收 (严禁使用 close 避免差值为 0)
+                                    lc = None
+                                    for k in ("last_close", "lastp", "prev_close", "preclose", "llastp"):
+                                        if k in row and row[k] is not None:
+                                            try:
+                                                v = float(row[k])
+                                                if v > 0:
+                                                    lc = v
+                                                    break
+                                            except Exception:
+                                                pass
+                                    if dp is None and p > 0 and lc is not None and lc > 0:
+                                        dp = (p - lc) / lc * 100.0
+                                    if lc is None and p > 0 and dp is not None and abs(dp + 100.0) > 1e-4:
+                                        lc = p / (1.0 + dp / 100.0)
+                                    if p > 0:
+                                        out[cd] = {
+                                            "price": p,
+                                            "high": h,
+                                            "low": l,
+                                            "last_close": round(lc if lc is not None else p, 3),
+                                            "day_pct": round(dp if dp is not None else 0.0, 2),
+                                        }
+                            except Exception:
+                                pass
+        # 2. 剩余未命中的代码，通过 TDX 批量极速拉取（0.1s 内完成）
+        missing = [c for c in clean_codes if c not in out]
+        if missing:
+            try:
+                from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+                fetcher = TDXRealtimeFetcher.get_instance()
+                qs = fetcher.get_security_quotes_safe(missing)
+                for q in qs or []:
+                    cd = str(q.get("code") or "").split(".")[0].zfill(6)
+                    p = float(q.get("price") or 0.0)
+                    h = float(q.get("high") or p)
+                    l = float(q.get("low") or p)
+                    lc = float(q.get("last_close") or p)
+                    dp = None
+                    for k in ("percent", "pct", "day_pct"):
+                        if k in q and q[k] is not None:
+                            try:
+                                v = float(q[k])
+                                if np.isfinite(v):
+                                    dp = v
+                                    break
+                            except Exception:
+                                pass
+                    if dp is None and p > 0 and lc > 0 and abs(p - lc) > 1e-4:
+                        dp = (p - lc) / lc * 100.0
+                    if p > 0:
+                        out[cd] = {
+                            "price": p,
+                            "high": h,
+                            "low": l,
+                            "last_close": lc,
+                            "day_pct": round(dp if dp is not None else 0.0, 2),
+                        }
+            except Exception:
+                pass
+        return out
 
     @staticmethod
     def _num_item(text: Any, raw_val: Any = None, color: Optional[QColor] = None, bold: bool = False) -> NumericTableWidgetItem:
@@ -2182,15 +2536,21 @@ class FusionLadderDialog(QWidget, WindowMixin):
         idx = self.tabs.currentIndex()
         if idx not in (0, 3):
             return
-        if self._worker is not None:
+        if self._worker is not None and self._worker.isRunning():
             return
         day = self.cmb_day.currentText().strip() or today_str()
         sig = self._live_source_signature(day)
-        if sig == getattr(self, "_live_sig", None):
-            self._maybe_ensure_data()
+        tab_sig_map = getattr(self, "_tab_signatures", None)
+        if tab_sig_map is None:
+            tab_sig_map = self._tab_signatures = {}
+        last_sig = tab_sig_map.get(idx)
+        if sig == last_sig:
+            if idx == 0:
+                self._maybe_ensure_data()
             return
+        tab_sig_map[idx] = sig
+        self._live_sig = sig
         if idx == 3:
-            self._live_sig = sig
             self._render_track_from_shadow(day)
             return
         self._render_live(force=False)
@@ -2388,6 +2748,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
         coverage_n = 0
         latest_ts = 0.0
         hit_count = 0
+        df_strat = self._resolve_ats_strategy_df()
         for r in rows:
             fusion = r.get("fusion") or {}
             tier = int(fusion.get("tier") or 0)
@@ -2402,7 +2763,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 band = "{:.2f}~{:.2f}".format(float(entry["price_lo"]), float(entry["price_hi"]))
 
             code = str(r.get("code", "")).split(".")[0].zfill(6)
-            name = str(r.get("name") or "") or name_of(code)
+            name = self._resolve_name(code, r)
 
             # 现价/涨幅必须来自真实落盘行情；缺失就显示 "--"，绝不伪造成 0.00%
             raw_price = r.get("price")
@@ -2454,6 +2815,12 @@ class FusionLadderDialog(QWidget, WindowMixin):
             tbl.setItem(i, 17, self._num_item(f"{cov_val * 100:.0f}%", cov_val,
                                               color=QColor("#8fd18f") if cov_val >= 0.8 else QColor("#ffa64d")))
 
+            # 动态自定义列 (ats_col)
+            if getattr(self, "extra_cols", None):
+                for idx_ec, ec in enumerate(self.extra_cols):
+                    val_txt, val_raw = self._extract_stock_custom_val(df_strat, code, ec)
+                    tbl.setItem(i, 18 + idx_ec, self._num_item(val_txt, val_raw))
+
         tbl.setSortingEnabled(True)
 
         if selected_code:
@@ -2503,16 +2870,20 @@ class FusionLadderDialog(QWidget, WindowMixin):
     # 赛马跟踪（实盘影子流直出，不依赖回放）
     # ------------------------------------------------------------------
     def _track_entries_from_shadow(self, day: str) -> List[Dict[str, Any]]:
-        """从当日影子时间序列还原"第一波入局"清单。
+        """从当日影子时间序列还原"第一波入局"清单，严格对齐连续竞价交易与通达信权威行情。
 
-        入局口径：该票当日首次达到 L2（可执行梯度）的那一条记录。
-        入局后 MFE/MAE/收盘% 用后续记录里的真实 price 计算，不依赖回放。
+        入局口径：该票当日在正式开盘连续竞价（09:30~15:00）首次达到 L2（可执行梯度）的那一条记录。
+        彻底排除 09:15~09:29 集合竞价撮合前的虚拟未成交报价，杜绝假价格污染。
+        入局后 MFE/MAE/收盘% 接入通达信权威行情（日内最高、最低与最新收盘价），实现点对点精准对齐。
         """
         series = load_live_series(day)
+        # 1. 批量获取权威行情快照，实现通达信全口径对齐
+        quotes_map = self._get_batch_quotes_snapshot(list(series.keys()))
+
         out: List[Dict[str, Any]] = []
         for code, recs in series.items():
-            # 只保留盘中记录：盘后轮询写进来的 21:xx 记录不能当作"入局"
-            recs = [r for r in recs if _in_trading_session(r.get("ts"))]
+            # 必须只取正式连续竞价时段（09:30~11:30, 13:00~15:00），严格剔除集合竞价假价格
+            recs = [r for r in recs if _in_trading_session(r.get("ts"), allow_premarket=False)]
             if not recs:
                 continue
             entry_i = None
@@ -2531,11 +2902,45 @@ class FusionLadderDialog(QWidget, WindowMixin):
             ep = float(entry.get("price") or 0.0)
             after = recs[entry_i:]
             prices = [float(x.get("price") or 0.0) for x in after if float(x.get("price") or 0.0) > 0]
-            mfe = mae = close_ret = 0.0
-            if ep > 0 and prices and len(after) > 1:
-                mfe = (max(prices) - ep) / ep * 100.0
-                mae = (min(prices) - ep) / ep * 100.0
-                close_ret = (prices[-1] - ep) / ep * 100.0
+
+            # 2. 结合通达信权威行情校准全天最高、全天最低与收盘价
+            q = quotes_map.get(code, {})
+            q_high = float(q.get("high") or 0.0)
+            q_low = float(q.get("low") or 0.0)
+            q_price = float(q.get("price") or 0.0)
+            q_last_close = float(q.get("last_close") or 0.0)
+            q_day_pct = q.get("day_pct")
+
+            # 之后最高价：采样点最高与权威最高取最大
+            valid_highs = [p for p in prices if p > 0] + ([q_high] if q_high > 0 else [])
+            max_p = max(valid_highs) if valid_highs else ep
+            # 之后最低价：采样点最低与权威最低取最小
+            valid_lows = [p for p in prices if p > 0] + ([q_low] if q_low > 0 else [])
+            min_p = min(valid_lows) if valid_lows else ep
+            # 收盘/最新价：优先通达信权威收盘价，其次采样点末尾
+            cur_price = q_price if q_price > 0 else (prices[-1] if prices else ep)
+
+            if ep > 0:
+                mfe = (max_p - ep) / ep * 100.0
+                mae = (min_p - ep) / ep * 100.0
+                holding_ret = (cur_price - ep) / ep * 100.0
+            else:
+                mfe = mae = holding_ret = 0.0
+
+            # 当日真实收盘涨跌幅（对齐通达信权威行情）
+            if q_day_pct is not None and abs(float(q_day_pct)) > 1e-4:
+                day_close_pct = float(q_day_pct)
+            elif q_price > 0 and q_last_close > 0 and abs(q_price - q_last_close) > 1e-4:
+                day_close_pct = (q_price - q_last_close) / q_last_close * 100.0
+            elif recs and recs[-1].get("pct") is not None and abs(float(recs[-1].get("pct") or 0.0)) > 1e-4:
+                day_close_pct = float(recs[-1].get("pct"))
+            elif entry.get("pct") is not None and abs(float(entry.get("pct") or 0.0)) > 1e-4:
+                day_close_pct = float(entry.get("pct"))
+            elif first.get("pct") is not None and abs(float(first.get("pct") or 0.0)) > 1e-4:
+                day_close_pct = float(first.get("pct"))
+            else:
+                day_close_pct = float(q_day_pct if q_day_pct is not None else (entry.get("pct") or 0.0))
+
             keep = 0
             for x in after:
                 try:
@@ -2545,24 +2950,17 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 if t >= 1:
                     keep += 1
             ev = list((entry.get("fusion") or {}).get("evidence") or [])
-            # 融合实盘 RaceTracker / 回放回补 track_entry 的真实跟踪信息（解决单条回补时 MFE/MAE/首异动归零问题）
             te = entry.get("track_entry") or entry.get("track") or {}
             first_ts = float(te.get("first_ts") or first.get("ts") or 0.0)
             first_pct = float(te.get("first_pct") if te.get("first_pct") is not None else (first.get("pct") or 0.0))
             enter_ts = float(te.get("enter_ts") or entry.get("ts") or 0.0)
             enter_pct = float(te.get("enter_pct") if te.get("enter_pct") is not None else (entry.get("pct") or 0.0))
             persist_val = float(te.get("persist") or round(keep * 100.0 / max(1, len(after)), 1))
-            if len(after) <= 1:
-                mfe = float(te.get("mfe") if te.get("mfe") is not None else (entry.get("mfe") or mfe))
-                mae = float(te.get("mae") if te.get("mae") is not None else (entry.get("mae") or mae))
-                close_ret = float(
-                    te.get("close_ret") if te.get("close_ret") is not None else (entry.get("close_ret") or close_ret)
-                )
             chain_txt = str(te.get("chain") or " · ".join(ev))[:160]
             ev_n = int(te.get("evidence_n") or len(ev) or (1 if chain_txt else 0))
             out.append({
                 "code": code,
-                "name": entry.get("name") or name_of(code),
+                "name": self._resolve_name(code, entry),
                 "tier": int((entry.get("fusion") or {}).get("tier") or 0),
                 "enter_ts": enter_ts,
                 "enter_price": ep,
@@ -2575,13 +2973,19 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 "chain": chain_txt,
                 "mfe": round(mfe, 2),
                 "mae": round(mae, 2),
-                "close_ret": round(close_ret, 2),
+                "holding_ret": round(holding_ret, 2),
+                "day_close_pct": round(day_close_pct, 2),
+                "close_ret": round(holding_ret, 2),
+                "cur_price": round(cur_price, 3),
+                "max_p": round(max_p, 3),
+                "min_p": round(min_p, 3),
             })
         out.sort(key=lambda e: (-e["tier"], -e["persist"]))
         return out
 
     def _render_track_from_shadow(self, day: str) -> None:
         t3 = self.tbl_track
+        df_strat = self._resolve_ats_strategy_df()
         entries = self._track_entries_from_shadow(day)
         t3.setSortingEnabled(False)
         t3.setRowCount(0)
@@ -2596,8 +3000,12 @@ class FusionLadderDialog(QWidget, WindowMixin):
         for e in entries:
             i = t3.rowCount()
             t3.insertRow(i)
-            ret = float(e.get("close_ret") or 0.0)
-            color = QColor("#ff5c5c") if ret >= 0 else QColor("#00ff88")
+            day_pct = float(e.get("day_close_pct") if e.get("day_close_pct") is not None else (e.get("close_ret") or 0.0))
+            holding_ret = float(e.get("holding_ret") if e.get("holding_ret") is not None else (e.get("close_ret") or 0.0))
+            color_ret = QColor("#ff5c5c") if day_pct >= 0 else QColor("#00ff88")
+            mfe_v = float(e.get("mfe") or 0.0)
+            mae_v = float(e.get("mae") or 0.0)
+
             t3.setItem(i, 0, self._num_item(e["code"], e["code"]))
             t3.setItem(i, 1, self._num_item(e["name"], e["name"]))
             t3.setItem(i, 2, self._num_item(_fmt_hms(e["enter_ts"]), e["enter_ts"]))
@@ -2609,9 +3017,21 @@ class FusionLadderDialog(QWidget, WindowMixin):
             t3.setItem(i, 8, self._num_item(e["persist"], float(e["persist"]), bold=True))
             t3.setItem(i, 9, self._num_item(e["evidence_n"], int(e["evidence_n"])))
             t3.setItem(i, 10, self._num_item(e["chain"], e["chain"]))
-            t3.setItem(i, 11, self._num_item(f"{e['mfe']:+.2f}%", e["mfe"], color=color))
-            t3.setItem(i, 12, self._num_item(f"{e['mae']:+.2f}%", e["mae"]))
-            t3.setItem(i, 13, self._num_item(f"{ret:+.2f}%", ret, color=color, bold=True))
+            t3.setItem(i, 11, self._num_item(f"{mfe_v:+.2f}%", mfe_v, color=QColor("#ff5c5c") if mfe_v > 0 else QColor("#b9b9c8")))
+            t3.setItem(i, 12, self._num_item(f"{mae_v:+.2f}%", mae_v, color=QColor("#00ff88") if mae_v < 0 else QColor("#b9b9c8")))
+
+            # 收盘%：与通达信盘口收盘涨幅 100% 对齐，同时兼顾入局后收益
+            display_ret = f"{day_pct:+.2f}% (入{holding_ret:+.2f}%)" if abs(day_pct - holding_ret) > 0.05 else f"{day_pct:+.2f}%"
+            item_ret = self._num_item(display_ret, day_pct, color=color_ret, bold=True)
+            item_ret.setToolTip(
+                f"收盘价: {e.get('cur_price', 0.0):.2f} ｜ 当日收盘: {day_pct:+.2f}% ｜ 入局收益: {holding_ret:+.2f}%\n"
+                f"全天最高: {e.get('max_p', 0.0):.2f} ｜ 全天最低: {e.get('min_p', 0.0):.2f}"
+            )
+            t3.setItem(i, 13, item_ret)
+            if getattr(self, "extra_cols", None):
+                for idx_ec, ec in enumerate(self.extra_cols):
+                    val_txt, val_raw = self._extract_stock_custom_val(df_strat, e["code"], ec)
+                    t3.setItem(i, 14 + idx_ec, self._num_item(val_txt, val_raw))
         t3.setSortingEnabled(True)
 
     def _fill_table_hint(self, tbl: QTableWidget, text: str) -> None:
@@ -2630,7 +3050,12 @@ class FusionLadderDialog(QWidget, WindowMixin):
 
     def _on_tab_changed(self, index: int) -> None:
         day = self.cmb_day.currentText().strip() or today_str()
-        if index == 3:
+        if index == 0:
+            try:
+                self._render_live(force=False)
+            except Exception as exc:
+                logger.debug("[FusionLadder] 实时梯度刷新失败: %s", exc)
+        elif index == 3:
             try:
                 self._render_track_from_shadow(day)
             except Exception as exc:
@@ -2737,7 +3162,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
                     "writer_exe": "REPLAY_BACKFILL",
                     "ts": float(r.get("ts") or time.time()),
                     "code": cd,
-                    "name": r.get("name") or name_of(cd),
+                    "name": self._resolve_name(cd, r),
                     "price": entry_p,
                     "pct": pct_val,
                     "trade_date": day,
@@ -2815,7 +3240,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
         backfilled_count = self._persist_replay_shadow_and_context(result)
 
         # Tab 1: 按日回放表格渲染
-        # 表头: [时间(0), 代码(1), 名称(2), 现价(3), 涨幅%(4), 级别(5), RAR(6), 仓位%(7), MFE%(8), MAE%(9), 收盘%(10), 温度℃(11)]
+        # 表头: [时间(0), 代码(1), 名称(2), 现价(3), 涨幅%(4), 终收%(5), 级别(6), RAR(7), 仓位%(8), MFE%(9), MAE%(10), 收盘%(11), 温度℃(12)] + 自定义列
+        df_strat = self._resolve_ats_strategy_df()
         rows = sorted(result.records, key=lambda r: (r["tier"], r["rar"]), reverse=True)[:1000]
         tbl = self.tbl_replay
         tbl.setSortingEnabled(False)
@@ -2824,7 +3250,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
             i = tbl.rowCount()
             tbl.insertRow(i)
             cd = str(r["code"]).split(".")[0].zfill(6)
-            nm = str(r.get("name") or "") or name_of(cd)
+            nm = self._resolve_name(cd, r)
             entry_p = float(r.get("entry") or 0.0)
             pct_v = float(r.get("pct") or 0.0)
             tier = r["tier"]
@@ -2834,13 +3260,46 @@ class FusionLadderDialog(QWidget, WindowMixin):
             tbl.setItem(i, 2, self._num_item(nm, nm))
             tbl.setItem(i, 3, self._num_item(f"{entry_p:.2f}" if entry_p > 0 else "-", entry_p))
             tbl.setItem(i, 4, self._num_item(f"{pct_v:+.2f}%", pct_v, color=QColor("#ff5c5c") if pct_v >= 0 else QColor("#00ff88"), bold=True))
-            tbl.setItem(i, 5, self._num_item(r["tier_name"], tier, _TIER_COLORS.get(tier), bold=True))
-            tbl.setItem(i, 6, self._num_item(r["rar"], float(r["rar"] or 0)))
-            tbl.setItem(i, 7, self._num_item(f"{r['size_pct']}%", float(r["size_pct"] or 0)))
-            tbl.setItem(i, 8, self._num_item(f"{r['mfe']:+.2f}%", float(r["mfe"] or 0)))
-            tbl.setItem(i, 9, self._num_item(f"{r['mae']:+.2f}%", float(r["mae"] or 0)))
-            tbl.setItem(i, 10, self._num_item(f"{r['close_ret']:+.2f}%", float(r["close_ret"] or 0)))
-            tbl.setItem(i, 11, self._num_item(f"{r['temp']}℃", float(r["temp"] or 0)))
+
+            # 🌟 自动后验能力：终收% (全天最终收盘涨跌幅)
+            day_close_pct = r.get("day_close_pct")
+            if day_close_pct is None:
+                day_close_pct = float(pct_v) + float(r.get("close_ret") or 0.0)
+            else:
+                day_close_pct = float(day_close_pct)
+            close_p = float(r.get("day_close") or 0.0)
+            close_ret_v = float(r.get("close_ret") or 0.0)
+
+            item_day_close = self._num_item(
+                f"{day_close_pct:+.2f}%",
+                day_close_pct,
+                color=QColor("#ff5c5c") if day_close_pct >= 0 else QColor("#00ff88"),
+                bold=True
+            )
+            item_day_close.setToolTip(
+                f"【自动后验对照】\n"
+                f"• 标的代码: {cd} {nm}\n"
+                f"• 触发时间: {r['time']}（当时入局涨幅: {pct_v:+.2f}%）\n"
+                f"• 终收涨幅: {day_close_pct:+.2f}%" + (f" (全天收盘价: {close_p:.2f})" if close_p > 0 else "") + "\n"
+                f"• 入局后收益: {close_ret_v:+.2f}%\n"
+                f"• 最大浮盈 MFE: {float(r.get('mfe') or 0):+.2f}% | 最大回撤 MAE: {float(r.get('mae') or 0):+.2f}%\n"
+                f"说明: 若终收% > 触发涨幅%，说明入局后持续冲高走强；反之冲高回落。"
+            )
+            tbl.setItem(i, 5, item_day_close)
+
+            tbl.setItem(i, 6, self._num_item(r["tier_name"], tier, _TIER_COLORS.get(tier), bold=True))
+            tbl.setItem(i, 7, self._num_item(r["rar"], float(r["rar"] or 0)))
+            tbl.setItem(i, 8, self._num_item(f"{r['size_pct']}%", float(r["size_pct"] or 0)))
+            tbl.setItem(i, 9, self._num_item(f"{r['mfe']:+.2f}%", float(r["mfe"] or 0)))
+            tbl.setItem(i, 10, self._num_item(f"{r['mae']:+.2f}%", float(r["mae"] or 0)))
+            tbl.setItem(i, 11, self._num_item(f"{close_ret_v:+.2f}%", close_ret_v, color=QColor("#ff5c5c") if close_ret_v >= 0 else QColor("#00ff88"), bold=True))
+            tbl.setItem(i, 12, self._num_item(f"{r['temp']}℃", float(r["temp"] or 0)))
+
+            # 动态自定义列 (ats_col)
+            if getattr(self, "extra_cols", None):
+                for idx_ec, ec in enumerate(self.extra_cols):
+                    val_txt, val_raw = self._extract_stock_custom_val(df_strat, cd, ec)
+                    tbl.setItem(i, 13 + idx_ec, self._num_item(val_txt, val_raw))
         tbl.setSortingEnabled(True)
 
         # Tab 2: T+1 订单与成交
@@ -2852,7 +3311,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
             i = t2.rowCount()
             t2.insertRow(i)
             cd = str(d["code"]).split(".")[0].zfill(6)
-            nm = name_of(cd)
+            nm = self._resolve_name(cd, d)
             pnl = float(d["pnl_pct"] or 0)
             color = QColor("#ff5c5c") if pnl >= 0 else QColor("#00ff88")
 
@@ -2877,9 +3336,11 @@ class FusionLadderDialog(QWidget, WindowMixin):
             i = t3.rowCount()
             t3.insertRow(i)
             cd = str(e.get("code", "")).split(".")[0].zfill(6)
-            nm = name_of(cd)
+            nm = self._resolve_name(cd, e)
             ret = float(e.get("close_ret") or 0)
-            color = QColor("#ff5c5c") if ret >= 0 else QColor("#00ff88")
+            day_pct = float(e.get("day_close_pct") if e.get("day_close_pct") is not None else ret)
+            color_ret = QColor("#ff5c5c") if day_pct >= 0 else QColor("#00ff88")
+            display_ret = f"{day_pct:+.2f}% (入{ret:+.2f}%)" if abs(day_pct - ret) > 0.05 else f"{day_pct:+.2f}%"
 
             t3.setItem(i, 0, self._num_item(cd, cd))
             t3.setItem(i, 1, self._num_item(nm, nm))
@@ -2892,9 +3353,20 @@ class FusionLadderDialog(QWidget, WindowMixin):
             t3.setItem(i, 8, self._num_item(e.get("persist", 0), float(e.get("persist") or 0), bold=True))
             t3.setItem(i, 9, self._num_item(e.get("evidence_n", 0), int(e.get("evidence_n") or 0)))
             t3.setItem(i, 10, self._num_item(e.get("chain", ""), e.get("chain", "")))
-            t3.setItem(i, 11, self._num_item(f"{e.get('mfe', 0):+.2f}%", float(e.get("mfe") or 0), color=color))
+            t3.setItem(i, 11, self._num_item(f"{e.get('mfe', 0):+.2f}%", float(e.get("mfe") or 0), color=color_ret))
             t3.setItem(i, 12, self._num_item(f"{e.get('mae', 0):+.2f}%", float(e.get("mae") or 0)))
-            t3.setItem(i, 13, self._num_item(f"{ret:+.2f}%", ret, color=color, bold=True))
+            item_ret = self._num_item(display_ret, day_pct, color=color_ret, bold=True)
+            item_ret.setToolTip(
+                f"【收盘表现后验】\n"
+                f"• 当日收盘涨幅: {day_pct:+.2f}%\n"
+                f"• 入局后真实收益: {ret:+.2f}%\n"
+                f"提示: 点击表头可按【收盘涨幅%】升降序排序。"
+            )
+            t3.setItem(i, 13, item_ret)
+            if getattr(self, "extra_cols", None):
+                for idx_ec, ec in enumerate(self.extra_cols):
+                    val_txt, val_raw = self._extract_stock_custom_val(df_strat, cd, ec)
+                    t3.setItem(i, 14 + idx_ec, self._num_item(val_txt, val_raw))
         t3.setSortingEnabled(True)
 
         # Tab 4: 信号面板

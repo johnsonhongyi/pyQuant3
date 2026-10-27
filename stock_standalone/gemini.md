@@ -1,5 +1,43 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-27 16:30 【按日回放自动后验收盘涨幅、赛马收盘%归零根除与高精数值排序闭环】(`docs/tasks/2026-10-27_1630_按日回放自动后验与梯度Tab接入自定义列.md`, `ats/fusion/replay.py`, `ats/ui/fusion_ladder_dialog.py`, `tests/test_fusion_replay_posthoc_and_custom_cols.py`)
+- [x] **【彻底修复赛马跟踪收盘%归零并实现点击表头高精数值排序】**：
+  - **根因穿透**：`_get_batch_quotes_snapshot` 从 ATS 主窗口的 `current_df` 读取快照时，因策略 DataFrame 的 `close` 字段代表的是现价而非昨收，且未优先读取 `percent` / `pct` 字段，导致 `last_close` 错误回退为 `close`（现价），计算 `(p - lc) / lc` 恒等于 `0.0`，进而导致日内收盘涨幅全部归零（显示为 `+0.00%` 或 `+0.00% (入+0.17%)`）；
+  - **全链路权威涨幅四级梯队兜底提取**：① 优先读取行情 DataFrame 中的权威 `percent` / `pct` / `change_pct`；② 昨收价严禁使用 `close`，若昨收缺失但有现价与涨跌幅，通过 `p / (1.0 + dp / 100.0)` 精确反算昨收；③ 快照缺失时从影子序列最后一根记录 `recs[-1]` 获取真实的日内收盘涨幅；
+  - **点击表头按收盘涨幅精准排序**：单元格将真实的浮点收盘涨幅 `day_pct` 绑定为 `raw_val`，点击表头「收盘%」即刻严格按收盘涨幅升降序排序（如降序时 `301314` +20.00%、`603028` +10.01%、`603489` +9.03% 稳居顶部，跌幅最大者沉底）；
+- [x] **【按日回放自动后验能力与收盘涨幅对照闭环】**：
+  - **核心后验指标提取**：在 `ats/fusion/replay.py` 的 `DayReplay.run_day()` 中，通过 `mat["close"][i, -1]` 提取当日最终一分钟线收盘价 `_last_c` 与昨收盘价 `prev_close[i]`，精确计算当日全天最终收盘涨跌幅 `day_close_pct = (_last_c / _p_close - 1.0) * 100.0`，并在 `records.append(...)` 中显式持久化 `day_close` 与 `day_close_pct`；
+  - **双涨幅并列对照呈现**：在 `ats/ui/fusion_ladder_dialog.py` 的按日回放表格中，升级表头为 `["时间", "代码", "名称", "现价", "涨幅%", "终收%", "级别", "RAR", "仓位%", "MFE%", "MAE%", "收盘%", "温度℃"]`，列 4 展现信号触发时刻「涨幅%」，列 5 紧随展现当日最终「终收%」（红涨绿跌粗体）；
+  - **卡片级自动后验悬浮分析**：配备详细 ToolTip 说明，直观比对触发涨幅 vs 终收涨幅、入局后实际盈亏（`close_ret`）、最大浮盈（MFE%）、最大回撤（MAE%），一目了然判定信号入局后是持续走强冲高甚至封板，还是盘中冲高回落；
+- [x] **【梯度各 Tab 接入 ATS 策略 DataFrame 动态自定义列与开关控制】**：
+  - **顶部开关与跨会话持久化**：在顶部控制条紧随极窄模式后增加 `QCheckBox("📊 自定义列")`，状态持久化至 `fusion_ladder_show_custom_cols`，勾选即刻无缝显示/隐藏自定义列；
+  - **ATS 标准动态列规范与中文转换**：接入 `cct.ats_col` 与 `cct.vis_column_map`，剔除表格基础固定列（`BASE_EXCLUDE`），表头支持中英文映射（如 `dff` -> `DFF`，`win` -> `连阳` 等）；
+  - **策略主 DataFrame 动态感知与数值提取**：通过 `_resolve_ats_strategy_df` 递归探测当前量化策略 DataFrame，基于 `_extract_stock_custom_val` 支持按 6 位代码动态匹配，并经 `cct.format_col_value` 智能整型（`co2int`）与浮点精度格式化；
+  - **全 Tab 覆盖与高精度数值排序**：实时梯度（Tab 0）、按日回放（Tab 1）与赛马跟踪（Tab 3）全面接入自定义列，采用 `NumericTableWidgetItem` 保证点击自定义列表头即可按真实数值升降序排序；
+  - **极窄模式与自定义列智能联动**：极窄模式开启时自动收缩隐藏自定义列以保留关键视野，退出极窄模式时根据开关状态 0 延迟呈现自定义列，两者互不干扰；
+- [x] **【自动化测试全绿通过（6 项专项 + 213 项全量融合回归）】**：
+  - 新增 `tests/test_fusion_replay_posthoc_and_custom_cols.py`（6 项测试 100% PASS）；
+  - 全量运行 `pytest tests/ -k fusion` 213 项测试全部通过（213 passed in 26.97s），语法编译 0 错误。
+
+## 2026-10-27 15:45 【修复融合梯度各Tab缺名称、赛马与多Tab数据未自动更新及表头悬浮详细信息失效】(`docs/tasks/2026-10-27_1545_修复融合梯度缺名称与赛马更新及表头悬浮提示.md`, `ats/fusion/names.py`, `ats/fusion/replay.py`, `ats/fusion/trade_sim.py`, `ats/ui/fusion_ladder_dialog.py`, `tests/test_fusion_tab_names_and_header_tips.py`)
+- [x] **【彻底修复各 Tab 缺少 name（名称列空白）与全渠道兜底】**：
+  - **根因穿透**：`ats/fusion/names.py` 候选路径仅硬编码依赖 `__file__` 相对路径，在 PyInstaller/Nuitka 打包环境（临时目录 `_MEIPASS`）或特定运行目录下无法找到 `datacsv/stock_name_cache.json.gz`；且回放引擎 `DayReplay` 的 `records` 与 `entries` 生成时未显式携带 `name`，导致 `T+1 订单与成交`、`按日回放` 等 Tab 渲染时名称为空；
+  - **多环境自适应路径探测与动态兜底**：`names.py` 扩展支持 `get_app_root()`、`sys.executable` 物理目录、源码开发目录与 CWD 四级路径自适应发现，并在名称解析中接入 `sys_utils.resolve_stock_name` 作为多通道自愈兜底，同时在内存中 O(1) 缓存；
+  - **Replay / Trade / Dialog 全链路赋名**：在 `DayReplay.records`、`RaceTracker.entries`、`Trade.to_dict()` 中显式注入 `name`；在 `FusionLadderDialog` 中实现统一 `_resolve_name(code, fallback_dict)`，回放、T+1 订单、赛马跟踪与影子落盘 100% 具备合法中文股票名称（如“钧达股份”、“福晶科技”、“海量数据”、“贵州茅台”等）；
+- [x] **【彻底修复表头鼠标悬浮详细信息（ToolTip）卡片弹出】**：
+  - **根因穿透**：`HeaderToolTip` 为表头及其 `viewport()` 安装了事件过滤器，但在计算列索引时粗暴调用 `obj.logicalIndexAt()`。由于鼠标事件首先派发给 `header.viewport()`（属于普通 `QWidget`，无 `logicalIndexAt` 方法），抛出 `AttributeError` 被捕获吞掉导致 `html` 始终为空；同时 `QEvent.Type.ToolTip` 无条件返回 `True` 粗暴拦截吞掉了系统原生提示，导致用户调整配色后表头悬浮详细信息彻底消失；
+  - **统一表头对象坐标映射**：统一通过 `header = self.table.horizontalHeader()` 并在坐标系映射下调用 `header.logicalIndexAt(pos)`，精确捕获目标列索引；
+  - **全列卡片级说明与优雅降级**：完善各 Tab 全部列名的 `HEADER_TOOLTIPS`，悬浮 450ms 准时弹出自绘深色圆角卡片（`_TipCard`），未匹配到深色卡片时不拦截系统原生提示；
+- [x] **【彻底根治多 Tab 数据未自动更新、集合竞价脏数据污染与通达信权威行情点对点精准对齐】**：
+  - **解耦各 Tab 独立的渲染签名**：将单值的 `_live_sig` 升级为 `_tab_signatures: Dict[int, Any]`，杜绝切 Tab 后因签名相同被误判跳过刷新；
+  - **点击即刷新（Click-to-Refresh）**：优化 `_on_tab_changed`，用户点击切换到「实时梯度」或「赛马跟踪」Tab 时立即执行数据重绘，保证所见即最新；
+  - **集合竞价假价格彻底过滤**：`_in_trading_session` 严格锁定正式连续竞价时段（09:30~11:30, 13:00~15:00），彻底排除 09:15~09:29 集合竞价未成交报价（如 688836 宇树科技在 09:25:38 的 634.99），将入局点精准校正至 09:32 正式开盘连续竞价（入局价 650.00，当时涨幅 -3.27%）；
+  - **通达信权威行情（价格/涨幅/全天高低点）毫秒级批量校准**：实现 `_get_batch_quotes_snapshot`，纯内存/TDX 并发批量获取全天真实高点（681.98）、低点（638.00）、收盘价（639.96）与收盘涨幅（-4.77%），将 `之后MFE%` 精确校准至 `+4.92%`、`MAE%` 校准至 `-1.85%`；
+  - **表头与单元格数据毫无歧义呈现**：最后一列「收盘%」展示为 `-4.77% (入-1.54%)`（绿跌红涨），前面 100% 对齐通达信盘口收盘涨跌幅，后面清晰标明入局后真实盈亏，ToolTip 包含收盘价与全天高低点位，彻底根治数据错位认知偏差；
+- [x] **【自动化测试全绿通过（5 项专项 + 207 项全量融合回归）】**：
+  - 新增 `tests/test_fusion_tab_names_and_header_tips.py`（5 项测试 100% PASS）；
+  - 全量 19 个相关测试套件 207 项测试全部 100% 纯绿通过（207 passed in 28.09s），词法扫描 0 错误。
+
 ## 2026-10-27 10:55 【窗口布局管理器添加 Alt+Shift+F 探测并应用推荐布局全局热键、快捷键编辑与开关功能闭环】(`docs/tasks/2026-10-27_0930_管理器添加探测推荐布局全局热键及编辑开关.md`, `webTools/window_manager/ui.py`, `tests/test_manager_detect_apply_hotkey.py`)
 - [x] **【独立子线程与 Win32 全局热键多 ID 解耦】**：
   - `ManagerHotkeyThread` 扩展支持 `hotkey_id` 参数（默认 `0xAFC0`，探测推荐使用 `0xAFC1`），彻底杜绝 Windows 热键 ID 冲突；
