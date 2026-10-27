@@ -40,12 +40,12 @@ def test_sbc_margin_right_and_compact_labels(app):
     canvas.show()
     app.processEvents()
 
-    # 验证没有点击（未激活 _crosshair_active）时，设置 hover_pos 能够激活十字星手势与选择
+    # 1. 验证未双击点击 K 线时，_crosshair_active 保持 False (不显示 HUD 详情大图)
     assert getattr(canvas, "_crosshair_active", False) is False
     c_info = getattr(canvas, "_coord_info", {})
     assert c_info.get("ready") is True
 
-    # 模拟鼠标在主图中心悬停 (无需点击)
+    # 模拟鼠标在主图中心悬停 (无需点击，仅查价，不弹详情图)
     ml = c_info["margin_left"]
     mt = c_info["margin_top"]
     cw = c_info["chart_w"]
@@ -54,8 +54,18 @@ def test_sbc_margin_right_and_compact_labels(app):
     canvas._hover_pos = mid_pos
     canvas.update()
     app.processEvents()
+    assert getattr(canvas, "_crosshair_active", False) is False
 
-    # 鼠标离开
+    # 2. 模拟双击锁定 K 线查价 (双击才激活 _crosshair_active，显示详情图)
+    canvas._crosshair_active = True
+    canvas._crosshair_idx = 25
+    canvas.update()
+    app.processEvents()
+    assert canvas._crosshair_active is True
+
+    # 3. 鼠标离开窗口：验证自动关闭详情图并重置状态
     canvas.leaveEvent(None)
     assert canvas._hover_pos is None
+    assert canvas._crosshair_active is False
+    assert canvas._crosshair_idx == -1
     canvas.close()

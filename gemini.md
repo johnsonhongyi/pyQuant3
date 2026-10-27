@@ -1,19 +1,21 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
-## 2026-10-27 12:45 【实盘回放龙头异动捕捉对齐与早盘极限性能压降闭环】(docs/tasks/2026-10-27_1245_实盘回放龙头异动捕捉对齐与早盘极限性能压降闭环.md, ts/fusion/enrich.py, ts/fusion/adapter.py, ts/fusion/shadow.py, ts/fusion/premarket.py, ts/fusion/sector.py, ts/fusion/context.py, stock_live_strategy.py, ts/ui/fusion_ladder_dialog.py, ts/tdx_realtime_fetcher.py, 	ests/test_fusion_enrich.py)
-- [x] **【早盘全系统卡顿四大根因彻底切除（零网络争抢、零 UI 阻塞）】**：
-  - **切除 stock_live_strategy.py 融合层全部 TDX 网络调用**：删除 _fusion_intraday_bars 中的 TDXRealtimeFetcher.fetch_intraday_bars 网络回退与 _fusion_refresh_depth 的 TDX 批量快照请求，严格只读同进程 MinuteKlineCache 与 df_all_data 内存五档（1_v..b5_v / 1_v..a5_v），彻底消除 30 工作线程争抢 TDX TCP 锁导致的数秒级卡顿；
-  - **根治 ts/tdx_realtime_fetcher.py 60 秒僵尸代码风暴与串行重试**：_unlisted_or_dormant_codes 升级为指数退避冷却（60s -> 120s -> 240s -> 480s -> 最大 1800s）；missing_in_chunk 由 40 票逐只串行 TCP 循环改为单次小批量（
-etry_batch[:12]）合并请求，消除 3.5 秒串行阻塞；
-  - **根治 FusionLadderDialog Qt UI 主线程阻塞**：_init_days() 改为扫描影子与上下文目录文件名（< 0.3ms），彻底移除 UI 线程实例化 DayReplay() 反序列化 21MB minute_kline_cache.pkl（643ms 冻结）；load_live_rows 与 load_live_series 引入 (path, size, mtime) 内存缓存，_maybe_ensure_data 复用内存最新时间戳，消除每 2 秒重读 JSONL；
-  - **HDF5 全局锁与多线程并发防护**：ts/fusion/premarket.py、sector.py、context.py 全部接入 _HDF_GLOBAL_LOCK；FusionShadow 全程 self._lock 与 self._regime_lock DCL 保护，消除 30 线程并发读写竞态与 SQLite 重复打开；
-- [x] **【实盘与回放捕捉龙头异动标的全面对齐（P0+P1+P2 一次闭环）】**：
-  - **内存五档买压与滚动 10 根外盘占比**：enrich.depth_fields(snap, row) 从内存行直接推算五档 id_pressure 与 	aker_buy_ratio；intraday_fields 产出滚动 10 根阳线量能占比与横盘蓄势突破 latent_break；
-  - **全市场内存横截面引擎 _fusion_update_cross_section**：每 10 秒向量化计算全市场 p99 领涨龙头、前三强板块第一股龙头（is_leader）、板块共振分（sector_resonance）、板块启动时钟（SectorClock）与真实涨跌宽度（< 2.5ms）；
-  - **异动形态保底、二波先手重置与赛马跟踪**：FusionShadow.observe() 接入 detect_patterns（一阳穿三线/突破10日VWAP/逆势带头/潜伏转突破/两阳加速）、SectorClock（排头兵/夺旗）、	ier_floor（2/3 档保底）、PATTERN_LATENT_BREAK 先手时钟重置与 RaceTracker 实时跟踪；daptive_cuts 按个股去重横截面计算分位；
-  - **全市场新晋龙头先锋漏斗 _fusion_scan_market_vanguards**：每 15 秒从 df_all_data 内存筛选 Top 20 新晋领涨/强共振放量先锋送入影子层（< 2ms），彻底杜绝静态监控池外大龙漏网；
-- [x] **【自动化测试全绿通过（202 项 Fusion + 10 项 SBC PASS）】**：
-  - 全量 fusion 专项测试 18 个文件 202 项全部 100% 纯绿通过，SBC 十字星与异步调度 10 项全绿通过，py_compile 0 错误。
+## 2026-10-27 10:55 【窗口布局管理器添加 Alt+Shift+F 探测并应用推荐布局全局热键、快捷键编辑与开关功能闭环】(`docs/tasks/2026-10-27_0930_管理器添加探测推荐布局全局热键及编辑开关.md`, `webTools/window_manager/ui.py`, `tests/test_manager_detect_apply_hotkey.py`)
+- [x] **【独立子线程与 Win32 全局热键多 ID 解耦】**：
+  - `ManagerHotkeyThread` 扩展支持 `hotkey_id` 参数（默认 `0xAFC0`，探测推荐使用 `0xAFC1`），彻底杜绝 Windows 热键 ID 冲突；
+  - 基于非阻塞 `PeekMessageW` 与子线程隔离轮询，捕获系统 `WM_HOTKEY` 并安全分发至 Qt 信号（`detect_apply_signal.emit()`），0 阻塞主 UI；
+- [x] **【探测并应用推荐布局公共逻辑抽象】**：
+  - 将原托盘触发逻辑抽取为公共入口 `detect_and_apply_recommended_layout(source, show_tray_message)`，统一支持托盘右键与全局快捷键随时触发屏幕分辨率探测与推荐布局应用（并显示托盘气泡提示）；
+- [x] **【UI 控件布局、快捷键编辑录入与防冲突校验】**：
+  - 在底部栏左侧紧随“全局热键”之后添加“探测推荐:”标签、`HotkeyLineEdit`（默认 `alt+shift+f`，支持点击按键录入）、“绑定”测试保存按钮与“启用”开关复选框；
+  - `FlowLayout` 自适应分水岭对齐设置为 `align_right_from_index=8`，保证底部两组热键配置与开机自启整齐居左，工具操作平稳右对齐；
+  - 增加热键冲突互斥检测：防止将探测推荐热键与全局呼出热键设为相同按键；
+- [x] **【跨会话配置持久化与退出生命周期管理】**：
+  - `window_layout_config.json` 自动同步保存 `detect_apply_hotkey` 与 `detect_apply_hotkey_enabled`，窗口关闭与强制退出时严格注销并清理子线程；
+- [x] **【自动化测试全绿通过（6 项专项 + 5 项回归）】**：
+  - 新增 `tests/test_manager_detect_apply_hotkey.py`（6 项测试 100% PASS）；
+  - `tests/test_window_layout_double_click_and_column_persistence.py` 5 项回归测试 100% PASS；
+  - 源码文件 `python -m py_compile webTools/window_manager/ui.py` 0 语法错误。
 
 ## 2026-10-27 10:20 【修复TK并发读取HDF5导致AccessViolation闪退与TradingHub方法缺失】(`docs/tasks/2026-10-27_1020_修复TK并发读取HDF5导致AccessViolation闪退与TradingHub方法缺失.md`, `ats/fusion/relative_cache.py`, `stock_live_strategy.py`, `trading_hub.py`, `ats/ui/fusion_ladder_dialog.py`)
 - [x] **【彻底修复 Windows fatal exception: access violation 闪退根因】**：
@@ -33,10 +35,9 @@ etry_batch[:12]）合并请求，消除 3.5 秒串行阻塞；
   - 分时走势图标签精简：开盘: -> 开:、目标: -> 目:、VWAP: -> 均:；
   - K 线模式标签精简：上轨/中轨/下轨 -> 上:/中:/下:、支撑/反转/开盘/目标 -> 撑:/转:/开:/目:；
   - 彻底杜绝文字被右边缘截断（如 VWAP:12.、开盘:12.、目标:12.），留有舒适呼吸边距；
-- [x] **【对齐通达信免点击十字星查价与选择位置价格实时显示】**：
-  - 鼠标移动悬停（无需点击）即可自动切换十字光标（CrossCursor），实时呈现双向十字虚线与对应 Bar 的开高低收 HUD 数据看板；
-  - 水平虚线跟随鼠标当前高度，反算精确物理价格 p_selected；
-  - 右侧 Y 轴以 TDX 同款灰白底色（#E2E8F0）+ 黑色粗体胶囊高亮显示当前选择位置的绝对价格，鼠标移出画布（leaveEvent）瞬间彻底隐去，保持界面清爽；
+- [x] **【对齐通达信免点击十字星查价与详情图按需闭环】**：
+  - 鼠标移动悬停（无需点击）自动切换十字光标（CrossCursor），虚线跟随鼠标并反算精确物理价格 p_selected，右侧 Y 轴以 TDX 同款灰白底色（#E2E8F0）+ 黑色粗体胶囊高亮呈现；
+  - **详情图防遮挡优化**：平时鼠标悬停仅显示十字虚线与右轴价格胶囊，不弹 268×96 详情大图；只有双击点击锁定某根 K 线时才显示完整 HUD 看板，鼠标移出窗口画布（leaveEvent）瞬间彻底自动关闭详情图，保持视野通透；
 - [x] **【TDX API 频繁超时与 quote_gaps 暴增根因穿透分析】**：
   - **周期性 60 秒风暴根因**：ts/tdx_realtime_fetcher.py 内部 cooldown_sec = 60.0，异常代码每 60 秒冷却过期重新入批导致 40 票批次超时，进而触发单票循环串行重试，耗时飙升至 3.5 秒；
   - **并发加剧**：昨天引入的 stock_live_strategy.py 每 15 秒大批量拉五档快照及逐票抓分时 K 线，与 ATS 主进程 NextDayWatchProcess 116 股行情并发争夺通达信服务端带宽与限流配额；

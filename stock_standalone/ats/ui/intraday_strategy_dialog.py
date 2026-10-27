@@ -1883,9 +1883,11 @@ class SBCChartCanvas(QWidget):
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event):
-        """鼠标离开画布：清除光标价格与十字线"""
+        """鼠标离开画布：清除光标价格与十字线，自动关闭详情图"""
         self._hover_pos = None
         self._last_hover_pos = None
+        self._crosshair_active = False
+        self._crosshair_idx = -1
         self.setCursor(Qt.CursorShape.ArrowCursor)
         self.update()
         super().leaveEvent(event)
@@ -2495,32 +2497,7 @@ class SBCChartCanvas(QWidget):
                         painter.setPen(QPen(QColor("#0F172A")))  # 醒目黑色粗体
                         painter.drawText(QRect(int(ml + cw + 2), tag_y, tag_w, tag_h), Qt.AlignmentFlag.AlignCenter, f"{p_hover:.2f}")
 
-                    # ③ 十字光标右上角跟随微浮标
-                    tip_str = f"{p_hover:.2f}"
-                    ch_up_arr = c_info.get("ch_up", [])
-                    ch_mid_arr = c_info.get("ch_mid", [])
-                    ch_dn_arr = c_info.get("ch_dn", [])
-                    if isinstance(ch_up_arr, (list, np.ndarray)) and 0 <= idx_hover < len(ch_up_arr):
-                        c_u = float(ch_up_arr[idx_hover])
-                        c_d = float(ch_dn_arr[idx_hover]) if idx_hover < len(ch_dn_arr) else 0.0
-                        c_m = float(ch_mid_arr[idx_hover]) if idx_hover < len(ch_mid_arr) else 0.0
-                        if c_u > 0 and c_d > 0:
-                            h_diff = max(0.0, c_u - c_d)
-                            h_pct = (h_diff / max(1e-4, c_m)) * 100.0 if c_m > 0 else 0.0
-                            tip_str += f" | 通道:上{c_u:.2f} 中{c_m:.2f} 下{c_d:.2f}"
-
-                    tip_w = max(52, len(tip_str) * 7 + 12)
-                    tip_h = 16
-                    tip_x = min(ml + cw - tip_w - 4, max(ml + 4, int(hx + 12)))
-                    tip_y = max(mt + 4, min(mt + mh - tip_h - 4, int(hy - 20)))
-                    painter.setPen(QPen(QColor("#00E5FF"), 1))
-                    painter.setBrush(QBrush(QColor(12, 16, 28, 230)))
-                    painter.drawRoundedRect(tip_x, tip_y, tip_w, tip_h, 2, 2)
-                    painter.setPen(QPen(QColor("#FFFFFF")))
-                    painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
-                    painter.drawText(tip_x + 6, tip_y + 12, tip_str)
-
-                    # ④ 底部 X 轴时间/日期对齐标签
+                    # ③ 底部 X 轴时间/日期对齐标签 (实时对齐)
                     if times and 0 <= idx_hover < len(times):
                         t_str = str(times[idx_hover])
                         if len(t_str) > 12:
@@ -2534,105 +2511,109 @@ class SBCChartCanvas(QWidget):
                         painter.setPen(QPen(QColor("#ccddee")))
                         painter.drawText(t_x + 4, int(cross_bottom + 14), t_str)
 
-                    # ⑤ 🌟 通达信同款【当时情况数据 HUD 看板】(智能避让当前光标所指位置)
-                    hud_w = 268
-                    hud_h = 96 if is_kline else 84
-                    # 避让算法：光标在图表右半区，看板悬浮在左上角；光标在左半区，看板悬浮在右上角
-                    if hx > (ml + cw * 0.52):
-                        hud_x = int(ml + 8)
-                    else:
-                        hud_x = int(ml + cw - hud_w - 8)
-                    hud_y = int(mt + 8)
+                    # ④ 🌟 通达信同款【当时情况详情数据 HUD 看板】(操盘手明确要求：没有双击点击K线不要显示详情图遮挡走势，双击锁定才显示，鼠标移开自动关闭)
+                    if is_locked_cross:
+                        hud_w = 268
+                        hud_h = 96 if is_kline else 84
+                        # 避让算法：光标在图表右半区，看板悬浮在左上角；光标在左半区，看板悬浮在右上角
+                        if hx > (ml + cw * 0.52):
+                            hud_x = int(ml + 8)
+                        else:
+                            hud_x = int(ml + cw - hud_w - 8)
+                        hud_y = int(mt + 8)
 
-                    painter.setPen(QPen(QColor("#38bdf8"), 1.2))
-                    painter.setBrush(QBrush(QColor(11, 14, 23, 238)))
-                    painter.drawRoundedRect(hud_x, hud_y, hud_w, hud_h, 4, 4)
+                        painter.setPen(QPen(QColor("#38bdf8"), 1.2))
+                        painter.setBrush(QBrush(QColor(11, 14, 23, 238)))
+                        painter.drawRoundedRect(hud_x, hud_y, hud_w, hud_h, 4, 4)
 
-                    cur_code = getattr(self, 'code', '') or ''
-                    cur_name = resolve_stock_name(cur_code) if cur_code else ''
-                    time_val = str(times[idx_hover]) if 0 <= idx_hover < len(times) else ''
+                        cur_code = getattr(self, 'code', '') or ''
+                        cur_name = resolve_stock_name(cur_code) if cur_code else ''
+                        time_val = str(times[idx_hover]) if 0 <= idx_hover < len(times) else ''
 
-                    # 行 1: 标的代码名称与周期时间
-                    painter.setFont(QFont("Microsoft YaHei", 8, QFont.Weight.Bold))
-                    painter.setPen(QPen(QColor("#FBBF24")))
-                    painter.drawText(hud_x + 8, hud_y + 16, f"[{self.period_mode.upper()}] {cur_code} {cur_name}")
-                    painter.setFont(QFont("Consolas", 7))
-                    painter.setPen(QPen(QColor("#94A3B8")))
-                    painter.drawText(hud_x + hud_w - len(time_val) * 7 - 8, hud_y + 16, time_val)
-
-                    if is_kline:
-                        # K 线模式数据行
-                        o_val = float(c_info["opens"][idx_hover]) if 0 <= idx_hover < len(c_info.get("opens", [])) else p_hover
-                        h_val = float(c_info["highs"][idx_hover]) if 0 <= idx_hover < len(c_info.get("highs", [])) else p_hover
-                        l_val = float(c_info["lows"][idx_hover]) if 0 <= idx_hover < len(c_info.get("lows", [])) else p_hover
-                        c_val = float(c_info["closes"][idx_hover]) if 0 <= idx_hover < len(c_info.get("closes", [])) else p_hover
-                        prev_c = float(c_info["closes"][idx_hover - 1]) if (idx_hover > 0 and len(c_info.get("closes", [])) > idx_hover - 1) else o_val
-                        d_chg = c_val - prev_c
-                        p_chg = (d_chg / max(1e-4, prev_c)) * 100.0
-                        amp = ((h_val - l_val) / max(1e-4, prev_c)) * 100.0
-                        v_val = float(c_info["vols"][idx_hover]) if 0 <= idx_hover < len(c_info.get("vols", [])) else 0.0
-
-                        pct_col = QColor("#FF4444") if d_chg > 0.001 else (QColor("#00FF88") if d_chg < -0.001 else QColor("#F1F5F9"))
-                        v_str = f"{v_val / 10000.0:.2f}万手" if v_val >= 10000 else f"{int(v_val)}手"
-
-                        painter.setFont(QFont("Consolas", 8))
-                        # 行 2: 开盘与最高
-                        painter.setPen(QPen(QColor("#CBD5E1")))
-                        painter.drawText(hud_x + 8, hud_y + 35, f"开: {o_val:.2f}")
-                        painter.drawText(hud_x + 138, hud_y + 35, f"高: {h_val:.2f}")
-
-                        # 行 3: 最低与收盘
-                        painter.drawText(hud_x + 8, hud_y + 53, f"低: {l_val:.2f}")
-                        painter.setPen(QPen(pct_col))
-                        painter.drawText(hud_x + 138, hud_y + 53, f"收: {c_val:.2f}")
-
-                        # 行 4: 涨跌额/幅与振幅
-                        sign = "+" if d_chg > 0 else ""
-                        painter.drawText(hud_x + 8, hud_y + 71, f"涨跌: {sign}{d_chg:.2f} ({sign}{p_chg:.2f}%)")
-                        painter.setPen(QPen(QColor("#CBD5E1")))
-                        painter.drawText(hud_x + 185, hud_y + 71, f"振: {amp:.2f}%")
-
-                        # 行 5: 成交量与通道轨线
-                        ch_str = ""
-                        if isinstance(ch_up_arr, (list, np.ndarray)) and 0 <= idx_hover < len(ch_up_arr):
-                            c_u = float(ch_up_arr[idx_hover])
-                            c_d = float(ch_dn_arr[idx_hover]) if idx_hover < len(ch_dn_arr) else 0.0
-                            if c_u > 0 and c_d > 0:
-                                ch_str = f"上{c_u:.2f}/下{c_d:.2f}"
-                        painter.drawText(hud_x + 8, hud_y + 89, f"量: {v_str}")
-                        if ch_str:
-                            painter.setPen(QPen(QColor("#38BDF8")))
-                            painter.drawText(hud_x + 138, hud_y + 89, f"通道: {ch_str}")
-                    else:
-                        # 分时模式数据行
-                        cur_p = float(c_info["prices"][idx_hover]) if 0 <= idx_hover < len(c_info.get("prices", [])) else p_hover
-                        cur_vwap = float(c_info["vwaps"][idx_hover]) if 0 <= idx_hover < len(c_info.get("vwaps", [])) else 0.0
-                        base_op = float(c_info.get("open_price", 0.0)) or (float(c_info["prices"][0]) if c_info.get("prices") else cur_p)
-                        d_chg = cur_p - base_op
-                        p_chg = (d_chg / max(1e-4, base_op)) * 100.0
-                        disp = ((cur_p - cur_vwap) / max(1e-4, cur_vwap)) * 100.0 if cur_vwap > 0 else 0.0
-                        v_val = float(c_info["vols"][idx_hover]) if 0 <= idx_hover < len(c_info.get("vols", [])) else 0.0
-                        v_str = f"{v_val / 10000.0:.2f}万手" if v_val >= 10000 else f"{int(v_val)}手"
-
-                        pct_col = QColor("#FF4444") if d_chg > 0.001 else (QColor("#00FF88") if d_chg < -0.001 else QColor("#F1F5F9"))
-                        painter.setFont(QFont("Consolas", 8))
-                        # 行 2: 分时价与 VWAP 均价
-                        painter.setPen(QPen(pct_col))
-                        painter.drawText(hud_x + 8, hud_y + 35, f"现价: {cur_p:.2f}")
+                        # 行 1: 标的代码名称与周期时间
+                        painter.setFont(QFont("Microsoft YaHei", 8, QFont.Weight.Bold))
                         painter.setPen(QPen(QColor("#FBBF24")))
-                        painter.drawText(hud_x + 138, hud_y + 35, f"均价: {cur_vwap:.2f}")
+                        painter.drawText(hud_x + 8, hud_y + 16, f"[{self.period_mode.upper()}] {cur_code} {cur_name}")
+                        painter.setFont(QFont("Consolas", 7))
+                        painter.setPen(QPen(QColor("#94A3B8")))
+                        painter.drawText(hud_x + hud_w - len(time_val) * 7 - 8, hud_y + 16, time_val)
 
-                        # 行 3: 涨跌幅与偏离度
-                        sign = "+" if d_chg > 0 else ""
-                        painter.setPen(QPen(pct_col))
-                        painter.drawText(hud_x + 8, hud_y + 54, f"涨跌: {sign}{d_chg:.2f} ({sign}{p_chg:.2f}%)")
-                        disp_col = QColor("#FF4444") if disp > 0 else QColor("#00FF88")
-                        painter.setPen(QPen(disp_col))
-                        painter.drawText(hud_x + 160, hud_y + 54, f"偏离: {disp:+.2f}%")
+                        if is_kline:
+                            # K 线模式数据行
+                            o_val = float(c_info["opens"][idx_hover]) if 0 <= idx_hover < len(c_info.get("opens", [])) else p_hover
+                            h_val = float(c_info["highs"][idx_hover]) if 0 <= idx_hover < len(c_info.get("highs", [])) else p_hover
+                            l_val = float(c_info["lows"][idx_hover]) if 0 <= idx_hover < len(c_info.get("lows", [])) else p_hover
+                            c_val = float(c_info["closes"][idx_hover]) if 0 <= idx_hover < len(c_info.get("closes", [])) else p_hover
+                            prev_c = float(c_info["closes"][idx_hover - 1]) if (idx_hover > 0 and len(c_info.get("closes", [])) > idx_hover - 1) else o_val
+                            d_chg = c_val - prev_c
+                            p_chg = (d_chg / max(1e-4, prev_c)) * 100.0
+                            amp = ((h_val - l_val) / max(1e-4, prev_c)) * 100.0
+                            v_val = float(c_info["vols"][idx_hover]) if 0 <= idx_hover < len(c_info.get("vols", [])) else 0.0
 
-                        # 行 4: 成交量
-                        painter.setPen(QPen(QColor("#CBD5E1")))
-                        painter.drawText(hud_x + 8, hud_y + 73, f"成交量: {v_str}")
+                            pct_col = QColor("#FF4444") if d_chg > 0.001 else (QColor("#00FF88") if d_chg < -0.001 else QColor("#F1F5F9"))
+                            v_str = f"{v_val / 10000.0:.2f}万手" if v_val >= 10000 else f"{int(v_val)}手"
+
+                            painter.setFont(QFont("Consolas", 8))
+                            # 行 2: 开盘与最高
+                            painter.setPen(QPen(QColor("#CBD5E1")))
+                            painter.drawText(hud_x + 8, hud_y + 35, f"开: {o_val:.2f}")
+                            painter.drawText(hud_x + 138, hud_y + 35, f"高: {h_val:.2f}")
+
+                            # 行 3: 最低与收盘
+                            painter.drawText(hud_x + 8, hud_y + 53, f"低: {l_val:.2f}")
+                            painter.setPen(QPen(pct_col))
+                            painter.drawText(hud_x + 138, hud_y + 53, f"收: {c_val:.2f}")
+
+                            # 行 4: 涨跌额/幅与振幅
+                            sign = "+" if d_chg > 0 else ""
+                            painter.drawText(hud_x + 8, hud_y + 71, f"涨跌: {sign}{d_chg:.2f} ({sign}{p_chg:.2f}%)")
+                            painter.setPen(QPen(QColor("#CBD5E1")))
+                            painter.drawText(hud_x + 185, hud_y + 71, f"振: {amp:.2f}%")
+
+                            # 行 5: 成交量与通道轨线
+                            ch_str = ""
+                            ch_up_arr = c_info.get("ch_up", [])
+                            ch_mid_arr = c_info.get("ch_mid", [])
+                            ch_dn_arr = c_info.get("ch_dn", [])
+                            if isinstance(ch_up_arr, (list, np.ndarray)) and 0 <= idx_hover < len(ch_up_arr):
+                                c_u = float(ch_up_arr[idx_hover])
+                                c_d = float(ch_dn_arr[idx_hover]) if idx_hover < len(ch_dn_arr) else 0.0
+                                if c_u > 0 and c_d > 0:
+                                    ch_str = f"上{c_u:.2f}/下{c_d:.2f}"
+                            painter.drawText(hud_x + 8, hud_y + 89, f"量: {v_str}")
+                            if ch_str:
+                                painter.setPen(QPen(QColor("#38BDF8")))
+                                painter.drawText(hud_x + 138, hud_y + 89, f"通道: {ch_str}")
+                        else:
+                            # 分时模式数据行
+                            cur_p = float(c_info["prices"][idx_hover]) if 0 <= idx_hover < len(c_info.get("prices", [])) else p_hover
+                            cur_vwap = float(c_info["vwaps"][idx_hover]) if 0 <= idx_hover < len(c_info.get("vwaps", [])) else 0.0
+                            base_op = float(c_info.get("open_price", 0.0)) or (float(c_info["prices"][0]) if c_info.get("prices") else cur_p)
+                            d_chg = cur_p - base_op
+                            p_chg = (d_chg / max(1e-4, base_op)) * 100.0
+                            disp = ((cur_p - cur_vwap) / max(1e-4, cur_vwap)) * 100.0 if cur_vwap > 0 else 0.0
+                            v_val = float(c_info["vols"][idx_hover]) if 0 <= idx_hover < len(c_info.get("vols", [])) else 0.0
+                            v_str = f"{v_val / 10000.0:.2f}万手" if v_val >= 10000 else f"{int(v_val)}手"
+
+                            pct_col = QColor("#FF4444") if d_chg > 0.001 else (QColor("#00FF88") if d_chg < -0.001 else QColor("#F1F5F9"))
+                            painter.setFont(QFont("Consolas", 8))
+                            # 行 2: 分时价与 VWAP 均价
+                            painter.setPen(QPen(pct_col))
+                            painter.drawText(hud_x + 8, hud_y + 35, f"现价: {cur_p:.2f}")
+                            painter.setPen(QPen(QColor("#FBBF24")))
+                            painter.drawText(hud_x + 138, hud_y + 35, f"均价: {cur_vwap:.2f}")
+
+                            # 行 3: 涨跌幅与偏离度
+                            sign = "+" if d_chg > 0 else ""
+                            painter.setPen(QPen(pct_col))
+                            painter.drawText(hud_x + 8, hud_y + 54, f"涨跌: {sign}{d_chg:.2f} ({sign}{p_chg:.2f}%)")
+                            disp_col = QColor("#FF4444") if disp > 0 else QColor("#00FF88")
+                            painter.setPen(QPen(disp_col))
+                            painter.drawText(hud_x + 160, hud_y + 54, f"偏离: {disp:+.2f}%")
+
+                            # 行 4: 成交量
+                            painter.setPen(QPen(QColor("#CBD5E1")))
+                            painter.drawText(hud_x + 8, hud_y + 73, f"成交量: {v_str}")
 
             # 5. 🔍 局部缩放状态提示 (默认彻底隐藏不遮挡任何内容，仅当鼠标移至右上角时展开悬浮气泡)
             if self._is_zoomed() and self._coord_info.get("ready"):
