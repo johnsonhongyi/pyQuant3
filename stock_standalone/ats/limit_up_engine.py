@@ -1579,6 +1579,10 @@ class LimitUpEngine:
             except Exception as e:
                 logger.debug(f"宏观情绪广度提取异常: {e}")
 
+        total_market_stocks = up_cnt + down_cnt + flat_cnt
+        # 与 UltraShortAnomalyEngine / DistributionBarChart 保持 100% 同源标准市场温度定义 (0~100℃)
+        market_temp = round((up_cnt / float(total_market_stocks) * 100.0), 1) if total_market_stocks > 0 else 50.0
+
         if not records:
             return {
                 "date": date_str,
@@ -1586,6 +1590,9 @@ class LimitUpEngine:
                 "broken_count": 0,
                 "total_attempts": 0,
                 "seal_rate": 0.0,
+                "broken_rate": 0.0,
+                "market_temp": market_temp,
+                "total_market_stocks": total_market_stocks,
                 "max_boards": 0,
                 "multi_boards_count": 0,
                 "avg_seal_circ_ratio": 0.0,
@@ -1598,7 +1605,7 @@ class LimitUpEngine:
                 "median_pct": median_pct,
                 "sentiment_phase": "⚖️ 均衡博弈期",
                 "sentiment_score": 50.0,
-                "defense_status": "大盘整理中",
+                "defense_status": f"大盘整理中 (温度{market_temp:.1f}℃ | 涨{up_cnt}/跌{down_cnt})",
                 "is_avalanche": False
             }
 
@@ -1606,6 +1613,8 @@ class LimitUpEngine:
         broken_count = sum(1 for r in records if r.get("is_broken", False))
         total_attempts = zt_count + broken_count
         seal_rate = round((zt_count / total_attempts * 100.0), 1) if total_attempts > 0 else 0.0
+        # 真实炸板率科学计算 (冲板总数为0时炸板率为0%，绝不可粗暴写为 100 - seal_rate 导致0样本误报100%)
+        broken_rate = round((broken_count / total_attempts * 100.0), 1) if total_attempts > 0 else 0.0
 
         max_boards = max((_safe_int(r.get("consecutive_boards", 1)) for r in records if r.get("is_limit_up")), default=0)
         multi_boards_count = sum(1 for r in records if r.get("is_limit_up") and _safe_int(r.get("consecutive_boards", 1)) >= 2)
@@ -1620,28 +1629,37 @@ class LimitUpEngine:
         top_leader_name = top_leaders[0].get("name", top_leader_code) if top_leaders else (records[0].get("name", "") if records else "")
         top_leader_str = f"{top_leader_name} ({max_boards}板)" if (top_leaders and max_boards >= 2) else (top_leader_name if top_leader_name else "--")
 
-        # ── 💡 深度全市场情绪退潮与防猎感知指数 (Deep Market Sentiment & Avalanche Index) ──
-        # 综合考量：1. 封板率与炸板数; 2. 5500股红绿比; 3. 恐慌踩踏家数(panic_down_cnt); 4. 跌停数
+        # 炸板文本科学展示
+        if total_attempts >= 5:
+            brk_str = f"炸板率{broken_rate:.1f}% ({broken_count}/{total_attempts})"
+        else:
+            brk_str = f"炸板{broken_count}家"
+
+        # ── 💡 深度全市场情绪退潮与防猎感知指数 (结合真实市场温度、真实炸板率与恐慌踩踏) ──
+        # 严格退潮雪崩触发条件（多因子共振，杜绝无冲板样本时误判 100% 炸板）：
+        # 1. 真实炸板潮：冲板样本充分 (total_attempts >= 8) 且真实炸板率极高 (broken_rate >= 50.0%)
+        # 2. 极寒冰点踩踏：全市场温度处于极低冰点 (market_temp <= 22.0℃，下跌 > 4000家) 且恐慌踩踏严重 (panic_down_cnt >= 200)
+        # 3. 跌停潮爆发：跌停数严重暴增 (limit_down_cnt >= 30 且 limit_down_cnt > zt_count)
         is_avalanche = False
-        if (total_attempts >= 10 and seal_rate < 45.0) or (down_cnt >= 3800 and panic_down_cnt >= 150) or limit_down_cnt >= 20:
+        if (total_attempts >= 8 and broken_rate >= 50.0) or (market_temp <= 22.0 and panic_down_cnt >= 200) or (limit_down_cnt >= 30 and limit_down_cnt > zt_count):
             sentiment_phase = "🚨 情绪雪崩退潮"
             sentiment_score = 15.0
-            defense_status = f"🚨 全市场退潮雪崩 (下跌{down_cnt}家 | 恐慌踩踏{panic_down_cnt}家 | 炸板率{100.0-seal_rate:.0f}%), 触发全局防猎熔断, 强制禁止开仓, 严守止损!"
+            defense_status = f"🚨 全市场退潮雪崩 (温度{market_temp:.1f}℃ | 下跌{down_cnt}家 | 恐慌踩踏{panic_down_cnt}家 | {brk_str}), 触发全局防猎熔断, 强制禁止开仓, 严守止损!"
             is_avalanche = True
-        elif seal_rate < 60.0 or (down_cnt >= 3000 and down_cnt > up_cnt * 1.8) or panic_down_cnt >= 80:
+        elif (total_attempts >= 5 and broken_rate >= 35.0) or (market_temp < 38.0 and down_cnt > up_cnt * 2.0) or panic_down_cnt >= 100:
             sentiment_phase = "⚠️ 退潮分歧期"
             sentiment_score = 38.0
-            defense_status = f"🟠 市场分歧退潮 (下跌{down_cnt}家 | 炸板率{100.0-seal_rate:.0f}%), 谨防一致性回落与尾盘跳水, 严禁追高"
+            defense_status = f"🟠 市场分歧退潮 (温度{market_temp:.1f}℃ | 下跌{down_cnt}家 | {brk_str}), 谨防一致性回落与尾盘跳水, 严禁追高"
             is_avalanche = False
-        elif (seal_rate >= 80.0 and zt_count >= 30) or (up_cnt >= 3500 and limit_down_cnt <= 2):
+        elif (seal_rate >= 80.0 and zt_count >= 30 and market_temp >= 60.0) or (up_cnt >= 3600 and limit_down_cnt <= 3):
             sentiment_phase = "🔥 极度亢奋期"
             sentiment_score = 90.0
-            defense_status = f"🟢 进攻顺风 (上涨{up_cnt}家 | 封板率{seal_rate:.0f}%), 主力做多情绪高涨, 顺势跟随龙头主升"
+            defense_status = f"🟢 进攻顺风 (温度{market_temp:.1f}℃ | 上涨{up_cnt}家 | 封板率{seal_rate:.0f}%), 主力做多情绪高涨, 顺势跟随龙头主升"
             is_avalanche = False
         else:
             sentiment_phase = "⚖️ 均衡博弈期"
             sentiment_score = 65.0
-            defense_status = f"🟡 结构分化 (涨{up_cnt}/跌{down_cnt}), 重个股轻大盘, 严格控制仓位"
+            defense_status = f"🟡 结构分化 (温度{market_temp:.1f}℃ | 涨{up_cnt}/跌{down_cnt}), 重个股轻大盘, 严格控制仓位"
             is_avalanche = False
 
         return {
@@ -1650,6 +1668,9 @@ class LimitUpEngine:
             "broken_count": broken_count,
             "total_attempts": total_attempts,
             "seal_rate": seal_rate,
+            "broken_rate": broken_rate,
+            "market_temp": market_temp,
+            "total_market_stocks": total_market_stocks,
             "max_boards": max_boards,
             "multi_boards_count": multi_boards_count,
             "avg_seal_circ_ratio": avg_seal_circ,

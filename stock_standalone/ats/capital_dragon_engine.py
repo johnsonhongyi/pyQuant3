@@ -1293,7 +1293,7 @@ class CapitalDragonEngine:
                 'cy_amt': 0.0, 'bj_amt': 0.0, 'total_amt': 0.0, 'diff_amt': 0.0, 'diff_str': ''}
 
     def _compute_market_summary_from_df(self, df_all: pd.DataFrame, now_dt: Optional[Any] = None) -> Dict[str, Any]:
-        """从传入的 df_all 提取大盘摘要（单元测试与强制刷新专用，与主线程调用完全解耦）"""
+        """从传入的 df_all 提取大盘摘要（单元测试专用，与实盘后台线程完全解耦）"""
         import datetime
         if now_dt is None:
             now_dt = datetime.datetime.now()
@@ -1312,11 +1312,7 @@ class CapitalDragonEngine:
                     raw_vr = float(row.get('vol_ratio', row.get('volume', 1.0)) or 1.0)
                     extracted[idx_key] = {'amount_yi': amt_yi, 'vol_ratio': raw_vr}
                     break
-        res = self._build_summary_result(extracted, prev_data, now_dt)
-
-        self._bg_market_summary_cache = res
-        self._bg_market_summary_ts = time.time()
-        return res
+        return self._build_summary_result(extracted, prev_data, now_dt)
 
 
     def _compute_market_summary_bg(self) -> None:
@@ -1330,19 +1326,23 @@ class CapitalDragonEngine:
 
         # ① 获取/刷新昨日指数收盘基准（每天拉取一次，内存持久缓存）
         prev_data = getattr(self, '_yesterday_index_amounts', None)
-        if not prev_data or getattr(self, '_yesterday_cache_date', '') != today_str:
-            try:
-                from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
-                fetcher = TDXRealtimeFetcher.get_instance()
-                with fetcher._conn_lock:
-                    if not fetcher._is_connected or not fetcher.api:
-                        fetcher.connect()
-                    if fetcher._is_connected and fetcher.api:
+        b_sh, b_sz, b_cy, b_bj = None, None, None, None
+        try:
+            from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+            fetcher = TDXRealtimeFetcher.get_instance()
+            with fetcher._conn_lock:
+                if not fetcher._is_connected or not fetcher.api:
+                    fetcher.connect()
+                if fetcher._is_connected and fetcher.api:
+                    try:
                         b_sh = fetcher.api.get_index_bars(4, 1, '000001', 0, 3)
                         b_sz = fetcher.api.get_index_bars(4, 0, '399001', 0, 3)
                         b_cy = fetcher.api.get_index_bars(4, 0, '399006', 0, 3)
                         b_bj = fetcher.api.get_index_bars(4, 2, '899050', 0, 3)
+                    except Exception as e_b:
+                        logger.debug(f"[CapitalDragonEngine] 拉取指数日线异常: {e_b}")
 
+                    if (not prev_data or getattr(self, '_yesterday_cache_date', '') != today_str) and b_sh:
                         p_sh = b_sh[-2]['amount'] / 1e8 if b_sh and len(b_sh) >= 2 else 0.0
                         p_sz = b_sz[-2]['amount'] / 1e8 if b_sz and len(b_sz) >= 2 else 0.0
                         p_cy = b_cy[-2]['amount'] / 1e8 if b_cy and len(b_cy) >= 2 else 0.0
@@ -1358,11 +1358,11 @@ class CapitalDragonEngine:
                         }
                         self._yesterday_index_amounts = prev_data
                         self._yesterday_cache_date = today_str
-            except Exception as e_prev:
-                logger.debug(f"[CapitalDragonEngine] 后台获取昨日指数基准异常: {e_prev}")
-                prev_data = getattr(self, '_yesterday_index_amounts', {}) or {}
+        except Exception as e_prev:
+            logger.debug(f"[CapitalDragonEngine] 后台获取昨日指数基准异常: {e_prev}")
+            prev_data = getattr(self, '_yesterday_index_amounts', {}) or {}
 
-        # ② 拉取四大指数实时行情
+        # ② 拉取四大指数实时行情 (SSOT 通达信权威盘面)
         extracted = {}
         try:
             need_fetch = ['999999', '000001', '399001', '399006', '899050', '399005']
@@ -1384,6 +1384,23 @@ class CapitalDragonEngine:
                     extracted[k] = {'amount_yi': a_yi, 'vol_ratio': calc_vr}
         except Exception as e_tdx:
             logger.debug(f"[CapitalDragonEngine] 后台TDX拉取大盘指数异常: {e_tdx}")
+
+        # 若实时盘口未返回（非交易时段、休市或盘后清算），从已获取的通达信权威日线最后一条记录提取收盘数据 (100% 对齐通达信官方 SSOT)
+        if not extracted and b_sh:
+            try:
+                for k, b_list in [('sh', b_sh), ('sz', b_sz), ('cy', b_cy), ('bj', b_bj)]:
+                    if b_list and len(b_list) >= 1:
+                        last_bar = b_list[-1]
+                        amt_yi = float(last_bar.get('amount', 0.0) or 0.0) / 1e8
+                        cur_vol = float(last_bar.get('vol', 0.0) or 0.0)
+                        prev_vol = prev_data.get(f'vol_{k}', 1.0) if prev_data else 1.0
+                        calc_vr = round(cur_vol / max(prev_vol, 1.0), 2) if (cur_vol > 0 and prev_vol > 1000.0) else 1.0
+                        if calc_vr <= 0.05 or calc_vr > 50.0:
+                            calc_vr = 1.0
+                        if amt_yi > 0:
+                            extracted[k] = {'amount_yi': round(amt_yi, 2), 'vol_ratio': calc_vr}
+            except Exception as e_bar:
+                logger.debug(f"[CapitalDragonEngine] 从通达信日线提取收盘大盘数据异常: {e_bar}")
 
         if not extracted:
             return  # 拉取失败，保留旧缓存，不用空结果覆盖

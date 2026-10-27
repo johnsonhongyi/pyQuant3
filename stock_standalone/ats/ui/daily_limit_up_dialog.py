@@ -2780,6 +2780,9 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         multi_b = s.get("multi_boards_count", 0)
         brk_cnt = s.get("broken_count", 0)
         rate = s.get("seal_rate", 0.0)
+        brk_rate = s.get("broken_rate", 0.0)
+        total_att = s.get("total_attempts", 0)
+        temp_val = s.get("market_temp", 50.0)
         avg_seal = s.get("avg_seal_circ_ratio", 0.0)
         tot_amt = s.get("total_seal_amount_yi", 0.0)
         leader = s.get("top_leader", "--")
@@ -2787,6 +2790,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self.current_top_leader_name = s.get("top_leader_name", "")
         self._last_broken_count = brk_cnt
         self._last_seal_rate = rate
+        self._last_broken_rate = brk_rate
 
         # 市场情绪与防猎状态
         s_phase = s.get("sentiment_phase", "⚖️ 均衡博弈期")
@@ -2794,19 +2798,22 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         is_avalanche = s.get("is_avalanche", False)
         up_cnt = s.get("up_cnt", 0)
         down_cnt = s.get("down_cnt", 0)
+        limit_down_cnt = s.get("limit_down_cnt", 0)
 
         if up_cnt > 0 or down_cnt > 0:
-            self.btn_kpi_zt.setText(f"🔴 涨停: {zt_cnt} 家 ({up_cnt}涨/{down_cnt}跌)")
+            self.btn_kpi_zt.setText(f"🔴 涨停: {zt_cnt} 家 ({up_cnt}涨/{down_cnt}跌 | {temp_val:.1f}℃)")
         else:
             self.btn_kpi_zt.setText(f"🔴 涨停: {zt_cnt} 家")
 
         self.btn_kpi_ladder.setText(f"👑 连板: {multi_b} 家 (最高 {max_b} 板)")
         
-        # 炸板率恶化时的防猎高亮警示
-        if rate < 50.0 and brk_cnt >= 10:
-            self.btn_kpi_broken.setText(f"🚨 炸板: {brk_cnt} 家 (封板率 {rate:.1f}% 退潮高危!)")
+        # 炸板率恶化时的防猎高亮警示 (严格基于真实炸板率与充分冲板样本，绝不用0样本误报100%炸板)
+        if total_att >= 5 and brk_rate >= 35.0:
+            self.btn_kpi_broken.setText(f"🚨 炸板: {brk_cnt} 家 (炸板率 {brk_rate:.1f}% 退潮高危!)")
+        elif total_att > 0:
+            self.btn_kpi_broken.setText(f"💥 炸板: {brk_cnt} 家 (封板率 {rate:.1f}%/炸板率 {brk_rate:.1f}%)")
         else:
-            self.btn_kpi_broken.setText(f"💥 炸板: {brk_cnt} 家 (封板率 {rate:.1f}%)")
+            self.btn_kpi_broken.setText(f"💥 炸板: {brk_cnt} 家")
 
         self.lbl_kpi_seal.setText(f"💰 平均封流比: <b>{avg_seal:.2f}%</b> | 封单总额: <b>{tot_amt:.2f}</b> 亿")
         self._update_kpi_styles()
@@ -2819,16 +2826,23 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         if is_avalanche:
             self.lbl_status.setStyleSheet("color: #ff3344; font-weight: bold; background-color: #330000; padding: 2px 6px; border-radius: 3px;")
             self.lbl_status.setText(f"🚨 触发全局防猎熔断: {s_defense}")
-            # 触发退潮雪崩全局语音播报
+            # 触发退潮雪崩全局语音播报 (严格守卫：仅在盘中连续竞价时段播报，非交易时段/休市/盘后坚决静音)
             if getattr(self, "is_voice_alert_enabled", True):
                 try:
-                    now_ts = time.time()
-                    if now_ts - getattr(self, "_last_avalanche_voice_ts", 0.0) > 300.0:
-                        self._last_avalanche_voice_ts = now_ts
-                        from ats.alert_notifier import AlertNotifier
-                        AlertNotifier.get_instance().notify_special_signal("000001", "全市场退潮", f"全市场退潮雪崩，炸板率{100.0-rate:.0f}%, 严禁开仓执行止损", score=99.0, parent=self)
-                except Exception:
-                    pass
+                    from ats.tdx_realtime_fetcher import is_trading_time
+                    is_trading, _ = is_trading_time()
+                    if is_trading:
+                        now_ts = time.time()
+                        if now_ts - getattr(self, "_last_avalanche_voice_ts", 0.0) > 300.0:
+                            self._last_avalanche_voice_ts = now_ts
+                            from ats.alert_notifier import AlertNotifier
+                            if total_att >= 5:
+                                alert_msg = f"全市场退潮雪崩，市场温度{temp_val:.1f}℃，真实炸板率{brk_rate:.1f}%，下跌{down_cnt}家，注意防范回落风险"
+                            else:
+                                alert_msg = f"全市场情绪退潮，市场温度{temp_val:.1f}℃，下跌{down_cnt}家(跌停{limit_down_cnt}家)，严格控制仓位规避风险"
+                            AlertNotifier.get_instance().notify_special_signal("000001", "全市场退潮", alert_msg, score=99.0, parent=self)
+                except Exception as e_voice:
+                    logger.debug(f"[DailyLimitUpDialog] avalanche voice notify error: {e_voice}")
 
     def _on_top_leader_clicked(self):
         """点击顶部空间龙头按钮：立即联动切股并在表格中高亮定位"""

@@ -1,5 +1,41 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-27 22:45 【修复全市场退潮虚假100%炸板与非交易时间乱播报】(`docs/tasks/2026-10-27_2245_修复全市场退潮虚假100%炸板与非交易时间乱播报.md`, `ats/limit_up_engine.py`, `ats/ui/daily_limit_up_dialog.py`, `tests/test_limit_up_avalanche_and_broken_rate.py`)
+- [x] **【彻底修复真实炸板率科学计算，杜绝 0 冲板样本误报 100% 炸板】**：
+  - **根因穿透**：原代码偷懒将炸板率写为 `100.0 - seal_rate`；当冲板总数为 0 时，封板率 `seal_rate = 0.0`，直接算出了荒谬的 `100.0 - 0.0 = 100%` 炸板率并动不动大喊“退潮雪崩，炸板率100%”；
+  - **科学计算落地**：重构 `broken_rate = round((broken_count / total_attempts * 100.0), 1) if total_attempts > 0 else 0.0`，冲板为 0 时封板率与真实炸板率均为 `0.0%`；冲板不足 5 家时不展示无统计意义的百分比，仅展示真实炸板家数；
+- [x] **【引入 SSOT 权威市场温度与多维度严格防猎雪崩判定】**：
+  - **市场温度同源接入**：接入标准全市场温度定义 `market_temp = round((up_cnt / total_market_stocks) * 100.0, 1)`（0~100℃），与 `UltraShortAnomalyEngine` / `DistributionBarChart` 保持 100% 同源；
+  - **严格退潮雪崩判定**：彻底摒弃脆弱单因子误判，改为多因子共振（真实炸板潮 `total_attempts >= 8 且 broken_rate >= 50%`，或极寒冰点踩踏 `market_temp <= 22℃ 且 panic_down >= 200`，或跌停潮 `limit_down >= 30`）；
+  - **准确呈现数据**：状态栏与播报展示真实温度、真实下跌与真实炸板率（如 `温度18.5℃ | 下跌4200家 | 炸板率55.0% (11/20)`）；
+- [x] **【增加盘中交易时段门禁，非交易时间坚决静音】**：
+  - **非交易时间门禁**：`DailyLimitUpDialog._update_kpi_display` 增加 `is_trading_time()` 校验，非交易时段（夜间 22:25、休市、周末）仅展示复盘文字，**坚决不调用 `notify_special_signal` 发出盘中交易级语音警报**；
+  - **盘中播报精准化**：盘中退潮文案准确播报真实市场温度与真实炸板率，彻底消灭虚假 100% 炸板噪音。
+- [x] **【自动化测试全绿通过（4 项专项 + 11 项全量回归）】**：
+  - 新增 `tests/test_limit_up_avalanche_and_broken_rate.py`（4 项测试 100% PASS）；
+  - 回归测试包含 limit_up/avalanche/volume 11 项全部纯绿通过，语法静态检查 0 错误。
+
+## 2026-10-27 20:32 【修复非交易时间成交量获取对齐通达信SSOT与定时语音播报假死】(`docs/tasks/2026-10-27_2032_修复非交易时间成交量获取与定时语音播报假死.md`, `ats/capital_dragon_engine.py`, `ats/ui/main_window.py`, `alert_manager.py`, `ats/alert_notifier.py`, `tests/test_offhours_volume_and_alert_voice_robustness.py`)
+- [x] **【彻底撤销 current_df 覆盖，100% 对齐通达信官方权威大盘数据 (SSOT)】**：
+  - **用户纠偏与根因定位**：针对用户反馈“很久前这个启动默认初始化成交量功能已经修复过，底部数据不对，没有对齐，之前获取数据一直没有问题”，排查发现主界面 `current_df` 属于个股数据，字段单位与指数不一致，强行提取会导致数据严重不对齐；
+  - **纯粹只读通达信官方 SSOT**：彻底撤销 `_refresh_market_volume_status` 与 `_check_market_volume_announcement` 传入 `current_df` 的逻辑，还原 `_compute_market_summary_from_df` 为纯单元测试专用，完全杜绝个股列表污染大盘数据；
+  - **通达信官方日线收盘数据沉淀与休市冷启动自愈**：通达信服务器在盘后清算期间 `get_security_quotes` 对指数返回空快照；重构 `_compute_market_summary_bg`，在盘中正常读取实时盘口快照，在休市/非交易时间或盘口返回空时，自动从第一步已拉取的通达信官方权威日线 `b_sh[-1], b_sz[-1], b_cy[-1], b_bj[-1]` 提取当日最终收盘金额与成交量，数据 100% 源自通达信原生 API，精准对齐通达信盘口且彻底消除 `--（等待行情）`；
+- [x] **【彻底根治成交量定时播报哑火与 30 分钟文本结构指纹防抖误杀】**：
+  - **根因穿透**：`AlertManager.send_alert` 采用 `_get_message_fingerprint` 将数字替换为 `*`，对相同文本结构指纹实施长达 1800 秒（30分钟）的防抖；而成交量播报恰好每 30 分钟触发一次，前后两则播报指纹完全一致，定时器稍提前几百毫秒触发即被误判为重复报警而静默吞掉；
+  - **大盘成交额豁免白名单**：在 `send_alert` 中明确对包含“全市成交额”、“全市收盘总成交额”或 `priority <= 1` 的高优先级系统广播**坚决豁免 30 分钟文本结构指纹防抖**，确保每 30 分钟的成交额定时播报 100% 成功发声；
+- [x] **【彻底根治“先消耗令牌”导致播报槽位永久作废 Bug】**：
+  - **根因穿透**：原 `_check_market_volume_announcement` 在数据校验前就执行 `self._announced_market_volume_slots.add(slot_key)`；若当前秒后台数据尚在拉取（`total_amt <= 0`），时间槽被提前作废，后续 59 秒全部直接 return 导致整点漏报；
+  - **成功确认才消耗与整分自愈重试**：必须在确认获取到有效大盘摘要（`total_amt > 0`）并成功发起播报后，才将时间槽记入集合；若当前秒无数据，在这一分钟内允许持续重试，确保绝不漏报；
+- [x] **【彻底修复 11 点后或下午语音播报长时间无声假死与看门狗自愈】**：
+  - **跨越休市节点平滑播报**：`_check_market_volume_announcement` 脱离 `if market_active:` 强绑，11:30 上午收盘、13:00 下午开盘及 15:00 下午收盘等临界节点均能准时播报；
+  - **AlertNotifier 队列 12 秒看门狗**：针对串行轮播队列因子线程或 Toast 异常导致的 `_is_busy` 假死，引入 12 秒看门狗超时自动复位并唤醒队列消费，杜绝队列永久挂起；
+  - **底层 AlertManager 状态联动同步**：`_speak_text` 播报前自动同步纠正 `mgr.voice_enabled = True` 与 `mgr.enabled = True`，消除状态不同步导致的下午静音；
+  - **信号跨波段（>45分钟）放行**：对上午已提示的同形态信号，下午跨时段再次爆发时解除全天死锁拦截，允许正常提示。
+- [x] **【自动化测试全绿通过（6 项专项 + 38 项全量回归）】**：
+  - 新增/完善 `tests/test_offhours_volume_and_alert_voice_robustness.py`（6 项测试 100% PASS）；
+  - 全量 volume/summary/alert/market_frame 38 项回归测试全部纯绿通过；
+  - 4 个修改文件词法与静态语法编译 0 错误。
+
 ## 2026-10-27 17:40 【Windows 目录迁移工具优化：根除扫描卡死、添加跳过占用检测与快速核对开关闭环】(`docs/tasks/2026-10-27_1740_优化Windows目录迁移工具性能与跳过占用检测.md`, `tools/directory_migrator/migrator_core.py`, `tools/directory_migrator/app.py`, `tools/directory_migrator/README.md`, `tools/directory_migrator/test_migrator_core.py`)
 - [x] **【彻底根治海量文件占用检测长时间扫描无进度卡死问题】**：
   - **根因穿透**：Nuitka 打包缓存（`clcache/objects`）包含数万至数十万小文件（当前已超 4.2 万个）。原实现使用 Windows Restart Manager（`Rstrtmgr.dll`）每登记 256 个文件就调用一次 `RmGetList` 进行全系统跨进程检索；随着累加文件增多，单次系统检索开销呈 $O(N^2)$ 灾难性暴增，且无百分比进度显示，导致长时间卡在占用检测环节；
@@ -15,9 +51,13 @@
   - **0 次 per-file 元数据系统调用**：修复 `_reparse_kind` 先调 3 次 `lstat` 再看属性的倒置逻辑，直接读取 `os.scandir` 缓存的 `DirEntry.stat(follow_symlinks=False)`；缓存 `kernel32` DLL 句柄与函数签名（消灭每文件重复实例化 `ctypes.WinDLL("kernel32")` 60 万次的开销）；核验阶段支持 `check_streams=False, check_hardlinks=has_hardlinks`，对常规文件实现 0 次 `os.stat` / `FindFirstStreamW` 调用；
   - **消除小文件 4MB `VirtualAlloc` 页表抖动与冗余 `copystat`**：按文件实际大小动态设置读取块（`<=64KB` 小文件走 `pymalloc` 且单次读完即退）；`_copy_tree` 直接应用 `TreeEntry` 缓存时间戳与属性，省去每文件 4 次冗余查询；`_remove_path_no_follow` 清理备份省去预置 `lstat` 与无条件 `chmod`；
   - **修复 UI 进度条重置假死与事件风暴**：`_poll_events` 对连续进度事件进行最新帧合并（Coalescing），并修复每次 `"scan"` 事件重复调用 `progress.stop()/start(12)` 导致跑马灯动画归零不动的 Bug，新增阶段进度百分比与总耗时统计日志；
-- [x] **【自动化测试全绿通过（7 项专项 + 27 项全量回归）】**：
-  - 新增 `PerformanceAndSkipOccupantsTests` 专项测试，覆盖跳过占用检测、快速核对模式、0 per-file syscall 校验、UI 进度事件合并与防重置；
-  - 全量 34 项单元测试 100% 纯绿通过（`Ran 34 tests in 0.631s, OK`），语法静态检查 0 错误。
+- [x] **【根除 Windows 下可执行文件 .exe/.bat 的 mode 不一致误报阻断】**：
+  - **根因穿透**：Python Windows CRT 的 `os.stat` 会根据文件扩展名合成 `0o111`（`stat.S_IEXEC`），而 `DirEntry.stat()` 直接从 `WIN32_FIND_DATAW` 读取并不合成 `0o111`（仅输出 `0o666`）；原 `inspect_tree` 在 `check_hardlinks=True` 分支中用 `os.stat` 覆盖了 `item_stat`，导致源端 `.exe` 被记录为 `0o777`，而目标端在无硬链接时记录为 `0o666`，比对直接报错阻断；
+  - **源头解耦与快速核对对称**：硬链接检查使用独立局部变量 `hl_stat`，杜绝覆盖 `item_stat`；快速核对模式透传 `check_hardlinks=not quick_verify`，源端与目标端均跳过逐文件 `os.stat` 系统调用；
+  - **平台级权限兼容**：`compare_inventories` 适配 Windows NTFS 特性：Windows 无 POSIX 执行位，仅 `stat.S_IWRITE` 与 `attributes`（`FILE_ATTRIBUTE_READONLY`）反映真实文件状态；当读写/只读位一致时兼容 CRT 虚拟执行位合成差异，真实权限不一致时仍严格报错；
+- [x] **【自动化测试全绿通过（9 项专项 + 27 项全量回归）】**：
+  - 新增 `PerformanceAndSkipOccupantsTests` 专项测试，覆盖跳过占用检测、快速核对模式、0 per-file syscall 校验、UI 进度事件合并与防重置、可执行文件 mode 一致性核对；
+  - 全量 36 项单元测试 100% 纯绿通过（`Ran 36 tests in 0.573s, OK`），语法静态检查 0 错误。
 
 ## 2026-10-27 16:30 【按日回放自动后验收盘涨幅、赛马收盘%归零根除与高精数值排序闭环】(`docs/tasks/2026-10-27_1630_按日回放自动后验与梯度Tab接入自定义列.md`, `ats/fusion/replay.py`, `ats/ui/fusion_ladder_dialog.py`, `tests/test_fusion_replay_posthoc_and_custom_cols.py`)
 - [x] **【彻底修复赛马跟踪收盘%归零并实现点击表头高精数值排序】**：

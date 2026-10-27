@@ -1013,7 +1013,10 @@ class AlertNotifier(QObject if HAS_PYQT else object):
             try:
                 from ats.signal_ledger import get_signal_ledger
                 ledger = get_signal_ledger()
-                if not has_new_mutation and not score_boost and ledger.is_notified_today(code_str, norm_reason):
+                # 若跨越早盘与午后(相隔超过45分钟)或有新突变/提分，允许作为新阶段信号提示
+                last_st = self._stock_alert_state.get(code_str)
+                time_span_ok = bool(last_st and (now - float(last_st.get('ts', 0.0))) >= 2700.0)
+                if not has_new_mutation and not score_boost and not time_span_ok and ledger.is_notified_today(code_str, norm_reason):
                     logger.info(f"🔇 [ALERT_NOTIFY] 该核心信号 [{code_str} | {norm_reason}] 今日已播报提醒，自动去重跳过重复提示")
                     return
             except Exception as e_check:
@@ -1101,13 +1104,29 @@ class AlertNotifier(QObject if HAS_PYQT else object):
         """串行轮播队列处理：前一个信号弹窗+语音播报完毕后再弹出下一个"""
         if getattr(self, '_shutting_down', False):
             return
+
+        # 🛡️ 队列卡死自愈看门狗：若 _is_busy 持续超过 12.0 秒未被重置，强制复位以防卡死
+        now_mono = time.monotonic()
         if self._is_busy:
-            return
+            busy_dur = now_mono - getattr(self, '_busy_start_mono', now_mono)
+            if busy_dur > 12.0:
+                logger.warning(f"[AlertNotifier] 队列繁忙超时 ({busy_dur:.1f}s)，看门狗自动强制复位!")
+                self._is_busy = False
+                if self._current_toast:
+                    try:
+                        self._current_toast.close()
+                    except Exception:
+                        pass
+                    self._current_toast = None
+            else:
+                return
+
         if not self._notify_queue:
             self._is_busy = False
             return
 
         self._is_busy = True
+        self._busy_start_mono = now_mono
         item = self._notify_queue.popleft()
 
         # ── 市场成交额定时播报专属分支 ──
@@ -1287,8 +1306,13 @@ class AlertNotifier(QObject if HAS_PYQT else object):
                 mgr = get_alert_manager()
                 if self._voice_stop_event.is_set():
                     return
+                # 🛡️ 确保底层 AlertManager 语音开关处于就绪状态 (与 AlertNotifier 保持一致)
+                if hasattr(mgr, 'voice_enabled') and not mgr.voice_enabled:
+                    mgr.voice_enabled = True
+                if hasattr(mgr, 'enabled') and not mgr.enabled:
+                    mgr.enabled = True
                 if hasattr(mgr, 'speak'):
-                    mgr.speak(text)
+                    mgr.speak(text, priority=0)
                     return
             except Exception:
                 pass

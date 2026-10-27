@@ -654,13 +654,16 @@ class AlertManager:
         now = time.time()
         
         # 1. 30分钟相同信息防抖过滤
-        fingerprint = self._get_message_fingerprint(message)
-        if fingerprint:
-            last_time = self.message_cooldowns.get(fingerprint, 0)
-            if now - last_time < 1800:  # 30分钟防抖
-                logger.debug(f"🔇 [Debounced] Ignored duplicate alert within 30m: {message} (Fingerprint: {fingerprint})")
-                return
-            self.message_cooldowns[fingerprint] = now
+        # 🛡️【关键白名单豁免】：大盘全市成交额定时播报（属于全系统权威周期性播报，每 30 分钟一次），绝对不被 30 分钟文本结构指纹防抖误拦截！
+        is_market_vol_alert = bool(("全市成交额" in message) or ("全市收盘总成交额" in message) or (priority == 0))
+        if not is_market_vol_alert:
+            fingerprint = self._get_message_fingerprint(message)
+            if fingerprint:
+                last_time = self.message_cooldowns.get(fingerprint, 0)
+                if now - last_time < 1800:  # 30分钟防抖
+                    logger.debug(f"🔇 [Debounced] Ignored duplicate alert within 30m: {message} (Fingerprint: {fingerprint})")
+                    return
+                self.message_cooldowns[fingerprint] = now
             
         # 2. 冷却检查
         if key and cooldown > 0:
