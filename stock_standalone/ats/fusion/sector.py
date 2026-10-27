@@ -14,14 +14,32 @@
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Optional
+import threading
+from typing import Any, Dict, List, Optional
 
 import numpy as np
+
+try:
+    from JSONData.tdx_hdf5_api import _HDF_GLOBAL_LOCK
+    _H5_LOCK = _HDF_GLOBAL_LOCK
+except Exception:
+    _H5_LOCK = threading.RLock()
 
 _CANDIDATES = (
     r"G:/tdx_last_df.h5",
     os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "JSONData", "tdx_last_df.h5"),
 )
+
+
+def _find_last_df_path() -> Optional[str]:
+    try:
+        from JohnsonUtil import commonTips as cct  # type: ignore
+        p = cct.get_run_path_tdx_Path("tdx_last_df")
+        if p and os.path.exists(p):
+            return p
+    except Exception:
+        pass
+    return next((p for p in _CANDIDATES if os.path.exists(p)), None)
 
 
 def _level2(name: str) -> str:
@@ -39,22 +57,23 @@ class SectorMap:
     """code -> 赛道，以及赛道成员索引。"""
 
     def __init__(self, path: Optional[str] = None):
-        self.path = path or next((p for p in _CANDIDATES if os.path.exists(p)), None)
+        self.path = path or _find_last_df_path()
         self.code2sector: Dict[str, str] = {}
         self.ok = False
         if self.path:
             self._load()
 
     def _load(self) -> None:
-        try:
-            import pandas as pd
+        with _H5_LOCK:
+            try:
+                import pandas as pd
 
-            df = pd.read_hdf(self.path, key="/low_d_120_y_all", columns=["hangye"])
-            for code, row in df.iterrows():
-                self.code2sector[str(code).zfill(6)] = _level2(row.get("hangye"))
-            self.ok = bool(self.code2sector)
-        except Exception:
-            self.ok = False
+                df = pd.read_hdf(self.path, key="/low_d_120_y_all", columns=["hangye"])
+                for code, row in df.iterrows():
+                    self.code2sector[str(code).zfill(6)] = _level2(row.get("hangye"))
+                self.ok = bool(self.code2sector)
+            except Exception:
+                self.ok = False
 
     def get(self, code: str) -> str:
         return self.code2sector.get(str(code).zfill(6), "未分类")
@@ -93,28 +112,29 @@ class ThemeMap:
     BROAD = {"深股通", "沪股通", "国企改革", "融资融券", "转融券标的", "MSCI概念", "标普道琼斯A股"}
 
     def __init__(self, path: Optional[str] = None):
-        self.path = path or next((p for p in _CANDIDATES if os.path.exists(p)), None)
+        self.path = path or _find_last_df_path()
         self.code2tags: Dict[str, List[str]] = {}
         self.ok = False
         if self.path:
             self._load()
 
     def _load(self) -> None:
-        try:
-            import pandas as pd
+        with _H5_LOCK:
+            try:
+                import pandas as pd
 
-            df = pd.read_hdf(self.path, key="/low_d_120_y_all", columns=["category"])
-            for code, row in df.iterrows():
-                raw = str(row.get("category") or "")
-                tags = [
-                    t.strip() for t in raw.split(";")
-                    if t.strip() and t.strip() not in self.BROAD and t.strip() not in ("0", "--", "nan", "None")
-                ]
-                if tags:
-                    self.code2tags[str(code).zfill(6)] = tags
-            self.ok = bool(self.code2tags)
-        except Exception:
-            self.ok = False
+                df = pd.read_hdf(self.path, key="/low_d_120_y_all", columns=["category"])
+                for code, row in df.iterrows():
+                    raw = str(row.get("category") or "")
+                    tags = [
+                        t.strip() for t in raw.split(";")
+                        if t.strip() and t.strip() not in self.BROAD and t.strip() not in ("0", "--", "nan", "None")
+                    ]
+                    if tags:
+                        self.code2tags[str(code).zfill(6)] = tags
+                self.ok = bool(self.code2tags)
+            except Exception:
+                self.ok = False
 
     def get(self, code: str) -> List[str]:
         return self.code2tags.get(str(code).zfill(6), [])

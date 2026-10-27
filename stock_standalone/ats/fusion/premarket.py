@@ -17,7 +17,14 @@
 from __future__ import annotations
 
 import os
+import threading
 from typing import Any, Dict, Optional
+
+try:
+    from JSONData.tdx_hdf5_api import _HDF_GLOBAL_LOCK
+    _H5_LOCK = _HDF_GLOBAL_LOCK
+except Exception:
+    _H5_LOCK = threading.RLock()
 
 _COLS = [
     "lastp", "ma5d", "ma10d", "ma20d", "ma60d",
@@ -32,36 +39,48 @@ _CANDIDATES = (
 )
 
 
+def _find_premarket_path() -> Optional[str]:
+    try:
+        from JohnsonUtil import commonTips as cct  # type: ignore
+        p = cct.get_run_path_tdx_Path("tdx_last_df")
+        if p and os.path.exists(p):
+            return p
+    except Exception:
+        pass
+    return next((p for p in _CANDIDATES if os.path.exists(p)), None)
+
+
 class PremarketFeatures:
     """按 code 提供盘前指标；缺失时返回空字典，绝不抛异常。"""
 
     def __init__(self, path: Optional[str] = None):
-        self.path = path or next((p for p in _CANDIDATES if os.path.exists(p)), None)
+        self.path = path or _find_premarket_path()
         self._data: Dict[str, Dict[str, float]] = {}
         self.ok = False
         if self.path:
             self._load()
 
     def _load(self) -> None:
-        try:
-            import pandas as pd
+        with _H5_LOCK:
+            try:
+                import pandas as pd
 
-            df = pd.read_hdf(self.path, key="/low_d_120_y_all")
-            keep = [c for c in _COLS if c in df.columns]
-            df = df[keep]
-            for code, row in df.iterrows():
-                self._data[str(code).zfill(6)] = {
-                    k: float(v) if isinstance(v, (int, float)) and v == v else 0.0
-                    for k, v in row.items()
-                    if k not in ("hangye",)
-                }
-                try:
-                    self._data[str(code).zfill(6)]["hangye"] = float(row.get("hangye", 0) or 0)
-                except Exception:
-                    pass
-            self.ok = bool(self._data)
-        except Exception:
-            self.ok = False
+                df = pd.read_hdf(self.path, key="/low_d_120_y_all")
+                keep = [c for c in _COLS if c in df.columns]
+                df = df[keep]
+                for code, row in df.iterrows():
+                    self._data[str(code).zfill(6)] = {
+                        k: float(v) if isinstance(v, (int, float)) and v == v else 0.0
+                        for k, v in row.items()
+                        if k not in ("hangye",)
+                    }
+                    try:
+                        self._data[str(code).zfill(6)]["hangye"] = float(row.get("hangye", 0) or 0)
+                    except Exception:
+                        pass
+                self.ok = bool(self._data)
+            except Exception:
+                self.ok = False
 
     def get(self, code: str) -> Dict[str, float]:
         return self._data.get(str(code).zfill(6), {})

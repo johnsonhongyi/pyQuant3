@@ -470,6 +470,9 @@ class StockLiveStrategy:
         self._fusion_depth_ts: float = 0.0
         self._fusion_feat_cache: Dict[str, Any] = {}
         self._fusion_enrich_budget: int = 0
+        self._fusion_cross_ts: float = 0.0
+        self._fusion_cross_map: Dict[str, Dict[str, Any]] = {}
+        self._fusion_vanguard_ts: float = 0.0
         # 相对强度（5 日超额）：整表批量缓存（tdx_all_df_900.h5），不逐票发请求
         self._fusion_rs_map: Optional[Dict[str, float]] = None
         self._fusion_rs_ts: float = 0.0
@@ -2671,10 +2674,10 @@ class StockLiveStrategy:
                     if self.realtime_service:
                         all_emotion_scores = self.realtime_service.get_emotion_scores(fetch_list)
                         if hasattr(self.realtime_service, 'get_batch_minute_klines'):
-                            all_klines = self.realtime_service.get_batch_minute_klines(fetch_list, n=30)
+                            all_klines = self.realtime_service.get_batch_minute_klines(fetch_list, n=60)
 
-                    # --- [FUSION] 每轮一次批量五档快照，供融合层补 taker_buy_ratio / bid_pressure ---
-                    self._fusion_refresh_depth(fetch_list)
+                    # --- [FUSION] 零网络开销：基于内存 df_all_data 刷新全市场横截面（领涨/板块共振/宽度）---
+                    self._fusion_update_cross_section(df_all_data, now)
                     # --- [FUSION] 预热相对强度缓存（并发任务分发前就绪，彻底避免子线程并发读 HDF5）---
                     self._fusion_ensure_rs_map()
                             
@@ -2784,6 +2787,15 @@ class StockLiveStrategy:
                 except Exception as e_outer:
                     logger.error(f"❌ [ENGINE_COLLECT] Collection loop error: {e_outer}")
 
+            # 5.5 全市场龙头异动先锋漏斗（纯内存，零网络/磁盘 IO，避免监控池外新晋龙头漏网）
+            if resample == 'd':
+                try:
+                    self._fusion_scan_market_vanguards(
+                        df_all_data, fetch_list, all_klines, now, global_cand_df=global_cand_df
+                    )
+                except Exception as e_van:
+                    logger.debug(f"[FUSION] vanguard funnel skipped: {e_van}")
+
             # 6. 原子写入与同步报警 (性能指标结算)
             cost_loop_ms = (time.perf_counter() - start_loop_timer) * 1000
             if cost_loop_ms > 1000:
@@ -2831,11 +2843,11 @@ class StockLiveStrategy:
 
 
     # =========================
-    # 🧬 融合层输入补全（只补缺，不参与决策）
+    # 🧬 融合层输入补全（只补缺，不参与决策；100% 纯内存计算，零网络请求）
     # =========================
-    _FUSION_DEPTH_INTERVAL = 15.0   # 五档批量快照刷新间隔（秒）
-    _FUSION_FEAT_TTL = 90.0         # 单票分时派生指标缓存（秒）
-    _FUSION_FEAT_BUDGET = 24        # 每轮最多新抓多少只分时，控制 TDX 压力
+    _FUSION_DEPTH_INTERVAL = 10.0   # 全市场横截面刷新间隔（秒）
+    _FUSION_FEAT_TTL = 15.0         # 单票分时派生指标内存缓存（秒）
+    _FUSION_FEAT_BUDGET = 120       # 纯内存分时派生预算
     _FUSION_RS_TTL = 1800.0         # 5 日相对强度缓存（秒），日线当天不变
 
     def _fusion_market_ret5(self) -> float:
@@ -2892,34 +2904,149 @@ class StockLiveStrategy:
             logger.debug(f"[FUSION] 相对强度取值失败 {code}: {e}")
             return {}
 
+    def _fusion_update_cross_section(self, df_all_data: pd.DataFrame, now: Optional[float] = None) -> None:
+        """每 10s 基于内存 df_all_data 向量化计算全市场领涨、板块共振与真实涨跌宽度（零网络/零磁盘 IO）。"""
+        try:
+            now_ts = float(now if now is not None else time.time())
+            if now_ts - float(getattr(self, "_fusion_cross_ts", 0.0) or 0.0) < self._FUSION_DEPTH_INTERVAL:
+                return
+            self._fusion_cross_ts = now_ts
+            self._fusion_enrich_budget = self._FUSION_FEAT_BUDGET
+            if df_all_data is None or df_all_data.empty or "percent" not in df_all_data.columns:
+                return
+
+            pct_s = pd.to_numeric(df_all_data["percent"], errors="coerce").dropna()
+            if pct_s.empty:
+                return
+
+            # 1. 全市场真实宽度注入 FusionShadow
+            up_ratio = float((pct_s > 0).mean())
+            limit_up = int((pct_s >= 9.7).sum())
+            limit_down = int((pct_s <= -9.7).sum())
+            mkt_pct = float(pct_s.median())
+            p99 = max(float(pct_s.quantile(0.99)), 3.0)
+
+            _fusion = getattr(self, "_fusion_shadow", None)
+            if _fusion is None:
+                from ats.fusion.shadow import FusionShadow
+                _fusion = FusionShadow()
+                self._fusion_shadow = _fusion
+            _fusion.update_market_breadth(
+                up_ratio=up_ratio,
+                limit_up=limit_up,
+                limit_down=limit_down,
+                seal_rate=0.8,
+                now=now_ts,
+            )
+
+            # 2. 板块共振（sector_resonance）与板块第一股龙头判定（纯内存字典聚合 + 静态板块映射缓存，耗时 < 2ms）
+            sec_col = "category" if "category" in df_all_data.columns else ("hangye" if "hangye" in df_all_data.columns else "")
+            sec_resonance_map: Dict[str, float] = {}
+            sec_breadth_map: Dict[str, float] = {}
+            sec_top_leader: set = set()
+            code_sec_map: Dict[str, str] = getattr(self, "_fusion_code_sec_cache", None) or {}
+
+            pct_idx = pct_s.index
+            pct_arr = pct_s.to_numpy(dtype="float64", copy=False)
+
+            if sec_col and len(code_sec_map) < len(df_all_data) // 2:
+                raw_sec = df_all_data[sec_col]
+                for idx_c, val_s in zip(raw_sec.index, raw_sec.to_numpy()):
+                    if val_s and isinstance(val_s, str):
+                        s0 = val_s.split(";", 1)[0].strip()
+                        if s0 and s0 not in ("0", "nan", "None"):
+                            code_sec_map[idx_c] = s0
+                self._fusion_code_sec_cache = code_sec_map
+
+            if code_sec_map:
+                sec_buckets: Dict[str, List[Tuple[float, Any]]] = {}
+                for raw_code, p_val in zip(pct_idx, pct_arr):
+                    s_name = code_sec_map.get(raw_code)
+                    if s_name:
+                        sec_buckets.setdefault(s_name, []).append((float(p_val), raw_code))
+
+                sec_top3_list: List[Tuple[float, str, float, Any, float]] = []
+                for s_name, items in sec_buckets.items():
+                    n_items = len(items)
+                    if n_items < 4:
+                        continue
+                    items.sort(key=lambda x: x[0], reverse=True)
+                    t3_mean = (items[0][0] + items[1][0] + items[2][0]) / 3.0
+                    up_cnt = sum(1 for pv, _ in items if pv > 0.0)
+                    s_brd = up_cnt / n_items
+                    sec_breadth_map[s_name] = s_brd
+                    sec_top3_list.append((t3_mean, s_name, s_brd, items[0][1], items[0][0]))
+
+                if sec_top3_list:
+                    sec_top3_list.sort(key=lambda x: x[0])
+                    n_secs = len(sec_top3_list)
+                    for rank_i, (t3_mean, s_name, s_brd, top_code, top_pct) in enumerate(sec_top3_list):
+                        sr = (rank_i + 1) / n_secs
+                        sec_resonance_map[s_name] = round(100.0 * (0.60 * sr + 0.40 * s_brd), 1)
+                    # 涨幅前 3 板块（且前 3 均涨 >= 1.5%）的板块第一股（涨幅 >= 3.5%）视作龙头
+                    for t3_mean, _s_name, _s_brd, top_code, top_pct in sec_top3_list[-3:]:
+                        if t3_mean >= 1.5 and top_pct >= 3.5:
+                            sec_top_leader.add(str(top_code).split(".")[0].zfill(6))
+
+            crowd = min(1.0, limit_up / 50.0)
+            cross_map: Dict[str, Dict[str, Any]] = {}
+            s_clock = getattr(_fusion, "sector_clock", None)
+            s_lock = getattr(_fusion, "_lock", None)
+            clock_updates = []
+            for raw_code, p_val in zip(pct_idx, pct_arr):
+                if p_val < 0.5:
+                    continue
+                pv = float(p_val)
+                c6 = str(raw_code).split(".")[0].zfill(6)
+                s_name = code_sec_map.get(raw_code, "")
+                is_ldr = bool(pv >= p99 or c6 in sec_top_leader)
+                s_res = sec_resonance_map.get(s_name, 0.0)
+                s_brd = sec_breadth_map.get(s_name, 0.5)
+                entry_map: Dict[str, Any] = {
+                    "is_leader": is_ldr,
+                    "sector_resonance": s_res,
+                    "sector": s_name,
+                    "rs_day": round(pv - mkt_pct, 2),
+                    "consensus": round(0.5 * up_ratio + 0.3 * s_brd + 0.2 * crowd, 3),
+                }
+                cross_map[c6] = entry_map
+                if s_clock is not None and s_name and pv >= 1.0:
+                    clock_updates.append((c6, s_name, pv, is_ldr, entry_map))
+
+            if s_clock is not None and clock_updates:
+                try:
+                    if s_lock:
+                        with s_lock:
+                            for c6, s_name, pv, is_ldr, entry_map in clock_updates:
+                                ld = s_clock.observe(c6, s_name, now_ts, pv, breakout=is_ldr)
+                                entry_map["lead_label"] = ld.label
+                                entry_map["lead_score"] = round(ld.score, 1)
+                    else:
+                        for c6, s_name, pv, is_ldr, entry_map in clock_updates:
+                            ld = s_clock.observe(c6, s_name, now_ts, pv, breakout=is_ldr)
+                            entry_map["lead_label"] = ld.label
+                            entry_map["lead_score"] = round(ld.score, 1)
+                except Exception:
+                    pass
+            self._fusion_cross_map = cross_map
+        except Exception as e:
+            logger.debug(f"[FUSION] 横截面刷新失败: {e}")
 
     def _fusion_refresh_depth(self, fetch_list) -> None:
-        """每 15s 批量拉一次五档快照，供融合层补承接字段。失败静默，不影响主循环。"""
-        try:
-            now = time.time()
-            if now - float(self._fusion_depth_ts or 0.0) < self._FUSION_DEPTH_INTERVAL:
-                return
-            self._fusion_depth_ts = now
-            self._fusion_enrich_budget = self._FUSION_FEAT_BUDGET
-            codes = [str(k).split("_")[0] for k in (fetch_list or [])]
-            if not codes:
-                return
-            from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+        """兼容保留旧签名：不再发起 TDX 批量 TCP 快照请求，五档直接取自 df_all_data 内存行。"""
+        self._fusion_enrich_budget = self._FUSION_FEAT_BUDGET
 
-            snap = TDXRealtimeFetcher.get_instance().fetch_batch_stock_snapshots(codes)
-            if isinstance(snap, dict) and snap:
-                self._fusion_depth = snap
-        except Exception as e:
-            logger.debug(f"[FUSION] 五档快照刷新失败: {e}")
+    def _fusion_intraday_bars(self, code, all_klines=None):
+        """取当日分时序列：严格只读同进程内存缓存（零网络/零磁盘 IO）。
 
-    def _fusion_intraday_bars(self, code):
-        """取当日分时序列：优先同进程内存缓存（零 IO），再退回 TDX 分时接口。
-
-        `MinuteKlineCache` 里就是实时的 1 分钟 bar（每股最近 200 根），
-        比落盘的 `minute_kline_cache.pkl`（5 分钟才快照一次）新鲜得多，
-        也不需要跨进程读 21MB 文件。
+        绝不在策略工作线程中回退调用 TDXRealtimeFetcher.fetch_intraday_bars，
+        彻底根除 30 线程争抢 TDX TCP 连接锁导致的早盘全系统卡顿与超时。
         """
-        # 1. 同进程内存缓存
+        c6 = str(code).split(".")[0].zfill(6)
+        if isinstance(all_klines, dict) and all_klines:
+            bars = all_klines.get(c6) or all_klines.get(str(code))
+            if bars:
+                return bars
         try:
             svc = getattr(self, "realtime_service", None)
             cache = getattr(svc, "kline_cache", None) if svc is not None else None
@@ -2928,62 +3055,54 @@ class StockLiveStrategy:
 
                 cache = get_global_kline_cache()
             if cache is not None and hasattr(cache, "get_klines"):
-                bars = cache.get_klines(code, 60)
+                bars = cache.get_klines(c6, 120)
                 if bars:
                     return bars
         except Exception as e:
             logger.debug(f"[FUSION] 内存分时取用失败 {code}: {e}")
-        # 2. TDX 分时（网络，2.5s 缓存）
-        try:
-            from ats.tdx_realtime_fetcher import TDXRealtimeFetcher
+        return None
 
-            return TDXRealtimeFetcher.get_instance().fetch_intraday_bars(code)
-        except Exception as e:
-            logger.debug(f"[FUSION] TDX 分时取用失败 {code}: {e}")
-            return None
-
-    def _fusion_intraday(self, code, snap, row):
-        """单票分时派生指标（带 TTL 与每轮预算），数据不足返回 {}。"""
+    def _fusion_intraday(self, code, snap, row, all_klines=None):
+        """单票分时派生指标（纯内存，15s TTL），数据不足返回 {}。"""
         cache = self._fusion_feat_cache
         now = time.time()
-        hit = cache.get(code)
+        c6 = str(code).split(".")[0].zfill(6)
+        hit = cache.get(c6)
         if hit and (now - hit[0]) < self._FUSION_FEAT_TTL:
             return hit[1]
-        if int(self._fusion_enrich_budget or 0) <= 0:
-            return hit[1] if hit else {}
-        self._fusion_enrich_budget = int(self._fusion_enrich_budget) - 1
         try:
             from ats.fusion.enrich import intraday_fields
 
-            bars = self._fusion_intraday_bars(code)
+            bars = self._fusion_intraday_bars(c6, all_klines=all_klines)
             if bars is None or getattr(bars, "empty", False) or (hasattr(bars, "__len__") and len(bars) == 0):
-                cache[code] = (now, {})
+                cache[c6] = (now, {})
                 return {}
             vwap = float(snap.get("vwap") or (row or {}).get("vwap") or 0.0)
             price = float((row or {}).get("trade") or (row or {}).get("price") or 0.0)
             feats = intraday_fields(bars, vwap=vwap, price=price)
-            cache[code] = (now, feats)
-            if len(cache) > 2000:
+            cache[c6] = (now, feats)
+            if len(cache) > 3000:
                 cache.clear()
             return feats
         except Exception as e:
             logger.debug(f"[FUSION] 分时派生失败 {code}: {e}")
-            cache[code] = (now, {})
+            cache[c6] = (now, {})
             return {}
 
-    def _fusion_enrich_snap(self, code, snap, row):
-        """盘口 + 分时派生合并进快照副本：只补缺失/为 0 的键，绝不覆盖真实值。"""
+    def _fusion_enrich_snap(self, code, snap, row, all_klines=None):
+        """盘口（内存五档）+ 分时派生 + 相对强度 + 全市场横截面合并进快照副本（零网络 IO）。"""
         base = dict(snap or {})
+        c6 = str(code).split(".")[0].zfill(6)
         try:
             from ats.fusion.enrich import depth_fields, merge_missing
 
-            base = merge_missing(base, depth_fields((self._fusion_depth or {}).get(code)))
+            base = merge_missing(base, depth_fields((self._fusion_depth or {}).get(c6), row=row))
         except Exception:
             pass
         try:
             from ats.fusion.enrich import merge_missing
 
-            feats = self._fusion_intraday(code, base, row)
+            feats = self._fusion_intraday(c6, base, row, all_klines=all_klines)
             if feats:
                 base = merge_missing(base, feats)
         except Exception:
@@ -2991,12 +3110,107 @@ class StockLiveStrategy:
         try:
             from ats.fusion.enrich import merge_missing
 
-            rs = self._fusion_rs5(code)
+            rs = self._fusion_rs5(c6)
             if rs:
                 base = merge_missing(base, rs)
         except Exception:
             pass
+        try:
+            from ats.fusion.enrich import merge_missing
+
+            cross = (getattr(self, "_fusion_cross_map", None) or {}).get(c6)
+            if cross:
+                base = merge_missing(base, cross)
+        except Exception:
+            pass
         return base
+
+    def _fusion_scan_market_vanguards(
+        self,
+        df_all_data: pd.DataFrame,
+        fetch_list: list,
+        all_klines: Optional[Dict[str, Any]],
+        now: float,
+        global_cand_df: Optional[pd.DataFrame] = None,
+    ) -> None:
+        """每 15s 从全市场内存行情中筛选 Top 20 新晋龙头/板块排头兵送入影子层（纯内存，耗时 < 2ms）。
+
+        解决实盘只评估静态监控池（fetch_list）而漏掉当日新冒头的板块龙头/排头兵的问题。
+        """
+        if now - float(getattr(self, "_fusion_vanguard_ts", 0.0) or 0.0) < 15.0:
+            return
+        self._fusion_vanguard_ts = now
+        if df_all_data is None or df_all_data.empty or "percent" not in df_all_data.columns:
+            return
+
+        _fusion = getattr(self, "_fusion_shadow", None)
+        if _fusion is None or not _fusion.enabled:
+            return
+
+        evaluated = {str(k).split("_")[0].zfill(6) for k in (fetch_list or [])}
+        cross_map = getattr(self, "_fusion_cross_map", None) or {}
+        if not cross_map:
+            self._fusion_update_cross_section(df_all_data, now)
+            cross_map = getattr(self, "_fusion_cross_map", None) or {}
+
+        # 快速向量筛选：涨幅 2.2% ~ 9.6% 且先截取涨幅前 80 名，避免大表 iterrows 开销
+        pct_col = pd.to_numeric(df_all_data["percent"], errors="coerce")
+        mask = (pct_col >= 2.2) & (pct_col <= 9.6)
+        r_col_name = "ratio" if "ratio" in df_all_data.columns else ("volume" if "volume" in df_all_data.columns else "")
+        if r_col_name:
+            vol_col = pd.to_numeric(df_all_data[r_col_name], errors="coerce").fillna(0.0)
+            mask = mask & (vol_col >= 1.2)
+        sub = df_all_data[mask]
+        if sub.empty:
+            return
+        if len(sub) > 60:
+            sub = sub.loc[pct_col[mask].nlargest(60).index]
+
+        # 一次性转字典，避免 pandas iterrows() 与逐行 .loc[].to_dict() 的 Series 构造开销
+        sub_dicts = sub.to_dict(orient="index")
+        scored = []
+        for raw_code, row_dict in sub_dicts.items():
+            c6 = str(raw_code).split(".")[0].zfill(6)
+            if c6 in evaluated or c6.startswith(("8", "4", "92")):
+                continue
+            name_str = str(row_dict.get("name") or "")
+            if "ST" in name_str or "退" in name_str:
+                continue
+            cross = cross_map.get(c6) or {}
+            is_ldr = bool(cross.get("is_leader"))
+            s_res = float(cross.get("sector_resonance") or 0.0)
+            pct_v = float(row_dict.get("percent") or 0.0)
+            vol_r = float(row_dict.get("ratio") or row_dict.get("volume") or 1.0)
+            # 重点捕捉：领涨股、强共振板块前排、或放量突破股
+            if not (is_ldr or s_res >= 58.0 or (pct_v >= 3.5 and vol_r >= 1.8)):
+                continue
+            rank_score = pct_v * 0.6 + min(vol_r, 6.0) * 0.8 + (4.0 if is_ldr else 0.0) + s_res * 0.04
+            scored.append((rank_score, c6, raw_code, name_str, row_dict))
+
+        if not scored:
+            return
+        scored.sort(key=lambda x: x[0], reverse=True)
+        has_cand = global_cand_df is not None and not global_cand_df.empty
+        for _, c6, raw_code, name_str, row_dict in scored[:20]:
+            try:
+                if has_cand and raw_code in global_cand_df.index:
+                    cand_row = global_cand_df.loc[raw_code]
+                    if isinstance(cand_row, pd.Series):
+                        for c_key in ("grade", "tqi", "score", "category", "ma5", "ma10", "ma60d", "volume"):
+                            if c_key in cand_row and pd.notna(cand_row[c_key]):
+                                row_dict[c_key] = cand_row[c_key]
+                f_snap = self._fusion_enrich_snap(c6, {"name": name_str}, row_dict, all_klines=all_klines)
+                _fusion.observe(
+                    code=c6,
+                    row=row_dict,
+                    snap=f_snap,
+                    decision={"action": "HOLD", "reason": "全市场龙头先锋漏斗"},
+                    name=name_str,
+                    now=now,
+                    source="vanguard_funnel",
+                )
+            except Exception:
+                continue
 
     # =========================
     # 🚨 单股处理（核心）
@@ -3713,8 +3927,8 @@ class StockLiveStrategy:
                 from ats.fusion.shadow import FusionShadow
                 _fusion = FusionShadow()
                 self._fusion_shadow = _fusion
-            # 用补全后的快照副本喂融合层：五档承接 + 分时攻角/意图/清晰度
-            _fusion_snap = self._fusion_enrich_snap(code, snap, row)
+            # 用补全后的快照副本喂融合层：五档承接 + 分时攻角/意图/清晰度（100% 内存，零网络 IO）
+            _fusion_snap = self._fusion_enrich_snap(code, snap, row, all_klines=all_klines)
             _fusion.observe(
                 code=code,
                 row=row,

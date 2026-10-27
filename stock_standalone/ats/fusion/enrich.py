@@ -36,20 +36,58 @@ def _f(value: Any, default: float = 0.0) -> float:
     return v
 
 
-def depth_fields(snapshot: Optional[Dict[str, Any]]) -> Dict[str, float]:
-    """从 TDX 五档快照里取出盘口字段（只搬运，不推算）。
+def depth_fields(snapshot: Optional[Dict[str, Any]], row: Optional[Dict[str, Any]] = None) -> Dict[str, float]:
+    """从 TDX/Sina 五档快照或实时行里取出盘口字段（真实五档量能计算，零网络开销）。
 
-    只取引擎真正会用的键；取不到就不返回，让 adapter 继续按 missing 记账。
+    优先级：
+      1) snapshot / row 中已算好的 taker_buy_ratio / bid_pressure；
+      2) 由五档买量 (b1_v..b5_v / bid_vol1..5 / bid1_vol) 与五档卖量 (a1_v..a5_v / ask_vol1..5 / ask1_vol) 实算 bid_pressure；
+      3) 由外盘/内盘 (b_vol / s_vol 或 outer_vol / inner_vol) 实算 taker_buy_ratio。
+    取不到就不返回，让 adapter 继续按 missing 记账。
     """
-    if not snapshot:
+    if not snapshot and not row:
         return {}
     out: Dict[str, float] = {}
-    for key in ("taker_buy_ratio", "bid_pressure"):
-        if snapshot.get(key) is None:
+    for src in (snapshot, row):
+        if not src:
             continue
-        val = _f(snapshot.get(key), -1.0)
-        if 0.0 < val <= 100.0:
-            out[key] = round(val, 2)
+        for key in ("taker_buy_ratio", "bid_pressure"):
+            if key in out or src.get(key) is None:
+                continue
+            val = _f(src.get(key), -1.0)
+            if 0.0 < val <= 100.0:
+                out[key] = round(val, 2)
+
+    if "bid_pressure" not in out:
+        for src in (row, snapshot):
+            if not src:
+                continue
+            bid_sum = 0.0
+            ask_sum = 0.0
+            for i in range(1, 6):
+                bid_sum += max(0.0, _f(src.get(f"b{i}_v") or src.get(f"bid_vol{i}") or src.get(f"bid{i}_volume"), 0.0))
+                ask_sum += max(0.0, _f(src.get(f"a{i}_v") or src.get(f"ask_vol{i}") or src.get(f"ask{i}_volume"), 0.0))
+            if bid_sum + ask_sum <= 0:
+                bid_sum = max(0.0, _f(src.get("bid1_vol") or src.get("b1_v"), 0.0))
+                ask_sum = max(0.0, _f(src.get("ask1_vol") or src.get("a1_v"), 0.0))
+            if bid_sum + ask_sum > 0:
+                bp = (bid_sum / (bid_sum + ask_sum)) * 100.0
+                if 0.0 < bp <= 100.0:
+                    out["bid_pressure"] = round(bp, 2)
+                    break
+
+    if "taker_buy_ratio" not in out:
+        for src in (row, snapshot):
+            if not src:
+                continue
+            b_v = max(0.0, _f(src.get("b_vol") or src.get("outer_vol"), 0.0))
+            s_v = max(0.0, _f(src.get("s_vol") or src.get("inner_vol"), 0.0))
+            if b_v + s_v > 0:
+                tb = (b_v / (b_v + s_v)) * 100.0
+                if 0.0 < tb <= 100.0:
+                    out["taker_buy_ratio"] = round(tb, 2)
+                    break
+
     return out
 
 
@@ -89,7 +127,7 @@ def intraday_fields(
     velocity_pct = ((closes[-1] - base) / base * 100.0) if base > 0 else 0.0
 
     recent_vol = _mean(vols[-5:]) if n >= 5 else 0.0
-    prior_vol = _mean(vols[-25:-5]) if n >= 25 else 0.0
+    prior_vol = _mean(vols[-25:-5]) if n >= 10 else 0.0
     segment_vol_inc = (recent_vol / prior_vol) if prior_vol > 0 else 0.0
 
     minutes_above_vwap = 0
@@ -124,6 +162,31 @@ def intraday_fields(
     }
     if segment_vol_inc > 0:
         out["segment_vol_inc"] = round(segment_vol_inc, 3)
+
+    # 滚动 10 根阳线量能占比（对齐 DayReplay._slice_day 的 taker 口径），
+    # 仅在有真实上涨成交量时提供，作为无逐笔外盘时的分时承接真实度量
+    r_win = min(10, n - 1)
+    if r_win >= 3:
+        r_up_v = 0.0
+        r_tot_v = 0.0
+        for idx_r in range(n - r_win, n):
+            vv = max(0.0, vols[idx_r])
+            r_tot_v += vv
+            if closes[idx_r] > closes[idx_r - 1]:
+                r_up_v += vv
+        if r_tot_v > 0 and r_up_v > 0:
+            out["taker_buy_ratio"] = round((r_up_v / r_tot_v) * 100.0, 2)
+
+    # 潜伏转突破（对齐 replay.py PATTERN_LATENT_BREAK）：
+    # 前段 (>=12根) 窄幅蓄势（振幅 <= 2.5%），近期 (最后 5 根内) 放量突破前段高点
+    if n >= 18 and segment_vol_inc >= 1.5 and velocity_pct >= 0.6:
+        pre_closes = closes[:-5]
+        pre_hi, pre_lo = max(pre_closes), min(pre_closes)
+        if pre_lo > 0:
+            pre_amp_pct = (pre_hi - pre_lo) / pre_lo * 100.0
+            if pre_amp_pct <= 2.5 and closes[-1] > pre_hi * 1.003:
+                out["latent_break"] = True
+
     return out
 
 

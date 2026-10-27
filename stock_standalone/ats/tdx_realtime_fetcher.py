@@ -3486,7 +3486,10 @@ class TDXRealtimeFetcher:
 
             if not force and c_clean in self._unlisted_or_dormant_codes:
                 last_try = self._no_quote_last_attempt.get(c_clean, 0.0)
-                if now_t - last_try < cooldown_sec:
+                fail_n = max(1, int(self._no_quote_counts.get(c_clean, 1)))
+                # 指数退避冷却（60s -> 120s -> 240s -> 480s -> 960s，上限 1800s），彻底根除每 60s 僵尸代码雪崩风暴
+                eff_cooldown = min(1800.0, cooldown_sec * (2 ** min(4, max(0, fail_n - 2))))
+                if now_t - last_try < eff_cooldown:
                     if c_clean in self._off_hours_cached_quotes:
                         cached_results.append(self._off_hours_cached_quotes[c_clean])
                     continue
@@ -3550,19 +3553,21 @@ class TDXRealtimeFetcher:
                                 q.update(b_res)
                         all_fetched_quotes.extend(quotes)
 
-                        # 处理该批次中个别未返回行情的标的（自动记录并适度冷却）
+                        # 处理该批次中个别未返回行情的标的（单次小批量补拉，严禁 40 票逐只串行 TCP 循环导致 3.5s 超时）
                         missing_in_chunk = [c_c for _, c_c in req_params if c_c not in returned_codes]
-                        for c_m in missing_in_chunk:
-                            if time.monotonic() >= deadline:
-                                break
-                            # 混合批次可能只漏回个别代码；单票重试一次，避免把批次漏项直接当成无行情。
-                            retry_succeeded = False
+                        recovered_codes = set()
+                        if missing_in_chunk and time.monotonic() < deadline:
+                            retry_batch = [(get_market_code(c_m), c_m) for c_m in missing_in_chunk[:12]]
                             try:
-                                retry_quotes = self.api.get_security_quotes([(get_market_code(c_m), c_m)]) or []
+                                retry_quotes = self.api.get_security_quotes(retry_batch) or []
                                 for retry_quote in retry_quotes:
                                     retry_quote = normalize_quote_unit(retry_quote)
                                     retry_code = str(retry_quote.get("code", "")).strip().zfill(6)
-                                    if retry_code != c_m:
+                                    if not retry_code:
+                                        continue
+                                    rp = safe_float(retry_quote.get("price", 0.0))
+                                    rlc = safe_float(retry_quote.get("last_close", 0.0))
+                                    if rp <= 0 and rlc <= 0:
                                         continue
                                     self._off_hours_cached_quotes[retry_code] = retry_quote
                                     self._no_quote_counts[retry_code] = 0
@@ -3573,15 +3578,16 @@ class TDXRealtimeFetcher:
                                             self._off_hours_settled_codes.add(retry_code)
                                     retry_quote.update(self.record_and_evaluate_bidding_surge(retry_quote))
                                     all_fetched_quotes.append(retry_quote)
-                                    retry_succeeded = True
-                                    break
+                                    recovered_codes.add(retry_code)
                             except Exception as retry_error:
-                                logger.debug("TDX 单票补拉失败 code=%s: %s", c_m, retry_error)
-                            if retry_succeeded:
+                                logger.debug("TDX 小批量补拉失败 count=%d: %s", len(retry_batch), retry_error)
+
+                        for c_m in missing_in_chunk:
+                            if c_m in recovered_codes:
                                 continue
                             self._no_quote_counts[c_m] = self._no_quote_counts.get(c_m, 0) + 1
                             self._no_quote_last_attempt[c_m] = now_t
-                            if self._no_quote_counts[c_m] >= (4 if is_trading else 2):
+                            if self._no_quote_counts[c_m] >= (3 if is_trading else 2):
                                 self._unlisted_or_dormant_codes.add(c_m)
 
                         self.add_log(f"⚡ [TDX] 成功获取批次 {len(quotes)} 只标的行情 (耗时: {cost_ms:.1f}ms, 主站: {host_info})", level="INFO")
@@ -3754,6 +3760,13 @@ class TDXRealtimeFetcher:
         else:
             turnover_rate = 0.0
 
+        bid5_sum = sum(safe_float(q.get(f"bid_vol{idx}", 0.0)) for idx in range(1, 6))
+        ask5_sum = sum(safe_float(q.get(f"ask_vol{idx}", 0.0)) for idx in range(1, 6))
+        bid_pressure = round(bid5_sum / (bid5_sum + ask5_sum) * 100.0, 2) if (bid5_sum + ask5_sum) > 0 else 0.0
+        b_vol = safe_float(q.get("b_vol", 0.0))
+        s_vol = safe_float(q.get("s_vol", 0.0))
+        taker_buy_ratio = round(b_vol / (b_vol + s_vol) * 100.0, 2) if (b_vol + s_vol) > 0 else 0.0
+
         return {
             "code": c_clean,
             "open_price": open_price,
@@ -3774,6 +3787,8 @@ class TDXRealtimeFetcher:
             "ask1_price": ask1_p,
             "ask1": ask1_p,
             "ask1_vol": ask1_v,
+            "bid_pressure": bid_pressure,
+            "taker_buy_ratio": taker_buy_ratio,
             "server_time": time.strftime("%H:%M:%S")
         }
 

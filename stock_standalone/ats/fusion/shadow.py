@@ -25,9 +25,12 @@ import time
 from typing import Any, Callable, Dict, List, Optional
 
 from ats.fusion.adapter import LaunchTracker, build_event, in_trading_session, is_today, today_str
+from ats.fusion.anomaly import PATTERN_LATENT_BREAK, detect_patterns, pattern_score
 from ats.fusion.config import engine_params, load_config
 from ats.fusion.engine import FusionBus, FusionEngine
 from ats.fusion.regime import MarketRegime, MarketRegimeTracker, RegimeSample
+from ats.fusion.tracker import RaceTracker
+from ats.fusion.vanguard import LABEL_FLAG, LABEL_VANGUARD, SectorClock
 
 logger = logging.getLogger(__name__)
 
@@ -103,9 +106,14 @@ class FusionShadow:
         )
         self.launch = LaunchTracker()
         self.regime_tracker = MarketRegimeTracker()
+        self.tracker = RaceTracker()
+        self.sector_clock = SectorClock()
+        self._latent_pool: Dict[str, float] = {}
         self._regime_provider = regime_provider
 
         self._lock = threading.Lock()
+        self._regime_lock = threading.Lock()
+        self._market_sample: Optional[Dict[str, float]] = None
         self._stats: Dict[str, Any] = {
             "records": 0,
             "errors": 0,
@@ -148,6 +156,7 @@ class FusionShadow:
             except Exception:
                 pass
         self._rar_samples: List[float] = []
+        self._latest_rar_by_code: Dict[str, float] = {}
         self._cuts: Optional[tuple] = None
         self._last_cut_n = 0
 
@@ -164,19 +173,45 @@ class FusionShadow:
         """当日样本足够时，用横截面分位重算 L0~L4 阈值；样本不足则沿用引擎固定阈值。"""
         if self._cuts_mode != "adaptive":
             return
-        n = len(self._rar_samples)
+        # 优先按个股去重后的最新横截面分布计算分位，防止 1~2 只高频活跃股污染 p98/p92；
+        # 若唯一标的数量尚不足（例如单标的单元测试），自动回退到全样本池。
+        if len(self._latest_rar_by_code) >= self._cuts_min_samples:
+            pool = list(self._latest_rar_by_code.values())
+        else:
+            pool = self._rar_samples
+        n = len(pool)
         if n < self._cuts_min_samples:
             return
-        if self._cuts is not None and (n - self._last_cut_n) < 20:
+        total_n = len(self._rar_samples)
+        if self._cuts is not None and (total_n - self._last_cut_n) < 20:
             return
         try:
-            self._cuts = adaptive_cuts(self._rar_samples, self._cuts_floors)
-            self._last_cut_n = n
+            self._cuts = adaptive_cuts(pool, self._cuts_floors)
+            self._last_cut_n = total_n
         except Exception as exc:  # 分档失败不能影响主循环
             logger.debug("[fusion] adaptive cuts failed: %s", exc)
 
     def current_cuts(self) -> tuple:
         return tuple(self._cuts) if self._cuts else tuple(self.engine.cuts)
+
+    def update_market_breadth(
+        self,
+        up_ratio: float,
+        limit_up: int = 0,
+        limit_down: int = 0,
+        seal_rate: float = 0.8,
+        now: Optional[float] = None,
+    ) -> None:
+        """由主循环注入全市场真实横截面宽度（零 I/O），供 current_regime 融合。"""
+        ts = float(now if now is not None else time.time())
+        with self._regime_lock:
+            self._market_sample = {
+                "ts": ts,
+                "up_ratio": max(0.0, min(1.0, float(up_ratio))),
+                "limit_up": int(limit_up),
+                "limit_down": int(limit_down),
+                "seal_rate": max(0.0, min(1.0, float(seal_rate))),
+            }
 
     # ------------------------------------------------------------------
     # 温度
@@ -197,26 +232,46 @@ class FusionShadow:
 
     def current_regime(self, now: Optional[float] = None) -> MarketRegime:
         now = float(now if now is not None else time.time())
-        if self._regime is not None and now - self._regime_ts < 60.0:
+        cached = self._regime
+        if cached is not None and now - self._regime_ts < 60.0:
+            return cached
+
+        with self._regime_lock:
+            if self._regime is not None and now - self._regime_ts < 60.0:
+                return self._regime
+
+            if self._regime_provider is not None:
+                try:
+                    provided = self._regime_provider(now)
+                    if provided is not None:
+                        self._regime = provided
+                        self._regime_ts = now
+                        return provided
+                except Exception:
+                    pass
+
+            temp = self._read_state_temp()
+            ms = self._market_sample
+            if ms is not None and (now - float(ms.get("ts") or 0.0)) < 180.0:
+                up_r = float(ms.get("up_ratio", temp / 100.0))
+                lu = int(ms.get("limit_up", 0))
+                ld = int(ms.get("limit_down", 0))
+                sr = float(ms.get("seal_rate", 0.8))
+                # 融合状态机温度与真实盘面涨跌比
+                eff_temp = 0.55 * temp + 0.45 * (up_r * 100.0)
+                sample = RegimeSample(
+                    ts=now,
+                    temp=eff_temp,
+                    up_ratio=up_r,
+                    limit_up=lu,
+                    limit_down=ld,
+                    seal_rate=sr,
+                )
+            else:
+                sample = RegimeSample(ts=now, temp=temp, up_ratio=temp / 100.0, seal_rate=0.8)
+            self._regime = self.regime_tracker.update(sample)
+            self._regime_ts = now
             return self._regime
-
-        if self._regime_provider is not None:
-            try:
-                provided = self._regime_provider(now)
-                if provided is not None:
-                    self._regime = provided
-                    self._regime_ts = now
-                    return provided
-            except Exception:
-                pass
-
-        temp = self._read_state_temp()
-        # 用状态温度喂状态机，主要为了拿到斜率与翻转态；
-        # P2 应替换为真实分钟级横截面（涨停/跌停/封板率/上涨家数）。
-        sample = RegimeSample(ts=now, temp=temp, up_ratio=temp / 100.0, seal_rate=0.8)
-        self._regime = self.regime_tracker.update(sample)
-        self._regime_ts = now
-        return self._regime
 
     # ------------------------------------------------------------------
     # 主入口
@@ -245,23 +300,30 @@ class FusionShadow:
             # 否则"入局时间/当日 MFE"都会被盘后噪声污染。
             # 只拦"当天"的记录：历史日期（回放、补数）一律放行；force 用于测试与补录。
             if not force and self._session_gate and is_today(now) and not in_trading_session(now):
-                self._stats["skipped_off_session"] = self._stats.get("skipped_off_session", 0) + 1
+                with self._lock:
+                    self._stats["skipped_off_session"] = self._stats.get("skipped_off_session", 0) + 1
                 return None
 
             day = today_str(now)
-            if day != self._day:
-                self._day = day
-                self.launch.reset()
-                self._last_sample.clear()
-                self._rar_samples.clear()
-                self._cuts = None
-                self._last_cut_n = 0
+            with self._lock:
+                if day != self._day:
+                    prev_day = self._day
+                    self._day = day
+                    if prev_day:
+                        self.launch.reset()
+                        self.sector_clock = SectorClock()
+                        self._latent_pool.clear()
+                        self._last_sample.clear()
+                        self._rar_samples.clear()
+                        self._latest_rar_by_code.clear()
+                        self._cuts = None
+                        self._last_cut_n = 0
 
-            last = self._last_sample.get(code, 0.0)
-            if now - last < self._sample_interval:
-                self._stats["skipped_interval"] += 1
-                return None
-            self._last_sample[code] = now
+                last = self._last_sample.get(code, 0.0)
+                if now - last < self._sample_interval:
+                    self._stats["skipped_interval"] += 1
+                    return None
+                self._last_sample[code] = now
 
             price = 0.0
             try:
@@ -278,8 +340,19 @@ class FusionShadow:
                 vwap = float(row.get("vwap") or (snap or {}).get("vwap") or 0.0)
             except Exception:
                 vwap = 0.0
+            day_open = 0.0
+            try:
+                day_open = float(row.get("open") or (snap or {}).get("open") or price or 0.0)
+            except Exception:
+                day_open = price
 
-            launch_ts = self.launch.note(code, now, pct, price, vwap)
+            reset_wave = False
+            try:
+                reset_wave = bool((snap or {}).get("latent_break") or row.get("latent_break"))
+            except Exception:
+                reset_wave = False
+
+            launch_ts = self.launch.note(code, now, pct, price, vwap, reset_wave=reset_wave)
             event = build_event(
                 row=row,
                 snap=snap,
@@ -289,19 +362,136 @@ class FusionShadow:
                 launch_ts=launch_ts,
                 trade_date=day,
             )
+
+            # ---- 异动形态识别与板块排头兵时钟（对齐回放 DayReplay）----
+            mkt_ret5 = float(event.extra.get("mkt_ret5") or 0.0)
+            prev_pct = 0.0
+            ret_std20 = 0.0
+            try:
+                prev_pct = float(row.get("per1d") or (snap or {}).get("prev_pct") or 0.0)
+                ret_std20 = float(row.get("ret_std20") or (snap or {}).get("ret_std20") or 0.0)
+            except Exception:
+                prev_pct = 0.0
+                ret_std20 = 0.0
+            patterns = list(
+                detect_patterns(
+                    price=event.price,
+                    day_open=day_open,
+                    ma5=event.ma5,
+                    ma10=event.ma10,
+                    ma20=event.ma20,
+                    pct=event.pct,
+                    ret_std20=ret_std20,
+                    vol_ratio=event.vol_ratio,
+                    rs5=event.rs5,
+                    mkt_ret5=mkt_ret5,
+                    is_leader=event.is_leader,
+                    vwap10=event.vwap_10d,
+                    prev_pct=prev_pct,
+                )
+            )
+            if reset_wave and PATTERN_LATENT_BREAK not in patterns:
+                patterns.append(PATTERN_LATENT_BREAK)
+
+            with self._lock:
+                if mkt_ret5 < -0.3 and event.rs5 >= 1.0 and event.pct < 3.0:
+                    self._latent_pool.setdefault(code, now)
+                _lt = self._latent_pool.get(code)
+                if (
+                    _lt is not None
+                    and event.vwap_10d > 0
+                    and event.price > event.vwap_10d
+                    and 0.0 <= (now - _lt) <= 3600.0
+                ):
+                    if PATTERN_LATENT_BREAK not in patterns:
+                        patterns.append(PATTERN_LATENT_BREAK)
+
+            if PATTERN_LATENT_BREAK in patterns and event.launch_ts > 0 and (now - event.launch_ts) > 600.0:
+                new_launch = self.launch.reset_code(code, max(0.0, now - 300.0))
+                event.launch_ts = new_launch
+
+            raw_sector = str(
+                event.extra.get("sector")
+                or (row.get("category") if hasattr(row, "get") else "")
+                or ""
+            )
+            sector = raw_sector.split(";")[0].strip() if raw_sector else ""
+            if sector and "lead_score" not in event.extra:
+                with self._lock:
+                    _lead = self.sector_clock.observe(
+                        code=code,
+                        sector=sector,
+                        ts=now,
+                        pct=event.pct,
+                        breakout=bool(patterns),
+                    )
+                ld_dict = _lead.to_dict()
+                ld_dict["lead_label"] = _lead.label
+                event.extra.update(ld_dict)
+
+            lead_label = str(event.extra.get("lead_label") or event.extra.get("label") or "")
+            lead_score = float(event.extra.get("lead_score") or 0.0)
+            _ps = pattern_score(patterns)
+            _floor: Optional[int] = None
+            if _ps >= 100 or (event.is_leader and _ps >= 70):
+                _floor = 3
+            elif _ps >= 70 or (lead_label in (LABEL_VANGUARD, LABEL_FLAG) and patterns):
+                _floor = 2
+
             regime = self.current_regime(now)
-            self._refresh_cuts()
-            fusion = self.engine.evaluate(event, regime, now=now, cuts=self._cuts)
-            self._rar_samples.append(float(fusion.rar))
-            if len(self._rar_samples) > 4000:
-                del self._rar_samples[:1000]
-            self.bus.update(event, regime)
-            if now - self._last_rebalance >= 60.0:
+            with self._lock:
+                self._refresh_cuts()
+                active_cuts = self._cuts
+
+            fusion = self.engine.evaluate(
+                event, regime, now=now, cuts=active_cuts, tier_floor=_floor
+            )
+            if patterns:
+                for p in patterns:
+                    tag = "形态:{}".format(p)
+                    if tag not in fusion.evidence:
+                        fusion.evidence.append(tag)
+            if lead_label in (LABEL_VANGUARD, LABEL_FLAG):
+                ltag = "先锋:{}({:.0f})".format(lead_label, lead_score)
+                if ltag not in fusion.evidence:
+                    fusion.evidence.append(ltag)
+
+            track_dict: Dict[str, Any] = {}
+            with self._lock:
+                self._rar_samples.append(float(fusion.rar))
+                if len(self._rar_samples) > 4000:
+                    del self._rar_samples[:1000]
+                if code:
+                    self._latest_rar_by_code[code] = float(fusion.rar)
+                self.bus.update(event, regime)
+                if now - self._last_rebalance >= 60.0:
+                    try:
+                        self.bus.rebalance()
+                        self._last_rebalance = now
+                    except Exception:
+                        pass
                 try:
-                    self.bus.rebalance()
-                    self._last_rebalance = now
+                    _st = self.tracker.update(
+                        code=code,
+                        ts=now,
+                        price=event.price,
+                        pct=event.pct,
+                        vwap10=event.vwap_10d,
+                        vwap=event.vwap,
+                        vol_ratio=event.vol_ratio,
+                        tier=fusion.tier,
+                        rar=fusion.rar,
+                        patterns=patterns,
+                        day=day,
+                        anomaly=bool(patterns) or fusion.tier >= 2,
+                        consensus=float(event.extra.get("consensus") or 0.5),
+                        temp=regime.temp if regime else 50.0,
+                        lead_label=lead_label,
+                        lead_score=lead_score,
+                    )
+                    track_dict = _st.to_dict()
                 except Exception:
-                    pass
+                    track_dict = {}
 
             legacy_action = str((decision or {}).get("action") or "")
             legacy_buy = legacy_action in _BUY_ACTIONS
@@ -316,6 +506,8 @@ class FusionShadow:
             else:
                 divergence = "both_skip"
 
+            # 注意：保持 (snap or {}).get("name") 直接调用，使异常隔离单测 Boom() 可精确触发
+            snap_name = str((snap or {}).get("name") or "")
             record = {
                 # 记录结构版本：2 = 含 price/pct/vwap/hit/coverage。
                 # 界面据此判断"写盘进程是不是新版本"，旧版本写的记录会缺字段。
@@ -326,7 +518,7 @@ class FusionShadow:
                 "ts": round(now, 3),
                 "day": day,
                 "code": code,
-                "name": name or str((snap or {}).get("name") or ""),
+                "name": name or snap_name,
                 "source": source,
                 # 行情快照：界面"现价/涨幅/更新时间"直接读这三个字段。
                 # 旧实现只落 fusion 结论，不落行情，导致监视器全部显示 "-" 与 +0.00%。
@@ -336,6 +528,12 @@ class FusionShadow:
                 "trade_date": day,
                 "hit": bool(fusion.tier >= 2),
                 "coverage": round(float(getattr(fusion, "coverage", 0.0) or 0.0), 3),
+                "patterns": patterns,
+                "sector": sector,
+                "lead_label": lead_label,
+                "lead_score": round(lead_score, 1),
+                "is_leader": bool(event.is_leader),
+                "track": track_dict,
                 "legacy": {
                     "action": legacy_action,
                     "reason": str((decision or {}).get("reason") or "")[:120],

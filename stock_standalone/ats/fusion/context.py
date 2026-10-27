@@ -13,9 +13,16 @@
 from __future__ import annotations
 
 import os
+import threading
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+
+try:
+    from JSONData.tdx_hdf5_api import _HDF_GLOBAL_LOCK
+    _H5_LOCK = _HDF_GLOBAL_LOCK
+except Exception:
+    _H5_LOCK = threading.RLock()
 
 _DAILY_CANDIDATES = (
     r"G:/tdx_all_df_300.h5",
@@ -24,6 +31,13 @@ _DAILY_CANDIDATES = (
 
 
 def _find_daily_path() -> Optional[str]:
+    try:
+        from JohnsonUtil import commonTips as cct  # type: ignore
+        p = cct.get_run_path_tdx_Path("tdx_all_df_300")
+        if p and os.path.exists(p):
+            return p
+    except Exception:
+        pass
     for p in _DAILY_CANDIDATES:
         if os.path.exists(p):
             return p
@@ -45,40 +59,41 @@ class DailyContext:
             self._load()
 
     def _load(self) -> None:
-        try:
-            import pandas as pd
+        with _H5_LOCK:
+            try:
+                import pandas as pd
 
-            df = pd.read_hdf(self.path, key="/all_300")
-            # 该表每个 (code, date) 有重复行，必须去重，否则均线与多日收益全部错位
-            df = df[~df.index.duplicated(keep="last")]
-            codes = df.index.get_level_values(0).astype(str)
-            dates = pd.to_datetime(df.index.get_level_values(1), errors="coerce")
-            close = df["close"].to_numpy(dtype="float64")
-            high = df["high"].to_numpy(dtype="float64")
-            low = df["low"].to_numpy(dtype="float64")
-            vol = df["vol"].to_numpy(dtype="float64")
-            amount = df["amount"].to_numpy(dtype="float64") if "amount" in df.columns else np.zeros_like(vol)
+                df = pd.read_hdf(self.path, key="/all_300")
+                # 该表每个 (code, date) 有重复行，必须去重，否则均线与多日收益全部错位
+                df = df[~df.index.duplicated(keep="last")]
+                codes = df.index.get_level_values(0).astype(str)
+                dates = pd.to_datetime(df.index.get_level_values(1), errors="coerce")
+                close = df["close"].to_numpy(dtype="float64")
+                high = df["high"].to_numpy(dtype="float64")
+                low = df["low"].to_numpy(dtype="float64")
+                vol = df["vol"].to_numpy(dtype="float64")
+                amount = df["amount"].to_numpy(dtype="float64") if "amount" in df.columns else np.zeros_like(vol)
 
-            order = np.lexsort((dates.to_numpy(), codes.to_numpy()))
-            codes_s = codes.to_numpy()[order]
-            dates_s = dates.to_numpy()[order]
-            close, high, low, vol = close[order], high[order], low[order], vol[order]
-            amount = amount[order]
+                order = np.lexsort((dates.to_numpy(), codes.to_numpy()))
+                codes_s = codes.to_numpy()[order]
+                dates_s = dates.to_numpy()[order]
+                close, high, low, vol = close[order], high[order], low[order], vol[order]
+                amount = amount[order]
 
-            uniq, starts = np.unique(codes_s, return_index=True)
-            ends = np.append(starts[1:], len(codes_s))
-            for code, s, e in zip(uniq, starts, ends):
-                self._by_code[str(code).zfill(6)] = {
-                    "dates": dates_s[s:e],
-                    "close": close[s:e],
-                    "high": high[s:e],
-                    "low": low[s:e],
-                    "vol": vol[s:e],
-                    "amount": amount[s:e],
-                }
-            self.ok = bool(self._by_code)
-        except Exception:
-            self.ok = False
+                uniq, starts = np.unique(codes_s, return_index=True)
+                ends = np.append(starts[1:], len(codes_s))
+                for code, s, e in zip(uniq, starts, ends):
+                    self._by_code[str(code).zfill(6)] = {
+                        "dates": dates_s[s:e],
+                        "close": close[s:e],
+                        "high": high[s:e],
+                        "low": low[s:e],
+                        "vol": vol[s:e],
+                        "amount": amount[s:e],
+                    }
+                self.ok = bool(self._by_code)
+            except Exception:
+                self.ok = False
 
     def days(self) -> List[str]:
         seen = set()

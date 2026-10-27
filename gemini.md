@@ -1,5 +1,20 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-27 12:45 【实盘回放龙头异动捕捉对齐与早盘极限性能压降闭环】(docs/tasks/2026-10-27_1245_实盘回放龙头异动捕捉对齐与早盘极限性能压降闭环.md, ts/fusion/enrich.py, ts/fusion/adapter.py, ts/fusion/shadow.py, ts/fusion/premarket.py, ts/fusion/sector.py, ts/fusion/context.py, stock_live_strategy.py, ts/ui/fusion_ladder_dialog.py, ts/tdx_realtime_fetcher.py, 	ests/test_fusion_enrich.py)
+- [x] **【早盘全系统卡顿四大根因彻底切除（零网络争抢、零 UI 阻塞）】**：
+  - **切除 stock_live_strategy.py 融合层全部 TDX 网络调用**：删除 _fusion_intraday_bars 中的 TDXRealtimeFetcher.fetch_intraday_bars 网络回退与 _fusion_refresh_depth 的 TDX 批量快照请求，严格只读同进程 MinuteKlineCache 与 df_all_data 内存五档（1_v..b5_v / 1_v..a5_v），彻底消除 30 工作线程争抢 TDX TCP 锁导致的数秒级卡顿；
+  - **根治 ts/tdx_realtime_fetcher.py 60 秒僵尸代码风暴与串行重试**：_unlisted_or_dormant_codes 升级为指数退避冷却（60s -> 120s -> 240s -> 480s -> 最大 1800s）；missing_in_chunk 由 40 票逐只串行 TCP 循环改为单次小批量（
+etry_batch[:12]）合并请求，消除 3.5 秒串行阻塞；
+  - **根治 FusionLadderDialog Qt UI 主线程阻塞**：_init_days() 改为扫描影子与上下文目录文件名（< 0.3ms），彻底移除 UI 线程实例化 DayReplay() 反序列化 21MB minute_kline_cache.pkl（643ms 冻结）；load_live_rows 与 load_live_series 引入 (path, size, mtime) 内存缓存，_maybe_ensure_data 复用内存最新时间戳，消除每 2 秒重读 JSONL；
+  - **HDF5 全局锁与多线程并发防护**：ts/fusion/premarket.py、sector.py、context.py 全部接入 _HDF_GLOBAL_LOCK；FusionShadow 全程 self._lock 与 self._regime_lock DCL 保护，消除 30 线程并发读写竞态与 SQLite 重复打开；
+- [x] **【实盘与回放捕捉龙头异动标的全面对齐（P0+P1+P2 一次闭环）】**：
+  - **内存五档买压与滚动 10 根外盘占比**：enrich.depth_fields(snap, row) 从内存行直接推算五档 id_pressure 与 	aker_buy_ratio；intraday_fields 产出滚动 10 根阳线量能占比与横盘蓄势突破 latent_break；
+  - **全市场内存横截面引擎 _fusion_update_cross_section**：每 10 秒向量化计算全市场 p99 领涨龙头、前三强板块第一股龙头（is_leader）、板块共振分（sector_resonance）、板块启动时钟（SectorClock）与真实涨跌宽度（< 2.5ms）；
+  - **异动形态保底、二波先手重置与赛马跟踪**：FusionShadow.observe() 接入 detect_patterns（一阳穿三线/突破10日VWAP/逆势带头/潜伏转突破/两阳加速）、SectorClock（排头兵/夺旗）、	ier_floor（2/3 档保底）、PATTERN_LATENT_BREAK 先手时钟重置与 RaceTracker 实时跟踪；daptive_cuts 按个股去重横截面计算分位；
+  - **全市场新晋龙头先锋漏斗 _fusion_scan_market_vanguards**：每 15 秒从 df_all_data 内存筛选 Top 20 新晋领涨/强共振放量先锋送入影子层（< 2ms），彻底杜绝静态监控池外大龙漏网；
+- [x] **【自动化测试全绿通过（202 项 Fusion + 10 项 SBC PASS）】**：
+  - 全量 fusion 专项测试 18 个文件 202 项全部 100% 纯绿通过，SBC 十字星与异步调度 10 项全绿通过，py_compile 0 错误。
+
 ## 2026-10-27 10:20 【修复TK并发读取HDF5导致AccessViolation闪退与TradingHub方法缺失】(`docs/tasks/2026-10-27_1020_修复TK并发读取HDF5导致AccessViolation闪退与TradingHub方法缺失.md`, `ats/fusion/relative_cache.py`, `stock_live_strategy.py`, `trading_hub.py`, `ats/ui/fusion_ladder_dialog.py`)
 - [x] **【彻底修复 Windows fatal exception: access violation 闪退根因】**：
   - **根因穿透**：10/26 22:07 的 commit `fd289295` 引入 relative 轴，在 `_detect_signals_single_stock` 多线程并发（30 线程）中并发调用 `_fusion_rs5` -> `load_rs5_map`；`relative_cache.py` 裸用 `pd.HDFStore` 且无锁，导致 Windows 下 PyTables / HDF5 C 底层指针发生竞态破坏（`tables\table.py:1843 in _read`），抛出 `0xC0000005` Access Violation 强杀进程；

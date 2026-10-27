@@ -729,16 +729,26 @@ def _row_is_hit(rec: Dict[str, Any]) -> bool:
     return bool(rec.get("hit")) or tier >= 2 or action in ("买入", "加仓", "BUY", "ADD")
 
 
+_LIVE_ROWS_CACHE: Dict[Tuple[str, int, float, int, str], List[Dict[str, Any]]] = {}
+_LIVE_SERIES_CACHE: Dict[Tuple[str, int, float, int], Dict[str, List[Dict[str, Any]]]] = {}
+
+
 def load_live_series(day: str = "", max_lines: int = 20000) -> Dict[str, List[Dict[str, Any]]]:
     """按 code 返回当日全部影子记录（时间升序），供赛马跟踪等"过程类"视图使用。
 
     与 `load_live_rows` 的区别：那个只保留每只票最新一条（看板用），
     这个保留整条时间序列，才能算出入局时间、入局后 MFE/MAE、持续分。
+    内置文件指纹 (path, size, mtime) 缓存，文件未变时 0 磁盘 IO 直接返回。
     """
     path, _src_day = _resolve_shadow_file(day)
     if not path or not os.path.exists(path):
         return {}
     try:
+        st = os.stat(path)
+        cache_key = (path, st.st_size, round(st.st_mtime, 3), int(max_lines))
+        cached = _LIVE_SERIES_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
         with open(path, "r", encoding="utf-8") as f:
             tail = deque(f, maxlen=max_lines)
     except Exception:
@@ -761,6 +771,9 @@ def load_live_series(day: str = "", max_lines: int = 20000) -> Dict[str, List[Di
         series.setdefault(code, []).append(rec)
     for recs in series.values():
         recs.sort(key=lambda r: float(r.get("ts") or 0.0))
+    if len(_LIVE_SERIES_CACHE) >= 8:
+        _LIVE_SERIES_CACHE.clear()
+    _LIVE_SERIES_CACHE[cache_key] = series
     return series
 
 
@@ -878,6 +891,7 @@ def load_live_rows(day: str = "", max_lines: int = 5000, allow_fallback: bool = 
 
     allow_fallback=True 时，当日无数据会回退到最近一个有数据的交易日，
     并在每行打上 `_source_day`，由界面显式标注"展示的是哪一天"，不伪装成今日数据。
+    内置文件指纹 (path, size, mtime) 缓存，文件未变化时 0 磁盘 IO 直接返回。
     """
     if allow_fallback:
         target_path, src_day = _resolve_shadow_file(day)
@@ -887,6 +901,11 @@ def load_live_rows(day: str = "", max_lines: int = 5000, allow_fallback: bool = 
     if not target_path or not os.path.exists(target_path):
         return []
     try:
+        st = os.stat(target_path)
+        cache_key = (target_path, st.st_size, round(st.st_mtime, 3), int(max_lines), str(src_day))
+        cached = _LIVE_ROWS_CACHE.get(cache_key)
+        if cached is not None:
+            return list(cached)
         with open(target_path, "r", encoding="utf-8") as f:
             tail = deque(f, maxlen=max_lines)
     except Exception:
@@ -917,7 +936,10 @@ def load_live_rows(day: str = "", max_lines: int = 5000, allow_fallback: bool = 
         r["_source_file"] = target_path
     rows.sort(key=lambda r: (int((r.get("fusion") or {}).get("tier") or 0),
                              float((r.get("fusion") or {}).get("rar") or 0)), reverse=True)
-    return rows
+    if len(_LIVE_ROWS_CACHE) >= 12:
+        _LIVE_ROWS_CACHE.clear()
+    _LIVE_ROWS_CACHE[cache_key] = rows
+    return list(rows)
 
 
 class _ReplayCancelled(Exception):
@@ -1588,20 +1610,40 @@ class FusionLadderDialog(QWidget, WindowMixin):
         return None
 
     def _init_days(self) -> None:
+        """零阻塞加载可用日期列表：直接扫描本地影子目录与上下文目录（耗时 < 0.3ms）。
+
+        严禁在 Qt UI 主线程实例化 DayReplay()（会反序列化 21MB minute_kline_cache.pkl 导致界面冻结 600ms+）。
+        """
+        days_set = {today_str()}
         try:
-            rp = DayReplay()
-            self._replay_days = rp.days()
+            cand_dirs = list(_shadow_dir_candidates())
+            ram_d = _detect_ramdisk_dir()
+            if ram_d:
+                cand_dirs.append(ram_d)
+            for d in cand_dirs:
+                if not d or not os.path.isdir(d):
+                    continue
+                for nm in os.listdir(d):
+                    if nm.endswith(".jsonl") and len(nm) == 16 and nm[:4].isdigit():
+                        days_set.add(nm[:-6])
+            try:
+                from ats.fusion.session_ctx import default_store
+
+                st_dir = getattr(default_store(), "dir", "")
+                if st_dir and os.path.isdir(st_dir):
+                    for nm in os.listdir(st_dir):
+                        if nm.endswith(".json") and len(nm) == 15 and nm[:4].isdigit():
+                            days_set.add(nm[:-5])
+            except Exception:
+                pass
+            self._replay_days = sorted(days_set)
         except Exception:
-            self._replay_days = []
+            self._replay_days = [today_str()]
         self.cmb_day.blockSignals(True)
         self.cmb_day.clear()
-        if self._replay_days:
-            for d in self._replay_days:
-                self.cmb_day.addItem(d)
-            self.cmb_day.setCurrentIndex(len(self._replay_days) - 1)
-        else:
-            self.cmb_day.addItem(today_str())
-            self.cmb_day.setCurrentIndex(0)
+        for d in self._replay_days:
+            self.cmb_day.addItem(d)
+        self.cmb_day.setCurrentIndex(len(self._replay_days) - 1)
         self.cmb_day.blockSignals(False)
 
     def _on_day_changed(self, text: str) -> None:
@@ -1994,14 +2036,6 @@ class FusionLadderDialog(QWidget, WindowMixin):
             self.anchor_edge = None
             self.snap_timer.start(300)
 
-    def changeEvent(self, event) -> None:  # noqa: N802
-        super().changeEvent(event)
-        if event.type() == event.Type.ActivationChange:
-            if self.isActiveWindow() and getattr(self, "is_hidden_state", False):
-                self._is_auto_popping = True
-                QTimer.singleShot(500, lambda: setattr(self, "_is_auto_popping", False))
-                self.show_normal_position()
-
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         if (self.anchor_edge is not None or getattr(self, "is_hidden_state", False)) and not getattr(self, "stays_on_top", False):
@@ -2020,6 +2054,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
         try:
             if event and event.type() == QEvent.Type.ActivationChange:
                 if self.isActiveWindow() and getattr(self, "is_hidden_state", False):
+                    self._is_auto_popping = True
+                    QTimer.singleShot(500, lambda: setattr(self, "_is_auto_popping", False))
                     self.show_normal_position()
         except Exception:
             pass
@@ -2238,7 +2274,15 @@ class FusionLadderDialog(QWidget, WindowMixin):
             return
         if self._worker is not None and self._worker.isRunning():
             return
+        now = time.time()
+        if (now - float(getattr(self, "_last_init_scan_t", 0.0) or 0.0)) < 300:
+            return
         day = self.cmb_day.currentText().strip() or today_str()
+        # 优先使用已缓存的最新记录时间戳，避免每 2 秒无变化时仍在 UI 线程重读文件
+        cached_day = getattr(self, "_latest_live_day", "")
+        cached_ts = float(getattr(self, "_latest_live_ts", 0.0) or 0.0)
+        if cached_day == day and cached_ts > 0 and (now - cached_ts) <= 180:
+            return
         rows = load_live_rows(day, allow_fallback=False)
         has_data = bool(rows)
         if has_data:
@@ -2246,11 +2290,10 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 latest = max(float(r.get("ts") or 0.0) for r in rows)
             except Exception:
                 latest = 0.0
-            if latest > 0 and (time.time() - latest) <= 180:
+            self._latest_live_day = day
+            self._latest_live_ts = latest
+            if latest > 0 and (now - latest) <= 180:
                 return
-        now = time.time()
-        if (now - float(getattr(self, "_last_init_scan_t", 0.0) or 0.0)) < 300:
-            return
         self._last_init_scan_t = now
         if self._trigger_host_scan():
             self.lbl_status.setText("状态：{} 已请求主程序执行一轮逻辑扫描，等待影子数据…".format(day))
@@ -2433,6 +2476,9 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 pass
 
         cov_avg = (coverage_sum / coverage_n) if coverage_n else 0.0
+        if source_day == day and latest_ts > 0:
+            self._latest_live_day = day
+            self._latest_live_ts = latest_ts
         now_txt = datetime.datetime.now().strftime("%H:%M:%S")
         stale = ""
         if latest_ts > 0:
@@ -2486,7 +2532,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
             after = recs[entry_i:]
             prices = [float(x.get("price") or 0.0) for x in after if float(x.get("price") or 0.0) > 0]
             mfe = mae = close_ret = 0.0
-            if ep > 0 and prices:
+            if ep > 0 and prices and len(after) > 1:
                 mfe = (max(prices) - ep) / ep * 100.0
                 mae = (min(prices) - ep) / ep * 100.0
                 close_ret = (prices[-1] - ep) / ep * 100.0
@@ -2499,22 +2545,37 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 if t >= 1:
                     keep += 1
             ev = list((entry.get("fusion") or {}).get("evidence") or [])
+            # 融合实盘 RaceTracker / 回放回补 track_entry 的真实跟踪信息（解决单条回补时 MFE/MAE/首异动归零问题）
+            te = entry.get("track_entry") or entry.get("track") or {}
+            first_ts = float(te.get("first_ts") or first.get("ts") or 0.0)
+            first_pct = float(te.get("first_pct") if te.get("first_pct") is not None else (first.get("pct") or 0.0))
+            enter_ts = float(te.get("enter_ts") or entry.get("ts") or 0.0)
+            enter_pct = float(te.get("enter_pct") if te.get("enter_pct") is not None else (entry.get("pct") or 0.0))
+            persist_val = float(te.get("persist") or round(keep * 100.0 / max(1, len(after)), 1))
+            if len(after) <= 1:
+                mfe = float(te.get("mfe") if te.get("mfe") is not None else (entry.get("mfe") or mfe))
+                mae = float(te.get("mae") if te.get("mae") is not None else (entry.get("mae") or mae))
+                close_ret = float(
+                    te.get("close_ret") if te.get("close_ret") is not None else (entry.get("close_ret") or close_ret)
+                )
+            chain_txt = str(te.get("chain") or " · ".join(ev))[:160]
+            ev_n = int(te.get("evidence_n") or len(ev) or (1 if chain_txt else 0))
             out.append({
                 "code": code,
                 "name": entry.get("name") or name_of(code),
                 "tier": int((entry.get("fusion") or {}).get("tier") or 0),
-                "enter_ts": float(entry.get("ts") or 0.0),
+                "enter_ts": enter_ts,
                 "enter_price": ep,
-                "enter_pct": float(entry.get("pct") or 0.0),
-                "first_ts": float(first.get("ts") or 0.0),
-                "first_pct": float(first.get("pct") or 0.0),
-                "since_first": float(entry.get("pct") or 0.0) - float(first.get("pct") or 0.0),
-                "persist": round(keep * 100.0 / max(1, len(after)), 1),
-                "evidence_n": len(ev),
-                "chain": " · ".join(ev)[:160],
-                "mfe": mfe,
-                "mae": mae,
-                "close_ret": close_ret,
+                "enter_pct": enter_pct,
+                "first_ts": first_ts,
+                "first_pct": first_pct,
+                "since_first": enter_pct - first_pct,
+                "persist": round(persist_val, 1),
+                "evidence_n": ev_n,
+                "chain": chain_txt,
+                "mfe": round(mfe, 2),
+                "mae": round(mae, 2),
+                "close_ret": round(close_ret, 2),
             })
         out.sort(key=lambda e: (-e["tier"], -e["persist"]))
         return out
@@ -2644,6 +2705,13 @@ class FusionLadderDialog(QWidget, WindowMixin):
             from ats.fusion.session_ctx import default_store
 
             # 1. 回补双通道持久化：同时落盘 logs/fusion_shadow/{day}.jsonl 与 Ramdisk
+            entry_by_code: Dict[str, Dict[str, Any]] = {}
+            for e_item in (getattr(result, "entries", None) or []):
+                if isinstance(e_item, dict):
+                    ec = str(e_item.get("code") or "").split(".")[0].zfill(6)
+                    if ec and ec not in entry_by_code:
+                        entry_by_code[ec] = e_item
+
             by_code: Dict[str, Dict[str, Any]] = {}
             for r in result.records:
                 cd = str(r.get("code") or "").split(".")[0].zfill(6)
@@ -2653,6 +2721,14 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 rar = float(r.get("rar") or 0.0)
                 entry_p = float(r.get("entry") or 0.0)
                 pct_val = float(r.get("pct") or 0.0)
+                ev_list = list(r.get("evidence") or [])
+                if not ev_list:
+                    for p_tag in (r.get("patterns") or []):
+                        ev_list.append(f"形态:{p_tag}")
+                    if r.get("lead_label"):
+                        ev_list.append(f"先锋:{r.get('lead_label')}")
+                    if r.get("chain"):
+                        ev_list.append(str(r.get("chain")))
                 row = {
                     # 回补记录必须与实盘记录同构：否则界面会把它当成"旧版 exe 写入"，
                     # 覆盖% / 命中 / 证据链也会集体缺失。
@@ -2667,6 +2743,21 @@ class FusionLadderDialog(QWidget, WindowMixin):
                     "trade_date": day,
                     "hit": bool(tier >= 2),
                     "coverage": 1.0,
+                    "mfe": round(float(r.get("mfe") or 0.0), 2),
+                    "mae": round(float(r.get("mae") or 0.0), 2),
+                    "close_ret": round(float(r.get("close_ret") or 0.0), 2),
+                    "track_entry": entry_by_code.get(cd) or {
+                        "first_ts": float(r.get("ts") or 0.0),
+                        "first_pct": float(r.get("first_pct") if r.get("first_pct") is not None else pct_val),
+                        "enter_ts": float(r.get("ts") or 0.0),
+                        "enter_pct": pct_val,
+                        "persist": float(r.get("persist") or 0.0),
+                        "evidence_n": int(r.get("attach_n") or len(ev_list)),
+                        "chain": str(r.get("chain") or " · ".join(ev_list)),
+                        "mfe": round(float(r.get("mfe") or 0.0), 2),
+                        "mae": round(float(r.get("mae") or 0.0), 2),
+                        "close_ret": round(float(r.get("close_ret") or 0.0), 2),
+                    },
                     "fusion": {
                         "tier": tier,
                         "tier_name": str(r.get("tier_name") or ""),
@@ -2675,7 +2766,10 @@ class FusionLadderDialog(QWidget, WindowMixin):
                         "age_min": float(r.get("age_min") or 0.0),
                         "coverage": 1.0,
                         "provisional": False,
-                        "entry": {"price_lo": entry_p, "price_hi": entry_p},
+                        "entry": {
+                            "price_lo": float(r.get("entry_lo") or entry_p),
+                            "price_hi": float(r.get("entry_hi") or entry_p),
+                        },
                         "stop": {"price": r.get("stop") or "-"},
                         "axes": {
                             "position": float((r.get("axes") or {}).get("position") or 50.0),
@@ -2686,7 +2780,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
                             "penalty": float((r.get("axes") or {}).get("penalty") or 0.0),
                             "rar": rar,
                         },
-                        "evidence": list(r.get("evidence") or [])[:6],
+                        "evidence": ev_list[:6],
                         "sources": ["REPLAY_BACKFILL"],
                     },
                 }
