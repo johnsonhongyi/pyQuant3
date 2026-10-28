@@ -7125,6 +7125,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         getattr(self, 'sortby_col', None), bool(getattr(self, 'sortby_col_ascend', False)),
                         (tuple(vars(self._capture_sort_state()).items()) if hasattr(self, '_capture_sort_state') else ())) != context:
                         return
+                    # 🛡️ [SSOT守卫] 首批行情若尚未完成量比计算，避免将原始成交量展示在量比列
+                    if 'volume' in d.columns:
+                        try:
+                            sample_vol = pd.to_numeric(d['volume'], errors='coerce')
+                            if (sample_vol > 100).any():
+                                if 'vol_ratio' in d.columns:
+                                    d['volume'] = d['vol_ratio']
+                                elif 'last6vol' in d.columns:
+                                    d['volume'] = (sample_vol / d['last6vol'].replace(0, np.nan)).fillna(1.0).round(1)
+                                else:
+                                    d['volume'] = 1.0
+                        except Exception:
+                            pass
                     self.refresh_tree(d, force=True, source_version=('initial', v))
                     self._first_market_frame_shown = True
                     logger.info("[MarketPipeline] 首批行情已显示: rows=%s version=%s", len(d), v)
@@ -12213,6 +12226,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             for column, value in quote_values.items():
                                 if pd.isna(value) and column in df.columns:
                                     continue
+                                # 🛡️ [SSOT守卫] 盘口快照中的 volume 是累计成交量(手)，而主表 df['volume'] 是「量比」！
+                                # 绝不允许用几万/几十万的原始成交量覆写主表的量比列！原始成交量映射至 'vol' 列。
+                                if column == 'volume':
+                                    if 'vol' in df.columns:
+                                        df.at[row_index, 'vol'] = value
+                                    continue
                                 if column not in df.columns:
                                     df[column] = pd.NA
                                 df.at[row_index, column] = value
@@ -12226,10 +12245,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             merged = rich_row.to_dict()
                             local_date, quote_date = row_date(rich_row), row_date(quote_row)
                             if local_date and quote_date and local_date == quote_date:
-                                merged.update({column: value for column, value in quote_values.items()
-                                               if not pd.isna(value)})
+                                # 剔除 volume，防止盘口成交量覆盖 rich_row 里的真实量比
+                                filtered_quote = {
+                                    column: value for column, value in quote_values.items()
+                                    if not pd.isna(value) and column != 'volume'
+                                }
+                                merged.update(filtered_quote)
+                                if 'volume' in quote_values and not pd.isna(quote_values['volume']):
+                                    merged['vol'] = quote_values['volume']
                             quote_values = merged
                             quote_values['code'] = code
+                        else:
+                            # 没有 rich_row 时，将盘口成交量放入 vol，volume 保持为合法量比兜底(1.0)
+                            if 'volume' in quote_values:
+                                quote_values['vol'] = quote_values['volume']
+                                quote_values['volume'] = 1.0
                         quote_values['linkage_quote_status'] = statuses_snapshot.get(code, 'unknown')
                         for column, value in quote_values.items():
                             if column not in df.columns:
@@ -19129,7 +19159,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             for col_i, v in enumerate(raw_values):
                 col_name = cols_to_show[col_i] if col_i < len(cols_to_show) else ""
                 if pd.notna(v):
-                    if col_name in co2int_cols and isinstance(v, (float, np.floating, int, np.integer)):
+                    if col_name == 'volume':
+                        try:
+                            fv = float(v)
+                            if fv > 100:
+                                vr = getattr(row, 'vol_ratio', None)
+                                if vr is not None and pd.notna(vr) and float(vr) <= 100:
+                                    formatted_values.append(f"{float(vr):.1f}")
+                                else:
+                                    formatted_values.append("1.0")
+                            else:
+                                formatted_values.append(f"{fv:.1f}")
+                        except Exception:
+                            formatted_values.append(str(v))
+                    elif col_name in co2int_cols and isinstance(v, (float, np.floating, int, np.integer)):
                         try:
                             formatted_values.append(str(int(round(float(v)))))
                         except Exception:

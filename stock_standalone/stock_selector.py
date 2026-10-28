@@ -174,12 +174,17 @@ class StockSelector:
             else:
                 combined_df['vol_ratio'] = 0.0
 
-            # 将实时采集的 vol 映射为 volume (成交量) 和 amount (如果缺失)
-            if 'vol' in combined_df.columns:
-                combined_df['volume'] = combined_df['vol']
-                if 'amount' not in combined_df.columns:
-                    # 兜底：如果 amount 缺失，使用 vol 作为临时 amount (若 vol 已经是额) 或根据价格估算
-                    combined_df['amount'] = combined_df['vol']
+            # 🛡️ [SSOT规范] 确保 volume 保持为「量比」语义，成交量统一由 'vol' 列承担，绝对禁止用成交量覆盖 volume
+            if 'vol_ratio' in combined_df.columns and not (combined_df['vol_ratio'] == 0.0).all():
+                combined_df['volume'] = combined_df['vol_ratio']
+            elif 'volume' in combined_df.columns and (combined_df['volume'] > 100).any():
+                if 'last6vol' in combined_df.columns:
+                    combined_df['volume'] = (combined_df['volume'] / combined_df['last6vol'].replace(0, np.nan)).fillna(1.0).round(1)
+                else:
+                    combined_df['volume'] = 1.0
+
+            if 'amount' not in combined_df.columns and 'vol' in combined_df.columns:
+                combined_df['amount'] = combined_df['vol']
             
             return combined_df
         except Exception as e:

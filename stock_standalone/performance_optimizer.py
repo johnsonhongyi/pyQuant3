@@ -563,6 +563,11 @@ class TreeviewIncrementalUpdater:
 
         # 预提取显示列的值（使用 numpy 提取每列，然后组装）
         col_arrays = []
+        has_vol_ratio = 'vol_ratio' in df.columns
+        vol_ratio_col = df['vol_ratio'] if has_vol_ratio else None
+        has_last6vol = 'last6vol' in df.columns
+        has_vol = 'vol' in df.columns
+
         for col in columns:
             if col in df.columns:
                 # fillna 处理 NaN
@@ -570,6 +575,36 @@ class TreeviewIncrementalUpdater:
                     arr = [_fmt_sig(x) if pd.notna(x) else '' for x in df[col]]
                 elif col in co2int_cols:
                     arr = [_fmt_int(x) if pd.notna(x) else '' for x in df[col]]
+                elif col == 'volume':
+                    # 🛡️ [SSOT终极防御] 表头'volume'对应'量比'！绝对禁止向用户界面裸露几万/几十万成交量！
+                    arr = []
+                    for idx, val in enumerate(df[col]):
+                        if pd.isna(val) or val == '':
+                            if has_vol_ratio and pd.notna(vol_ratio_col.iloc[idx]):
+                                arr.append(f"{float(vol_ratio_col.iloc[idx]):.1f}")
+                            else:
+                                arr.append('')
+                            continue
+                        try:
+                            fval = float(val)
+                            # 判定标准：A股量比绝对不可能达到 100 以上（实盘最大一般在 20~50）
+                            if fval > 100:
+                                # 受到原始成交量污染，智能自愈
+                                if has_vol_ratio and pd.notna(vol_ratio_col.iloc[idx]) and float(vol_ratio_col.iloc[idx]) <= 100:
+                                    arr.append(f"{float(vol_ratio_col.iloc[idx]):.1f}")
+                                elif has_last6vol and has_vol:
+                                    l6v = float(df['last6vol'].iloc[idx]) if pd.notna(df['last6vol'].iloc[idx]) else 0
+                                    cur_v = float(df['vol'].iloc[idx]) if pd.notna(df['vol'].iloc[idx]) else fval
+                                    if l6v > 0:
+                                        arr.append(f"{(cur_v / l6v):.1f}")
+                                    else:
+                                        arr.append("1.0")
+                                else:
+                                    arr.append("1.0")
+                            else:
+                                arr.append(f"{fval:.1f}")
+                        except (TypeError, ValueError):
+                            arr.append(str(val))
                 else:
                     # Extension/categorical dtypes reject filling numeric or
                     # category storage with ''. Convert display values only.

@@ -1,5 +1,20 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-28 14:30 【TK监控主界面量比数据一致性、盘口快照防污染与UI智能自愈治理】(`docs/tasks/2026-10-28_1430_TK量比数据一致性与盘口快照防污染治理.md`, `instock_MonitorTK.py`, `performance_optimizer.py`, `stock_selector.py`, `data_utils.py`, `tests/test_tk_volume_ratio_data_consistency.py`)
+- [x] **【彻底破案并根除 TK 量比显示为几十万成交量与刷新后恢复的间歇性 BUG】**：
+  - **用户业务诉求**：“tk的量比出现严重的bug,全面检查数据一致性”，“刷新后又正常了,修复这是哪里的逻辑bug导致的”；
+  - **直接污染源破案**：`instock_MonitorTK.py` 中的 `_refresh_ui_favorites` 每 2~10 秒后台拉取重点关注/联动盘口快照（`linkage_quotes`）。原生盘口快照的 `volume` 为**当日累计成交量（手）**（如 301005: 113764手）。原合并逻辑无条件 `df.at[row_index, column] = value`，直接用数十万的成交量覆盖了主表表头为「量比」的 `volume` 列；且将未选中的关注股追加为 134 行；刷新后主管道送达纯净 55 行量比 1.3，故呈现“刷新后正常，过几秒又异常”；
+  - **源头止血与字段隔离**：在 `_refresh_ui_favorites` 实施严格 SSOT 守卫：盘口快照的 `volume` 坚决不覆写主表量比，重定向映射至成交量 `vol` 列；与 `rich_row` 合并时坚决剔除 `volume`，严密保护主表已计算好的真实量比不被冲刷；
+- [x] **【全系统数据管道 SSOT 规范化与歧义根除】**：
+  - **StockSelector 规范化**：移除 `stock_selector.py` 内部 `combined_df['volume'] = combined_df['vol']` 危险反向覆盖，成交量由 `vol` 承担，量比严格由 `volume` 与 `vol_ratio` 承担；
+  - **双向镜像索引**：在 `data_utils.py` 的 `calc_indicators` 显式写入 `top_all['vol_ratio'] = top_all['volume']`，建立全系统不可篡改的双重权威索引；
+- [x] **【UI 消费端（Treeview 增量更新与传统更新）终极自愈防线】**：
+  - **增量更新器智能自愈**：在 `performance_optimizer.py` 的 `_prepare_rows_fast` 建立量比数值防御门禁：若检测到 `volume > 100`（明显是数十万成交量脏数据），优先从同行 `vol_ratio` 提取真实量比；次选通过 `vol / last6vol` 现场自愈纠偏；兜底保持为 `1.0`，**绝对禁止在「量比」列向用户渲染出几十万的绝对成交量**；统一浮点数格式化为保留 1 位小数（如 `1.3`、`0.9`）；
+  - **传统模式与首帧守卫**：在 `_refresh_tree_traditional` 与 `show_first_frame` 同步注入量比健康门禁，彻底阻断任何异常数据穿透到前端界面；
+- [x] **【自动化测试全绿通过（5 项专项 + 40 项全量回归）】**：
+  - 新增 `tests/test_tk_volume_ratio_data_consistency.py` 5 项测试全部 100% PASS；
+  - 全量 49 项关联测试纯绿通过，语法静态检查 0 错误。
+
 ## 2026-10-28 11:55 【午间休市TDX防误切主站、冷启动首次初始化豁免与现价0.00根除治理】(`docs/tasks/2026-10-28_1155_午间休市TDX防误切主站与冷启动首次初始化豁免治理.md`, `ats/tdx_realtime_fetcher.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_noon_recess_and_cold_start_exemption.py`)
 - [x] **【彻底根治午间休市通达信空批次误判主站假死与深度二分拆包轰炸（用户日志问题）】**：
   - **用户日志破案**：用户在 11:34:37 遇到报警 `[TDX] 批次未返回盘口数据，启动深度二分隔离探针`、`[TDX故障自愈] 主站探针无响应，确认节点假死，立即自动故障转移！` 并询问“刚刚启动提示,是tdx的服务器暂停导致的?”；

@@ -1036,6 +1036,8 @@ def calc_indicators(top_all: pd.DataFrame, logger: Any, resample: str) -> pd.Dat
     top_all['amount'] = top_all['vol'] * top_all['close']
     # 这里的 volume 将被更新为虚拟量比信号强度
     top_all['volume'] = calc_compute_volume(top_all, logger, resample=resample, virtual=True)
+    # 🛡️ [SSOT对齐] 将量比同时同步镜像到 vol_ratio，建立全链路不可篡改的量比备份
+    top_all['vol_ratio'] = top_all['volume']
     
     # --- [NEW] 注入 win_upper 实时指标 (针对压力位1和2) ---
     max_days = cct.compute_lastdays
