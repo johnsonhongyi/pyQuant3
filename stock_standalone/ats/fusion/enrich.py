@@ -91,6 +91,55 @@ def depth_fields(snapshot: Optional[Dict[str, Any]], row: Optional[Dict[str, Any
     return out
 
 
+def _extract_series_ohlcv(bars: Any):
+    """从 DataFrame 或 list[dict] 或结构化数组里取出完整的 (opens, highs, lows, closes, vols)。"""
+    opens: List[float] = []
+    highs: List[float] = []
+    lows: List[float] = []
+    closes: List[float] = []
+    vols: List[float] = []
+    if bars is None:
+        return opens, highs, lows, closes, vols
+    try:
+        if hasattr(bars, "columns"):
+            if "close" not in getattr(bars, "columns", []):
+                return opens, highs, lows, closes, vols
+            closes = [_f(x) for x in bars["close"].tolist()]
+            vols = [_f(x) for x in bars["vol"].tolist()] if "vol" in bars.columns else [0.0] * len(closes)
+            highs = [_f(x) for x in bars["high"].tolist()] if "high" in bars.columns else list(closes)
+            lows = [_f(x) for x in bars["low"].tolist()] if "low" in bars.columns else list(closes)
+            opens = [_f(x) for x in bars["open"].tolist()] if "open" in bars.columns else list(closes)
+            return opens, highs, lows, closes, vols
+        if hasattr(bars, "dtype") and getattr(bars.dtype, "names", None):
+            names = bars.dtype.names
+            if "close" in names:
+                closes = [_f(x) for x in bars["close"]]
+                vols = [_f(x) for x in bars["volume" if "volume" in names else "vol"]] if ("vol" in names or "volume" in names) else [0.0] * len(closes)
+                highs = [_f(x) for x in bars["high"]] if "high" in names else list(closes)
+                lows = [_f(x) for x in bars["low"]] if "low" in names else list(closes)
+                opens = [_f(x) for x in bars["open"]] if "open" in names else list(closes)
+                return opens, highs, lows, closes, vols
+        seq: Sequence[Any] = bars
+        for row in seq:
+            if isinstance(row, dict):
+                c_val = _f(row.get("close") or row.get("price"))
+                closes.append(c_val)
+                vols.append(_f(row.get("vol") or row.get("volume")))
+                highs.append(_f(row.get("high"), c_val))
+                lows.append(_f(row.get("low"), c_val))
+                opens.append(_f(row.get("open"), c_val))
+            elif hasattr(row, "close"):
+                c_val = _f(getattr(row, "close", 0.0))
+                closes.append(c_val)
+                vols.append(_f(getattr(row, "vol", getattr(row, "volume", 0.0))))
+                highs.append(_f(getattr(row, "high", c_val), c_val))
+                lows.append(_f(getattr(row, "low", c_val), c_val))
+                opens.append(_f(getattr(row, "open", c_val), c_val))
+    except Exception:
+        pass
+    return opens, highs, lows, closes, vols
+
+
 def intraday_fields(
     bars: Any,
     vwap: float = 0.0,
@@ -112,9 +161,64 @@ def intraday_fields(
       intent_score       上涨分钟成交量占比 × 70 + 净拉升加成 + 15 基线。
       structure_clarity  1 - 噪声比：噪声比 = 平均每分钟波动 / 当日振幅。
     """
-    closes, vols = _extract_series(bars)
+    opens, highs, lows, closes, vols = _extract_series_ohlcv(bars)
     n = len(closes)
-    if n < 8:
+    if n < 3:
+        return {}
+
+    # 向量化还原日内动态加权均价序列 vwap_t
+    cum_vol = 0.0
+    cum_amt = 0.0
+    vwap_series: List[float] = []
+    for k in range(n):
+        vk = max(1.0, vols[k]) if vols else 1.0
+        tp = (highs[k] + lows[k] + 2.0 * closes[k]) / 4.0 if (highs and lows) else closes[k]
+        cum_vol += vk
+        cum_amt += tp * vk
+        vwap_series.append(cum_amt / cum_vol if cum_vol > 0 else tp)
+
+    # 剥离起跳根 (t=0) 的最低价悬空度检验：
+    # 首根 t=0 必须站上均价 (closes[0] >= vwap_series[0])，从 t>=1 开始检验最低价不跌碰均线
+    min_vwap_cushion = 0.0
+    vwap_zero_touch = False
+    if n >= 3 and closes[0] >= vwap_series[0] * 0.999:
+        cushions = [
+            (lows[idx_c] - vwap_series[idx_c]) / vwap_series[idx_c] * 100.0
+            for idx_c in range(1, n)
+            if vwap_series[idx_c] > 0
+        ]
+        if cushions:
+            min_vwap_cushion = min(cushions)
+            vwap_slope_up = vwap_series[-1] >= vwap_series[0] * 0.999
+            if min_vwap_cushion >= 0.25 and vwap_slope_up:
+                vwap_zero_touch = True
+
+    # 早盘 3 <= n < 8 确认窗快速通道 (09:33~09:38 豁免数据饥饿死锁，仅在具备真实最低价 low 时激活)
+    has_real_low = False
+    if hasattr(bars, "columns") and "low" in bars.columns:
+        has_real_low = True
+    elif hasattr(bars, "dtype") and getattr(bars.dtype, "names", None) and "low" in bars.dtype.names:
+        has_real_low = True
+    elif isinstance(bars, (list, tuple)) and bars and isinstance(bars[0], dict) and "low" in bars[0]:
+        has_real_low = True
+
+    if 3 <= n < 8:
+        if has_real_low and vwap_zero_touch and closes[-1] >= vwap_series[-1]:
+            hi0 = highs[0] if (highs and len(highs) > 0) else closes[0]
+            if closes[-1] >= hi0 * 0.998:
+                seg = closes
+                slope_score = _clip(50.0 + _slope_pct_per_min(seg) * 300.0, 10.0, 100.0)
+                base_p = closes[0]
+                vel_pct = ((closes[-1] - base_p) / base_p * 100.0) if base_p > 0 else 0.0
+                return {
+                    "slope_score": round(slope_score, 2),
+                    "velocity_pct": round(vel_pct, 3),
+                    "minutes_above_vwap": float(sum(1 for idx_m in range(n) if closes[idx_m] >= vwap_series[idx_m])),
+                    "intent_score": 75.0,
+                    "structure_clarity": 85.0,
+                    "min_vwap_cushion": round(min_vwap_cushion, 2),
+                    "vwap_zero_touch": 1.0,
+                }
         return {}
 
     window = max(4, min(int(slope_window), n))
@@ -159,6 +263,8 @@ def intraday_fields(
         "minutes_above_vwap": float(minutes_above_vwap),
         "intent_score": round(intent_score, 2),
         "structure_clarity": round(structure_clarity, 2),
+        "min_vwap_cushion": round(min_vwap_cushion, 2),
+        "vwap_zero_touch": 1.0 if vwap_zero_touch else 0.0,
     }
     if segment_vol_inc > 0:
         out["segment_vol_inc"] = round(segment_vol_inc, 3)

@@ -854,6 +854,19 @@ class DayReplay:
                 )
                 _rs5 = float(ret5_arr[i] - mkt_ret5) if _isfinite(ret5_arr[i]) else 0.0
                 _vw10 = float(vwap10_map.get(codes[i], 0.0))
+
+                # V2: 向量化计算自开盘 t>=1 起最低价悬空垫 (Zero-Touch Cushion)
+                _cushion = 0.0
+                if t >= 2 and mat["close"][i, 0] >= mat["vwap"][i, 0] * 0.999:
+                    if mat["vwap"][i, t] >= mat["vwap"][i, 0] * 0.999:
+                        cush_list = [
+                            (mat["low"][i, k] - mat["vwap"][i, k]) / mat["vwap"][i, k] * 100.0
+                            for k in range(1, t + 1)
+                            if mat["vwap"][i, k] > 0
+                        ]
+                        if cush_list:
+                            _cushion = min(cush_list)
+
                 _pat_early = detect_patterns(
                     price=price, day_open=_day_open,
                     ma5=_ma5, ma10=_ma10, ma20=_ma20,
@@ -863,6 +876,10 @@ class DayReplay:
                     vwap10=_vw10,
                     vol_dry=float(_dc.get("vol_dry", 1.0) or 1.0),
                     prev_pct=float(_dc.get("prev_pct", 0.0) or 0.0),
+                    is_box10_ready=bool(_dc.get("is_box10_ready")),
+                    hi_10d=float(_dc.get("hi_10d") or 0.0),
+                    hi_pre1=float(_dc.get("hi_pre1") or 0.0),
+                    min_vwap_cushion=float(_cushion),
                 )
                 patterns = list(_pat_early)
 
@@ -889,13 +906,16 @@ class DayReplay:
 
                 ev.extra = dict(ev.extra or {})
                 ev.extra.update(_lead.to_dict())
+                ev.extra["patterns"] = list(patterns)
 
                 if _lead.label in (LABEL_VANGUARD, LABEL_FLAG):
                     vwatch.register(codes[i], _sector, float(clock[t]), price, _vw10)
 
                 _ps = pattern_score(patterns)
                 _floor = None
-                if self.cfg.pattern_floor:
+                if "十日洗盘悬空突破" in patterns:
+                    _floor = 4  # 直通 L4 主攻
+                elif self.cfg.pattern_floor:
                     _floor = 3 if _ps >= 100 else (2 if _ps >= 70 else None)
                 decision = self.engine.evaluate(
                     ev, regime, now=float(clock[t]), tier_floor=_floor
@@ -952,6 +972,9 @@ class DayReplay:
                         _row = _st.to_dict()
                         _row.update({
                             "ts": int(clock[t]),
+                            "enter_time": time.strftime("%H:%M", time.localtime(int(clock[t]))),
+                            "enter_price": round(float(price), 3),
+                            "enter_pct": round(float(pct[i]), 2),
                             "name": name_of(codes[i]),
                             "mfe": round((float(_fm) / price - 1.0) * 100.0, 2) if np.isfinite(_fm) else 0.0,
                             "mae": round((float(_fn) / price - 1.0) * 100.0, 2) if np.isfinite(_fn) else 0.0,

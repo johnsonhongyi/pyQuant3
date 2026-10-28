@@ -1,5 +1,31 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-28 16:10 【10日VWAP结构异动双轨极限性能落地架构设计与V2终审优化】(`docs/tasks/2026-10-28_1600_10日VWAP结构异动双轨极限性能落地架构.md`, `realtime_data_service.py`, `ats/fusion/context.py`, `ats/fusion/anomaly.py`, `ats/fusion/engine.py`, `ats/fusion/enrich.py`, `ats/fusion/replay.py`, `ats/fusion/tracker.py`, `stock_live_strategy.py`, `ats/ui/fusion_ladder_dialog.py`)
+- [x] **【支柱 1：静态历史 10 日宏观骨架与 $O(1)$ 标量预计算表（修正 V1 盘中覆盖悖论与量纲风险）】**：
+  - **消除盘中覆盖未来函数与突破自锁**：`DailySkeleton10` 严格锚定截至昨日收盘的过去 10 个完整交易日（`Day -10 ~ Day -1`），盘中全天只读、绝不拿今日未走完的数据动态覆盖（避免 `Price >= hi_10d` 自锁与早盘大涨后把自身踢出窄幅池）；
+  - **盘前 $O(1)$ 标量预计算与量纲自校准**：盘前一次性归约生成 `PrecomputedBox10` 标量字典（`hi_10d, lo_10d, hi_pre1, v3, v5, v10, amp_10d, vwap_disp`），盘中直读耗时 $< 0.05\,\mu\text{s}$；单日均价执行 `[low, high]` 量纲自校准，彻底杜绝 `amount(千元)/vol(手)` 引发的 10x/100x 量纲事故；
+- [x] **【支柱 2：分板块弹性 10 日 VWAP 洗盘收敛池（Top 150 动态漏斗）】**：
+  - **主板/双创差异化箱体门禁**：10cm 主板 $\text{amp}_{10\text{d}} \le 18.0\%$，20cm 创业板/科创板（如 300806 斯迪克）放宽至 $\text{amp}_{10\text{d}} \le 24.0\%$，防止误杀 20cm 强势洗盘牛股；
+  - **3V/5V/10V 粘合与重心不破底**：要求极差粘合度 $\le 2.5\%$ 且 $V_3 \ge V_{10} \times 0.985 \land \text{Close}_{\text{pre1}} \ge V_{10} \times 0.98$，配合 60F 通道企稳，盘前 0.1s 锁定 Top 150 蓄势种子；
+- [x] **【支柱 3：两级漏斗定向深算（仅 3~8 只）、剥离起跳根的悬空不碰 VWAP 与水下反抽硬否决】**：
+  - **水下反抽一票否决（`engine.py -> veto_of`）**：凡 $\text{Price} < \text{VWAP}_{\text{day}} \times 0.998$ 或 10 日成本水下冲高回落一律硬否决为 `L0`；
+  - **两级漏斗极致降载（CPU 降 99.8%）**：在 `stock_live_strategy.py` 与 `replay.py` 先用 $O(1)$ 标量过滤池内满足 `Price >= hi_10d & Price >= hi_pre1 & Price > VWAP` 的突破活跃种子（每秒仅 3~8 只），仅对这 3~8 只执行分时深算；
+  - **剥离首根起跳 Bar（$t=0$）与早盘快速通道（$3 \le n < 8$）**：修正 V1 中 $t=0$ 首根 Bar 必满足 $\text{low}_0 \le \text{vwap}_0$ 的数学死锁，从 $t \ge 1$（且 $n \ge 3$，09:33 起）检验最低价悬空垫 $\min_{t \ge 1}(\text{low}_t - \text{vwap}_t)/\text{vwap}_t \ge 0.25\%$；注册 `PATTERN_BOX10_VWAP_HOVER` 形态并豁免早盘板块共振滞后与 `STAGE_COLD` 封顶，直通 `L4 主攻`；
+- [x] **【支柱 4：根治监视器表格当时涨幅 `+0.00%` 与首→入% `-8.77%` 倒挂 Bug】**：
+  - **真正根因穿透**：`tracker.py` 的 `to_dict()` 原已导出 `"enter_pct": 0.0`；当首次 `fusion.tier >= 2` 触发时，`RaceTracker` 尚处 `STAGE_WATCH`（`enter_ts == 0`），其导出的 `0.0` 因满足 `is not None` 直接覆盖了 `entry.get("pct")` 的真实涨幅（`+8.77%`），导致 `since_first = 0.0 - 8.77 = -8.77%`；
+  - **靶向修复**：`to_dict()` 补齐 `first_ts/enter_ts` 并在 `enter_ts <= 0` 时不导出虚假 `0.0`；`fusion_ladder_dialog.py` 严格校验 `enter_ts > 0 and enter_price > 0`，未正式入局时一律回退取触发帧真实 `entry.get("pct")`。
+
+- [x] **【支柱 5：实盘影子流（observe）与回放（DayReplay）100% 同构全闭环】**：
+  - **彻底打通影子流全参数与形态透传（断链 1 & 2）**：`ats/fusion/adapter.py` 白名单注入 `is_box10_ready`, `min_vwap_cushion`, `hi_10d`, `hi_pre1` 等扩展字段；`ats/fusion/shadow.py` 完整透传形态识别参数并回写 `event.extra["patterns"]`，识别到 `十日洗盘悬空突破` 时赋予 `tier_floor=4`，直通 L4 主攻；
+  - **四处悬空门禁口径严格对齐（断链 4）**：`enrich.py`, `anomaly.py`, `engine.py`, `replay.py` 统一对齐最低价悬空垫 >= 0.25%、均线斜率向上且现价突破首根最高价；
+  - **赛马跟踪首帧直通与可下单放宽（断链 6）**：`RaceTracker._advance` 针对 `十日洗盘悬空突破` 豁免观察期与低 bar 数限制，直通 `STAGE_ENTER`；首帧未回撤时效率判定为 1.0；`deploy_path` 放宽首异动涨幅上限至 7.0%，生成 `PATH_BOX10 = "D 十日洗盘突破"`；
+  - **反例与并发深度加固（实盘前终审）**：
+    - 修复 `enrich.py` 早盘确认窗缩进问题，彻底消除 `UnboundLocalError: 'seg'` 运行时崩溃风险；
+    - 修复 `engine.py` 字段错位与误保底箱底票缺陷，严格校验 `patterns` 形态，并在 `replay.py` 补齐 `ev.extra["patterns"]` 透传；
+    - 在 `context.py` 为 `get_daily_context()` 与 `box10_pool()` 增加 DCL 双检锁与线程安全缓存，根除多线程并发重复实例化与排队卡顿；
+    - 专项测试增至 9 项（覆盖正向放行、反例安全返回、箱底不保底、多线程并发 DCL），全部 100% PASS。
+  - **全量自动化测试纯绿通过**：`tests/test_box10_vwap_hover_and_ladder_v2.py` 6 项专项测试 100% PASS，65 项核心测试与 18 项回放测试全部纯绿通过。
+
 ## 2026-10-28 14:30 【TK监控主界面量比数据一致性、盘口快照防污染与UI智能自愈治理】(`docs/tasks/2026-10-28_1430_TK量比数据一致性与盘口快照防污染治理.md`, `instock_MonitorTK.py`, `performance_optimizer.py`, `stock_selector.py`, `data_utils.py`, `tests/test_tk_volume_ratio_data_consistency.py`)
 - [x] **【彻底破案并根除 TK 量比显示为几十万成交量与刷新后恢复的间歇性 BUG】**：
   - **用户业务诉求**：“tk的量比出现严重的bug,全面检查数据一致性”，“刷新后又正常了,修复这是哪里的逻辑bug导致的”；

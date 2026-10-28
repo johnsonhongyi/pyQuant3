@@ -137,7 +137,9 @@ class TrackState:
     @property
     def efficiency(self) -> float:
         tot = self.up_sum + self.down_sum
-        return self.up_sum / tot if tot > 0 else 0.5
+        if tot > 0:
+            return self.up_sum / tot
+        return 1.0 if self.first_pct > 0 else 0.5
 
     @property
     def vol_frac(self) -> float:
@@ -179,6 +181,7 @@ class TrackState:
             "day": self.day,
             "stage": self.stage,
             "persist": round(self.persist, 1),
+            "first_ts": float(self.first_ts) if self.first_ts > 0 else 0.0,
             "first_time": time.strftime("%H:%M", time.localtime(int(self.first_ts))) if self.first_ts else "",
             "first_pct": round(self.first_pct, 2),
             "since_first_pct": round(self.since_first_pct, 2),
@@ -203,9 +206,10 @@ class TrackState:
             "best_tier": self.best_tier,
             "best_rar": round(self.best_rar, 1),
             "chain": self.chain(),
+            "enter_ts": float(self.enter_ts) if self.enter_ts > 0 else 0.0,
             "enter_time": time.strftime("%H:%M", time.localtime(int(self.enter_ts))) if self.enter_ts else "",
-            "enter_price": round(self.enter_price, 3),
-            "enter_pct": round(self.enter_pct, 2),
+            "enter_price": round(self.enter_price, 3) if self.enter_ts > 0 and self.enter_price > 0 else None,
+            "enter_pct": round(self.enter_pct, 2) if self.enter_ts > 0 and self.enter_price > 0 else None,
             "evict_reason": self.evict_reason,
             "prev_day": self.day_summaries[-1] if self.day_summaries else None,
         }
@@ -598,10 +602,15 @@ class RaceTracker:
             return
 
         # ---- 入局前：只做宽松观察，不因分数低而剔除 ----
-        if st.bars < cfg.min_bars:
-            return
-        if st.evidence_count() < cfg.min_evidence:
-            return
+        is_box10_fast = (
+            "十日洗盘悬空突破" in st.patterns_seen
+            or st.best_tier >= 4
+        )
+        if not is_box10_fast:
+            if st.bars < cfg.min_bars:
+                return
+            if st.evidence_count() < cfg.min_evidence:
+                return
         if st.age_min > cfg.watch_expire_min and st.stale_bars >= cfg.evict_flat_bars:
             self._evict(st, ts, "观察{}分钟无新证据".format(int(st.age_min)))
             return
@@ -635,11 +644,13 @@ class RaceTracker:
             self._block(st, "阶段:先锋阵亡(非排头兵)")
             return
 
-        if st.persist < cfg.enter_persist:
+        enter_thresh = 45.0 if is_box10_fast else cfg.enter_persist
+        if st.persist < enter_thresh:
             return
         if st.efficiency < cfg.enter_eff_min:
             return
-        if st.since_first_pct > cfg.enter_max_chase:
+        chase_limit = 7.0 if is_box10_fast else cfg.enter_max_chase
+        if st.since_first_pct > chase_limit:
             return   # 第一波已经走完，不追
         if vwap10 > 0 and price < vwap10 * cfg.enter_vwap10_tol:
             return   # 10 日 VWAP 是启动确认门槛
@@ -703,11 +714,13 @@ class DeployRule:
 
     theme_rank_min: float = 0.60     # 赛道（概念）强度分位：个股是蓄势，板块才是赛道
     first_pct_max: float = 3.0       # 首异动涨幅上限：第一波，不追
+    box10_first_pct_max: float = 7.0 # 十日洗盘突破首异动上限：创业板/科创板放宽至7%
     efficiency_min: float = 0.85     # 想的多回踩的少
     persist_min: float = 55.0        # 量能持续（A 路径）
     safe_persist_min: float = 60.0   # 量能持续（B 路径更严）
     trend_pattern: str = "两阳加速"
     safe_pattern: str = "缩量转放量"
+    box10_pattern: str = "十日洗盘悬空突破"
     consensus_max: float = 0.60      # 趋同度超过此值不下单（大家都涨了，跟单容易被埋）
     reject_follow: bool = True       # 跟风票不下单（板块已启动30分钟+才动，没有导向性）
     # C 路径（排头兵无形态直接下单）默认关闭：
@@ -720,6 +733,7 @@ class DeployRule:
 PATH_TREND = "A 主升延续"
 PATH_VANGUARD = "C 排头兵"
 PATH_SAFE = "B 低风险收敛"
+PATH_BOX10 = "D 十日洗盘突破"
 
 
 def deploy_path(entry: Dict[str, Any], rule: Optional[DeployRule] = None) -> str:
@@ -730,7 +744,9 @@ def deploy_path(entry: Dict[str, Any], rule: Optional[DeployRule] = None) -> str
     pats = entry.get("patterns") or {}
     if float(entry.get("theme_rank") or 0.0) < r.theme_rank_min:
         return ""
-    if float(entry.get("first_pct") or 0.0) > r.first_pct_max:
+    first_pct = float(entry.get("first_pct") or 0.0)
+    max_first_pct = r.box10_first_pct_max if r.box10_pattern in pats else r.first_pct_max
+    if first_pct > max_first_pct:
         return ""
     if float(entry.get("efficiency") or 0.0) < r.efficiency_min:
         return ""
@@ -742,6 +758,8 @@ def deploy_path(entry: Dict[str, Any], rule: Optional[DeployRule] = None) -> str
     persist = float(entry.get("persist") or 0.0)
     # C 排头兵路径：板块内第一个/第二个启动、或第一个夺旗的，不要求"两阳加速"
     # （用户："要的就是排头兵、冲锋队、夺旗的生力军"——它们启动时本来就没有第二根阳线）
+    if r.box10_pattern in pats and persist >= r.persist_min:
+        return PATH_BOX10
     if r.allow_vanguard_path and entry.get("lead_label") in ("排头兵", "夺旗") \
             and persist >= r.persist_min:
         return PATH_VANGUARD

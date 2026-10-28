@@ -572,6 +572,16 @@ def veto_of(
         return "跌破底台{:.2f}".format(event.base_support)
     if event.sbc_supp > 0 and event.price < event.sbc_supp * 0.995:
         return "跌破SBC支撑{:.2f}".format(event.sbc_supp)
+    # V2 操盘手硬约束 1：下跌结构涨不过 VWAP (现价低于日内均价线一票否决)
+    if event.price < event.vwap * 0.998:
+        return "水下运行(现价{:.2f}低于均价{:.2f})".format(event.price, event.vwap)
+    # V2 操盘手硬约束 2：10日均价水下冲高回落一票否决 (Price < V10 且从日内最高点回撤 >= 1.5%)
+    vwap10_val = float(event.vwap_10d or event.extra.get("vwap10") or 0.0)
+    day_high_val = max(float(event.day_high or 0.0), float(event.extra.get("day_high") or 0.0), float(event.price))
+    if vwap10_val > 0 and event.price < vwap10_val:
+        drawdown_pct = ((day_high_val - event.price) / day_high_val * 100.0) if day_high_val > 0 else 0.0
+        if drawdown_pct >= 1.5:
+            return "10日VWAP水下冲高回落(回撤{:.1f}%)".format(drawdown_pct)
     if event.bias_pct() > v_cfg["max_bias_pct"]:
         return "追高透支(偏离均价{:+.1f}%)".format(event.bias_pct())
     if regime is not None and regime.stage == STAGE_EBB and not event.is_leader:
@@ -769,12 +779,24 @@ class FusionEngine:
 
         used_cuts = tuple(cuts) if cuts else self.cuts
         tier = tier_of(rar, used_cuts)
+
+        # V2: 识别 PATTERN_BOX10_VWAP_HOVER (十日洗盘悬空突破)
+        _ev_pats = event.extra.get("patterns") or getattr(event, "patterns", None) or ()
+        has_box10_hover = bool(
+            "十日洗盘悬空突破" in _ev_pats
+            or event.extra.get("box10_hover_break")
+        )
+        if has_box10_hover:
+            tier_floor = max(int(tier_floor or 0), 4)
+
         temp_cap, temp_coef = self._temp_cap(regime, event)
+        if has_box10_hover:
+            temp_cap = max(temp_cap, 4)  # 豁免早盘 STAGE_COLD 封顶
         age_min, age_cap, age_coef = self._age(event, now)
         tier = min(tier, temp_cap, age_cap)
 
-        # L4 额外门槛：必须是龙头或强共振，且结构清晰度达标
-        if tier >= 4 and not (event.is_leader or event.sector_resonance >= 60.0):
+        # L4 额外门槛：必须是龙头或强共振，且结构清晰度达标 (十日洗盘悬空突破直接豁免板块滞后)
+        if tier >= 4 and not (event.is_leader or event.sector_resonance >= 60.0 or has_box10_hover):
             tier = 3
         if tier >= 3 and event.structure_clarity > 0 and event.structure_clarity < 60.0:
             tier = min(tier, 2)

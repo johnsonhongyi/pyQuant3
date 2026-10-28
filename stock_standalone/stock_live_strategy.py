@@ -3123,6 +3123,17 @@ class StockLiveStrategy:
                 base = merge_missing(base, cross)
         except Exception:
             pass
+        try:
+            from ats.fusion.context import get_daily_context
+            d_ctx = get_daily_context()
+            if d_ctx.ok:
+                m10 = d_ctx.asof(c6, time.strftime("%Y-%m-%d"))
+                if m10:
+                    for k_box in ("is_box10_ready", "hi_10d", "hi_pre1", "lo_10d", "amp_10d", "vwap10", "vwap5", "vwap3"):
+                        if k_box in m10 and k_box not in base:
+                            base[k_box] = m10[k_box]
+        except Exception:
+            pass
         return base
 
     def _fusion_scan_market_vanguards(
@@ -3166,9 +3177,56 @@ class StockLiveStrategy:
         if len(sub) > 60:
             sub = sub.loc[pct_col[mask].nlargest(60).index]
 
+        # V2: 第一级 O(1) 标量快车道（10日洗盘蓄势种子突破过滤，每秒仅 3~8 只）
+        box10_fast_tracked = set()
+        svc = getattr(self, "realtime_service", None)
+        v_pool = svc.get_v_reversal_pool() if (svc and hasattr(svc, "get_v_reversal_pool")) else set()
+        from ats.fusion.context import get_daily_context
+        d_ctx = get_daily_context()
+        box_pool = d_ctx.box10_pool(time.strftime("%Y-%m-%d")) if d_ctx.ok else set()
+        raw_pool = v_pool | box_pool
+
         # 一次性转字典，避免 pandas iterrows() 与逐行 .loc[].to_dict() 的 Series 构造开销
         sub_dicts = sub.to_dict(orient="index")
         scored = []
+
+        # 优先扫描 10 日结构种子池：即使涨幅仅 2.0%~5.0%，只要突破箱顶与昨高即享第一优先级
+        if raw_pool:
+            try:
+                for pool_cd in raw_pool:
+                    p_c6 = str(pool_cd).split(".")[0].zfill(6)
+                    # 在 df_all_data 中查找该标的
+                    row_match = None
+                    if p_c6 in df_all_data.index:
+                        row_match = df_all_data.loc[p_c6]
+                    elif str(pool_cd) in df_all_data.index:
+                        row_match = df_all_data.loc[str(pool_cd)]
+                    if row_match is None or (hasattr(row_match, "empty") and row_match.empty):
+                        continue
+                    if isinstance(row_match, pd.DataFrame):
+                        row_match = row_match.iloc[0]
+                    p_pct = float(row_match.get("percent") or 0.0)
+                    p_px = float(row_match.get("trade") or row_match.get("price") or 0.0)
+                    p_vw = float(row_match.get("vwap") or 0.0)
+                    if not (2.0 <= p_pct <= 9.6 and p_px > p_vw > 0):
+                        continue
+                    # O(1) 标量比对
+                    b_metrics = d_ctx.asof(p_c6, time.strftime("%Y-%m-%d")) if d_ctx.ok else {}
+                    hi_10d_v = float(b_metrics.get("hi_10d") or 0.0)
+                    hi_pre1_v = float(b_metrics.get("hi_pre1") or 0.0)
+                    if (hi_10d_v > 0 and p_px >= hi_10d_v * 0.998) or (hi_pre1_v > 0 and p_px >= hi_pre1_v * 0.998):
+                        p_row_dict = row_match.to_dict() if hasattr(row_match, "to_dict") else dict(row_match)
+                        p_nm = str(p_row_dict.get("name") or "")
+                        # 合并 10 日箱体标量进 row_dict
+                        if b_metrics:
+                            for k_box in ("is_box10_ready", "hi_10d", "hi_pre1", "lo_10d", "amp_10d", "vwap10", "vwap5", "vwap3"):
+                                if k_box in b_metrics:
+                                    p_row_dict[k_box] = b_metrics[k_box]
+                        # 赋予特级优先分 150.0 锁定最前排
+                        scored.append((150.0 + p_pct, p_c6, pool_cd, p_nm, p_row_dict))
+                        box10_fast_tracked.add(p_c6)
+            except Exception as e_box:
+                logger.debug(f"[FUSION] box10 fast track skipped: {e_box}")
         for raw_code, row_dict in sub_dicts.items():
             c6 = str(raw_code).split(".")[0].zfill(6)
             if c6 in evaluated or c6.startswith(("8", "4", "92")):

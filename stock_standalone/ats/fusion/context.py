@@ -54,6 +54,8 @@ class DailyContext:
         self.path = path or _find_daily_path()
         self._by_code: Dict[str, Dict[str, np.ndarray]] = {}
         self._cache: Dict[tuple, Dict[str, float]] = {}
+        self._box10_pool_cache: Dict[str, set[str]] = {}
+        self._pool_lock = threading.Lock()
         self.ok = False
         if self.path:
             self._load()
@@ -168,13 +170,110 @@ class DailyContext:
                 break
         out["limit_up_streak"] = float(streak)
 
-        # 10 日 / 5 日累计均价（VWAP），只用截至昨日的成交额与成交量
+        # 10 日 / 5 日 / 3 日累计均价（VWAP）与 10 日箱体标量 (V2 规范：量纲自校准 + 标量预计算)
         amt = v["amount"][: idx + 1]
-        for w, name in ((5, "vwap5"), (10, "vwap10")):
-            if n >= w:
-                sv = float(np.sum(vol[-w:]))
-                if sv > 0:
-                    out[name] = float(np.sum(amt[-w:]) / sv)
+        # 单日均价量纲自校准门禁 (防止 amount(千元)/vol(手) 引发 10x/100x 偏差)
+        def _calibrated_vwap_day(a_val, v_val, h_val, l_val, c_val):
+            if l_val <= 0 or h_val <= 0:
+                return max(0.0, float(c_val))
+            tp = (h_val + l_val + 2.0 * c_val) / 4.0
+            if a_val <= 0 or v_val <= 0:
+                return float(tp)
+            raw = a_val / v_val
+            if l_val * 0.95 <= raw <= h_val * 1.05:
+                return float(raw)
+            if l_val * 0.95 <= raw / 10.0 <= h_val * 1.05:
+                return float(raw / 10.0)
+            if l_val * 0.95 <= raw / 100.0 <= h_val * 1.05:
+                return float(raw / 100.0)
+            if l_val * 0.95 <= raw * 10.0 <= h_val * 1.05:
+                return float(raw * 10.0)
+            return float(tp)
+
+        # 预计算最近 10 根单日校准均价与真实成交量
+        win_10 = min(10, n)
+        if win_10 >= 3:
+            vwaps_10 = []
+            vols_10 = []
+            lows_arr = v["low"][: idx + 1]
+            for k in range(n - win_10, n):
+                ck = float(c[k])
+                hk = float(h[k])
+                lk = float(lows_arr[k])
+                ak = float(amt[k])
+                vk = float(vol[k])
+                vw = _calibrated_vwap_day(ak, vk, hk, lk, ck)
+                vwaps_10.append(vw)
+                vols_10.append(max(1.0, vk))
+
+            vwaps_arr = np.array(vwaps_10)
+            vols_arr = np.array(vols_10)
+
+            # 计算 V3, V5, V10
+            sv3 = np.sum(vols_arr[-3:])
+            v3 = float(np.sum(vwaps_arr[-3:] * vols_arr[-3:]) / sv3) if sv3 > 0 else float(vwaps_arr[-1])
+            sv5 = np.sum(vols_arr[-min(5, win_10):])
+            v5 = float(np.sum(vwaps_arr[-min(5, win_10):] * vols_arr[-min(5, win_10):]) / sv5) if sv5 > 0 else v3
+            sv10 = np.sum(vols_arr)
+            v10 = float(np.sum(vwaps_arr * vols_arr) / sv10) if sv10 > 0 else v5
+
+            out["vwap3"] = round(v3, 3)
+            out["vwap5"] = round(v5, 3)
+            out["vwap10"] = round(v10, 3)
+
+            # 10 日箱顶、箱底与昨日高点 (严格锚定截至昨日收盘，盘中绝不动态覆盖)
+            hi_10d = float(np.max(h[-win_10:]))
+            lo_10d = float(np.min(lows_arr[-win_10:]))
+            hi_pre1 = float(h[-1])
+            lo_pre1 = float(lows_arr[-1])
+            close_pre1 = float(c[-1])
+
+            out["hi_10d"] = round(hi_10d, 3)
+            out["lo_10d"] = round(lo_10d, 3)
+            out["hi_pre1"] = round(hi_pre1, 3)
+            out["lo_pre1"] = round(lo_pre1, 3)
+            out["close_pre1"] = round(close_pre1, 3)
+
+            amp_10d = ((hi_10d - lo_10d) / lo_10d * 100.0) if lo_10d > 0 else 0.0
+            # 近 6 日触底筑底平台振幅 (包容触底后蓄势企稳结构，如 300806 斯迪克)
+            hi_6d = float(np.max(h[-min(6, win_10):]))
+            lo_6d = float(np.min(lows_arr[-min(6, win_10):]))
+            amp_6d = ((hi_6d - lo_6d) / lo_6d * 100.0) if lo_6d > 0 else amp_10d
+            eff_amp = min(amp_10d, amp_6d)
+            out["amp_10d"] = round(amp_10d, 2)
+            out["amp_6d"] = round(amp_6d, 2)
+
+            max_v = max(v3, v5, v10)
+            min_v = min(v3, v5, v10)
+            # V2 规范：分母对齐 v10 均价基准
+            vwap_disp = ((max_v - min_v) / v10 * 100.0) if v10 > 0 else 0.0
+            out["vwap_disp"] = round(vwap_disp, 2)
+
+            # 分板块弹性门禁：主板 <= 18%, 20cm 双创 <= 24%
+            c_str = str(code).zfill(6)
+            is_growth = c_str.startswith(("300", "301", "688"))
+            max_amp = 24.0 if is_growth else 18.0
+            max_disp = 4.5 if is_growth else 3.0
+            v3_v5_disp = (abs(v3 - v5) / v5 * 100.0) if v5 > 0 else 0.0
+            is_box_ready = (
+                (eff_amp <= max_amp)
+                and (vwap_disp <= max_disp or v3_v5_disp <= 2.5)
+                and (v3 >= v10 * 0.95 if is_growth else v3 >= v10 * 0.985)
+                and (close_pre1 >= v10 * 0.95 if is_growth else close_pre1 >= v10 * 0.98)
+            )
+            out["is_box10_ready"] = 1.0 if is_box_ready else 0.0
+        else:
+            out["vwap3"] = last
+            out["vwap5"] = last
+            out["vwap10"] = last
+            out["hi_10d"] = last
+            out["lo_10d"] = last
+            out["hi_pre1"] = last
+            out["lo_pre1"] = last
+            out["close_pre1"] = last
+            out["amp_10d"] = 0.0
+            out["vwap_disp"] = 0.0
+            out["is_box10_ready"] = 0.0
 
         # 昨日涨幅（用于"两阳加速"）
         if n >= 2 and c[-2] > 0:
@@ -228,12 +327,38 @@ class DailyContext:
         self._cache[key] = out
         return out
 
+    def box10_pool(self, day: str = "") -> set[str]:
+        """返回截至指定交易日 (默认为当天) 全市场符合 10 日箱体洗盘蓄势 (is_box10_ready=1.0) 的代码集合。"""
+        if not day:
+            import time
+            day = time.strftime("%Y-%m-%d")
+        cache_key = f"box10_pool_{day}"
+        if hasattr(self, "_box10_pool_cache") and cache_key in self._box10_pool_cache:
+            return self._box10_pool_cache[cache_key]
+        if not hasattr(self, "_pool_lock"):
+            self._pool_lock = threading.Lock()
+        with self._pool_lock:
+            if not hasattr(self, "_box10_pool_cache"):
+                self._box10_pool_cache = {}
+            if cache_key in self._box10_pool_cache:
+                return self._box10_pool_cache[cache_key]
+            pool: set[str] = set()
+            for cd in self._by_code.keys():
+                m = self.asof(cd, day)
+                if m.get("is_box10_ready") == 1.0:
+                    pool.add(cd)
+            self._box10_pool_cache[cache_key] = pool
+            return pool
+
 
 _CTX: Optional[DailyContext] = None
+_CTX_LOCK = threading.Lock()
 
 
 def get_daily_context() -> DailyContext:
     global _CTX
     if _CTX is None:
-        _CTX = DailyContext()
+        with _CTX_LOCK:
+            if _CTX is None:
+                _CTX = DailyContext()
     return _CTX

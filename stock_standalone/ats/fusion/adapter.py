@@ -267,7 +267,15 @@ def build_event(
     ma10 = _first_num([(row, "ma10d"), (row, "ma10"), (snap, "ma10d"), (snap, "ma10")])
     ma20 = _first_num([(row, "ma20d"), (row, "ma20"), (snap, "ma20d"), (snap, "ma20")])
     vwap_10d = _first_num(
-        [(row, "ma10dcum"), (row, "vwap_10d"), (snap, "ma10dcum"), (snap, "vwap_10d"), (row, "vwap_cum_5d")]
+        [
+            (row, "ma10dcum"),
+            (row, "vwap_10d"),
+            (row, "vwap10"),
+            (snap, "ma10dcum"),
+            (snap, "vwap_10d"),
+            (snap, "vwap10"),
+            (row, "vwap_cum_5d"),
+        ]
     )
     ret5d = _first_num([(row, "per5d"), (row, "ret5d"), (snap, "ret5d"), (snap, "per5d")])
     ret10d = _first_num([(row, "per10d"), (row, "ret10d"), (snap, "ret10d")])
@@ -291,6 +299,17 @@ def build_event(
         "sector",
         "latent_break",
         "patterns",
+        "is_box10_ready",
+        "min_vwap_cushion",
+        "box10_hover_break",
+        "vwap_zero_touch",
+        "hi_10d",
+        "lo_10d",
+        "hi_pre1",
+        "amp_10d",
+        "vwap_disp",
+        "vwap10",
+        "day_high",
     ):
         val = _first_raw([(snap, k), (row, k)])
         if val is not None:

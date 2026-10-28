@@ -2955,8 +2955,16 @@ class FusionLadderDialog(QWidget, WindowMixin):
             te = entry.get("track_entry") or entry.get("track") or {}
             first_ts = float(te.get("first_ts") or first.get("ts") or 0.0)
             first_pct = float(te.get("first_pct") if te.get("first_pct") is not None else (first.get("pct") or 0.0))
-            enter_ts = float(te.get("enter_ts") or entry.get("ts") or 0.0)
-            enter_pct = float(te.get("enter_pct") if te.get("enter_pct") is not None else (entry.get("pct") or 0.0))
+            te_enter_ts = float(te.get("enter_ts") or 0.0)
+            te_enter_price = float(te.get("enter_price") or 0.0)
+            if te_enter_ts > 0 and te_enter_price > 0 and te.get("enter_pct") is not None:
+                enter_ts = te_enter_ts
+                enter_pct = float(te.get("enter_pct"))
+                enter_price_val = te_enter_price
+            else:
+                enter_ts = float(entry.get("ts") or first_ts or 0.0)
+                enter_pct = float(entry.get("pct") if entry.get("pct") is not None else first_pct)
+                enter_price_val = ep
             persist_val = float(te.get("persist") or round(keep * 100.0 / max(1, len(after)), 1))
             chain_txt = str(te.get("chain") or " · ".join(ev))[:160]
             ev_n = int(te.get("evidence_n") or len(ev) or (1 if chain_txt else 0))
@@ -2965,7 +2973,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 "name": self._resolve_name(code, entry),
                 "tier": int((entry.get("fusion") or {}).get("tier") or 0),
                 "enter_ts": enter_ts,
-                "enter_price": ep,
+                "enter_price": enter_price_val,
                 "enter_pct": enter_pct,
                 "first_ts": first_ts,
                 "first_pct": first_pct,
@@ -3346,12 +3354,16 @@ class FusionLadderDialog(QWidget, WindowMixin):
 
             t3.setItem(i, 0, self._num_item(cd, cd))
             t3.setItem(i, 1, self._num_item(nm, nm))
-            t3.setItem(i, 2, self._num_item(e.get("enter_time", ""), e.get("enter_time", "")))
-            t3.setItem(i, 3, self._num_item(e.get("enter_price", ""), float(e.get("enter_price") or 0)))
-            t3.setItem(i, 4, self._num_item(f"{e.get('enter_pct', 0):+.2f}%", float(e.get("enter_pct") or 0)))
+            ep_val = float(e.get("enter_price") if e.get("enter_price") is not None else (e.get("price") or 0.0))
+            ep_pct = float(e.get("enter_pct") if e.get("enter_pct") is not None else (e.get("pct") or 0.0))
+            f_pct = float(e.get("first_pct") if e.get("first_pct") is not None else ep_pct)
+            sf_pct = float(e.get("since_first_pct") if e.get("since_first_pct") is not None else (ep_pct - f_pct))
+            t3.setItem(i, 2, self._num_item(e.get("enter_time") or e.get("first_time", ""), e.get("enter_time") or e.get("first_time", "")))
+            t3.setItem(i, 3, self._num_item(f"{ep_val:.2f}" if ep_val > 0 else "--", ep_val))
+            t3.setItem(i, 4, self._num_item(f"{ep_pct:+.2f}%", ep_pct))
             t3.setItem(i, 5, self._num_item(e.get("first_time", ""), e.get("first_time", "")))
-            t3.setItem(i, 6, self._num_item(f"{e.get('first_pct', 0):+.2f}%", float(e.get("first_pct") or 0)))
-            t3.setItem(i, 7, self._num_item(f"{e.get('since_first_pct', 0):+.2f}%", float(e.get("since_first_pct") or 0)))
+            t3.setItem(i, 6, self._num_item(f"{f_pct:+.2f}%", f_pct))
+            t3.setItem(i, 7, self._num_item(f"{sf_pct:+.2f}%", sf_pct))
             t3.setItem(i, 8, self._num_item(e.get("persist", 0), float(e.get("persist") or 0), bold=True))
             t3.setItem(i, 9, self._num_item(e.get("evidence_n", 0), int(e.get("evidence_n") or 0)))
             t3.setItem(i, 10, self._num_item(e.get("chain", ""), e.get("chain", "")))

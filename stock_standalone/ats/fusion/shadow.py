@@ -25,7 +25,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional
 
 from ats.fusion.adapter import LaunchTracker, build_event, in_trading_session, is_today, today_str
-from ats.fusion.anomaly import PATTERN_LATENT_BREAK, detect_patterns, pattern_score
+from ats.fusion.anomaly import PATTERN_BOX10_VWAP_HOVER, PATTERN_LATENT_BREAK, detect_patterns, pattern_score
 from ats.fusion.config import engine_params, load_config
 from ats.fusion.engine import FusionBus, FusionEngine
 from ats.fusion.regime import MarketRegime, MarketRegimeTracker, RegimeSample
@@ -373,6 +373,31 @@ class FusionShadow:
             except Exception:
                 prev_pct = 0.0
                 ret_std20 = 0.0
+
+            _is_box10_ready = bool(
+                event.extra.get("is_box10_ready")
+                or (snap or {}).get("is_box10_ready")
+                or (row.get("is_box10_ready") if hasattr(row, "get") else False)
+            )
+            _hi_10d = float(
+                event.extra.get("hi_10d")
+                or (snap or {}).get("hi_10d")
+                or (row.get("hi_10d") if hasattr(row, "get") else 0.0)
+                or 0.0
+            )
+            _hi_pre1 = float(
+                event.extra.get("hi_pre1")
+                or (snap or {}).get("hi_pre1")
+                or (row.get("hi_pre1") if hasattr(row, "get") else 0.0)
+                or 0.0
+            )
+            _min_cushion = float(
+                event.extra.get("min_vwap_cushion")
+                or (snap or {}).get("min_vwap_cushion")
+                or (row.get("min_vwap_cushion") if hasattr(row, "get") else 0.0)
+                or 0.0
+            )
+
             patterns = list(
                 detect_patterns(
                     price=event.price,
@@ -388,6 +413,10 @@ class FusionShadow:
                     is_leader=event.is_leader,
                     vwap10=event.vwap_10d,
                     prev_pct=prev_pct,
+                    is_box10_ready=_is_box10_ready,
+                    hi_10d=_hi_10d,
+                    hi_pre1=_hi_pre1,
+                    min_vwap_cushion=_min_cushion,
                 )
             )
             if reset_wave and PATTERN_LATENT_BREAK not in patterns:
@@ -409,6 +438,9 @@ class FusionShadow:
             if PATTERN_LATENT_BREAK in patterns and event.launch_ts > 0 and (now - event.launch_ts) > 600.0:
                 new_launch = self.launch.reset_code(code, max(0.0, now - 300.0))
                 event.launch_ts = new_launch
+
+            # 同步写回 event.extra，让引擎与证据链完整读取形态
+            event.extra["patterns"] = list(patterns)
 
             raw_sector = str(
                 event.extra.get("sector")
@@ -433,7 +465,9 @@ class FusionShadow:
             lead_score = float(event.extra.get("lead_score") or 0.0)
             _ps = pattern_score(patterns)
             _floor: Optional[int] = None
-            if _ps >= 100 or (event.is_leader and _ps >= 70):
+            if PATTERN_BOX10_VWAP_HOVER in patterns:
+                _floor = 4
+            elif _ps >= 100 or (event.is_leader and _ps >= 70):
                 _floor = 3
             elif _ps >= 70 or (lead_label in (LABEL_VANGUARD, LABEL_FLAG) and patterns):
                 _floor = 2

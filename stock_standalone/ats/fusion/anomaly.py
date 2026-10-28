@@ -23,6 +23,7 @@ PATTERN_VWAP_BREAK = "突破10日VWAP"
 PATTERN_LATENT_BREAK = "潜伏转突破"
 PATTERN_DRY_UP = "缩量转放量"
 PATTERN_TWO_YANG = "两阳加速"
+PATTERN_BOX10_VWAP_HOVER = "十日洗盘悬空突破"
 
 PATTERN_LABELS = {
     PATTERN_PIERCE: "🕯️ 一阳穿三线",
@@ -32,6 +33,7 @@ PATTERN_LABELS = {
     PATTERN_LATENT_BREAK: "🎯 潜伏转突破",
     PATTERN_DRY_UP: "💧 缩量转放量",
     PATTERN_TWO_YANG: "🕯️ 两阳加速",
+    PATTERN_BOX10_VWAP_HOVER: "🚀 十日洗盘悬空突破",
 }
 
 
@@ -50,6 +52,10 @@ def detect_patterns(
     vwap10: float = 0.0,
     vol_dry: float = 1.0,
     prev_pct: float = 0.0,
+    is_box10_ready: bool = False,
+    hi_10d: float = 0.0,
+    hi_pre1: float = 0.0,
+    min_vwap_cushion: float = 0.0,
     thresholds: Optional[Dict[str, float]] = None,
 ) -> List[str]:
     """返回命中的形态名列表（可能为空）。"""
@@ -106,6 +112,11 @@ def detect_patterns(
     if vwap10 > 0 and price > vwap10 and day_open < vwap10:
         out.append(PATTERN_VWAP_BREAK)
 
+    # 十日洗盘蓄势突破 + 分时悬空不碰 VWAP
+    if is_box10_ready and min_vwap_cushion >= 0.25:
+        if (hi_10d <= 0 or price >= hi_10d * 0.998) and (hi_pre1 <= 0 or price >= hi_pre1 * 0.998):
+            out.append(PATTERN_BOX10_VWAP_HOVER)
+
     return out
 
 
@@ -117,5 +128,6 @@ def pattern_score(patterns: List[str]) -> float:
         PATTERN_PIERCE: 40.0, PATTERN_LEADERSHIP: 35.0,
         PATTERN_SELF_ABNORMAL: 30.0, PATTERN_VWAP_BREAK: 35.0,
         PATTERN_LATENT_BREAK: 45.0, PATTERN_DRY_UP: 45.0, PATTERN_TWO_YANG: 40.0,
+        PATTERN_BOX10_VWAP_HOVER: 60.0,
     }
     return min(100.0, sum(w.get(p, 20.0) for p in patterns))
