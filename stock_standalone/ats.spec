@@ -12,6 +12,8 @@ yaml_hiddenimports = collect_submodules('yaml')
 # --- 关键：定义需要剔除的冗余库和 DLL 关键词 ---
 # 这些库通常是 PyQt6 自动带入但金融监控工具很少用到的，剔除它们能有效降低启动负载
 trash_list = [
+    # 彻底杜绝误引 Tkinter / 日历国际化 / 终端控制台冗余包导致体积虚增
+    'babel', 'prompt_toolkit', 'tkcalendar', 'instock_MonitorTK',
     'Qt6WebEngineCore', 'Qt6WebEngineWidgets', 'Qt6Pdf',
     'Qt6Quick', 'Qt6Qml', 'Qt6VirtualKeyboard',
     'Qt6Multimedia', 'Qt6Bluetooth', 'Qt6Network',
@@ -87,7 +89,9 @@ a = Analysis(
         'PyQt5', 'PySide2', 'PySide6',
         'matplotlib', 'scipy', 'jedi', 'IPython', 'notebook',
         'lxml', 'cryptography',
-        'numba', 'llvmlite', 'botocore', 'boto3'
+        'numba', 'llvmlite', 'botocore', 'boto3',
+        # 严禁将 Tkinter 主控及日历国际化多国语言包卷入 ATS 终端
+        'instock_MonitorTK', 'tkcalendar', 'babel', 'prompt_toolkit'
     ],
     noarchive=False,
     optimize=1,              # 相当于 -OO，保留文档字符串供 numpy 运行

@@ -2588,13 +2588,15 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 if obj is not None:
                     targets.append(obj)
         if not targets:
-            # TK 入口打开窗口时 parent 传 None，这里回落到主控全局实例
+            # TK 入口打开窗口时 parent 传 None，这里仅在运行时内存已存在主控时回落到全局实例（杜绝静态 import 导致打包污染）
             try:
-                import instock_MonitorTK as _tk
+                import sys
 
-                app_inst = getattr(_tk, "_global_app_instance", None)
-                if app_inst is not None:
-                    targets.append(app_inst)
+                _tk = sys.modules.get("instock_MonitorTK")
+                if _tk is not None:
+                    app_inst = getattr(_tk, "_global_app_instance", None)
+                    if app_inst is not None:
+                        targets.append(app_inst)
             except Exception:
                 pass
         for obj in targets:

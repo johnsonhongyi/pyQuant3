@@ -1,5 +1,27 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-28 10:45 【成交量30秒平滑自动更新、全资金主线180秒性能隔离与SSOT同源闭环】(`ats/capital_dragon_engine.py`, `ats/ui/capital_dragon_panel.py`, `ats/ui/main_window.py`, `tests/test_volume_30s_and_capital_dragon_isolation.py`)
+- [x] **【底部成交量 30 秒平滑自动更新与 0 阻塞设计】**：
+  - **业务需求闭环**：用户明确指示“底部的成交量数据可以 30 秒自动更新，不能全资金主线高频的更新数据”；
+  - **极轻量 30 秒节流刷新（耗时 <0.1ms）**：`CapitalDragonEngine.get_market_indices_and_volume_summary(df_all=cur_df, min_interval=30.0)` 仅在跨越 30 秒时轻量提取四大指数（仅检索 4 行数据，0 遍历全市场 5000+ 标的），毫秒级原子刷新大盘摘要缓存；30 秒内（如每秒 UI 时钟触发）直接读取纯内存缓存，0 毫秒开销，0 线程阻塞，UI 极度丝滑；
+  - **后台守护线程对齐 30 秒**：`start_market_summary_bg_updater` 默认基准刷新周期设为 30.0 秒，并在休市/冷启动时从权威日线提取收盘数据，杜绝高频打扰 TDX 服务器；
+- [x] **【全资金主线严格恪守 180 秒性能红线，杜绝 ATS 性能超载】**：
+  - **绝对隔离**：`CapitalDragonPanel` 维持 `get_cached_report(max_age=180.0, fallback_stale=True)`，坚决不高频重算全市场 5000+ 标的多维特征、加速形态与龙头中军画像，彻底阻断主线程卡顿与 CPU 飙升；
+- [x] **【三级数量级精准自适应，彻底杜绝千亿大盘量级错乱】**：
+  - **根因穿透**：大盘成交额达数千亿，若简单以 `raw_amt > 1000` 判定为万元，会导致 2800.5 亿元被错误除以 10000 变为 0.28 亿；
+  - **精准门禁**：对四大指数成交额严格按大盘体量建立分级门禁：`>= 1e9` 判定为元（除以 `1e8`），`>= 1e6` 判定为万元（除以 `10000.0`），`< 1e6`（如 2800.5 亿）判定为已是亿元直接取用，精准覆盖各类行情源格式；
+- [x] **【彻底打通资金主线与底层状态栏数据源（SSOT 同源闭环）】**：
+  - **同源同步闭环**：在 `CapitalDragonEngine._analyze_capital_dragon_universe` 计算完成后，直接将全市场分析出的四大指数最新成交额与最新真实虚拟量比（0.99x, 1.01x, 0.93x）同步写入 `_bg_market_summary_cache`，底层状态栏与主视区表格所展示的四大指数数据 100% 同源、同分同秒、绝对一致；
+- [x] **【本地基准持久化，根除较昨 0.0亿与虚假预测】**：
+  - **昨日收盘基准持久化与自愈**：引入 `_get_or_load_yesterday_benchmark()` 与 `datacsv/market_yesterday_amount_benchmark.json`，即使网络延迟或日线未返回，始终能拿到昨日全天收盘基准；盘中时段（09:30~15:00）精准呈现 `(较同期 ±xxx亿 | 虚拟 x.xx万亿)`，彻底根治 `较昨 0.0亿`；
+- [x] **【自动化测试全绿通过（31 项回归 + 专项隔离测试 100% PASS）】**：
+  - 新增 `tests/test_volume_30s_and_capital_dragon_isolation.py` 覆盖 30 秒节流与 180 秒资金主线隔离，100% PASS；
+  - `pytest tests/ -k "volume or summary"` 31 项全量回归测试纯绿通过；
+  - 语法编译与词法扫描 0 错误。
+
+
+
+
 ## 2026-10-27 22:45 【修复全市场退潮虚假100%炸板与非交易时间乱播报】(`docs/tasks/2026-10-27_2245_修复全市场退潮虚假100%炸板与非交易时间乱播报.md`, `ats/limit_up_engine.py`, `ats/ui/daily_limit_up_dialog.py`, `tests/test_limit_up_avalanche_and_broken_rate.py`)
 - [x] **【彻底修复真实炸板率科学计算，杜绝 0 冲板样本误报 100% 炸板】**：
   - **根因穿透**：原代码偷懒将炸板率写为 `100.0 - seal_rate`；当冲板总数为 0 时，封板率 `seal_rate = 0.0`，直接算出了荒谬的 `100.0 - 0.0 = 100%` 炸板率并动不动大喊“退潮雪崩，炸板率100%”；

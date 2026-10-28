@@ -3578,10 +3578,11 @@ class ATSMainWindow(QMainWindow):
         self._status_clock_timer.start(1000 if self._is_market_session_active() else 60000)
         self._refresh_statusbar_time_display()
 
-        # ⚡ 启动大盘指数后台刷新线程（接入全局自定义 cct.ats_tdx_interval，主线程只读缓存，零阻塞）
+        # ⚡ 启动大盘指数后台刷新线程（30秒基准平滑刷新，主线程只读缓存，零阻塞，保护 TDX API）
         try:
             from ats.capital_dragon_engine import CapitalDragonEngine
-            tdx_intv = float(getattr(cct, 'ats_tdx_interval', 5.0) or 5.0)
+            tdx_intv = float(getattr(cct, 'ats_tdx_interval', 30.0) or 30.0)
+            tdx_intv = max(30.0, tdx_intv)
             CapitalDragonEngine.get_instance().start_market_summary_bg_updater(
                 interval_sec=tdx_intv, on_updated=self._market_summary_ready.emit)
         except Exception as _e_bg:
@@ -3589,22 +3590,27 @@ class ATSMainWindow(QMainWindow):
 
 
 
-    def _refresh_market_volume_status(self):
-        """刷新底部状态栏的大盘四大核心指数（上证、深证、创业板、北证）资金量比与全市成交额增减 (SSOT 通达信权威盘面)"""
+    def _refresh_market_volume_status(self, force: bool = False):
+        """刷新底部状态栏的大盘四大核心指数（上证、深证、创业板、北证）资金量比与全市成交额增减 (30秒平滑自动更新)"""
         if not hasattr(self, 'lbl_market_volume_status') or self.lbl_market_volume_status is None:
             return
         try:
             from ats.capital_dragon_engine import CapitalDragonEngine
             cde = CapitalDragonEngine.get_instance()
-            # 严格从通达信权威后台缓存读取 (SSOT)，绝不用个股列表数据拼凑，保证与通达信盘面 100% 对齐
-            summary = cde.get_market_indices_and_volume_summary()
-
-            html = summary.get('formatted_html', '') if summary else ''
+            cur_df = getattr(self, 'current_df', None)
+            if cur_df is not None and not getattr(cur_df, 'empty', True):
+                try:
+                    summary = cde.get_market_indices_and_volume_summary(df_all=cur_df, min_interval=30.0, force=force)
+                except TypeError:
+                    summary = cde.get_market_indices_and_volume_summary()
+            else:
+                summary = cde.get_market_indices_and_volume_summary()
+            html = summary.get('formatted_html', '')
             if not html and not self.lbl_market_volume_status.text():
                 html = '上证: -- | 深证: -- | 创业板: -- | 北证: -- | 总成交额: --（等待行情）'
             if html and self.lbl_market_volume_status.text() != html:
                 self.lbl_market_volume_status.setText(html)
-            tooltip = summary.get('tooltip_text', '') if summary else ''
+            tooltip = summary.get('tooltip_text', '')
             if tooltip and self.lbl_market_volume_status.toolTip() != tooltip:
                 self.lbl_market_volume_status.setToolTip(tooltip)
         except Exception as e:
@@ -3649,21 +3655,15 @@ class ATSMainWindow(QMainWindow):
             self.lbl_data_time_status.setText(f"🕒 数据更新: {t_str}  |  🔄 自动刷新: 已关闭 (等待TK推送)")
             self.lbl_data_time_status.setStyleSheet("color: #8e8e93; font-weight: bold; font-size: 9pt; padding-right: 8px;")
 
-        has_valid_vol = hasattr(self, 'lbl_market_volume_status') and self.lbl_market_volume_status and ('--' not in self.lbl_market_volume_status.text()) and ('等待行情' not in self.lbl_market_volume_status.text())
         if market_active:
             if now - getattr(self, '_last_market_status_update', 0.0) >= 2.0:
                 self._last_market_status_update = now
                 self._refresh_market_volume_status()
             self._check_market_volume_announcement()
-        else:
-            # 休市期间：若尚未拿到有效行情或首次启动，保持心跳自愈刷新直到获取到有效收盘数据
-            if (not has_valid_vol) or (now - getattr(self, '_last_market_status_update', 0.0) >= 60.0 and not getattr(self, '_market_status_settled', False)):
-                self._last_market_status_update = now
-                self._refresh_market_volume_status()
-                if hasattr(self, 'lbl_market_volume_status') and self.lbl_market_volume_status and ('--' not in self.lbl_market_volume_status.text()):
-                    self._market_status_settled = True
-            # 无论 market_active 是否为 True，只要时间符合定时播报节点（如 11:30 上午收盘、15:00 下午收盘），必须执行播报检查
-            self._check_market_volume_announcement()
+        elif not getattr(self, '_last_market_status_update', 0.0):
+            # 冷启动时只读一次已有缓存，休市期间不再刷新摘要。
+            self._last_market_status_update = now
+            self._refresh_market_volume_status()
 
     def _check_market_volume_announcement(self, now_dt=None, force=False):
         """
@@ -3695,13 +3695,13 @@ class ATSMainWindow(QMainWindow):
                 if slot_key in self._announced_market_volume_slots:
                     return
 
-            # 3. 获取大盘最新摘要数据 (通达信权威后台缓存 SSOT)
+            # 3. 获取大盘最新摘要数据
             from ats.capital_dragon_engine import CapitalDragonEngine
             from ats.alert_notifier import AlertNotifier
             cde = CapitalDragonEngine.get_instance()
             summary = cde.get_market_indices_and_volume_summary()
             
-            # 若数据有效，触发统一通知播报，并在【确认播报成功后】才消耗令牌！
+            # 若数据有效，触发统一通知播报，并在确认播报成功后才消耗令牌
             if summary and float(summary.get('total_amt', 0.0) or 0.0) > 0:
                 if not force:
                     today_str = now_dt.strftime("%Y-%m-%d")
@@ -3710,8 +3710,6 @@ class ATSMainWindow(QMainWindow):
                     self._announced_market_volume_slots.add(slot_key)
                 logger.info(f"📢 [MAIN_WINDOW] 触发 {cur_hm} 全市成交额定时播报: {summary.get('plain_text', '')}")
                 AlertNotifier.get_instance().notify_market_volume(summary, parent=self)
-            else:
-                logger.debug(f"[MAIN_WINDOW] {cur_hm} 成交额定时播报等待有效数据中...")
         except Exception as e:
             logger.debug(f"[MAIN_WINDOW] _check_market_volume_announcement error: {e}")
 
