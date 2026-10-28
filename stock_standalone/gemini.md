@@ -26,6 +26,15 @@
     - 专项测试增至 9 项（覆盖正向放行、反例安全返回、箱底不保底、多线程并发 DCL），全部 100% PASS。
   - **全量自动化测试纯绿通过**：`tests/test_box10_vwap_hover_and_ladder_v2.py` 6 项专项测试 100% PASS，65 项核心测试与 18 项回放测试全部纯绿通过。
 
+- [x] **【支柱 6：MAE 买入后最大回撤时序严格守卫与首→入% 真实走阔对齐治理】**：
+  - **彻底根治 MAE 买入后最大回撤被开盘最低价击穿的时序严重倒挂**：
+    - **污染源破案**：`_track_entries_from_shadow` 原逻辑中写了 `valid_lows = [p for p in prices] + [q_low]`，将通达信盘口快照返回的【全天最低价 `q_low`】（斯迪克开盘 09:30~09:35 的 36.90 元）强行塞入买入后统计，导致 10:23 买入价 39.81 在后续单边封死 20cm 涨停 0 回撤的情况下，荒谬算出了 `(36.90 - 39.81) / 39.81 = -7.31%` 的历史倒挂假回撤；
+    - **交易时序因果性守卫**：重构 `_track_entries_from_shadow`，坚决贯彻交易系统铁律——**买入时刻之前的价格绝对不可影响买入之后的持仓回撤**！`MAE` 与 `MFE` 严格只从入局时刻起及买入后的采样点 `after_prices` 与收盘价计算，买入后无回撤严格为 `0.00%`，彻底根除时序错乱；
+  - **彻底修复全表首异动与入局数据未对齐（全列 `+0.00%` 假象）**：
+    - **根因穿透**：原逻辑直接用 `first = recs[0]` 与 `te.get("first_pct")`，当入局尚未达标或 `te` 只有当前帧时，`first_pct` 与 `enter_pct` 均取了当前入局涨幅，导致相减恒为 `0.00%`；
+    - **首异动与入局严格分帧提取**：从时间序列中精准检索首个 `tier >= 1` 或包含形态识别的帧作为 `first_rec`（首异动发令枪），以首个 `tier >= 2` 或 `STAGE_ENTER` 作为 `entry_rec`（入局），真实计算 `since_first = round(enter_pct - first_pct, 2)`（如义翘神州首异动 4.31%，入局 9.54%，真实走阔 `+5.23%`），彻底对齐首入数据；
+  - **自动化测试 11 项纯绿通过**：新增 `test_track_entries_from_shadow_mae_no_qlow_pollution` 与 `test_track_entries_from_shadow_since_first_alignment`，专项与核心测试全部 100% PASS。
+
 ## 2026-10-28 14:30 【TK监控主界面量比数据一致性、盘口快照防污染与UI智能自愈治理】(`docs/tasks/2026-10-28_1430_TK量比数据一致性与盘口快照防污染治理.md`, `instock_MonitorTK.py`, `performance_optimizer.py`, `stock_selector.py`, `data_utils.py`, `tests/test_tk_volume_ratio_data_consistency.py`)
 - [x] **【彻底破案并根除 TK 量比显示为几十万成交量与刷新后恢复的间歇性 BUG】**：
   - **用户业务诉求**：“tk的量比出现严重的bug,全面检查数据一致性”，“刷新后又正常了,修复这是哪里的逻辑bug导致的”；

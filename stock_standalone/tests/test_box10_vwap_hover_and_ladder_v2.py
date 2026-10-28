@@ -259,3 +259,76 @@ def test_daily_context_singleton_dcl():
     first_inst = instances[0]
     for inst in instances:
         assert inst is first_inst, "所有并发线程必须获取完全相同的 DailyContext 实例"
+
+
+def test_track_entries_from_shadow_mae_no_qlow_pollution():
+    """测试 10 (时序): MAE 买入后最大回撤严禁被盘前/买入前全天最低价 q_low 污染"""
+    from ats.ui.fusion_ladder_dialog import FusionLadderDialog
+    import ats.ui.fusion_ladder_dialog as fld
+
+    diag = FusionLadderDialog.__new__(FusionLadderDialog)
+    diag.extra_cols = []
+    # 模拟通达信全天盘口快照：全天最低价 36.90（发生在 09:30 开盘）
+    diag._get_batch_quotes_snapshot = lambda codes: {
+        "300806": {
+            "high": 43.92,
+            "low": 36.90,  # 绝不可污染 10:23 买入后的 MAE
+            "price": 43.92,
+            "last_close": 36.60,
+            "day_pct": 20.0,
+        }
+    }
+    diag._resolve_name = lambda c, e: "斯迪克"
+
+    # 10:23 买入价 39.81，之后单边拉升至涨停 43.92
+    mock_series = {
+        "300806": [
+            {"ts": 1730082180.0, "price": 39.81, "pct": 8.77, "fusion": {"tier": 3}},
+            {"ts": 1730082300.0, "price": 40.50, "pct": 10.65, "fusion": {"tier": 3}},
+            {"ts": 1730083500.0, "price": 43.92, "pct": 20.0, "fusion": {"tier": 3}},
+        ]
+    }
+
+    old_load = fld.load_live_series
+    fld.load_live_series = lambda d: mock_series
+    try:
+        entries = diag._track_entries_from_shadow("2026-10-28")
+        assert len(entries) == 1
+        e = entries[0]
+        assert e["enter_price"] == 39.81
+        assert e["mae"] == 0.0, f"买入后一路涨停，MAE 必须严格为 0.00%，严禁被 36.90 污染为负数，实际为 {e['mae']}%"
+        assert e["mfe"] > 10.0, f"MFE 必须大于 10%，实际为 {e['mfe']}%"
+    finally:
+        fld.load_live_series = old_load
+
+
+def test_track_entries_from_shadow_since_first_alignment():
+    """测试 11 (时序): 首异动涨幅与入局涨幅正确区分，首→入% 真实走阔对齐"""
+    from ats.ui.fusion_ladder_dialog import FusionLadderDialog
+    import ats.ui.fusion_ladder_dialog as fld
+
+    diag = FusionLadderDialog.__new__(FusionLadderDialog)
+    diag.extra_cols = []
+    diag._get_batch_quotes_snapshot = lambda codes: {}
+    diag._resolve_name = lambda c, e: "义翘神州"
+
+    # 09:52 首异动 4.31%，10:17 正式入局 9.54%
+    mock_series = {
+        "301047": [
+            {"ts": 1730080320.0, "price": 105.87, "pct": 4.31, "fusion": {"tier": 1}, "patterns": ["突破10日VWAP"]},
+            {"ts": 1730081820.0, "price": 111.18, "pct": 9.54, "fusion": {"tier": 2}, "patterns": ["两阳加速"]},
+            {"ts": 1730082000.0, "price": 112.00, "pct": 10.35, "fusion": {"tier": 2}},
+        ]
+    }
+
+    old_load = fld.load_live_series
+    fld.load_live_series = lambda d: mock_series
+    try:
+        entries = diag._track_entries_from_shadow("2026-10-28")
+        assert len(entries) == 1
+        e = entries[0]
+        assert e["first_pct"] == 4.31, f"首异动涨幅必须为 4.31%，实际为 {e['first_pct']}%"
+        assert e["enter_pct"] == 9.54, f"入局涨幅必须为 9.54%，实际为 {e['enter_pct']}%"
+        assert e["since_first"] == 5.23, f"首→入% 必须为 +5.23%，绝不能全表恒为 +0.00%，实际为 {e['since_first']}%"
+    finally:
+        fld.load_live_series = old_load

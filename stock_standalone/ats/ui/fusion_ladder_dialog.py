@@ -2888,6 +2888,21 @@ class FusionLadderDialog(QWidget, WindowMixin):
             recs = [r for r in recs if _in_trading_session(r.get("ts"), allow_premarket=False)]
             if not recs:
                 continue
+            # 严格时序排序：确保时间戳递增
+            recs = sorted(recs, key=lambda x: float(x.get("ts") or 0.0))
+
+            # 1. 寻找当日首异动帧 (First Anomaly Frame)：首次出现 tier>=1 或形态识别的记录，若无则取首根
+            first_rec = None
+            for r in recs:
+                t_val = int((r.get("fusion") or {}).get("tier") or 0)
+                pats = (r.get("patterns") or (r.get("fusion") or {}).get("evidence") or [])
+                if t_val >= 1 or pats:
+                    first_rec = r
+                    break
+            if first_rec is None:
+                first_rec = recs[0]
+
+            # 2. 寻找当日入局帧 (Entry Frame)：首次达到可执行梯度（tier>=2）的记录
             entry_i = None
             for i, r in enumerate(recs):
                 try:
@@ -2899,32 +2914,41 @@ class FusionLadderDialog(QWidget, WindowMixin):
                     break
             if entry_i is None:
                 continue
-            first = recs[0]
-            entry = recs[entry_i]
-            ep = float(entry.get("price") or 0.0)
+
+            entry_rec = recs[entry_i]
+            ep = float(entry_rec.get("price") or 0.0)
             after = recs[entry_i:]
             prices = [float(x.get("price") or 0.0) for x in after if float(x.get("price") or 0.0) > 0]
+            if not prices and ep > 0:
+                prices = [ep]
 
-            # 2. 结合通达信权威行情校准全天最高、全天最低与收盘价
+            # 3. 获取通达信权威行情
             q = quotes_map.get(code, {})
-            q_high = float(q.get("high") or 0.0)
-            q_low = float(q.get("low") or 0.0)
             q_price = float(q.get("price") or 0.0)
             q_last_close = float(q.get("last_close") or 0.0)
             q_day_pct = q.get("day_pct")
 
-            # 之后最高价：采样点最高与权威最高取最大
-            valid_highs = [p for p in prices if p > 0] + ([q_high] if q_high > 0 else [])
-            max_p = max(valid_highs) if valid_highs else ep
-            # 之后最低价：采样点最低与权威最低取最小
-            valid_lows = [p for p in prices if p > 0] + ([q_low] if q_low > 0 else [])
-            min_p = min(valid_lows) if valid_lows else ep
-            # 收盘/最新价：优先通达信权威收盘价，其次采样点末尾
+            # 4. 买入后时序因果性铁律：
+            # 买入之后的最低价与最高价，严格只取 entry_i 及其后续时间切片！
+            # 绝对禁止引入买入之前的历史全天最低价 q_low（避免拿开盘低点误判为买后回撤）！
+            max_p = max(prices) if prices else ep
+            min_p = min(prices) if prices else ep
+
+            # 收盘/最新价：优先通达信权威当前价/收盘价，其次采样点末尾
             cur_price = q_price if q_price > 0 else (prices[-1] if prices else ep)
 
+            # 若当前最新价在买入后创出新高或新低，将其纳入买入后的极值对比
+            if cur_price > 0:
+                if cur_price > max_p:
+                    max_p = cur_price
+                if cur_price < min_p:
+                    min_p = cur_price
+
+            # 严格计算 MFE 与 MAE
             if ep > 0:
-                mfe = (max_p - ep) / ep * 100.0
-                mae = (min_p - ep) / ep * 100.0
+                mfe = max(0.0, (max_p - ep) / ep * 100.0)
+                # MAE 是买入后的最大回撤（只能 <= 0，若买入后价格始终高于买入价，回撤为 0.00%）
+                mae = min(0.0, (min_p - ep) / ep * 100.0)
                 holding_ret = (cur_price - ep) / ep * 100.0
             else:
                 mfe = mae = holding_ret = 0.0
@@ -2936,12 +2960,12 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 day_close_pct = (q_price - q_last_close) / q_last_close * 100.0
             elif recs and recs[-1].get("pct") is not None and abs(float(recs[-1].get("pct") or 0.0)) > 1e-4:
                 day_close_pct = float(recs[-1].get("pct"))
-            elif entry.get("pct") is not None and abs(float(entry.get("pct") or 0.0)) > 1e-4:
-                day_close_pct = float(entry.get("pct"))
-            elif first.get("pct") is not None and abs(float(first.get("pct") or 0.0)) > 1e-4:
-                day_close_pct = float(first.get("pct"))
+            elif entry_rec.get("pct") is not None and abs(float(entry_rec.get("pct") or 0.0)) > 1e-4:
+                day_close_pct = float(entry_rec.get("pct"))
+            elif first_rec.get("pct") is not None and abs(float(first_rec.get("pct") or 0.0)) > 1e-4:
+                day_close_pct = float(first_rec.get("pct"))
             else:
-                day_close_pct = float(q_day_pct if q_day_pct is not None else (entry.get("pct") or 0.0))
+                day_close_pct = float(q_day_pct if q_day_pct is not None else (entry_rec.get("pct") or 0.0))
 
             keep = 0
             for x in after:
@@ -2951,33 +2975,52 @@ class FusionLadderDialog(QWidget, WindowMixin):
                     t = 0
                 if t >= 1:
                     keep += 1
-            ev = list((entry.get("fusion") or {}).get("evidence") or [])
-            te = entry.get("track_entry") or entry.get("track") or {}
-            first_ts = float(te.get("first_ts") or first.get("ts") or 0.0)
-            first_pct = float(te.get("first_pct") if te.get("first_pct") is not None else (first.get("pct") or 0.0))
+            ev = list((entry_rec.get("fusion") or {}).get("evidence") or [])
+            te = entry_rec.get("track_entry") or entry_rec.get("track") or {}
+
+            # 5. 首异动与入局点数据精确提取（严密对齐时序）
+            # 入局：
             te_enter_ts = float(te.get("enter_ts") or 0.0)
             te_enter_price = float(te.get("enter_price") or 0.0)
             if te_enter_ts > 0 and te_enter_price > 0 and te.get("enter_pct") is not None:
                 enter_ts = te_enter_ts
-                enter_pct = float(te.get("enter_pct"))
                 enter_price_val = te_enter_price
+                enter_pct = float(te.get("enter_pct"))
             else:
-                enter_ts = float(entry.get("ts") or first_ts or 0.0)
-                enter_pct = float(entry.get("pct") if entry.get("pct") is not None else first_pct)
+                enter_ts = float(entry_rec.get("ts") or 0.0)
                 enter_price_val = ep
+                enter_pct = float(entry_rec.get("pct") if entry_rec.get("pct") is not None else 0.0)
+
+            # 首异动：
+            first_ts = float(first_rec.get("ts") or enter_ts)
+            first_pct = float(first_rec.get("pct") if first_rec.get("pct") is not None else enter_pct)
+
+            te_first_ts = float(te.get("first_ts") or 0.0)
+            te_first_pct = te.get("first_pct")
+            if te_first_ts > 0 and te_first_ts <= enter_ts and te_first_pct is not None:
+                first_ts = te_first_ts
+                first_pct = float(te_first_pct)
+
+            # 若时序倒挂（首异动晚于入局），则守卫对齐
+            if first_ts > enter_ts and enter_ts > 0:
+                first_ts = enter_ts
+                first_pct = enter_pct
+
+            since_first = round(enter_pct - first_pct, 2)
+
             persist_val = float(te.get("persist") or round(keep * 100.0 / max(1, len(after)), 1))
             chain_txt = str(te.get("chain") or " · ".join(ev))[:160]
             ev_n = int(te.get("evidence_n") or len(ev) or (1 if chain_txt else 0))
             out.append({
                 "code": code,
-                "name": self._resolve_name(code, entry),
-                "tier": int((entry.get("fusion") or {}).get("tier") or 0),
+                "name": self._resolve_name(code, entry_rec),
+                "tier": int((entry_rec.get("fusion") or {}).get("tier") or 0),
                 "enter_ts": enter_ts,
                 "enter_price": enter_price_val,
                 "enter_pct": enter_pct,
                 "first_ts": first_ts,
                 "first_pct": first_pct,
-                "since_first": enter_pct - first_pct,
+                "since_first": since_first,
                 "persist": round(persist_val, 1),
                 "evidence_n": ev_n,
                 "chain": chain_txt,
