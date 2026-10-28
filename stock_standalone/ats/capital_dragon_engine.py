@@ -1231,30 +1231,7 @@ class CapitalDragonEngine:
             "temp_trend_summary": str(horse_report.get("temp_trend_summary", "")) if horse_report else ""
         }
 
-        # 🛡️ 提取全市场四大指数，将资金主线与底层状态栏完全打通并实现 100% 数据一致闭环 (SSOT)
-        extracted_indices = {}
-        for r in dragon_records_all:
-            c = _clean_code(r.get("code", ""))
-            vr = float(r.get("vol_ratio", 1.0) or 1.0)
-            amt = float(r.get("amount_yi", 0.0) or 0.0)
-            if c in ('999999', '000001') and 'sh' not in extracted_indices:
-                extracted_indices['sh'] = {'amount_yi': amt, 'vol_ratio': vr}
-            elif c == '399001' and 'sz' not in extracted_indices:
-                extracted_indices['sz'] = {'amount_yi': amt, 'vol_ratio': vr}
-            elif c == '399006' and 'cy' not in extracted_indices:
-                extracted_indices['cy'] = {'amount_yi': amt, 'vol_ratio': vr}
-            elif c == '899050' and 'bj' not in extracted_indices:
-                extracted_indices['bj'] = {'amount_yi': amt, 'vol_ratio': vr}
 
-        if len(extracted_indices) >= 2:
-            prev_bench = getattr(self, '_yesterday_index_amounts', None) or self._get_or_load_yesterday_benchmark()
-            import datetime
-            now_dt = datetime.datetime.now()
-            market_sum = self._build_summary_result(extracted_indices, prev_bench, now_dt)
-            if market_sum and float(market_sum.get('total_amt', 0.0) or 0.0) > 0:
-                self._bg_market_summary_cache = market_sum
-                self._bg_market_summary_ts = now
-                report['market_volume_summary'] = market_sum
 
         with self._cache_lock:
             self._cached_report = report
@@ -1299,34 +1276,27 @@ class CapitalDragonEngine:
         self,
         df_all: Optional[pd.DataFrame] = None,
         now_dt: Optional[Any] = None,
-        min_interval: float = 30.0,
-        force: bool = False
+        *args, **kwargs
     ) -> Dict[str, Any]:
         """
         获取全市场四大核心指数（上证、深证、创业板、北证）的资金、量比，以及全市交易额和较昨日增减交易额 (SSOT)
-
-        ⚡ 30秒平滑自动更新与 0 阻塞设计 (严格对齐闭环):
-        1. 若传入 df_all 且距离上次计算已超过 min_interval (默认 30.0 秒)，或者 force=True:
-           轻量级快速提取四大指数（仅检索 4 行数据，耗时 <0.1ms），毫秒级原子刷新缓存 _bg_market_summary_cache；
-        2. 若距离上次更新未满 min_interval:
-           直接返回已缓存的摘要，0 毫秒开销，0 线程阻塞，保证高频 UI 极度丝滑；
-        3. 资金主线每 180 秒跑完一轮时，其四大指数产物亦会自动同步到此缓存；
-        4. 全资金主线绝对维持 180 秒低频运行，坚决不高频重算全市场，保护 ATS 性能与 TDX API。
+        纯粹只读通达信官方后台缓存（< 0.1ms，零网络IO，绝对不被个股列表污染）
         """
         now = time.time()
         last_ts = getattr(self, '_bg_market_summary_ts', 0.0)
+        force = kwargs.get('force', False)
+        min_interval = kwargs.get('min_interval', 30.0)
 
-        # ── 若传入了 df_all，按 30 秒节流刷新四大指数（耗时 <0.1ms） ──────────────────
+        # 仅供离线单元测试分支显式传入 df_all 时使用
         if df_all is not None and not df_all.empty:
             if force or (now - last_ts >= min_interval) or (not self._bg_market_summary_cache):
                 return self._compute_market_summary_from_df(df_all, now_dt)
 
-        # ── 只读缓存（< 0.1ms，零阻塞）────────────────────────
+        # 生产环境：纯粹只读通达信原生后台线程计算的高精度 SSOT 缓存
         cached = self._bg_market_summary_cache
         if cached:
             return dict(cached)
 
-        # 首次启动缓存为空时返回空占位（不阻塞主线程）
         return {'formatted_html': '', 'plain_text': '', 'sh_amt': 0.0, 'sz_amt': 0.0,
                 'cy_amt': 0.0, 'bj_amt': 0.0, 'total_amt': 0.0, 'diff_amt': 0.0, 'diff_str': ''}
 

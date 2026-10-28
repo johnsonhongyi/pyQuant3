@@ -3592,70 +3592,90 @@ class TDXRealtimeFetcher:
 
                         self.add_log(f"⚡ [TDX] 成功获取批次 {len(quotes)} 只标的行情 (耗时: {cost_ms:.1f}ms, 主站: {host_info})", level="INFO")
                     else:
-                        self._consecutive_empty_batches += 1
-                        # 🚨 判定主站是否真正假死：先发送标准健康探针 (000001/600519)
-                        is_host_dead = False
-                        if self._consecutive_empty_batches >= 2 and not stage_meta.get("is_server_init", False):
-                            # 🛡️ 守卫：若标准探针能够有效返回盘口，说明主站与网络完全健康，纯粹是业务批次内含有未上市或异常标的，绝不触发误切换！
-                            if not self._probe_host_alive(self.api):
-                                is_host_dead = True
-                            else:
-                                self._consecutive_empty_batches = 0
-
-                        if is_host_dead:
-                            self.add_log(f"⚠️ [TDX故障自愈] 主站 [{host_info}] 探针无响应，确认节点假死，立即自动故障转移！", level="WARN")
-                            if self.auto_failover():
-                                try:
-                                    retry_quotes = self.api.get_security_quotes(req_params)
-                                    if retry_quotes:
-                                        self._consecutive_empty_batches = 0
-                                        for rq in retry_quotes:
-                                            rq = normalize_quote_unit(rq)
-                                            rq_c = str(rq.get("code", "")).strip().zfill(6)
-                                            if rq_c:
-                                                self._off_hours_cached_quotes[rq_c] = rq
-                                                self._no_quote_counts[rq_c] = 0
-                                                self._unlisted_or_dormant_codes.discard(rq_c)
-                                                b_res = self.record_and_evaluate_bidding_surge(rq)
-                                                rq.update(b_res)
-                                        all_fetched_quotes.extend(retry_quotes)
-                                        self.add_log(f"⚡ [TDX故障自愈] 新主站重试成功，已获取 {len(retry_quotes)} 只标的行情", level="INFO")
-                                        continue
-                                except Exception as e_retry:
-                                    self.add_log(f"新主站重试异常: {e_retry}", level="WARN")
-
-                        # 批次未返回盘口数据：带 60s 日志防刷频
-                        if not hasattr(self, "_last_batch_warn_time"):
-                            self._last_batch_warn_time = {}
-                        batch_key = codes_str[:25]
-                        last_warn_t = self._last_batch_warn_time.get(batch_key, 0.0)
-                        if now_t - last_warn_t > 60.0:
-                            self._last_batch_warn_time[batch_key] = now_t
-                            self.add_log(f"⚠️ [TDX] 批次 [{codes_str[:30]}...] 未返回盘口数据，启动深度二分隔离探针", level="WARN")
-
-                        # 🚀 [PERF-FIX] 递归二分拆包隔离：精准识别并剔除导致失败的单个异常/未上市代码，确保同批正常标的 100% 成功拉取！
-                        queue = collections.deque([req_params])
-                        while queue:
-                            cur_b = queue.popleft()
-                            if not cur_b:
-                                continue
-                            try:
-                                cur_q = self.api.get_security_quotes(cur_b)
-                                if cur_q and len(cur_q) > 0:
-                                    for sq in cur_q:
-                                        sq = normalize_quote_unit(sq)
-                                        sq_code = str(sq.get("code", "")).strip().zfill(6)
-                                        if sq_code:
-                                            self._off_hours_cached_quotes[sq_code] = sq
-                                            self._no_quote_counts[sq_code] = 0
-                                            self._unlisted_or_dormant_codes.discard(sq_code)
-                                            b_res = self.record_and_evaluate_bidding_surge(sq)
-                                            sq.update(b_res)
-                                    all_fetched_quotes.extend(cur_q)
+                        if not is_trading:
+                            # 🛡️ 非交易时段/午间休市保护：交易所未撮合或暂停推送实时盘口为正常现象
+                            # 1. 绝对禁止误判主站假死与自动故障转移
+                            # 2. 绝对禁止启动深度二分隔离探针与高频轰炸
+                            # 3. 绝对禁止将正常标的误标记为未上市/僵尸代码
+                            self._consecutive_empty_batches = 0
+                            for _, c_item in req_params:
+                                if c_item in self._off_hours_cached_quotes:
+                                    all_fetched_quotes.append(self._off_hours_cached_quotes[c_item])
+                        else:
+                            self._consecutive_empty_batches += 1
+                            # 🚨 判定主站是否真正假死：先发送标准健康探针 (000001/600519)
+                            is_host_dead = False
+                            if self._consecutive_empty_batches >= 2 and not stage_meta.get("is_server_init", False):
+                                # 🛡️ 守卫：若标准探针能够有效返回盘口，说明主站与网络完全健康，纯粹是业务批次内含有未上市或异常标的，绝不触发误切换！
+                                if not self._probe_host_alive(self.api):
+                                    is_host_dead = True
                                 else:
-                                    # 当前批次失败
+                                    self._consecutive_empty_batches = 0
+
+                            if is_host_dead:
+                                self.add_log(f"⚠️ [TDX故障自愈] 主站 [{host_info}] 探针无响应，确认节点假死，立即自动故障转移！", level="WARN")
+                                if self.auto_failover():
+                                    try:
+                                        retry_quotes = self.api.get_security_quotes(req_params)
+                                        if retry_quotes:
+                                            self._consecutive_empty_batches = 0
+                                            for rq in retry_quotes:
+                                                rq = normalize_quote_unit(rq)
+                                                rq_c = str(rq.get("code", "")).strip().zfill(6)
+                                                if rq_c:
+                                                    self._off_hours_cached_quotes[rq_c] = rq
+                                                    self._no_quote_counts[rq_c] = 0
+                                                    self._unlisted_or_dormant_codes.discard(rq_c)
+                                                    b_res = self.record_and_evaluate_bidding_surge(rq)
+                                                    rq.update(b_res)
+                                            all_fetched_quotes.extend(retry_quotes)
+                                            self.add_log(f"⚡ [TDX故障自愈] 新主站重试成功，已获取 {len(retry_quotes)} 只标的行情", level="INFO")
+                                            continue
+                                    except Exception as e_retry:
+                                        self.add_log(f"新主站重试异常: {e_retry}", level="WARN")
+
+                            # 批次未返回盘口数据：带 60s 日志防刷频
+                            if not hasattr(self, "_last_batch_warn_time"):
+                                self._last_batch_warn_time = {}
+                            batch_key = codes_str[:25]
+                            last_warn_t = self._last_batch_warn_time.get(batch_key, 0.0)
+                            if now_t - last_warn_t > 60.0:
+                                self._last_batch_warn_time[batch_key] = now_t
+                                self.add_log(f"⚠️ [TDX] 批次 [{codes_str[:30]}...] 未返回盘口数据，启动深度二分隔离探针", level="WARN")
+
+                            # 🚀 [PERF-FIX] 递归二分拆包隔离：精准识别并剔除导致失败的单个异常/未上市代码，确保同批正常标的 100% 成功拉取！
+                            queue = collections.deque([req_params])
+                            while queue:
+                                cur_b = queue.popleft()
+                                if not cur_b:
+                                    continue
+                                try:
+                                    cur_q = self.api.get_security_quotes(cur_b)
+                                    if cur_q and len(cur_q) > 0:
+                                        for sq in cur_q:
+                                            sq = normalize_quote_unit(sq)
+                                            sq_code = str(sq.get("code", "")).strip().zfill(6)
+                                            if sq_code:
+                                                self._off_hours_cached_quotes[sq_code] = sq
+                                                self._no_quote_counts[sq_code] = 0
+                                                self._unlisted_or_dormant_codes.discard(sq_code)
+                                                b_res = self.record_and_evaluate_bidding_surge(sq)
+                                                sq.update(b_res)
+                                        all_fetched_quotes.extend(cur_q)
+                                    else:
+                                        # 当前批次失败
+                                        if len(cur_b) == 1:
+                                            # 精准定位到单只未上市或无盘口异常代码，单独记录并隔离冷却
+                                            bad_mkt, bad_c = cur_b[0]
+                                            self._no_quote_counts[bad_c] = self._no_quote_counts.get(bad_c, 0) + 1
+                                            self._no_quote_last_attempt[bad_c] = now_t
+                                            self._unlisted_or_dormant_codes.add(bad_c)
+                                        else:
+                                            mid = len(cur_b) // 2
+                                            queue.append(cur_b[:mid])
+                                            queue.append(cur_b[mid:])
+                                except Exception:
                                     if len(cur_b) == 1:
-                                        # 精准定位到单只未上市或无盘口异常代码，单独记录并隔离冷却
                                         bad_mkt, bad_c = cur_b[0]
                                         self._no_quote_counts[bad_c] = self._no_quote_counts.get(bad_c, 0) + 1
                                         self._no_quote_last_attempt[bad_c] = now_t
@@ -3664,16 +3684,6 @@ class TDXRealtimeFetcher:
                                         mid = len(cur_b) // 2
                                         queue.append(cur_b[:mid])
                                         queue.append(cur_b[mid:])
-                            except Exception:
-                                if len(cur_b) == 1:
-                                    bad_mkt, bad_c = cur_b[0]
-                                    self._no_quote_counts[bad_c] = self._no_quote_counts.get(bad_c, 0) + 1
-                                    self._no_quote_last_attempt[bad_c] = now_t
-                                    self._unlisted_or_dormant_codes.add(bad_c)
-                                else:
-                                    mid = len(cur_b) // 2
-                                    queue.append(cur_b[:mid])
-                                    queue.append(cur_b[mid:])
                 except Exception as e:
                     cost_ms = (time.time() - t_start) * 1000.0
                     self._record_request_feedback(cost_ms, is_error=True)
@@ -3725,12 +3735,14 @@ class TDXRealtimeFetcher:
         """【标准行情快照转换 SSOT】标准化单只标的行情快照字典（包含VWAP均价修正与换手率计算）"""
         c_clean = str(q.get("code", "")).strip().zfill(6)
         trade_price = float(q.get("price", 0.0))
+        last_close = float(q.get("last_close", trade_price))
         open_price = float(q.get("open", trade_price))
         high_price = float(q.get("high", trade_price))
         low_price = float(q.get("low", trade_price))
         if low_price <= 1.0 or (trade_price > 5.0 and low_price < trade_price * 0.1):
-            low_price = trade_price if trade_price > 0 else (open_price if open_price > 0 else 10.0)
-        last_close = float(q.get("last_close", trade_price))
+            low_price = trade_price if trade_price > 0 else (open_price if open_price > 0 else (last_close if last_close > 0 else 10.0))
+        if high_price <= 0.0:
+            high_price = trade_price if trade_price > 0 else (open_price if open_price > 0 else (last_close if last_close > 0 else 10.0))
         vol = float(q.get("vol", 0.0))       # 单位：手 (100股)
         amount = float(q.get("amount", 0.0)) # 单位：元
         bid1_p = float(q.get("bid1", trade_price))

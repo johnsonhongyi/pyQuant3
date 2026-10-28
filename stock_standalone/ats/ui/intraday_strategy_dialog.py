@@ -565,6 +565,8 @@ class SBCChartCanvas(QWidget):
         self.low_price = 0.0
         self.target_sell_min = 0.0
         self.target_sell_max = 0.0
+        self.auction_price = 0.0
+        self.market_phase = ""
         self.signals = []
         self.channel_info = {}  # ⚡ 存储对齐 K 线的通道关键阶梯 (上轨、中轨、下轨、支撑、反转)
         self.channel_info_code = ""
@@ -2710,8 +2712,8 @@ class SBCChartCanvas(QWidget):
         scalar_keys = ("code", "period_mode", "_data_revision", "_zoom_start_idx", "_zoom_end_idx",
                        "_is_right_anchored", "_visible_bar_count", "selected_trade_id", "_vol_mode",
                        "open_price", "vwap", "high_price", "low_price", "target_sell_min", "target_sell_max",
-                       "channel_overlay_enabled", "auto_eval_enabled", "market_phase", "show_gap_channels", "theme_mode", "show_boll")
-        object_keys = ("channel_info", "multi_vwap_snapshot", "strategy_eval_result", "amplitude_info")
+                       "channel_overlay_enabled", "auto_eval_enabled", "market_phase", "auction_price", "show_gap_channels", "theme_mode", "show_boll")
+        object_keys = ("channel_info", "multi_vwap_snapshot", "strategy_eval_result", "amplitude_info", "auction_samples")
         ratio = self.devicePixelRatioF()
         token = (self.width(), self.height(), ratio, self.font().toString(),
                  tuple(getattr(self, key, None) for key in scalar_keys),
@@ -2760,57 +2762,78 @@ class SBCChartCanvas(QWidget):
 
         op_ref = self.open_price if self.open_price > 1.0 else (prices[0] if len(prices) > 0 else 10.0)
 
-        auction_history = getattr(self, "market_phase", "") in ("auction_indicative", "auction_pending")
-        if auction_history:
+        cur_hm = datetime.now().strftime("%H:%M")
+        is_auction_time = ("09:15" <= cur_hm < "09:30")
+        m_phase = str(getattr(self, "market_phase", ""))
+        auction_samples = getattr(self, "auction_samples", [])
+        raw_auc_p = float(getattr(self, "auction_price", 0.0) or 0.0)
+        if raw_auc_p <= 0.001 and auction_samples:
+            try:
+                raw_auc_p = float(auction_samples[-1].get("price", 0.0) or 0.0)
+            except Exception:
+                pass
+
+        # 判定是否处于集合竞价阶段 (覆盖 09:15~09:30、auction_* 标记、或竞价样本有效)
+        auction_active = m_phase.startswith("auction_") or (is_auction_time and (raw_auc_p > 0.001 or bool(auction_samples)))
+        auction_finalized = (m_phase == "auction_open") or (cur_hm >= "09:25" and auction_active)
+
+        if auction_active:
             # 竞价主图仍是历史成交线，不能用当天撮合/报价作为历史涨幅基准。
             history_open = float(df_view.iloc[0].get("open", prices[0]))
             op_ref = history_open if np.isfinite(history_open) and history_open > 0 else float(prices[0])
 
-        # 🌟 真实全量价格候选收集：坚决不人为用 op_ref*1.70 硬截断暴涨新股/次新股/无涨跌幅标的！
+        multi_vwap = getattr(self, "multi_vwap_snapshot", None)
+        # 🌟 真实价格候选收集：严格基于可视区间有效价格
         all_cands = []
         for p in prices:
-            if p > 0.001 and not np.isnan(p) and not np.isinf(p):
+            if p > 0.001 and np.isfinite(p):
                 all_cands.append(float(p))
         for v in vwaps:
-            if v > 0.001 and not np.isnan(v) and not np.isinf(v):
+            if v > 0.001 and np.isfinite(v):
                 all_cands.append(float(v))
-        multi_vwap = getattr(self, "multi_vwap_snapshot", None)
-        if multi_vwap is not None:
-            for name in ("vwap_1d", "vwap_5d", "vwap_10d"):
-                value = getattr(multi_vwap, name, None)
-                if value is not None and value > 0.001:
-                    all_cands.append(float(value))
         if op_ref > 0.001:
             all_cands.append(float(op_ref))
-        if 0 < self.high_price:
-            all_cands.append(float(self.high_price))
-        if 0 < self.low_price:
-            all_cands.append(float(self.low_price))
-        if 0 < self.target_sell_min:
-            all_cands.append(float(self.target_sell_min))
-        if self.signals:
-            for sig in self.signals:
-                if self._map_signal_to_visible_index(sig, df_view, start_i, end_i) is not None:
-                    sig_p = float(sig.get("price", 0.0) if isinstance(sig, dict) else getattr(sig, "price", 0.0))
-                    if sig_p > 0.001:
-                        all_cands.append(sig_p)
 
-        if auction_history:
-            # 未成交竞价只在独立面板显示；历史主图按可见成交/VWAP缩放，
-            # 排除当天高低/开盘、目标价、跨日VWAP等异日参考价撑开纵轴。
-            all_cands = [float(value) for series in (prices, vwaps) for value in series
-                         if np.isfinite(value) and value > 0.001]
-            if np.isfinite(op_ref) and op_ref > 0.001:
-                all_cands.append(float(op_ref))
+        # 🌟 集合竞价最新虚拟撮合价纳入 Y 轴候选 (如果竞价大幅高开/低开，自动舒展 Y 轴包容该虚拟水平线)
+        if auction_active and raw_auc_p > 0.001 and np.isfinite(raw_auc_p):
+            if op_ref > 0.01:
+                if op_ref * 0.60 <= raw_auc_p <= op_ref * 1.50:
+                    all_cands.append(float(raw_auc_p))
+            else:
+                all_cands.append(float(raw_auc_p))
+
+        # 仅在非竞价且实盘交易时，才纳入日线/通道/目标等外部参考位，并严格增加合理性门禁
+        if not auction_active:
+            if multi_vwap is not None:
+                for name in ("vwap_1d", "vwap_5d", "vwap_10d"):
+                    value = getattr(multi_vwap, name, None)
+                    if value is not None and value > 0.001 and (op_ref <= 0.01 or (op_ref * 0.5 <= value <= op_ref * 2.0)):
+                        all_cands.append(float(value))
+            if 0 < self.high_price and (op_ref <= 0.01 or (op_ref * 0.5 <= self.high_price <= op_ref * 2.0)):
+                all_cands.append(float(self.high_price))
+            if 0 < self.low_price and (op_ref <= 0.01 or (op_ref * 0.5 <= self.low_price <= op_ref * 2.0)):
+                all_cands.append(float(self.low_price))
+            if 0 < self.target_sell_min and (op_ref <= 0.01 or (op_ref * 0.5 <= self.target_sell_min <= op_ref * 2.0)):
+                all_cands.append(float(self.target_sell_min))
+            if self.signals:
+                for sig in self.signals:
+                    if self._map_signal_to_visible_index(sig, df_view, start_i, end_i) is not None:
+                        sig_p = float(sig.get("price", 0.0) if isinstance(sig, dict) else getattr(sig, "price", 0.0))
+                        if sig_p > 0.001 and (op_ref <= 0.01 or (op_ref * 0.5 <= sig_p <= op_ref * 2.0)):
+                            all_cands.append(sig_p)
 
         if not all_cands:
             all_cands = [op_ref if op_ref > 0 else 10.0]
 
-        # 🛡️ 极端离群毛刺价格统计学防御 (防止极个别错位 32.60 脏数据撑爆 Y 轴坐标系)
+        # 🛡️ 稳健离群毛刺价格统计学防御 (防止错位脏数据撑爆 Y 轴坐标系)
         if len(all_cands) >= 5:
             med_cands = float(np.median(all_cands))
             if med_cands > 0.1:
-                filtered_cands = [c for c in all_cands if med_cands * 0.25 <= c <= med_cands * 3.5]
+                p_min_real = min(prices) if len(prices) > 0 else med_cands
+                p_max_real = max(prices) if len(prices) > 0 else med_cands
+                lower_bound = min(p_min_real * 0.95, med_cands * 0.60)
+                upper_bound = max(p_max_real * 1.05, med_cands * 1.50)
+                filtered_cands = [c for c in all_cands if lower_bound <= c <= upper_bound]
                 if filtered_cands:
                     all_cands = filtered_cands
 
@@ -2904,11 +2927,18 @@ class SBCChartCanvas(QWidget):
             else:
                 return QColor("#A0AEC0")  # 高对比银白
 
-        # 0. 🌟 可视区间真实【最高点】与【最低点】及精准涨跌幅 (P0 核心标尺，上下两行大字显示)
-        hi_cand = float(df_view['high'].max()) if 'high' in df_view.columns else float(max(prices))
-        lo_cand = float(df_view['low'].min()) if 'low' in df_view.columns else float(min(prices))
-        hi_val = max(hi_cand, float(max(prices))) if len(prices) > 0 else hi_cand
-        lo_val = min(lo_cand, float(min(prices))) if len(prices) > 0 else lo_cand
+        # 0. 🌟 可视区间真实【最高点】与【最低点】及精准涨跌幅 (严格限定在有效数据范围内，绝不被离群毛刺撑爆)
+        valid_p = [p for p in prices if raw_min <= p <= raw_max] if len(prices) > 0 else [raw_min]
+        hi_val = max(valid_p) if valid_p else raw_max
+        lo_val = min(valid_p) if valid_p else raw_min
+        if 'high' in df_view.columns:
+            vh = [float(h) for h in df_view['high'] if np.isfinite(h) and raw_min <= float(h) <= raw_max]
+            if vh:
+                hi_val = max(hi_val, max(vh))
+        if 'low' in df_view.columns:
+            vl = [float(l) for l in df_view['low'] if np.isfinite(l) and raw_min <= float(l) <= raw_max]
+            if vl:
+                lo_val = min(lo_val, min(vl))
 
         if hi_val > 0 and min_p <= hi_val <= max_p:
             y_hi = price_to_y(hi_val)
@@ -3116,8 +3146,32 @@ class SBCChartCanvas(QWidget):
         right_axis_labels = []
         reserved_right_y = []
 
-        # 🟢 最新现价水平虚线与右侧现价高亮胶囊 (对齐通达信同款核心浮标，实时动态展现最新成交价)
-        if len(prices) > 0 and prices[-1] > 0.01:
+        # 🟢 最新现价水平虚线与右侧现价高亮胶囊 (集合竞价期间展示虚拟撮合价虚线与胶囊；盘中展示真实最新成交价)
+        if auction_active and raw_auc_p > 0.001:
+            # 🌟 集合竞价虚拟水平线与右侧竞价胶囊 (用户明确需求：及时在图上看到当前虚拟撮合价格)
+            y_auc = price_to_y(raw_auc_p)
+            pct_auc = ((raw_auc_p - op_ref) / op_ref * 100.0) if op_ref > 0 else 0.0
+            col_auc = QColor("#00E5FF") if auction_finalized else QColor("#FFAA00")
+            auc_title = "开" if auction_finalized else "撮"
+
+            # 跨图表集合竞价水平虚线
+            painter.setPen(QPen(col_auc, 1.2, Qt.PenStyle.DashLine))
+            painter.drawLine(int(margin_left), int(y_auc), int(margin_left + chart_w), int(y_auc))
+
+            # 右侧竞价高亮标签框
+            p_box_w = 56
+            p_box_h = 16
+            p_box_y = max(margin_top, min(margin_top + chart_h - p_box_h, int(y_auc - p_box_h / 2)))
+            reserved_right_y.append(p_box_y + p_box_h / 2)
+            painter.setPen(QPen(col_auc, 1.2))
+            painter.setBrush(QBrush(QColor(col_auc.red(), col_auc.green(), col_auc.blue(), 85)))
+            painter.drawRoundedRect(int(margin_left + chart_w + 2), int(p_box_y), p_box_w, p_box_h, 2, 2)
+
+            painter.setPen(QPen(QColor("#FFFFFF")))
+            painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+            painter.drawText(int(margin_left + chart_w + 4), int(p_box_y + 12), f"{auc_title}:{raw_auc_p:.2f}")
+
+        elif len(prices) > 0 and prices[-1] > 0.01:
             last_p = float(prices[-1])
             y_last = price_to_y(last_p)
             pct_last = ((last_p - op_ref) / op_ref * 100.0) if op_ref > 0 else 0.0
@@ -3167,7 +3221,7 @@ class SBCChartCanvas(QWidget):
             for label, value, color in refs:
                 if label == current_ref or value is None or value <= 0:
                     continue
-                if auction_history and not (min_p <= value <= max_p):
+                if auction_active and not (min_p <= value <= max_p):
                     continue
                 y_ref = price_to_y(float(value))
                 painter.setPen(QPen(QColor(color), 1, Qt.PenStyle.DotLine))
@@ -5731,6 +5785,7 @@ class SBCGlobalDispatcher(QObject):
                 if not codes:
                     self._wait_or_wake(1.0, wake_event)
                     continue
+
 
                 # 1. 批量拉取快照 (40 只批次限制与标准化转换)
                 perf_on = os.environ.get("SBC_PERF") == "1"
@@ -8636,7 +8691,9 @@ class SBCIntradayChartDialog(QWidget):
 
             if not df_multi.empty:
                 if op <= 1.0:
-                    op = float(df_multi.iloc[-1].get("open", p))
+                    op = float(df_multi.iloc[0].get("open", p))
+                if p <= 1.0:
+                    p = float(df_multi.iloc[-1].get("close", op))
                 if vw <= 1.0:
                     vw = float(df_multi.iloc[-1].get("vwap", p))
                 if hi <= 1.0:
@@ -8656,7 +8713,9 @@ class SBCIntradayChartDialog(QWidget):
 
             if not df_kline.empty:
                 if op <= 1.0:
-                    op = float(df_kline.iloc[-1].get("open", p))
+                    op = float(df_kline.iloc[0].get("open", p))
+                if p <= 1.0:
+                    p = float(df_kline.iloc[-1].get("close", op))
                 if vw <= 1.0:
                     vw = float(df_kline.iloc[-1].get("close", p))
                 if hi <= 1.0:
@@ -8723,6 +8782,21 @@ class SBCIntradayChartDialog(QWidget):
                         to_rate = float(df_intraday.iloc[-1].get("turnover_rate", 0.0))
 
             df_target = df_intraday
+
+        # 🛡️ 全模式现价与关键价格终极兜底（彻底杜绝标题栏与副标题显示 现价 0.00）
+        if df_target is not None and not df_target.empty:
+            last_bar = df_target.iloc[-1]
+            first_bar = df_target.iloc[0]
+            if p <= 0.001:
+                p = float(last_bar.get("close", last_bar.get("price", op)))
+            if op <= 0.001:
+                op = float(first_bar.get("open", p))
+            if vw <= 0.001:
+                vw = float(last_bar.get("vwap", p))
+            if hi <= 0.001:
+                hi = float(df_target["high"].max()) if "high" in df_target.columns else p
+            if lo <= 0.001:
+                lo = float(df_target["low"].min()) if "low" in df_target.columns else p
 
         # 计算状态指纹 (用于阶段 4 入口级脏检查)
         n_bars = len(df_target) if df_target is not None and not df_target.empty else 0
@@ -8821,6 +8895,12 @@ class SBCIntradayChartDialog(QWidget):
         canvas = getattr(self, "canvas", None)
         if canvas is not None:
             canvas.market_phase = payload.get("market_phase", "")
+            canvas.auction_price = float(payload.get("auction_price", 0.0) or 0.0)
+            if canvas.auction_price <= 0.001 and payload.get("auction_samples"):
+                try:
+                    canvas.auction_price = float(payload.get("auction_samples")[-1].get("price", 0.0) or 0.0)
+                except Exception:
+                    pass
         if (df_target is None or df_target.empty) and canvas is not None:
             previous = getattr(canvas, "df_intraday", None)
             if (previous is not None and not previous.empty

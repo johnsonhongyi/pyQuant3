@@ -1,5 +1,38 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-28 11:55 【午间休市TDX防误切主站、冷启动首次初始化豁免与现价0.00根除治理】(`docs/tasks/2026-10-28_1155_午间休市TDX防误切主站与冷启动首次初始化豁免治理.md`, `ats/tdx_realtime_fetcher.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_noon_recess_and_cold_start_exemption.py`)
+- [x] **【彻底根治午间休市通达信空批次误判主站假死与深度二分拆包轰炸（用户日志问题）】**：
+  - **用户日志破案**：用户在 11:34:37 遇到报警 `[TDX] 批次未返回盘口数据，启动深度二分隔离探针`、`[TDX故障自愈] 主站探针无响应，确认节点假死，立即自动故障转移！` 并询问“刚刚启动提示,是tdx的服务器暂停导致的?”；
+  - **核心破案**：通达信服务器在 11:30~13:00 午间休市期间暂停推送实时盘口快照，`get_security_quotes` 返回空属于交易所法定休市的正常标准行为；
+  - **彻底守卫根治**：在 `_get_security_quotes_safe` 增加 `if not is_trading:` 严格时段守卫：非交易时段盘口返回空时，**坚决清零 `_consecutive_empty_batches = 0`，绝对禁止误判假死切节点，绝对禁止启动深度二分隔离探针反复轰炸服务器，绝对禁止将正常标的误拉入僵尸代码黑名单**；
+- [x] **【建立全系统标准的冷启动首次加载豁免（Cold Start Exemption）（用户需求 2）】**：
+  - **跨日旧增量严密物理淘汰**：`TDXGlobalCachePool.get_incremental_intraday` 彻底重构跨日防御，只要已跨入新交易日（`entry_date < today_str`），昨日旧增量坚决物理淘汰，绝不误判为 `is_frozen` 命中；且交易日 >=09:30 若缺失今日数据，坚决放行重新拉取；
+  - **SBCGlobalDispatcher 首次加载豁免穿透**：引入 `initial_loaded_codes` 集合，对未完成首帧加载的订阅标的（`has_pending_cold_start`），100% 豁免非交易时段休眠，强力穿透执行首次初始化装载与分发，彻底解决冷启动展示昨日旧数据的问题；
+  - **休市/冷启动权威自愈快照**：新增 `_build_fallback_snapshot`，当盘口接口因休市或冷启动未返回报价时，自动从日线或分时权威数据提取当日收盘价格与指标，填充真实 `price`, `last_close`, `open_price`, `vwap`, `amount`；
+- [x] **【彻底根除走势图多日分时与各模式副标题“现价 0.00”】**：
+  - **数据提取补全**：在 `_do_fetch_chart_data` 中，补全 3d/5d/10d 以及 K 线模式的现价提取 `p = float(df_multi.iloc[-1].get("close", op))`；
+  - **开盘价取值纠偏**：将多日分时与 K 线开盘价取值从错误的一分钟线 `iloc[-1]`（分钟收尾价）纠正为全天开盘价 `iloc[0]`；
+  - **全模式现价终极兜底**：在数据构造阶段加入全局兜底防御，确保只要走势图有数据，`p` 与 `op` 严格大于 0，彻底消灭标题栏与副标题 `现价: 0.00元 (+0.00%)`；
+- [x] **【自动化测试全绿通过（4 项专项 + 回归测试纯绿）】**：
+  - 新增 `tests/test_noon_recess_and_cold_start_exemption.py`，覆盖午间休市空批次保护、休市自愈快照、跨日旧增量物理淘汰、多模式现价不为零兜底，4 项全部 100% PASS。
+
+## 2026-10-28 11:35 【SBC集合竞价实时虚拟水平线、右轴胶囊对齐与坐标轴防压缩治理】(`docs/tasks/2026-10-28_1135_SBC集合竞价实时虚拟水平线与坐标轴防压缩治理.md`, `ats/tdx_realtime_fetcher.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_sbc_auction_virtual_line_and_axis_compression.py`)
+- [x] **【集合竞价实时虚拟撮合水平线与右轴高亮胶囊全闭环（用户需求 1）】**：
+  - **用户业务诉求**：“ats的sbc盯盘中集合竞价的价格只是在小窗口显示,实时价格需要一个虚拟水平线显示在图上可以及时看到当前的价格”；
+  - **数据链与缓存打通**：`_apply_chart_payload` 同步传递 `auction_price`，在静态图层缓存 token 中纳入 `auction_price` 与 `auction_samples`，实现分钟级增量原子重绘；
+  - **主图贯穿虚拟水平线**：集合竞价期间（09:15~09:30 或 `auction_*` 状态），在主图绘制横贯全图的竞价虚线（未成交试撮合为 `#FFAA00` 高亮橙黄，已定盘开盘为 `#00E5FF` 青蓝，与右上角小浮窗 100% 同源）；
+  - **右轴现价胶囊对齐**：在右侧 Y 轴绘制集合竞价现价胶囊（`撮:xxx` 或 `开:xxx`）及昨收基准涨跌幅百分比，将位置加入排布避让列表，操盘手对竞价位置一目了然；
+  - **Y 轴范围自适应包容**：将竞价撮合价科学纳入 Y 轴价格候选 `all_cands`，当竞价大幅高开或低开时，走势图 Y 轴自动舒展，虚拟现价线绝对不跑出可视区域；
+- [x] **【彻底根治集合竞价个股 SBC 图被压缩压扁与清理数据无效（用户需求 2）】**：
+  - **根因一破案（通达信快照 10.0 污染）**：`_normalize_quote_to_snapshot` 原先在早盘竞价无成交价时将 `low_price` 硬编码为 `10.0`，导致低价股（如北新路桥 002307 现价 3.22元）被强行塞入 10.0 撑爆坐标轴，且每次拉取都重置，导致清理数据也无效；已重构安全回退到真实 `last_close`（昨收价），彻底根除污染源；
+  - **根因二破案（竞价门禁判断遗漏）**：原逻辑遗漏 `auction_open`（09:25~09:30）与未标记时间段，导致未成交盘口外部参考价（`high_price`, `low_price`, `target_sell_min`）裸塞入 `all_cands`；重构全时段强健竞价判定 `auction_active`，在竞价期间坚决排除未成交外部参考价；
+  - **根因三破案（统计学滤波门禁升级）**：原先 0.25~3.5 倍范围过宽失灵，现改为基于可视价格极值与中位数的科学门禁（`[lower_bound, upper_bound]`），彻底过滤离群脏数据；
+  - **根因四破案（左侧刻度极值约束）**：`hi_val` 与 `lo_val` 严格限定在清洗后的有效价格范围内，彻底消灭左侧刻度出现 `高:8.65 +168.5%` 或 `低:14.79 -51.8%` 的撑爆压扁毛刺；
+- [x] **【自动化测试全绿通过（4 项专项 + 23 项全量回归）】**：
+  - 新增 `tests/test_sbc_auction_virtual_line_and_axis_compression.py`，覆盖快照昨收兜底、竞价虚拟水平线与右轴胶囊、低价股防压缩（002307）与中高价股防压缩（601606），4 项全部 100% PASS；
+  - 回归测试包含 auction_cache/crosshair/gap_channels/theme_boll 23 项全部通过，静态语法检查 0 错误。
+
+
 ## 2026-10-28 11:25 【彻底根治盘中30分钟成交量定时播报哑火漏报】(`ats/ui/main_window.py`)
 - [x] **【彻底解决播报时无参调用读取 0 导致的全局漏报】**：
   - **根因穿透**：`_check_market_volume_announcement` 原本写死无参调用 `summary = cde.get_market_indices_and_volume_summary()`，后台 TDX 线程对指数行情返回空导致缓存中 `total_amt == 0`，进而直接被 `if total_amt > 0` 丢弃，整整 60 秒内每一次检查都被静默拦截；

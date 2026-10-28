@@ -3597,14 +3597,7 @@ class ATSMainWindow(QMainWindow):
         try:
             from ats.capital_dragon_engine import CapitalDragonEngine
             cde = CapitalDragonEngine.get_instance()
-            cur_df = getattr(self, 'current_df', None)
-            if cur_df is not None and not getattr(cur_df, 'empty', True):
-                try:
-                    summary = cde.get_market_indices_and_volume_summary(df_all=cur_df, min_interval=30.0, force=force)
-                except TypeError:
-                    summary = cde.get_market_indices_and_volume_summary()
-            else:
-                summary = cde.get_market_indices_and_volume_summary()
+            summary = cde.get_market_indices_and_volume_summary()
             html = summary.get('formatted_html', '')
             if not html and not self.lbl_market_volume_status.text():
                 html = '上证: -- | 深证: -- | 创业板: -- | 北证: -- | 总成交额: --（等待行情）'
@@ -3701,14 +3694,7 @@ class ATSMainWindow(QMainWindow):
             from ats.capital_dragon_engine import CapitalDragonEngine
             from ats.alert_notifier import AlertNotifier
             cde = CapitalDragonEngine.get_instance()
-            cur_df = getattr(self, 'current_df', None)
-            if cur_df is not None and not getattr(cur_df, 'empty', True):
-                try:
-                    summary = cde.get_market_indices_and_volume_summary(df_all=cur_df, min_interval=0.0, force=True)
-                except TypeError:
-                    summary = cde.get_market_indices_and_volume_summary()
-            else:
-                summary = cde.get_market_indices_and_volume_summary()
+            summary = cde.get_market_indices_and_volume_summary()
             
             # 若数据有效，触发统一通知播报，并在确认播报成功后才消耗令牌
             if summary and float(summary.get('total_amt', 0.0) or 0.0) > 0:
