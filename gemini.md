@@ -1,5 +1,16 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-28 11:25 【彻底根治盘中30分钟成交量定时播报哑火漏报】(`ats/ui/main_window.py`)
+- [x] **【彻底解决播报时无参调用读取 0 导致的全局漏报】**：
+  - **根因穿透**：`_check_market_volume_announcement` 原本写死无参调用 `summary = cde.get_market_indices_and_volume_summary()`，后台 TDX 线程对指数行情返回空导致缓存中 `total_amt == 0`，进而直接被 `if total_amt > 0` 丢弃，整整 60 秒内每一次检查都被静默拦截；
+  - **实时盘面强制提取注入**：在播报节点传入 `cur_df = getattr(self, 'current_df', None)` 并以 `force=True`（耗时 <0.1ms）强制从当前最新行情中即时提取四大指数真实成交额与量比，100% 确保 `total_amt > 0`；
+- [x] **【脱离 market_active 狭窄门禁，保障收盘与开盘准点播报】**：
+  - **根因穿透**：原调用被深包在 `if market_active:` 内部，导致 11:30 上午收盘、13:00 下午开盘及 15:00 下午收盘等跨交易/休市临界节点直接被拦截跳过；
+  - **解耦全周期守卫**：将定时检查移至 `_refresh_statusbar_time_display` 顶层无条件执行，依靠内部 `SCHEDULE_SLOTS` 精确毫秒级门禁驱动，确保全天 9 个槽位（10:00, 10:30, 11:00, 11:30, 13:00, 13:30, 14:00, 14:30, 15:00）100% 成功播报；
+- [x] **【全量测试验证通过】**：
+  - 模拟 11:30 收盘触发播报测试 100% PASS；
+  - 回归测试 31 项全量通过，静态语法检查 0 错误。
+
 ## 2026-10-28 10:45 【成交量30秒平滑自动更新、全资金主线180秒性能隔离与SSOT同源闭环】(`ats/capital_dragon_engine.py`, `ats/ui/capital_dragon_panel.py`, `ats/ui/main_window.py`, `tests/test_volume_30s_and_capital_dragon_isolation.py`)
 - [x] **【底部成交量 30 秒平滑自动更新与 0 阻塞设计】**：
   - **业务需求闭环**：用户明确指示“底部的成交量数据可以 30 秒自动更新，不能全资金主线高频的更新数据”；

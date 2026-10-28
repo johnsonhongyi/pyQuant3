@@ -3659,11 +3659,13 @@ class ATSMainWindow(QMainWindow):
             if now - getattr(self, '_last_market_status_update', 0.0) >= 2.0:
                 self._last_market_status_update = now
                 self._refresh_market_volume_status()
-            self._check_market_volume_announcement()
         elif not getattr(self, '_last_market_status_update', 0.0):
             # 冷启动时只读一次已有缓存，休市期间不再刷新摘要。
             self._last_market_status_update = now
             self._refresh_market_volume_status()
+
+        # 📢 定时大盘成交量播报检查（脱离 market_active 狭窄门禁，确保 11:30 上午收盘、13:00 午后开盘、15:00 下午收盘准点播报）
+        self._check_market_volume_announcement()
 
     def _check_market_volume_announcement(self, now_dt=None, force=False):
         """
@@ -3695,11 +3697,18 @@ class ATSMainWindow(QMainWindow):
                 if slot_key in self._announced_market_volume_slots:
                     return
 
-            # 3. 获取大盘最新摘要数据
+            # 3. 获取大盘最新摘要数据 (传入当前实时行情并在播报节点强制提取，杜绝因无参读到 0 导致漏报)
             from ats.capital_dragon_engine import CapitalDragonEngine
             from ats.alert_notifier import AlertNotifier
             cde = CapitalDragonEngine.get_instance()
-            summary = cde.get_market_indices_and_volume_summary()
+            cur_df = getattr(self, 'current_df', None)
+            if cur_df is not None and not getattr(cur_df, 'empty', True):
+                try:
+                    summary = cde.get_market_indices_and_volume_summary(df_all=cur_df, min_interval=0.0, force=True)
+                except TypeError:
+                    summary = cde.get_market_indices_and_volume_summary()
+            else:
+                summary = cde.get_market_indices_and_volume_summary()
             
             # 若数据有效，触发统一通知播报，并在确认播报成功后才消耗令牌
             if summary and float(summary.get('total_amt', 0.0) or 0.0) > 0:
