@@ -24,6 +24,7 @@ PATTERN_LATENT_BREAK = "潜伏转突破"
 PATTERN_DRY_UP = "缩量转放量"
 PATTERN_TWO_YANG = "两阳加速"
 PATTERN_BOX10_VWAP_HOVER = "十日洗盘悬空突破"
+PATTERN_STRUCTURE_CONFIRM = "结构预判验证"
 
 PATTERN_LABELS = {
     PATTERN_PIERCE: "🕯️ 一阳穿三线",
@@ -34,6 +35,7 @@ PATTERN_LABELS = {
     PATTERN_DRY_UP: "💧 缩量转放量",
     PATTERN_TWO_YANG: "🕯️ 两阳加速",
     PATTERN_BOX10_VWAP_HOVER: "🚀 十日洗盘悬空突破",
+    PATTERN_STRUCTURE_CONFIRM: "🎯 结构预判验证",
 }
 
 
@@ -56,6 +58,9 @@ def detect_patterns(
     hi_10d: float = 0.0,
     hi_pre1: float = 0.0,
     min_vwap_cushion: float = 0.0,
+    is_structure_prejudged: bool = False,
+    close_over_vwap10: bool = False,
+    vwap10_touch_count: int = 0,
     thresholds: Optional[Dict[str, float]] = None,
 ) -> List[str]:
     """返回命中的形态名列表（可能为空）。"""
@@ -117,6 +122,11 @@ def detect_patterns(
         if (hi_10d <= 0 or price >= hi_10d * 0.998) and (hi_pre1 <= 0 or price >= hi_pre1 * 0.998):
             out.append(PATTERN_BOX10_VWAP_HOVER)
 
+    # 结构预判验证 (果)：昨日确立尾盘站稳 10 日 VWAP 结构，今日日内悬空均线并突破昨高/昨收
+    if (is_structure_prejudged or close_over_vwap10) and min_vwap_cushion >= 0.20:
+        if hi_pre1 <= 0 or price >= hi_pre1 * 0.995:
+            out.append(PATTERN_STRUCTURE_CONFIRM)
+
     return out
 
 
@@ -128,6 +138,6 @@ def pattern_score(patterns: List[str]) -> float:
         PATTERN_PIERCE: 40.0, PATTERN_LEADERSHIP: 35.0,
         PATTERN_SELF_ABNORMAL: 30.0, PATTERN_VWAP_BREAK: 35.0,
         PATTERN_LATENT_BREAK: 45.0, PATTERN_DRY_UP: 45.0, PATTERN_TWO_YANG: 40.0,
-        PATTERN_BOX10_VWAP_HOVER: 60.0,
+        PATTERN_BOX10_VWAP_HOVER: 60.0, PATTERN_STRUCTURE_CONFIRM: 60.0,
     }
     return min(100.0, sum(w.get(p, 20.0) for p in patterns))

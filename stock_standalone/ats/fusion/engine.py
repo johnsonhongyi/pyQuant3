@@ -542,6 +542,22 @@ def penalty_of(event: SignalEvent, regime: Optional[MarketRegime], params: Optio
         p += p_cfg["illiquid_penalty"]
         notes.append("成交额不足{:.0f}万".format(event.amount_wan))
 
+    # 操盘手防追涨铁闸：深水下反抽诱多（坚决刹住追涨）
+    close_pre1_val = float(event.extra.get("close_pre1") or 0.0)
+    vwap10_val = float(event.vwap_10d or event.extra.get("vwap10") or 0.0)
+    if close_pre1_val > 0 and vwap10_val > 0 and close_pre1_val < vwap10_val * 0.96:
+        p += 15.0
+        gap_p = (1.0 - close_pre1_val / vwap10_val) * 100.0
+        notes.append("水下结构诱多(昨收距10V-{:.1f}%)".format(gap_p))
+
+    # 时间结构滞后惩罚 (同板块滞后跟风冲高回落风险，如中国卫通、航天环宇冲高回落套人)
+    lead_gap_v = float(event.extra.get("lead_gap_min") or 0.0)
+    is_prime_v = bool(event.extra.get("is_prime_leader") or event.extra.get("prev_strong_vwap"))
+    if not is_prime_v and lead_gap_v >= 10.0 and event.pct >= 4.0:
+        chase_p = min(15.0, 6.0 + (lead_gap_v - 10.0) * 0.4)
+        p += chase_p
+        notes.append("滞后跟风(落后龙头{:.0f}min)".format(lead_gap_v))
+
     return min(p_cfg["cap"], p), notes
 
 
@@ -572,16 +588,49 @@ def veto_of(
         return "跌破底台{:.2f}".format(event.base_support)
     if event.sbc_supp > 0 and event.price < event.sbc_supp * 0.995:
         return "跌破SBC支撑{:.2f}".format(event.sbc_supp)
-    # V2 操盘手硬约束 1：下跌结构涨不过 VWAP (现价低于日内均价线一票否决)
-    if event.price < event.vwap * 0.998:
-        return "水下运行(现价{:.2f}低于均价{:.2f})".format(event.price, event.vwap)
-    # V2 操盘手硬约束 2：10日均价水下冲高回落一票否决 (Price < V10 且从日内最高点回撤 >= 1.5%)
+    # 预先提取关键结构特征标量
     vwap10_val = float(event.vwap_10d or event.extra.get("vwap10") or 0.0)
     day_high_val = max(float(event.day_high or 0.0), float(event.extra.get("day_high") or 0.0), float(event.price))
+
+    # 操盘手硬约束 6 (具体排最前)：开盘低开破位 / 均线空头排列诱多，一票否决！(佰维存储 688525 案例，兼容 vwap3/v3)
+    v3_val = float(event.extra.get("vwap3") or event.extra.get("v3") or 0.0)
+    if v3_val > 0 and vwap10_val > 0 and v3_val < vwap10_val * 0.985 and not event.is_leader:
+        if event.price < vwap10_val:
+            return "均线空头排列下行(3V低于10V·水下诱多禁止赌博)"
+    close_pre1_val = float(event.extra.get("close_pre1") or 0.0)
+    if close_pre1_val > 0 and event.price < close_pre1_val * 0.98 and event.price < event.vwap and not event.is_leader:
+        return "低开破位杀跌(跌破昨收2%且水下运行·禁止接飞刀)"
+
+    # 操盘手硬约束 4：多周期 VWAP 严重水下且未站上 3V/10V 的弱势反抽，坚决一票否决！(光迅科技 002281 案例)
+    underwater_depth = float(event.extra.get("underwater_depth_pct") or 0.0)
+    multi_ready = bool(event.extra.get("vwap_multi_cycle_ready"))
+    if underwater_depth >= 3.0 and not multi_ready and not event.is_leader and not ("一阳穿三线" in (event.extra.get("patterns") or ())):
+        return "多周期VWAP严重水下(距10V-{:.1f}%·反抽诱多)".format(underwater_depth)
+
+    # 操盘手硬约束 3：走弱标的反弹至 10 日 VWAP 压力区是止损点，坚决拦截买入！(华虹宏力、迈为股份案例)
+    is_weak_val = bool(event.extra.get("is_underwater_weak"))
+    if is_weak_val and vwap10_val > 0 and event.price < vwap10_val * 1.005:
+        drawdown_pct = ((day_high_val - event.price) / day_high_val * 100.0) if day_high_val > 0 else 0.0
+        if drawdown_pct >= 0.8:
+            return "走弱反弹至10日VWAP压力区(是止损点不是买点)"
+
+    # 操盘手硬约束 5：不过前高阻力位是卖点/止损点，坚决拦截买入！(蓝色光标 300058 案例)
+    hi_10d_val = float(event.extra.get("hi_10d") or 0.0)
+    if hi_10d_val > 0 and event.price < hi_10d_val:
+        near_hi = (hi_10d_val - day_high_val) / hi_10d_val * 100.0 <= 1.5
+        drawdown_pct = ((day_high_val - event.price) / day_high_val * 100.0) if day_high_val > 0 else 0.0
+        if near_hi and (drawdown_pct >= 1.0 or event.price < event.vwap):
+            return "受阻10日前高压力区(前高{:.2f}·不过前高是卖点)".format(hi_10d_val)
+
+    # 操盘手硬约束 2：10日均价水下冲高回落一票否决 (Price < V10 且从日内最高点回撤 >= 1.5%)
     if vwap10_val > 0 and event.price < vwap10_val:
         drawdown_pct = ((day_high_val - event.price) / day_high_val * 100.0) if day_high_val > 0 else 0.0
         if drawdown_pct >= 1.5:
             return "10日VWAP水下冲高回落(回撤{:.1f}%)".format(drawdown_pct)
+
+    # V2 操盘手兜底约束：下跌结构涨不过 VWAP (泛化水下运行作为最后兜底)
+    if event.price < event.vwap * 0.998:
+        return "水下运行(现价{:.2f}低于均价{:.2f})".format(event.price, event.vwap)
     if event.bias_pct() > v_cfg["max_bias_pct"]:
         return "追高透支(偏离均价{:+.1f}%)".format(event.bias_pct())
     if regime is not None and regime.stage == STAGE_EBB and not event.is_leader:
@@ -780,22 +829,61 @@ class FusionEngine:
         used_cuts = tuple(cuts) if cuts else self.cuts
         tier = tier_of(rar, used_cuts)
 
-        # V2: 识别 PATTERN_BOX10_VWAP_HOVER (十日洗盘悬空突破)
+        # V2: 识别 PATTERN_BOX10_VWAP_HOVER (十日洗盘悬空突破) 与 PATTERN_STRUCTURE_CONFIRM (结构预判验证)
         _ev_pats = event.extra.get("patterns") or getattr(event, "patterns", None) or ()
         has_box10_hover = bool(
             "十日洗盘悬空突破" in _ev_pats
+            or "结构预判验证" in _ev_pats
             or event.extra.get("box10_hover_break")
+            or event.extra.get("structure_confirmed")
         )
         if has_box10_hover:
             tier_floor = max(int(tier_floor or 0), 4)
 
+        # 结构验证与板块总龙头加成 (电科蓝天 688818 典型特征：昨日单日强势 VWAP 突破带动全板块)
+        # K2 操盘手优化：总龙头必须是【昨日放量大突破 + 今日连阳续强且站在VWAP之上 + 客观非跟风/滞后】
+        lead_lbl_v = str(event.extra.get("lead_label") or "")
+        lead_gap_v = float(event.extra.get("lead_gap_min") or 0.0)
+        today_continue_strong = bool(event.pct > 0 and event.price >= event.vwap * 0.998)
+        # 严格检查：必须 extra["is_prime_leader"] 为 True，且今日续强，且绝对不能是跟风或落后超 5 分钟
+        is_prime_leader = bool(
+            event.extra.get("is_prime_leader")
+            and today_continue_strong
+            and lead_lbl_v not in ("跟风", "LABEL_FOLLOW", "冲锋队", "LABEL_STRIKE")
+            and lead_gap_v <= 5.0
+        )
+        is_struct_confirmed = bool("结构预判验证" in _ev_pats or event.extra.get("structure_confirmed"))
+        if is_prime_leader:
+            rar = min(100.0, rar + 12.0)
+            tier_floor = max(int(tier_floor or 0), 4)
+        elif bool(event.extra.get("prev_strong_vwap")):
+            # 昨日强势但今日分歧震荡 (未连阳续强)：不保底 L4，仅给予结构加分 +8
+            rar = min(100.0, rar + 8.0)
+        elif is_struct_confirmed:
+            rar = min(100.0, rar + 8.0)
+
         temp_cap, temp_coef = self._temp_cap(regime, event)
-        if has_box10_hover:
+        if has_box10_hover or is_prime_leader:
             temp_cap = max(temp_cap, 4)  # 豁免早盘 STAGE_COLD 封顶
         age_min, age_cap, age_coef = self._age(event, now)
         tier = min(tier, temp_cap, age_cap)
 
-        # L4 额外门槛：必须是龙头或强共振，且结构清晰度达标 (十日洗盘悬空突破直接豁免板块滞后)
+        # 操盘手防追涨铁闸 1：深水下非龙头一律封顶 L2 试仓，禁止参与主攻
+        close_pre1_v = float(event.extra.get("close_pre1") or 0.0)
+        vwap10_v = float(event.vwap_10d or event.extra.get("vwap10") or 0.0)
+        if close_pre1_v > 0 and vwap10_v > 0 and close_pre1_v < vwap10_v * 0.96 and not event.is_leader and not ("一阳穿三线" in _ev_pats):
+            tier = min(tier, 2)
+
+        # 操盘手防追涨铁闸 2：龙头永远强于其他！同板块滞后跟风标的 (落后龙头 >= 10min) 坚决禁止给 L4 主攻
+        lead_gap_v = float(event.extra.get("lead_gap_min") or 0.0)
+        lead_lbl_v = str(event.extra.get("lead_label") or "")
+        if not is_prime_leader and lead_gap_v >= 10.0 and lead_lbl_v in ("冲锋队", "跟风", "无导向"):
+            if tier >= 4:
+                tier = 3
+            if lead_gap_v >= 25.0:
+                tier = min(tier, 2)
+
+        # L4 额外门槛：必须是龙头或强共振，且结构清晰度达标 (十日洗盘悬空突破/结构预判验证直接豁免板块滞后)
         if tier >= 4 and not (event.is_leader or event.sector_resonance >= 60.0 or has_box10_hover):
             tier = 3
         if tier >= 3 and event.structure_clarity > 0 and event.structure_clarity < 60.0:
@@ -826,7 +914,25 @@ class FusionEngine:
             targets.append({"price": round(r1, 3), "action": "减半"})
             targets.append({"price": round(max(r1, event.price * 1.06), 3), "action": "清仓"})
 
-        evidence = (n_pos + n_sup + n_itn + n_reg + n_rel + n_pen)[:8]
+        struct_evs: List[str] = []
+        if is_prime_leader:
+            struct_evs.append("🚀板块总龙头(昨日强势VWAP突破带动)")
+        elif is_struct_confirmed:
+            if bool(event.extra.get("wash_quality")):
+                struct_evs.append("🎯结构验证(反复震荡洗盘充分·监听加速)")
+            else:
+                struct_evs.append("🎯结构验证(昨收站稳10V·均线粘合)")
+        elif bool(event.extra.get("is_structure_prejudged")):
+            struct_evs.append("🎯结构预判(昨收站稳10V蓄势)")
+        elif bool(event.extra.get("prev_strong_vwap")):
+            struct_evs.append("🎯结构强势(昨日倍量突破10V)")
+
+        if lead_lbl_v == "排头兵" and lead_gap_v <= 5.0 and not is_prime_leader:
+            struct_evs.append("🧭首动先锋(早盘领先全板块)")
+        elif not is_prime_leader and lead_gap_v >= 10.0 and lead_lbl_v in ("冲锋队", "跟风", "无导向"):
+            struct_evs.append("⚠️同板块滞后跟风(落后龙头{:.0f}min·防回落)".format(lead_gap_v))
+
+        evidence = (struct_evs + n_pos + n_sup + n_itn + n_reg + n_rel + n_pen)[:8]
 
         return FusionDecision(
             code=event.code,

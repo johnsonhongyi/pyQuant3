@@ -25,12 +25,19 @@ import time
 from typing import Any, Callable, Dict, List, Optional
 
 from ats.fusion.adapter import LaunchTracker, build_event, in_trading_session, is_today, today_str
-from ats.fusion.anomaly import PATTERN_BOX10_VWAP_HOVER, PATTERN_LATENT_BREAK, detect_patterns, pattern_score
+from ats.fusion.anomaly import PATTERN_BOX10_VWAP_HOVER, PATTERN_LATENT_BREAK, PATTERN_STRUCTURE_CONFIRM, detect_patterns, pattern_score
 from ats.fusion.config import engine_params, load_config
 from ats.fusion.engine import FusionBus, FusionEngine
 from ats.fusion.regime import MarketRegime, MarketRegimeTracker, RegimeSample
 from ats.fusion.tracker import RaceTracker
-from ats.fusion.vanguard import LABEL_FLAG, LABEL_VANGUARD, SectorClock
+from ats.fusion.vanguard import (
+    LABEL_FLAG,
+    LABEL_FOLLOW,
+    LABEL_PRIME,
+    LABEL_STRIKE,
+    LABEL_VANGUARD,
+    SectorClock,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +115,7 @@ class FusionShadow:
         self.regime_tracker = MarketRegimeTracker()
         self.tracker = RaceTracker()
         self.sector_clock = SectorClock()
+        self._prime_leader_by_sector: Dict[str, str] = {}  # sector -> code 板块总龙头唯一性
         self._latent_pool: Dict[str, float] = {}
         self._regime_provider = regime_provider
 
@@ -312,6 +320,7 @@ class FusionShadow:
                     if prev_day:
                         self.launch.reset()
                         self.sector_clock = SectorClock()
+                        self._prime_leader_by_sector.clear()
                         self._latent_pool.clear()
                         self._last_sample.clear()
                         self._rar_samples.clear()
@@ -368,7 +377,14 @@ class FusionShadow:
             prev_pct = 0.0
             ret_std20 = 0.0
             try:
-                prev_pct = float(row.get("per1d") or (snap or {}).get("prev_pct") or 0.0)
+                # K3 数据源对齐：优先读 adapter 注入的 event.extra["prev_pct"] (来自 DailyContext 权威日线)，与回放 100% 同源
+                prev_pct = float(
+                    event.extra.get("prev_pct")
+                    or (snap or {}).get("prev_pct")
+                    or (row.get("prev_pct") if hasattr(row, "get") else None)
+                    or (row.get("per1d") if hasattr(row, "get") else None)
+                    or 0.0
+                )
                 ret_std20 = float(row.get("ret_std20") or (snap or {}).get("ret_std20") or 0.0)
             except Exception:
                 prev_pct = 0.0
@@ -397,6 +413,22 @@ class FusionShadow:
                 or (row.get("min_vwap_cushion") if hasattr(row, "get") else 0.0)
                 or 0.0
             )
+            _is_struct_ready = bool(
+                event.extra.get("is_structure_prejudged")
+                or (snap or {}).get("is_structure_prejudged")
+                or (row.get("is_structure_prejudged") if hasattr(row, "get") else False)
+            )
+            _close_over_v10 = bool(
+                event.extra.get("close_over_vwap10")
+                or (snap or {}).get("close_over_vwap10")
+                or (row.get("close_over_vwap10") if hasattr(row, "get") else False)
+            )
+            _touch_cnt = int(
+                event.extra.get("vwap10_touch_count")
+                or (snap or {}).get("vwap10_touch_count")
+                or (row.get("vwap10_touch_count") if hasattr(row, "get") else 0)
+                or 0
+            )
 
             patterns = list(
                 detect_patterns(
@@ -417,6 +449,10 @@ class FusionShadow:
                     hi_10d=_hi_10d,
                     hi_pre1=_hi_pre1,
                     min_vwap_cushion=_min_cushion,
+                    is_structure_prejudged=_is_struct_ready,
+                    close_over_vwap10=_close_over_v10,
+                    vwap10_touch_count=_touch_cnt,
+                    vol_dry=float(event.extra.get("vol_dry") or (snap or {}).get("vol_dry") or 1.0),
                 )
             )
             if reset_wave and PATTERN_LATENT_BREAK not in patterns:
@@ -448,6 +484,15 @@ class FusionShadow:
                 or ""
             )
             sector = raw_sector.split(";")[0].strip() if raw_sector else ""
+            # K2 操盘手优化：总龙头判定（彻底杜绝自证循环、排除跟风、板块唯一）
+            prev_strong = bool(
+                event.extra.get("prev_strong_vwap")
+                or (snap or {}).get("prev_strong_vwap")
+                or (row.get("prev_strong_vwap") if hasattr(row, "get") else False)
+            )
+            today_strong = bool(event.pct > 0 and event.price >= event.vwap * 0.998)
+
+            # 1. 先调用板块时钟获取客观排名 (坚决传 is_prime_leader=False，杜绝自证循环)
             if sector and "lead_score" not in event.extra:
                 with self._lock:
                     _lead = self.sector_clock.observe(
@@ -456,17 +501,48 @@ class FusionShadow:
                         ts=now,
                         pct=event.pct,
                         breakout=bool(patterns),
+                        is_prime_leader=False,
                     )
                 ld_dict = _lead.to_dict()
                 ld_dict["lead_label"] = _lead.label
                 event.extra.update(ld_dict)
 
-            lead_label = str(event.extra.get("lead_label") or event.extra.get("label") or "")
+            raw_lead_label = str(event.extra.get("lead_label") or event.extra.get("label") or "")
+            lead_gap_min = float(event.extra.get("lead_gap_min") or 0.0)
+
+            # 2. 严密判定总龙头：
+            # 昨日倍量突破 + 今日连阳站稳均线 + 客观是排头兵/夺旗/极早启动 (落后<=5分钟) + 坚决排除跟风/冲锋队 + 板块唯一性
+            _is_prime = False
+            if prev_strong and today_strong:
+                is_front = (
+                    (raw_lead_label in (LABEL_VANGUARD, LABEL_FLAG) or lead_gap_min <= 5.0)
+                    and raw_lead_label not in (LABEL_FOLLOW, "跟风", LABEL_STRIKE, "冲锋队")
+                )
+                if is_front:
+                    if sector:
+                        with self._lock:
+                            current_prime = self._prime_leader_by_sector.get(sector)
+                            if current_prime is None or current_prime == code:
+                                self._prime_leader_by_sector[sector] = code
+                                _is_prime = True
+                    else:
+                        _is_prime = True
+
+            if _is_prime:
+                event.extra["is_prime_leader"] = True
+                event.extra["lead_label"] = LABEL_PRIME
+                lead_label = LABEL_PRIME
+            else:
+                event.extra["is_prime_leader"] = False
+                lead_label = raw_lead_label
+
             lead_score = float(event.extra.get("lead_score") or 0.0)
             _ps = pattern_score(patterns)
             _floor: Optional[int] = None
-            if PATTERN_BOX10_VWAP_HOVER in patterns:
+            if PATTERN_BOX10_VWAP_HOVER in patterns or PATTERN_STRUCTURE_CONFIRM in patterns or _is_prime:
                 _floor = 4
+                if PATTERN_STRUCTURE_CONFIRM in patterns:
+                    event.extra["structure_confirmed"] = True
             elif _ps >= 100 or (event.is_leader and _ps >= 70):
                 _floor = 3
             elif _ps >= 70 or (lead_label in (LABEL_VANGUARD, LABEL_FLAG) and patterns):
@@ -567,6 +643,16 @@ class FusionShadow:
                 "lead_label": lead_label,
                 "lead_score": round(lead_score, 1),
                 "is_leader": bool(event.is_leader),
+                "is_structure_prejudged": float(event.extra.get("is_structure_prejudged") or (snap or {}).get("is_structure_prejudged") or 0.0),
+                "wash_quality": float(event.extra.get("wash_quality") or (snap or {}).get("wash_quality") or 0.0),
+                "prev_strong_vwap": float(event.extra.get("prev_strong_vwap") or (snap or {}).get("prev_strong_vwap") or 0.0),
+                "is_prime_leader": 1.0 if _is_prime else 0.0,
+                "struct": {
+                    k_s: round(float(v_s), 3) if isinstance(v_s, (int, float)) else v_s
+                    for k_s in ("is_structure_prejudged", "wash_quality", "prev_strong_vwap", "is_prime_leader", "close_over_vwap10", "underwater_depth_pct")
+                    for v_s in [event.extra.get(k_s) or (snap or {}).get(k_s)]
+                    if v_s
+                },
                 "track": track_dict,
                 "legacy": {
                     "action": legacy_action,

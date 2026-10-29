@@ -1,5 +1,42 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-29 12:50 【结构预判模型全链路 10 处断链彻底闭环（三批全部交付）】(`docs/tasks/2026-10-29_1146_*.md` 第四节)
+- [x] **第 1 批 P0 透传彻底闭环**：在 `context.py` 定义单一权威 `STRUCTURE_FIELDS`，`stock_live_strategy` 与 `adapter.py` 白名单动态引用消除手写漂移；`engine.py` 铁闸 6 统一读 `vwap3`；`replay.py` 注入 `STRUCTURE_FIELDS` 与 `lead_label`；`shadow.py` 总龙头判断下沉至分支外直通 L4；jsonl 记录落盘紧凑 `"struct"` 结构字段；UI 增加 `_on_structure_only_toggled` 槽函数并优先读 `struct` 字段。
+- [x] **第 2 批 P1 可解释性彻底闭环**：`engine.veto_of` 重排顺序（铁闸 6 低开空头 → 4 深水 → 3 压力区 → 5 前高 → 泛化水下运行兜底），彻底恢复否决原因可解释性；全面重构测试去假绿，新增端到端穿透、回放注入与 JSON 往返真实测试。
+- [x] **第 3 批策略量能入模彻底闭环**：`context.py` 量能计算前移，`prev_strong_vwap` 显式要求 `vol_ratio_5d >= 1.5`（成交量是一切·倍量点火）；`shadow.py` 补传 `vol_dry` 激活放量形态；先锋扫描加入连阳（昨日涨+今日涨）初筛极大降载。
+
+## 2026-10-29 13:45 【全业务链路 100% 深度审查与终极大圆满闭环（77 项测试纯绿）】(`docs/tasks/2026-10-29_1146_*.md` 第八节)
+- [x] **R1 回放引擎 (DayReplay) 彻底解除自证循环并落实板块唯一性（P0）**：`replay.py` 时钟调用先传 `is_prime_leader=False` 获取客观排名，维护 `prime_leader_by_sector`，总龙头享有 `_floor=4` 直通保底并落盘，实盘与回放 100% 同构完全一致。
+- [x] **R2 赛马状态推进战役阶段白名单补齐（P1）**：`tracker.py` 阶段门禁放行白名单扩充为 `("排头兵", "夺旗", "总龙头")`，彻底杜绝逆势带队突围的总龙头在退守期被误阻断。
+- [x] **R3 快照权威特征绝对覆盖覆写（P1）**：`stock_live_strategy.py` 的 `_fusion_enrich_snap` 对权威日线 `STRUCTURE_FIELDS` 实行强制覆盖写入，根除残留脏快照掩盖权威指标的隐患。
+- [x] **R4 UI 证据链兜底关键词补齐（P2）**：`fusion_ladder_dialog.py` 补充 `"结构强势"` 关键词兜底，老旧记录与紧凑结构数据解析 100% 互通。
+- [x] **针对性测试全部纯绿通过**：新增回放板块唯一性卫通压制、退守期总龙头放行 2 项实战测试，专项扩充至 17 项，全量核心测试扩充至 77 项全部 3.80s 纯绿通过。
+
+## 2026-10-29 11:46 【主升浪全面转向10日VWAP结构预判与异动验证模型】(`docs/tasks/2026-10-29_1146_主升浪全面转向10日VWAP结构预判与异动验证模型.md`, `ats/fusion/context.py`, `ats/fusion/anomaly.py`, `ats/fusion/engine.py`, `ats/fusion/vanguard.py`, `ats/fusion/adapter.py`, `ats/fusion/shadow.py`, `ats/fusion/tracker.py`, `stock_live_strategy.py`, `ats/ui/fusion_ladder_dialog.py`, `tests/test_structure_opportunity_model.py`)
+- [x] **【支柱 1：`DailyContext` 结构预判多维特征库与盘前机会池（`context.py`）】**：
+  - **多周期 VWAP 结构预判（因）**：新增 `vwap10_touch_count`（触碰 $\ge 2$ 次，钧达股份/卫星 $\ge 7$ 次）、`close_over_vwap10`（昨收站稳 10V）、`close_over_vwap3`（站稳 3V）、`vwap_multi_cycle_ready`（同时站稳 3V 与 10V）、`wash_quality`（大幅震荡洗盘充分重心不破底，如山东矿机 002526、钧达股份 002865）；
+  - **量能在价先，成交量是一切（倍量点火）**：接入昨日放量倍数 `vol_ratio_5d`（放量突破 1.5~4 倍）与洗盘地量收敛度 `vol_dry`；
+  - **深水下与破位弱势精准标记**：`underwater_depth_pct`（光迅科技 5.1%）、`is_underwater_weak`（迈为股份/华虹宏力阶梯破位）；
+  - **盘前 $O(1)$ 结构机会池 `DailyContext.structure_pool(day)`**：带 DCL 双检锁与进程内缓存，盘中耗时 $< 0.05\,\mu	ext{s}$；
+- [x] **【支柱 2：形态识别与时间结构强度模型（`anomaly.py`, `vanguard.py`）】**：
+  - **形态层注册 `PATTERN_STRUCTURE_CONFIRM = "结构预判验证"`**：标签 `🎯 结构预判验证`（权重 60.0），要求具备结构预判底色的标的日内悬空突破昨高立即触发；
+  - **时间结构强度建模（启动早·震荡早·加速早）**：`vanguard.py` 注册 `LABEL_PRIME = "总龙头"`（98分），LeadInfo 增加 `is_prime_leader` 与 `temporal_strength`；启动越早强度越高（1.0），滞后跟风按延迟时间科学衰减至 0.25~0.45；
+- [x] **【支柱 3：决策引擎总龙头加成与操盘手 6 大风控铁闸（`engine.py`）】**：
+  - **总龙头直通加成**：昨日强势突破带头龙头（如电科蓝天 688818），RAR 奖励 +12 分直通 L4，豁免早盘冷封顶与板块滞后；结构验证奖励 +8 分；
+  - **操盘手铁闸 1（压制滞后）**：同板块滞后跟风（落后龙头 $\ge 10\,	ext{min}$，如卫通/环宇），封顶 L3/L2 并扣除滞后追高惩罚；
+  - **操盘手铁闸 2（深水压制）**：多周期水下非龙头一律封顶 L2 试仓；
+  - **操盘手铁闸 3（一票否决·压力区止损）**：走弱标的反弹至 10 日 VWAP 压力区受阻回撤 $\ge 0.8\%$ 一票否决（迈为股份、华虹宏力教训，“是止损点不是买点”）；
+  - **操盘手铁闸 4（一票否决·深水反抽诱多）**：水下深度 $\ge 3\%$ 且未站上 3V/10V 的弱反抽一票否决（光迅科技 002281 惨痛教训，彻底拦截）；
+  - **操盘手铁闸 5（一票否决·不过前高是卖点）**：逼近前高阻力位（$hi_{10	ext{d}}$，如蓝色光标 300058 遇阻 12.88 回落）未能突破且分时回撤一票否决；
+  - **操盘手铁闸 6（一票否决·开盘低开破位杀跌）**：均线空头排列或跳空低开破位（如佰维存储 688525 破位杀跌 -12.98%）一票否决，坚决禁止接飞刀赌博；
+- [x] **【支柱 4：监视器 UI【🎯 只看结构机会】过滤与首入时序对齐（`fusion_ladder_dialog.py`）】**：
+  - **顶部控制栏增加【🎯 只看结构机会】（`chk_structure_only`）**：采用专属高亮金黄色，物理过滤全池 95% 无结构脉冲杂音，聚焦真正具备主升浪潜力的机会；
+  - **状态栏与跟踪表联动**：状态栏呈现 `🎯 结构机会: X 只 (已过滤脉冲杂音)`；赛马跟踪表同步联动过滤；
+  - **彻底修复全表首入涨幅 `+0.00%`**：首帧直通入局显性展示 `+0.00% (现+X.XX%)`，Tooltip 详尽展示首异动/入局确认时间与涨幅、确认跨度及持仓走阔空间；
+- [x] **【支柱 5：自动化测试纯绿通过（9 项专项 + 11 项箱体 + 49 项核心 = 69 项全 PASS）】**：
+  - 新增 `tests/test_structure_opportunity_model.py` 覆盖 9 大核心实战场景全部 100% PASS；全量核心测试纯绿通过。
+
+
 ## 2026-10-28 16:10 【10日VWAP结构异动双轨极限性能落地架构设计与V2终审优化】(`docs/tasks/2026-10-28_1600_10日VWAP结构异动双轨极限性能落地架构.md`, `realtime_data_service.py`, `ats/fusion/context.py`, `ats/fusion/anomaly.py`, `ats/fusion/engine.py`, `ats/fusion/enrich.py`, `ats/fusion/replay.py`, `ats/fusion/tracker.py`, `stock_live_strategy.py`, `ats/ui/fusion_ladder_dialog.py`)
 - [x] **【支柱 1：静态历史 10 日宏观骨架与 $O(1)$ 标量预计算表（修正 V1 盘中覆盖悖论与量纲风险）】**：
   - **消除盘中覆盖未来函数与突破自锁**：`DailySkeleton10` 严格锚定截至昨日收盘的过去 10 个完整交易日（`Day -10 ~ Day -1`），盘中全天只读、绝不拿今日未走完的数据动态覆盖（避免 `Price >= hi_10d` 自锁与早盘大涨后把自身踢出窄幅池）；

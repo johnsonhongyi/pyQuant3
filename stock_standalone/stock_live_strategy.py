@@ -3124,13 +3124,13 @@ class StockLiveStrategy:
         except Exception:
             pass
         try:
-            from ats.fusion.context import get_daily_context
+            from ats.fusion.context import STRUCTURE_FIELDS, get_daily_context
             d_ctx = get_daily_context()
             if d_ctx.ok:
                 m10 = d_ctx.asof(c6, time.strftime("%Y-%m-%d"))
                 if m10:
-                    for k_box in ("is_box10_ready", "hi_10d", "hi_pre1", "lo_10d", "amp_10d", "vwap10", "vwap5", "vwap3"):
-                        if k_box in m10 and k_box not in base:
+                    for k_box in STRUCTURE_FIELDS:
+                        if k_box in m10:
                             base[k_box] = m10[k_box]
         except Exception:
             pass
@@ -3184,7 +3184,8 @@ class StockLiveStrategy:
         from ats.fusion.context import get_daily_context
         d_ctx = get_daily_context()
         box_pool = d_ctx.box10_pool(time.strftime("%Y-%m-%d")) if d_ctx.ok else set()
-        raw_pool = v_pool | box_pool
+        struct_pool = d_ctx.structure_pool(time.strftime("%Y-%m-%d")) if d_ctx.ok else set()
+        raw_pool = v_pool | box_pool | struct_pool
 
         # 一次性转字典，避免 pandas iterrows() 与逐行 .loc[].to_dict() 的 Series 构造开销
         sub_dicts = sub.to_dict(orient="index")
@@ -3210,8 +3211,13 @@ class StockLiveStrategy:
                     p_vw = float(row_match.get("vwap") or 0.0)
                     if not (2.0 <= p_pct <= 9.6 and p_px > p_vw > 0):
                         continue
-                    # O(1) 标量比对
+                    # O(1) 标量比对与 K1 两日连阳初筛 (昨日涨+今日涨，过滤无价值假信号)
                     b_metrics = d_ctx.asof(p_c6, time.strftime("%Y-%m-%d")) if d_ctx.ok else {}
+                    prev_p = float(b_metrics.get("prev_pct") or 0.0)
+                    is_struct_p = float(b_metrics.get("is_structure_prejudged") or 0.0) == 1.0
+                    # 昨日下跌 (<0.0%) 且今日未达强反包 (<5.0%) 且非结构预判底色：坚决拦截
+                    if prev_p < 0.0 and p_pct < 5.0 and not is_struct_p:
+                        continue
                     hi_10d_v = float(b_metrics.get("hi_10d") or 0.0)
                     hi_pre1_v = float(b_metrics.get("hi_pre1") or 0.0)
                     if (hi_10d_v > 0 and p_px >= hi_10d_v * 0.998) or (hi_pre1_v > 0 and p_px >= hi_pre1_v * 0.998):
@@ -3219,7 +3225,8 @@ class StockLiveStrategy:
                         p_nm = str(p_row_dict.get("name") or "")
                         # 合并 10 日箱体标量进 row_dict
                         if b_metrics:
-                            for k_box in ("is_box10_ready", "hi_10d", "hi_pre1", "lo_10d", "amp_10d", "vwap10", "vwap5", "vwap3"):
+                            from ats.fusion.context import STRUCTURE_FIELDS
+                            for k_box in STRUCTURE_FIELDS:
                                 if k_box in b_metrics:
                                     p_row_dict[k_box] = b_metrics[k_box]
                         # 赋予特级优先分 150.0 锁定最前排
@@ -3239,6 +3246,19 @@ class StockLiveStrategy:
             s_res = float(cross.get("sector_resonance") or 0.0)
             pct_v = float(row_dict.get("percent") or 0.0)
             vol_r = float(row_dict.get("ratio") or row_dict.get("volume") or 1.0)
+            # K1 两日连阳初筛：优先从 row_dict 提取，缺失时坚决调用 d_ctx.asof 权威日线计算，保证实盘 100% 触发
+            b_metrics_c6 = d_ctx.asof(c6, time.strftime("%Y-%m-%d")) if d_ctx.ok else {}
+            prev_pct_v = float(
+                row_dict.get("prev_pct")
+                or row_dict.get("per1d")
+                or b_metrics_c6.get("prev_pct")
+                or 0.0
+            )
+            is_struct_c6 = float(b_metrics_c6.get("is_structure_prejudged") or 0.0) == 1.0
+            # 非龙头且非结构预判标的，若昨日下跌且今日未达强反包 (>=5.0%)，直接前置剔除
+            if not is_ldr and not is_struct_c6 and prev_pct_v < 0.0 and pct_v < 5.0:
+                continue
+
             # 重点捕捉：领涨股、强共振板块前排、或放量突破股
             if not (is_ldr or s_res >= 58.0 or (pct_v >= 3.5 and vol_r >= 1.8)):
                 continue

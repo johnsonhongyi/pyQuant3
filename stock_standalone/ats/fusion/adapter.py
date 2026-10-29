@@ -285,8 +285,12 @@ def build_event(
     dist_ma20_pct = ((price - ma20) / ma20 * 100.0) if (price > 0 and ma20 > 0) else 0.0
     rs_day = _first_num([(snap, "rs_day"), (row, "rs_day")])
 
-    extra: Dict[str, Any] = {"missing": missing, "has_rs": has_rs, "mkt_ret5": mkt_ret5}
-    for k in (
+    # K3 数据源对齐：优先读 DailyContext 严格日线计算的 prev_pct，取不到再用分时快照 per1d
+    prev_pct_val = _first_num([(snap, "prev_pct"), (row, "prev_pct"), (snap, "per1d"), (row, "per1d")], 0.0)
+
+    extra: Dict[str, Any] = {"missing": missing, "has_rs": has_rs, "mkt_ret5": mkt_ret5, "prev_pct": prev_pct_val}
+    from ats.fusion.context import STRUCTURE_FIELDS
+    extra_keys = set(STRUCTURE_FIELDS) | {
         "lead_score",
         "lead_label",
         "rank",
@@ -299,18 +303,15 @@ def build_event(
         "sector",
         "latent_break",
         "patterns",
-        "is_box10_ready",
         "min_vwap_cushion",
         "box10_hover_break",
         "vwap_zero_touch",
-        "hi_10d",
-        "lo_10d",
-        "hi_pre1",
-        "amp_10d",
-        "vwap_disp",
-        "vwap10",
         "day_high",
-    ):
+        "structure_confirmed",
+        "temporal_strength",
+        "is_prime_leader",
+    }
+    for k in extra_keys:
         val = _first_raw([(snap, k), (row, k)])
         if val is not None:
             extra[k] = val

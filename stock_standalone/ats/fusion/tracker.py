@@ -604,6 +604,7 @@ class RaceTracker:
         # ---- 入局前：只做宽松观察，不因分数低而剔除 ----
         is_box10_fast = (
             "十日洗盘悬空突破" in st.patterns_seen
+            or "结构预判验证" in st.patterns_seen
             or st.best_tier >= 4
         )
         if not is_box10_fast:
@@ -637,10 +638,10 @@ class RaceTracker:
         # 而退守期过去被全部拦下 → 永远拿不到样本、也就永远学不到东西。
         # 所以退守期按同一口径放"排头兵/夺旗"，其余（跟风/冲锋队/无导向）照旧不碰。
         if st.phase == "退守":
-            if not (cfg.retreat_allow_vanguard and st.lead_label in ("排头兵", "夺旗")):
+            if not (cfg.retreat_allow_vanguard and st.lead_label in ("排头兵", "夺旗", "总龙头")):
                 self._block(st, "阶段:退守")
                 return
-        if st.phase == "先锋阵亡" and st.lead_label not in ("排头兵", "夺旗"):
+        if st.phase == "先锋阵亡" and st.lead_label not in ("排头兵", "夺旗", "总龙头"):
             self._block(st, "阶段:先锋阵亡(非排头兵)")
             return
 
@@ -734,6 +735,7 @@ PATH_TREND = "A 主升延续"
 PATH_VANGUARD = "C 排头兵"
 PATH_SAFE = "B 低风险收敛"
 PATH_BOX10 = "D 十日洗盘突破"
+PATH_STRUCTURE = "S 结构预判确认"
 
 
 def deploy_path(entry: Dict[str, Any], rule: Optional[DeployRule] = None) -> str:
@@ -745,7 +747,7 @@ def deploy_path(entry: Dict[str, Any], rule: Optional[DeployRule] = None) -> str
     if float(entry.get("theme_rank") or 0.0) < r.theme_rank_min:
         return ""
     first_pct = float(entry.get("first_pct") or 0.0)
-    max_first_pct = r.box10_first_pct_max if r.box10_pattern in pats else r.first_pct_max
+    max_first_pct = r.box10_first_pct_max if (r.box10_pattern in pats or "结构预判验证" in pats) else r.first_pct_max
     if first_pct > max_first_pct:
         return ""
     if float(entry.get("efficiency") or 0.0) < r.efficiency_min:
@@ -756,8 +758,10 @@ def deploy_path(entry: Dict[str, Any], rule: Optional[DeployRule] = None) -> str
         return ""
 
     persist = float(entry.get("persist") or 0.0)
-    # C 排头兵路径：板块内第一个/第二个启动、或第一个夺旗的，不要求"两阳加速"
-    # （用户："要的就是排头兵、冲锋队、夺旗的生力军"——它们启动时本来就没有第二根阳线）
+    # S 结构预判确认路径
+    if "结构预判验证" in pats and persist >= r.persist_min:
+        return PATH_STRUCTURE
+    # D 十日洗盘突破路径
     if r.box10_pattern in pats and persist >= r.persist_min:
         return PATH_BOX10
     if r.allow_vanguard_path and entry.get("lead_label") in ("排头兵", "夺旗") \

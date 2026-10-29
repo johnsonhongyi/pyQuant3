@@ -27,6 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+LABEL_PRIME = "总龙头"
 LABEL_VANGUARD = "排头兵"
 LABEL_STRIKE = "冲锋队"
 LABEL_FLAG = "夺旗"
@@ -37,6 +38,7 @@ LABEL_LONE = "无导向"
 LAUNCH_PCT = 1.0
 
 LABEL_SCORE = {
+    LABEL_PRIME: 98.0,
     LABEL_VANGUARD: 92.0,
     LABEL_FLAG: 88.0,
     LABEL_STRIKE: 78.0,
@@ -53,6 +55,8 @@ class LeadInfo:
     lead_gap_min: float = 0.0     # 相对板块首动的延迟（分钟；0 = 自己就是首动）
     sector_n: int = 0             # 该板块已启动家数
     is_flag: bool = False         # 是否板块内第一个突破（夺旗）
+    is_prime_leader: bool = False # 是否是昨日率先强势突破带动板块的总龙头 (如电科蓝天)
+    temporal_strength: float = 1.0 # 时间结构强度 0.0~1.0 (启动早=1.0，滞后跟风衰减)
     label: str = LABEL_LONE
     score: float = 50.0
 
@@ -60,6 +64,8 @@ class LeadInfo:
         return {
             "rank": self.rank, "lead_gap_min": round(self.lead_gap_min, 1),
             "sector_n": self.sector_n, "is_flag": self.is_flag,
+            "is_prime_leader": self.is_prime_leader,
+            "temporal_strength": round(self.temporal_strength, 2),
             "label": self.label, "lead_score": round(self.score, 1),
         }
 
@@ -89,6 +95,7 @@ class SectorClock:
         ts: float,
         pct: float,
         breakout: bool = False,
+        is_prime_leader: bool = False,
     ) -> LeadInfo:
         """喂一根 bar，返回该票此刻在板块内的领先度。"""
         code = str(code).zfill(6)
@@ -131,34 +138,50 @@ class SectorClock:
         info.lead_gap_min = lead_gap
         info.sector_n = len(order)
         info.is_flag = is_flag
-        info.label, info.score = classify(rank, lead_gap, len(order), is_flag)
+        info.is_prime_leader = is_prime_leader
+        info.label, info.score, info.temporal_strength = classify(rank, lead_gap, len(order), is_flag, is_prime_leader)
         return info
 
 
-def classify(rank: int, lead_gap_min: float, sector_n: int, is_flag: bool) -> Tuple[str, float]:
-    """把"第几个动 / 落后多久 / 板块几家在动 / 是否夺旗"翻译成标签与分数。"""
+def classify(rank: int, lead_gap_min: float, sector_n: int, is_flag: bool, is_prime_leader: bool = False) -> Tuple[str, float, float]:
+    """把"第几个动 / 落后多久 / 板块几家在动 / 是否夺旗 / 是否总龙头"翻译成标签、分数与时间结构强度。"""
+    # 时间结构强度：启动早为 1.0，随滞后分钟数递减
+    if is_prime_leader:
+        return LABEL_PRIME, LABEL_SCORE[LABEL_PRIME], 1.0
+
+    if rank == 1 and lead_gap_min <= 2.0:
+        temporal_strength = 1.0
+    elif rank <= 2 and lead_gap_min <= 5.0:
+        temporal_strength = 0.90
+    elif rank <= 5 and lead_gap_min <= 15.0:
+        temporal_strength = 0.70
+    elif lead_gap_min <= 30.0:
+        temporal_strength = 0.45
+    else:
+        temporal_strength = 0.25
+
     if sector_n < 3:
-        # 板块只有 1~2 家在动：谈不上排头兵，但也谈不上跟风（孤军）
+        # 板块只有 1~2 家在动：孤军
         label = LABEL_LONE
         score = LABEL_SCORE[LABEL_LONE]
         if is_flag:
             score += 8.0
-        return label, min(100.0, score)
+        return label, min(100.0, score), temporal_strength
 
     if is_flag and rank <= 3:
-        return LABEL_FLAG, LABEL_SCORE[LABEL_FLAG]
+        return LABEL_FLAG, LABEL_SCORE[LABEL_FLAG], max(0.85, temporal_strength)
 
     if rank <= 2 and lead_gap_min <= 5.0:
-        return LABEL_VANGUARD, LABEL_SCORE[LABEL_VANGUARD]
+        return LABEL_VANGUARD, LABEL_SCORE[LABEL_VANGUARD], max(0.90, temporal_strength)
 
     if rank <= 5 and lead_gap_min <= 15.0:
-        return LABEL_STRIKE, LABEL_SCORE[LABEL_STRIKE]
+        return LABEL_STRIKE, LABEL_SCORE[LABEL_STRIKE], temporal_strength
 
     if lead_gap_min >= 30.0 or rank >= 8:
-        return LABEL_FOLLOW, LABEL_SCORE[LABEL_FOLLOW]
+        return LABEL_FOLLOW, LABEL_SCORE[LABEL_FOLLOW], min(0.35, temporal_strength)
 
     # 中间地带（第 6~7 个、落后 15~30 分钟）：中性偏弱
-    return LABEL_STRIKE, LABEL_SCORE[LABEL_STRIKE] - 12.0
+    return LABEL_STRIKE, LABEL_SCORE[LABEL_STRIKE] - 12.0, temporal_strength
 
 
 def is_follower(info: LeadInfo) -> bool:

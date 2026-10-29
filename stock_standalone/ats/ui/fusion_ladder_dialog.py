@@ -87,6 +87,7 @@ QWidget { background-color: #17171c; color: #d8d8e0; font-size: 9pt; }
 QLabel { color: #b9b9c8; }
 QCheckBox { color: #d8d8e0; spacing: 5px; }
 QCheckBox[hitOnly="true"] { color: #4dd0e1; font-weight: bold; }
+QCheckBox[structureOnly="true"] { color: #ffd24d; font-weight: bold; }
 QCheckBox::indicator { width: 14px; height: 14px; border: 1px solid #3a3a48; border-radius: 3px; background: #202028; }
 QCheckBox::indicator:checked { background: #5a4b81; border-color: #a97bff; }
 QPushButton {
@@ -815,6 +816,46 @@ def _row_is_hit(rec: Dict[str, Any]) -> bool:
     return bool(rec.get("hit")) or tier >= 2 or action in ("买入", "加仓", "BUY", "ADD")
 
 
+def _row_is_structure_opportunity(rec: Dict[str, Any]) -> bool:
+    """判断单行是否属于多周期 VWAP 【结构机会】黄金标的。
+
+    操盘手核心实战心法：
+    1. 命中 10 日 VWAP 结构预判 (is_structure_prejudged == 1.0)；
+    2. 或昨日洗盘充分重心不破底 (wash_quality == 1.0)；
+    3. 或昨日大阳突破带头总龙头 (prev_strong_vwap == 1.0 或 is_prime_leader == 1.0)；
+    4. 或分时命中核心形态：结构预判验证、十日洗盘悬空突破、箱体悬空突破；
+    5. 或证据链中明确包含结构预判、总龙头等关键词。
+    """
+    if not isinstance(rec, dict):
+        return False
+    fusion = rec.get("fusion") or {}
+    extra = rec.get("extra") or fusion.get("extra") or {}
+    struct = rec.get("struct") or {}
+    patterns = list(rec.get("patterns") or fusion.get("patterns") or fusion.get("evidence") or [])
+    p_str = " ".join(str(p) for p in patterns)
+
+    # 1. 优先从紧凑结构字典 struct、顶层字段或 extra 提取结构预判标识
+    if float(struct.get("is_structure_prejudged") or rec.get("is_structure_prejudged") or extra.get("is_structure_prejudged") or 0.0) == 1.0:
+        return True
+    if float(struct.get("wash_quality") or rec.get("wash_quality") or extra.get("wash_quality") or 0.0) == 1.0:
+        return True
+    if float(struct.get("prev_strong_vwap") or rec.get("prev_strong_vwap") or extra.get("prev_strong_vwap") or 0.0) == 1.0:
+        return True
+    if float(struct.get("is_prime_leader") or rec.get("is_prime_leader") or extra.get("is_prime_leader") or 0.0) == 1.0:
+        return True
+
+    # 2. 命中核心结构形态
+    for pat in ("结构预判验证", "十日洗盘悬空突破", "箱体悬空突破", "多周期VWAP金叉"):
+        if pat in p_str:
+            return True
+
+    # 3. 证据链关键词兜底 (补齐 结构验证、🎯结构验证、🚀板块总龙头)
+    chain = str((fusion.get("tracker") or {}).get("chain") or " ".join(str(e) for e in (fusion.get("evidence") or [])))
+    if any(k in chain for k in ("结构预判", "结构验证", "结构强势", "十日洗盘", "总龙头", "3V10V粘合")):
+        return True
+    return False
+
+
 _LIVE_ROWS_CACHE: Dict[Tuple[str, int, float, int, str], List[Dict[str, Any]]] = {}
 _LIVE_SERIES_CACHE: Dict[Tuple[str, int, float, int], Dict[str, List[Dict[str, Any]]]] = {}
 
@@ -1200,6 +1241,21 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self.chk_hit_only.toggled.connect(self._on_hit_only_toggled)
         self._style_hit_only(self.chk_hit_only.isChecked())
         bar.addWidget(self.chk_hit_only)
+
+        # 🎯 只看结构机会：操盘手核心过滤，过滤95%无结构脉冲杂音，聚焦真正具备主升浪潜力的黄金机会
+        self.chk_structure_only = QCheckBox("🎯 只看结构机会")
+        self.chk_structure_only.setToolTip(
+            "【操盘手核心铁律】只看结构机会：\n"
+            "仅保留符合多周期 VWAP 结构预判（尾盘收盘站稳 10V/3V、洗盘充分重心不破底、板块总龙头或悬空突破验证）的黄金标的。\n"
+            "坚决过滤全池 95% 无结构支撑的脉冲杂音、水下抽搐、走弱反抽与不过前高诱多，聚焦主升浪持有底气！"
+        )
+        try:
+            self.chk_structure_only.setChecked(bool(load_config_node("fusion_ladder_structure_only", False)))
+        except Exception:
+            pass
+        self.chk_structure_only.toggled.connect(self._on_structure_only_toggled)
+        self._style_structure_only(self.chk_structure_only.isChecked())
+        bar.addWidget(self.chk_structure_only)
 
         bar.addWidget(QLabel("交易日"))
         self.cmb_day = QComboBox()
@@ -1838,6 +1894,32 @@ class FusionLadderDialog(QWidget, WindowMixin):
             st.unpolish(self.chk_hit_only)
             st.polish(self.chk_hit_only)
             self.chk_hit_only.update()
+        except Exception:
+            pass
+
+    def _style_structure_only(self, checked: bool) -> None:
+        """结构机会选中态用高亮金黄色表达。"""
+        try:
+            if hasattr(self, "chk_structure_only") and self.chk_structure_only:
+                self.chk_structure_only.setProperty("structureOnly", "true" if checked else "false")
+                st = self.chk_structure_only.style()
+                st.unpolish(self.chk_structure_only)
+                st.polish(self.chk_structure_only)
+                self.chk_structure_only.update()
+        except Exception:
+            pass
+
+    def _on_structure_only_toggled(self, checked: bool) -> None:
+        """只看结构机会切换：持久化并即时刷新全界面。"""
+        try:
+            save_config_node("fusion_ladder_structure_only", bool(checked))
+        except Exception:
+            pass
+        self._style_structure_only(bool(checked))
+        self._render_live(force=True)
+        try:
+            day = self.cmb_day.currentText().strip() or today_str()
+            self._render_track_from_shadow(day)
         except Exception:
             pass
 
@@ -2677,6 +2759,27 @@ class FusionLadderDialog(QWidget, WindowMixin):
         tbl = self.tbl_live
         total_rows = len(rows)
         hit_only = bool(getattr(self, "chk_hit_only", None) is not None and self.chk_hit_only.isChecked())
+        structure_only = bool(getattr(self, "chk_structure_only", None) is not None and self.chk_structure_only.isChecked())
+
+        if structure_only and rows:
+            rows = [r for r in rows if _row_is_structure_opportunity(r)]
+            if not rows:
+                tbl.setSortingEnabled(False)
+                tbl.setRowCount(0)
+                tbl.insertRow(0)
+                it = self._num_item("当前无符合10日VWAP结构预判的黄金机会——取消勾选 [🎯 只看结构机会] 可查看全池标的", "no_struct")
+                it.setForeground(QColor("#ffd24d"))
+                tbl.setItem(0, 0, it)
+                for c in range(1, tbl.columnCount()):
+                    tbl.setItem(0, c, self._num_item("", 0))
+                tbl.setSpan(0, 0, 1, max(1, tbl.columnCount()))
+                self.lbl_status.setText(
+                    "状态：{} 全池 {} 条｜🎯 结构机会 0｜等待尾盘站稳10V/3V及次日验证点火标的（取消勾选可看全池）".format(day, total_rows)
+                )
+                self.lbl_status.setStyleSheet("color:#ffd24d; font-weight:bold;")
+                tbl.setSortingEnabled(True)
+                return
+
         if hit_only and rows:
             rows = [r for r in rows if _row_is_hit(r)]
             if not rows:
@@ -2857,8 +2960,12 @@ class FusionLadderDialog(QWidget, WindowMixin):
         day_note = ""
         if source_day and source_day != day:
             day_note = "｜⚠ 今日暂无记录，展示 {} 数据".format(source_day)
-        count_txt = ("命中 {} / 共 {} 条".format(len(rows), total_rows) if hit_only
-                     else "影子 {} 条".format(len(rows)))
+        if structure_only:
+            count_txt = "🎯 结构机会 {} / 共 {} 条 (已过滤脉冲杂音)".format(len(rows), total_rows)
+        elif hit_only:
+            count_txt = "命中 {} / 共 {} 条".format(len(rows), total_rows)
+        else:
+            count_txt = "影子 {} 条".format(len(rows))
         self.lbl_status.setText(
             "状态：{} {}｜L4 {} / L3 {} / L2 {} / L1 {} / L0 {}｜命中 {}｜覆盖 {:.0f}%｜刷新 {}{}{}{}{}".format(
                 day, count_txt, tier_count[4], tier_count[3], tier_count[2], tier_count[1], tier_count[0],
@@ -3011,9 +3118,11 @@ class FusionLadderDialog(QWidget, WindowMixin):
             persist_val = float(te.get("persist") or round(keep * 100.0 / max(1, len(after)), 1))
             chain_txt = str(te.get("chain") or " · ".join(ev))[:160]
             ev_n = int(te.get("evidence_n") or len(ev) or (1 if chain_txt else 0))
+            is_struct = _row_is_structure_opportunity(entry_rec) or _row_is_structure_opportunity(first_rec)
             out.append({
                 "code": code,
                 "name": self._resolve_name(code, entry_rec),
+                "is_structure": is_struct,
                 "tier": int((entry_rec.get("fusion") or {}).get("tier") or 0),
                 "enter_ts": enter_ts,
                 "enter_price": enter_price_val,
@@ -3040,6 +3149,9 @@ class FusionLadderDialog(QWidget, WindowMixin):
         t3 = self.tbl_track
         df_strat = self._resolve_ats_strategy_df()
         entries = self._track_entries_from_shadow(day)
+        structure_only = bool(getattr(self, "chk_structure_only", None) is not None and self.chk_structure_only.isChecked())
+        if structure_only and entries:
+            entries = [e for e in entries if e.get("is_structure")]
         t3.setSortingEnabled(False)
         t3.setRowCount(0)
         if not entries:
@@ -3066,7 +3178,25 @@ class FusionLadderDialog(QWidget, WindowMixin):
             t3.setItem(i, 4, self._num_item(f"{e['enter_pct']:+.2f}%", e["enter_pct"]))
             t3.setItem(i, 5, self._num_item(_fmt_hms(e["first_ts"]), e["first_ts"]))
             t3.setItem(i, 6, self._num_item(f"{e['first_pct']:+.2f}%", e["first_pct"]))
-            t3.setItem(i, 7, self._num_item(f"{e['since_first']:+.2f}%", e["since_first"]))
+            # 优化首→入%展示：
+            # 若入局即首异动 (first_ts == enter_ts)，但入局后最新价相比入局价已有涨幅走阔 (holding_ret != 0)，
+            # 显性呈现 "+0.00% (现+X.XX%)"，让操盘手清晰看到入局后走阔空间，彻底根除全表死 "+0.00%" 的误解；
+            # 若 enter_ts > first_ts，展示真实的确认消耗跨度 "+X.XX%"
+            sf_val = float(e.get("since_first") or 0.0)
+            if e.get("enter_ts", 0) > 0 and e.get("first_ts", 0) > 0 and abs(e["enter_ts"] - e["first_ts"]) < 1e-3:
+                if abs(holding_ret) >= 0.05:
+                    sf_txt = f"+0.00% (现{holding_ret:+.2f}%)"
+                else:
+                    sf_txt = "+0.00%"
+            else:
+                sf_txt = f"{sf_val:+.2f}%"
+            item_sf = self._num_item(sf_txt, sf_val)
+            item_sf.setToolTip(
+                f"首异动时间: {_fmt_hms(e.get('first_ts', 0))} 涨幅: {e.get('first_pct', 0.0):+.2f}%\n"
+                f"入局确认时间: {_fmt_hms(e.get('enter_ts', 0))} 涨幅: {e.get('enter_pct', 0.0):+.2f}%\n"
+                f"确认跨度: {sf_val:+.2f}% ｜ 入局后持仓走阔: {holding_ret:+.2f}%"
+            )
+            t3.setItem(i, 7, item_sf)
             t3.setItem(i, 8, self._num_item(e["persist"], float(e["persist"]), bold=True))
             t3.setItem(i, 9, self._num_item(e["evidence_n"], int(e["evidence_n"])))
             t3.setItem(i, 10, self._num_item(e["chain"], e["chain"]))

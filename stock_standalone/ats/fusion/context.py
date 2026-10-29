@@ -44,6 +44,18 @@ def _find_daily_path() -> Optional[str]:
     return None
 
 
+STRUCTURE_FIELDS = (
+    "vwap3", "vwap5", "vwap10",
+    "hi_10d", "lo_10d", "hi_pre1", "lo_pre1", "close_pre1",
+    "amp_10d", "vwap_disp", "is_box10_ready",
+    "vwap10_touch_count", "vwap10_hold_days",
+    "close_over_vwap10", "close_over_vwap3", "vwap_multi_cycle_ready",
+    "underwater_depth_pct", "is_structure_prejudged", "wash_quality",
+    "is_underwater_weak", "prev_strong_vwap", "prev_pct",
+    "vol_ratio_5d", "vol_dry",
+)
+
+
 class DailyContext:
     """按 (code, 交易日) 提供"截至昨日"的多日结构。
 
@@ -55,6 +67,7 @@ class DailyContext:
         self._by_code: Dict[str, Dict[str, np.ndarray]] = {}
         self._cache: Dict[tuple, Dict[str, float]] = {}
         self._box10_pool_cache: Dict[str, set[str]] = {}
+        self._structure_pool_cache: Dict[str, set[str]] = {}
         self._pool_lock = threading.Lock()
         self.ok = False
         if self.path:
@@ -124,6 +137,9 @@ class DailyContext:
             "prev_pct": 0.0, "above_vwap10_days": 0,
             # 昨日形态：用于"前一日大涨、第二日急速杀跌"的风险预判
             "prev_amp": 0.0, "prev_close_pos": 0.5, "prev_upper_shadow": 0.0,
+            # 10日VWAP结构预判指标 (尾盘/昨日确立，今日早盘验证)
+            "vwap10_touch_count": 0, "vwap10_hold_days": 0,
+            "close_over_vwap10": 0.0, "close_over_vwap3": 0.0, "vwap_multi_cycle_ready": 0.0, "underwater_depth_pct": 0.0, "is_structure_prejudged": 0.0, "prev_strong_vwap": 0.0, "wash_quality": 0.0, "is_underwater_weak": 0.0,
         }
         v = self._by_code.get(str(code).zfill(6))
         if v is None:
@@ -262,6 +278,67 @@ class DailyContext:
                 and (close_pre1 >= v10 * 0.95 if is_growth else close_pre1 >= v10 * 0.98)
             )
             out["is_box10_ready"] = 1.0 if is_box_ready else 0.0
+
+            # -------------------------------------------------------------
+            # 成交量与缩量特征提前计算 (因：成交量是一切，量在价先)
+            # -------------------------------------------------------------
+            if n >= 21:
+                vma5 = float(np.mean(vol[-5:]))
+                vma20 = float(np.mean(vol[-20:]))
+                out["vol_ma5"] = vma5
+                out["vol_ma20"] = vma20
+                if vma20 > 0:
+                    out["vol_dry"] = round(vma5 / vma20, 3)
+            if n >= 6 and np.mean(vol[-6:-1]) > 0:
+                out["vol_ratio_5d"] = float(vol[-1] / np.mean(vol[-6:-1]))
+
+            # -------------------------------------------------------------
+            # 10日VWAP结构机会预判模型 (因)：尾盘收盘站稳 10 日 VWAP 结构
+            # -------------------------------------------------------------
+            highs_win = h[-win_10:]
+            closes_win = c[-win_10:]
+            # 统计过去 10 日中，单日最高价触及或上冲 10 日均线 (High_k >= v10 * 0.995) 的天数 (主力反复试盘上冲)
+            touch_mask = (highs_win >= v10 * 0.995)
+            vwap10_touch_count = int(np.sum(touch_mask))
+            hold_mask = (closes_win >= v10 * 0.995)
+            vwap10_hold_days = int(np.sum(hold_mask))
+
+            out["vwap10_touch_count"] = vwap10_touch_count
+            out["vwap10_hold_days"] = vwap10_hold_days
+
+            # 操盘手多周期 VWAP 核心：连 3 日 VWAP 都没站上，何况 10 日 VWAP！(光迅科技 002281 惨痛教训)
+            close_over_vwap10 = bool(close_pre1 >= (v10 * 0.985 if is_growth else v10 * 0.992))
+            close_over_vwap3 = bool(close_pre1 >= v3 * 0.995)
+            vwap_multi_cycle_ready = bool(close_over_vwap3 and close_over_vwap10)
+            underwater_depth_pct = round(((v10 - close_pre1) / v10 * 100.0), 2) if (v10 > 0 and close_pre1 < v10) else 0.0
+
+            out["close_over_vwap10"] = 1.0 if close_over_vwap10 else 0.0
+            out["close_over_vwap3"] = 1.0 if close_over_vwap3 else 0.0
+            out["vwap_multi_cycle_ready"] = 1.0 if vwap_multi_cycle_ready else 0.0
+            out["underwater_depth_pct"] = underwater_depth_pct
+
+            # 综合判定结构预判资格：
+            # 1. 昨收必须同时站上 3 日均价与 10 日均价 (连 3 日线都没站上的一律否决，杜绝深套)；
+            # 2. 过去 10 日有反复上冲/测试 10 日均线结构 (touch_count >= 2)；
+            # 3. 均线粘合收敛 (vwap_disp <= max_disp 或 v3_v5_disp <= 2.5)；
+            # 4. 箱体振幅未失控破位 (eff_amp <= max_amp)；
+            # 5. 昨收远离 10 日低点企稳 (close_pre1 >= lo_10d * 1.01)。
+            is_struct_ready = bool(
+                vwap_multi_cycle_ready
+                and (vwap10_touch_count >= 2)
+                and (vwap_disp <= max_disp or v3_v5_disp <= 2.5)
+                and (eff_amp <= max_amp)
+                and (close_pre1 >= lo_10d * 1.01 or win_10 < 5)
+            )
+            out["is_structure_prejudged"] = 1.0 if is_struct_ready else 0.0
+
+            # 结构强度深化：反复大幅度震荡洗盘蓄势 (钧达股份 002865 典型特征)
+            wash_quality = bool(is_struct_ready and vwap10_touch_count >= 3)
+            out["wash_quality"] = 1.0 if wash_quality else 0.0
+
+            # 走弱标的判定 (迈为股份、航天机电、拉普拉斯：昨收深处 10 日均线水下，反弹到 VWAP 压力区是止损点)
+            is_underwater_weak = bool(v10 > 0 and close_pre1 < v10 * 0.96)
+            out["is_underwater_weak"] = 1.0 if is_underwater_weak else 0.0
         else:
             out["vwap3"] = last
             out["vwap5"] = last
@@ -274,10 +351,29 @@ class DailyContext:
             out["amp_10d"] = 0.0
             out["vwap_disp"] = 0.0
             out["is_box10_ready"] = 0.0
+            out["vwap10_touch_count"] = 0
+            out["vwap10_hold_days"] = 0
+            out["close_over_vwap10"] = 0.0
+            out["is_structure_prejudged"] = 0.0
+            out["wash_quality"] = 0.0
+            out["is_underwater_weak"] = 0.0
 
         # 昨日涨幅（用于"两阳加速"）
         if n >= 2 and c[-2] > 0:
             out["prev_pct"] = (last / float(c[-2]) - 1.0) * 100.0
+
+        # 单日强势 VWAP 结构突破 (电科蓝天 688818 典型特征：昨日率先放量大涨站上 10 日 VWAP，带动全板块启动)
+        prev_strong = False
+        v10_v = float(out.get("vwap10") or 0.0)
+        c_str = str(code).zfill(6)
+        is_growth_code = c_str.startswith(("300", "301", "688"))
+        min_lead_pct = 7.0 if is_growth_code else 5.0
+        # 操盘手铁律：成交量是一切，总龙头昨日突破必须伴随放量倍量柱 (vol_ratio_5d >= 1.5)
+        vol_r5 = float(out.get("vol_ratio_5d") or 1.0)
+        if v10_v > 0 and out.get("prev_pct", 0.0) >= min_lead_pct and vol_r5 >= 1.5:
+            if float(out.get("close_pre1") or 0.0) >= v10_v * 1.005:
+                prev_strong = True
+        out["prev_strong_vwap"] = 1.0 if prev_strong else 0.0
 
         # 昨日形态：振幅、收盘在日内位置、上影线占振幅比
         if n >= 1:
@@ -348,6 +444,29 @@ class DailyContext:
                 if m.get("is_box10_ready") == 1.0:
                     pool.add(cd)
             self._box10_pool_cache[cache_key] = pool
+            return pool
+
+    def structure_pool(self, day: str = "") -> set[str]:
+        """返回截至指定交易日 (默认为当天) 全市场符合 10 日 VWAP 结构机会预判 (is_structure_prejudged=1.0) 的代码集合。"""
+        if not day:
+            import time
+            day = time.strftime("%Y-%m-%d")
+        cache_key = f"structure_pool_{day}"
+        if hasattr(self, "_structure_pool_cache") and cache_key in self._structure_pool_cache:
+            return self._structure_pool_cache[cache_key]
+        if not hasattr(self, "_pool_lock"):
+            self._pool_lock = threading.Lock()
+        with self._pool_lock:
+            if not hasattr(self, "_structure_pool_cache"):
+                self._structure_pool_cache = {}
+            if cache_key in self._structure_pool_cache:
+                return self._structure_pool_cache[cache_key]
+            pool: set[str] = set()
+            for cd in self._by_code.keys():
+                m = self.asof(cd, day)
+                if m.get("is_structure_prejudged") == 1.0:
+                    pool.add(cd)
+            self._structure_pool_cache[cache_key] = pool
             return pool
 
 

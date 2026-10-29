@@ -56,7 +56,7 @@ from ats.fusion.tracker import RaceTracker, TrackConfig, render_entries, STAGE_E
 from ats.fusion.trap import detect_traps, cross_day_risk, render_traps
 from ats.fusion.panel import build_panel, render_panel
 from ats.fusion.market_ctx import MarketHistory, DEFAULT_PATH as MARKET_PATH
-from ats.fusion.vanguard import SectorClock, LABEL_FOLLOW, LABEL_VANGUARD, LABEL_FLAG
+from ats.fusion.vanguard import SectorClock, LABEL_FOLLOW, LABEL_VANGUARD, LABEL_FLAG, LABEL_PRIME, LABEL_STRIKE
 from ats.fusion.lifecycle import CapitalGauge, MarketLifecycle, VanguardWatch
 from ats.fusion.sector import get_sector_map, get_theme_map, sector_strength, load_external_heat
 from dataclasses import replace
@@ -569,6 +569,7 @@ class DayReplay:
         done = np.zeros(n_code, dtype=bool)
         sector_clock = SectorClock()
         sector_clock.reset(day)
+        prime_leader_by_sector: Dict[str, str] = {}  # sector -> code (板块总龙头唯一性)
         # 先锋队名册 + 资金冲锋号 + 阶段状态机（"先锋阵亡 -> 跟风鸟兽散 -> 退守"）
         vwatch = VanguardWatch()
         capital = CapitalGauge()
@@ -880,6 +881,9 @@ class DayReplay:
                     hi_10d=float(_dc.get("hi_10d") or 0.0),
                     hi_pre1=float(_dc.get("hi_pre1") or 0.0),
                     min_vwap_cushion=float(_cushion),
+                    is_structure_prejudged=bool(_dc.get("is_structure_prejudged")),
+                    close_over_vwap10=bool(_dc.get("close_over_vwap10")),
+                    vwap10_touch_count=int(_dc.get("vwap10_touch_count") or 0),
                 )
                 patterns = list(_pat_early)
 
@@ -902,18 +906,57 @@ class DayReplay:
                     breakout=("突破10日VWAP" in patterns) or bool(
                         np.isfinite(prev_high20[i, t]) and price > float(prev_high20[i, t])
                     ),
+                    is_prime_leader=False,  # 与实盘同构：坚决先传 False 消除自证循环
                 )
 
                 ev.extra = dict(ev.extra or {})
                 ev.extra.update(_lead.to_dict())
+                raw_lead_label = _lead.label
+                lead_gap_min = float(_lead.lead_gap_min)
+
+                if _dc:
+                    from ats.fusion.context import STRUCTURE_FIELDS
+                    for k in STRUCTURE_FIELDS:
+                        if k in _dc:
+                            ev.extra[k] = _dc[k]
+                if "结构预判验证" in patterns:
+                    ev.extra["structure_confirmed"] = True
+
+                # K2 操盘手优化：与实盘 shadow.py 100% 同构判定总龙头 (排除跟风与板块唯一性)
+                prev_strong = bool(_dc.get("prev_strong_vwap") or ev.extra.get("prev_strong_vwap"))
+                today_strong = bool(float(pct[i]) > 0 and price >= vw * 0.998)
+                _is_prime = False
+                if prev_strong and today_strong:
+                    is_front = (
+                        (raw_lead_label in (LABEL_VANGUARD, LABEL_FLAG) or lead_gap_min <= 5.0)
+                        and raw_lead_label not in (LABEL_FOLLOW, "跟风", LABEL_STRIKE, "冲锋队")
+                    )
+                    if is_front:
+                        if _sector:
+                            current_prime = prime_leader_by_sector.get(_sector)
+                            if current_prime is None or current_prime == codes[i]:
+                                prime_leader_by_sector[_sector] = codes[i]
+                                _is_prime = True
+                        else:
+                            _is_prime = True
+
+                if _is_prime:
+                    ev.extra["is_prime_leader"] = True
+                    ev.extra["lead_label"] = LABEL_PRIME
+                    lead_label_final = LABEL_PRIME
+                else:
+                    ev.extra["is_prime_leader"] = False
+                    ev.extra["lead_label"] = raw_lead_label
+                    lead_label_final = raw_lead_label
+
                 ev.extra["patterns"] = list(patterns)
 
-                if _lead.label in (LABEL_VANGUARD, LABEL_FLAG):
+                if lead_label_final in (LABEL_VANGUARD, LABEL_FLAG):
                     vwatch.register(codes[i], _sector, float(clock[t]), price, _vw10)
 
                 _ps = pattern_score(patterns)
                 _floor = None
-                if "十日洗盘悬空突破" in patterns:
+                if "十日洗盘悬空突破" in patterns or "结构预判验证" in patterns or _is_prime:
                     _floor = 4  # 直通 L4 主攻
                 elif self.cfg.pattern_floor:
                     _floor = 3 if _ps >= 100 else (2 if _ps >= 70 else None)
@@ -1006,7 +1049,7 @@ class DayReplay:
                             "ice_days": int(day_ctx.ice_days) if day_ctx is not None else 0,
                             "hunger": round(float(day_ctx.hunger), 3) if day_ctx is not None else 1.0,
                             "ctx": day_ctx.label() if day_ctx is not None else "",
-                            "lead_label": _lead.label,
+                            "lead_label": lead_label_final,
                             "lead_score": round(_lead.score, 1),
                             "lead_rank": _lead.rank,
                             "lead_gap_min": round(_lead.lead_gap_min, 1),
