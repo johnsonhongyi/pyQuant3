@@ -304,6 +304,11 @@ def build_event(
         "latent_break",
         "patterns",
         "min_vwap_cushion",
+        # 时间轴派生量：随价格每秒变化，结构状态机与形态判定都依赖它们
+        "cushion_roll",
+        "cushion_now",
+        "vwap_hold_ratio",
+        "vwap_above_run",
         "box10_hover_break",
         "vwap_zero_touch",
         "day_high",

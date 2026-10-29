@@ -29,6 +29,14 @@ from ats.fusion.anomaly import PATTERN_BOX10_VWAP_HOVER, PATTERN_LATENT_BREAK, P
 from ats.fusion.config import engine_params, load_config
 from ats.fusion.engine import FusionBus, FusionEngine
 from ats.fusion.regime import MarketRegime, MarketRegimeTracker, RegimeSample
+from ats.fusion.structure_timeline import (
+    STATUS_BROKEN,
+    STATUS_CONFIRMED,
+    STATUS_EVICTED,
+    STATUS_LABEL,
+    STATUS_WAITING,
+    StructureTimeline,
+)
 from ats.fusion.tracker import RaceTracker
 from ats.fusion.vanguard import (
     LABEL_FLAG,
@@ -81,6 +89,19 @@ def adaptive_cuts(samples: List[float], floors: Optional[Dict[int, float]] = Non
     return tuple(out)
 
 
+def _pick_float(*values: Any, default: float = 0.0) -> float:
+    """按优先级取第一个"有值"的数值。0.0 是合法值（例如悬空垫正好为 0），
+    不能用 `a or b` 判断，否则会被后面的负值覆盖。"""
+    for v in values:
+        if v is None or v == "":
+            continue
+        try:
+            return float(v)
+        except Exception:
+            continue
+    return default
+
+
 def _app_root() -> str:
     try:
         from sys_utils import get_app_root  # type: ignore
@@ -118,6 +139,14 @@ class FusionShadow:
         self._prime_leader_by_sector: Dict[str, str] = {}  # sector -> code 板块总龙头唯一性
         self._latent_pool: Dict[str, float] = {}
         self._regime_provider = regime_provider
+
+        # 结构机会时间轴：让"结构验证"成为可成立/可失守/可恢复的状态，而不是开盘一次性盖章
+        self._struct_timeline = StructureTimeline(
+            cushion_min=float(self.cfg.get("struct_cushion_min", 0.20) or 0.20),
+            max_break_n=int(self.cfg.get("struct_max_break_n", 3) or 3),
+            rearm_bars=int(self.cfg.get("struct_rearm_bars", 3) or 3),
+            drawdown_limit=float(self.cfg.get("struct_drawdown_limit", 1.5) or 1.5),
+        )
 
         self._lock = threading.Lock()
         self._regime_lock = threading.Lock()
@@ -322,6 +351,7 @@ class FusionShadow:
                         self.sector_clock = SectorClock()
                         self._prime_leader_by_sector.clear()
                         self._latent_pool.clear()
+                        self._struct_timeline.reset(day)
                         self._last_sample.clear()
                         self._rar_samples.clear()
                         self._latest_rar_by_code.clear()
@@ -429,6 +459,52 @@ class FusionShadow:
                 or (row.get("vwap10_touch_count") if hasattr(row, "get") else 0)
                 or 0
             )
+            # 滚动悬空垫（时间可恢复）：只看最近 20 分钟，价格重新站上均线后会自动回升。
+            # 这是"结构不是一锤子买卖"的关键输入，缺失时才回退到全时段最小值。
+            _cushion_roll = _pick_float(
+                event.extra.get("cushion_roll"),
+                (snap or {}).get("cushion_roll"),
+                (row.get("cushion_roll") if hasattr(row, "get") else None),
+                default=_min_cushion,
+            )
+            _cushion_now = _pick_float(
+                event.extra.get("cushion_now"),
+                (snap or {}).get("cushion_now"),
+                (row.get("cushion_now") if hasattr(row, "get") else None),
+                default=0.0,
+            )
+            _close_pre1 = _pick_float(
+                event.extra.get("close_pre1"),
+                (snap or {}).get("close_pre1"),
+                (row.get("close_pre1") if hasattr(row, "get") else None),
+                default=0.0,
+            )
+            # 结构资格严格口径（设计文档支柱 2）：只认 is_structure_prejudged。
+            # close_over_vwap10 全市场占 37%，仅作诊断字段，不再作为结构候选的兜底资格
+            # （实测兜底组 L4 的 MAE 是严格组的 3.5 倍）。
+            _prejudged = bool(_is_struct_ready)
+
+            # ---- 结构时间轴：每一根行情都重新判定"结构还在不在" ----
+            # WAITING→CONFIRMED（点火）/ CONFIRMED→BROKEN（失守）/ BROKEN→CONFIRMED（重新站回）
+            # 反复失守 >= max_break_n 次进入 EVICTED，当日不再给保底，需连续 rearm_bars 次复核才复活。
+            with self._lock:
+                _tl = self._struct_timeline.update(
+                    code=code,
+                    ts=now,
+                    price=event.price,
+                    vwap=event.vwap,
+                    hi_pre1=_hi_pre1,
+                    close_pre1=_close_pre1,
+                    cushion_roll=_cushion_roll,
+                    cushion_now=_cushion_now,
+                    prejudged=_prejudged,
+                )
+            event.extra["struct_status"] = _tl.status
+            event.extra["struct_confirm_n"] = _tl.confirm_n
+            event.extra["struct_break_n"] = _tl.break_n
+            event.extra["struct_reason"] = _tl.reason
+            event.extra["struct_cushion_roll"] = _tl.cushion_roll
+            event.extra["struct_drawdown_pct"] = _tl.drawdown_pct
 
             patterns = list(
                 detect_patterns(
@@ -452,6 +528,8 @@ class FusionShadow:
                     is_structure_prejudged=_is_struct_ready,
                     close_over_vwap10=_close_over_v10,
                     vwap10_touch_count=_touch_cnt,
+                    cushion_roll=_cushion_roll,
+                    struct_status=_tl.status,
                     vol_dry=float(event.extra.get("vol_dry") or (snap or {}).get("vol_dry") or 1.0),
                 )
             )
@@ -538,11 +616,15 @@ class FusionShadow:
 
             lead_score = float(event.extra.get("lead_score") or 0.0)
             _ps = pattern_score(patterns)
+            # 结构失守/剔除后不再给结构保底；只有"此刻仍成立"的结构才配拿 L4 保底
+            _struct_blocked = _tl.status in (STATUS_BROKEN, STATUS_EVICTED)
             _floor: Optional[int] = None
-            if PATTERN_BOX10_VWAP_HOVER in patterns or PATTERN_STRUCTURE_CONFIRM in patterns or _is_prime:
+            if (PATTERN_BOX10_VWAP_HOVER in patterns or PATTERN_STRUCTURE_CONFIRM in patterns) and not _struct_blocked:
                 _floor = 4
                 if PATTERN_STRUCTURE_CONFIRM in patterns:
                     event.extra["structure_confirmed"] = True
+            elif _is_prime:
+                _floor = 4
             elif _ps >= 100 or (event.is_leader and _ps >= 70):
                 _floor = 3
             elif _ps >= 70 or (lead_label in (LABEL_VANGUARD, LABEL_FLAG) and patterns):
@@ -647,12 +729,29 @@ class FusionShadow:
                 "wash_quality": float(event.extra.get("wash_quality") or (snap or {}).get("wash_quality") or 0.0),
                 "prev_strong_vwap": float(event.extra.get("prev_strong_vwap") or (snap or {}).get("prev_strong_vwap") or 0.0),
                 "is_prime_leader": 1.0 if _is_prime else 0.0,
-                "struct": {
-                    k_s: round(float(v_s), 3) if isinstance(v_s, (int, float)) else v_s
-                    for k_s in ("is_structure_prejudged", "wash_quality", "prev_strong_vwap", "is_prime_leader", "close_over_vwap10", "underwater_depth_pct")
-                    for v_s in [event.extra.get(k_s) or (snap or {}).get(k_s)]
-                    if v_s
-                },
+                # 结构时间轴状态（顶层冗余一份，UI 与复盘脚本可直接读，不必再钻 struct 字典）
+                "struct_status": _tl.status,
+                "struct_confirm_n": int(_tl.confirm_n),
+                "struct_break_n": int(_tl.break_n),
+                "struct_reason": _tl.reason,
+                "struct": dict(
+                    {
+                        k_s: round(float(v_s), 3) if isinstance(v_s, (int, float)) else v_s
+                        for k_s in ("is_structure_prejudged", "wash_quality", "prev_strong_vwap", "is_prime_leader", "close_over_vwap10", "underwater_depth_pct")
+                        for v_s in [event.extra.get(k_s) or (snap or {}).get(k_s)]
+                        if v_s
+                    },
+                    **{
+                        "status": _tl.status,
+                        "label": STATUS_LABEL.get(_tl.status, _tl.status),
+                        "confirm_n": int(_tl.confirm_n),
+                        "break_n": int(_tl.break_n),
+                        "cushion_roll": round(float(_tl.cushion_roll), 2),
+                        "cushion_now": round(float(_tl.cushion_now), 2),
+                        "drawdown_pct": round(float(_tl.drawdown_pct), 2),
+                        "reason": _tl.reason,
+                    },
+                ),
                 "track": track_dict,
                 "legacy": {
                     "action": legacy_action,

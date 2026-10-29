@@ -25,6 +25,7 @@ PATTERN_DRY_UP = "缩量转放量"
 PATTERN_TWO_YANG = "两阳加速"
 PATTERN_BOX10_VWAP_HOVER = "十日洗盘悬空突破"
 PATTERN_STRUCTURE_CONFIRM = "结构预判验证"
+PATTERN_STRUCTURE_BREAK = "结构失守"
 
 PATTERN_LABELS = {
     PATTERN_PIERCE: "🕯️ 一阳穿三线",
@@ -36,7 +37,11 @@ PATTERN_LABELS = {
     PATTERN_TWO_YANG: "🕯️ 两阳加速",
     PATTERN_BOX10_VWAP_HOVER: "🚀 十日洗盘悬空突破",
     PATTERN_STRUCTURE_CONFIRM: "🎯 结构预判验证",
+    PATTERN_STRUCTURE_BREAK: "⚠️ 结构失守",
 }
+
+# 结构失守：既不是买点也不是异动，只用于撤销结构保底，因此不参与形态强度加分
+PATTERN_NEGATIVE = (PATTERN_STRUCTURE_BREAK,)
 
 
 def detect_patterns(
@@ -61,6 +66,8 @@ def detect_patterns(
     is_structure_prejudged: bool = False,
     close_over_vwap10: bool = False,
     vwap10_touch_count: int = 0,
+    cushion_roll: Optional[float] = None,
+    struct_status: str = "",
     thresholds: Optional[Dict[str, float]] = None,
 ) -> List[str]:
     """返回命中的形态名列表（可能为空）。"""
@@ -117,15 +124,28 @@ def detect_patterns(
     if vwap10 > 0 and price > vwap10 and day_open < vwap10:
         out.append(PATTERN_VWAP_BREAK)
 
+    # 悬空垫统一口径：优先用【滚动窗口】值（时间可恢复），未提供时才回退到全时段最小值。
+    # 两个结构形态必须同口径，否则"结构验证"能复活、"箱体悬空突破"却仍是一次性盖章。
+    _eff_cushion = float(cushion_roll) if cushion_roll is not None else float(min_vwap_cushion)
+    _struct_blocked = str(struct_status or "") in ("BROKEN", "EVICTED")
+
     # 十日洗盘蓄势突破 + 分时悬空不碰 VWAP
-    if is_box10_ready and min_vwap_cushion >= 0.25:
+    if is_box10_ready and _eff_cushion >= 0.25 and not _struct_blocked:
         if (hi_10d <= 0 or price >= hi_10d * 0.998) and (hi_pre1 <= 0 or price >= hi_pre1 * 0.998):
             out.append(PATTERN_BOX10_VWAP_HOVER)
 
     # 结构预判验证 (果)：昨日确立尾盘站稳 10 日 VWAP 结构，今日日内悬空均线并突破昨高/昨收
-    if (is_structure_prejudged or close_over_vwap10) and min_vwap_cushion >= 0.20:
+    #   悬空垫改用【滚动窗口】口径：cushion_roll 只看最近 N 分钟，价格重新站上均线后会自动回升，
+    #   结构因此可以"失守 → 重新成立"，不再是一锤子买卖。未提供滚动值时回退到全时段最小值（兼容旧调用）。
+    #   资格严格限定为 is_structure_prejudged（设计文档支柱 2）。实测放开到 close_over_vwap10 兜底时，
+    #   L4 里 1/3 来自兜底，其 MAE 中位 -3.40%、收盘相对 -2.02%，是严格组的 3.5 倍回撤 —— 属于无效异动。
+    if (not _struct_blocked) and is_structure_prejudged and _eff_cushion >= 0.20:
         if hi_pre1 <= 0 or price >= hi_pre1 * 0.995:
             out.append(PATTERN_STRUCTURE_CONFIRM)
+
+    # 结构失守：由时间轴状态机判定，用于撤销保底与提示操盘手"这个结构已经不成立"
+    if str(struct_status or "") in ("BROKEN", "EVICTED"):
+        out.append(PATTERN_STRUCTURE_BREAK)
 
     return out
 
@@ -140,4 +160,8 @@ def pattern_score(patterns: List[str]) -> float:
         PATTERN_LATENT_BREAK: 45.0, PATTERN_DRY_UP: 45.0, PATTERN_TWO_YANG: 40.0,
         PATTERN_BOX10_VWAP_HOVER: 60.0, PATTERN_STRUCTURE_CONFIRM: 60.0,
     }
-    return min(100.0, sum(w.get(p, 20.0) for p in patterns))
+    # 负向形态（结构失守）不计入强度，避免"越失守分越高"
+    pos = [p for p in patterns if p not in PATTERN_NEGATIVE]
+    if not pos:
+        return 0.0
+    return min(100.0, sum(w.get(p, 20.0) for p in pos))

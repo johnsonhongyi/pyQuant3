@@ -3105,6 +3105,15 @@ class StockLiveStrategy:
             feats = self._fusion_intraday(c6, base, row, all_klines=all_klines)
             if feats:
                 base = merge_missing(base, feats)
+                # 时间轴字段必须每轮覆盖：悬空垫/站上率是"随价格流动"的量，
+                # 若沿用上一轮的值，结构判定又会退化成一锤子买卖。
+                for _k in (
+                    "cushion_roll", "cushion_now", "vwap_hold_ratio", "vwap_above_run",
+                    "min_vwap_cushion", "minutes_above_vwap", "slope_score",
+                    "velocity_pct", "intent_score", "structure_clarity",
+                ):
+                    if _k in feats:
+                        base[_k] = feats[_k]
         except Exception:
             pass
         try:

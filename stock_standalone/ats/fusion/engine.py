@@ -23,7 +23,7 @@ from __future__ import annotations
 import time
 
 import numpy as np
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional
 
 from ats.fusion.contract import AxisScores, FusionDecision, SignalEvent, TierSpec
@@ -658,6 +658,8 @@ class FusionEngine:
         self.today = today
         self.params: Dict[str, Any] = dict(params or {})
         self.max_single_size_pct = float(self.params.get("max_single_size_pct", max_single_size_pct))
+        # 结构验证/箱体悬空是否直通 L4（默认开）。关掉仅用于 A/B 对照，不改变评分逻辑。
+        self.struct_floor = bool(self.params.get("struct_floor", True))
 
         self.weights = dict(DEFAULT_WEIGHTS)
         self.weights.update(self.params.get("weights") or {})
@@ -831,14 +833,18 @@ class FusionEngine:
 
         # V2: 识别 PATTERN_BOX10_VWAP_HOVER (十日洗盘悬空突破) 与 PATTERN_STRUCTURE_CONFIRM (结构预判验证)
         _ev_pats = event.extra.get("patterns") or getattr(event, "patterns", None) or ()
+        # 结构时间轴状态：BROKEN/EVICTED 一律撤销结构保底（价格变了，结论必须跟着变）
+        _struct_status = str(event.extra.get("struct_status") or "")
+        _struct_blocked = _struct_status in ("BROKEN", "EVICTED")
         has_box10_hover = bool(
-            "十日洗盘悬空突破" in _ev_pats
-            or "结构预判验证" in _ev_pats
-            or event.extra.get("box10_hover_break")
-            or event.extra.get("structure_confirmed")
+            (not _struct_blocked)
+            and (
+                "十日洗盘悬空突破" in _ev_pats
+                or "结构预判验证" in _ev_pats
+                or event.extra.get("box10_hover_break")
+                or event.extra.get("structure_confirmed")
+            )
         )
-        if has_box10_hover:
-            tier_floor = max(int(tier_floor or 0), 4)
 
         # 结构验证与板块总龙头加成 (电科蓝天 688818 典型特征：昨日单日强势 VWAP 突破带动全板块)
         # K2 操盘手优化：总龙头必须是【昨日放量大突破 + 今日连阳续强且站在VWAP之上 + 客观非跟风/滞后】
@@ -855,16 +861,33 @@ class FusionEngine:
         is_struct_confirmed = bool("结构预判验证" in _ev_pats or event.extra.get("structure_confirmed"))
         if is_prime_leader:
             rar = min(100.0, rar + 12.0)
-            tier_floor = max(int(tier_floor or 0), 4)
         elif bool(event.extra.get("prev_strong_vwap")):
             # 昨日强势但今日分歧震荡 (未连阳续强)：不保底 L4，仅给予结构加分 +8
             rar = min(100.0, rar + 8.0)
         elif is_struct_confirmed:
             rar = min(100.0, rar + 8.0)
 
+        # 结构失守/剔除：价格已经走坏，分数必须同步回落，而不是靠昨天的结构吃老本
+        if _struct_status == "BROKEN":
+            rar = max(0.0, rar - 6.0)
+        elif _struct_status == "EVICTED":
+            rar = max(0.0, rar - 12.0)
+
+        # ---- 形态/结构保底：只允许越过 RAR 分档，绝不越过任何风控上限 ----
+        # 旧实现把 tier_floor 放在所有封顶之后做 max()，导致结构票可以顶掉
+        # 温度封顶、老化衰减、滞后压制、L4 门槛甚至组合预算（rebalance 因此死循环）。
+        # 现在改为"先抬到保底档，再统一被风控 min 下去"。
+        _floor_cand = int(tier_floor or 0)
+        if has_box10_hover and not _struct_blocked and self.struct_floor:
+            _floor_cand = max(_floor_cand, 4)
+        if is_prime_leader and not _struct_blocked:
+            _floor_cand = max(_floor_cand, 4)
+        if _floor_cand > 0 and not _struct_blocked:
+            tier = max(tier, _floor_cand)
+
         temp_cap, temp_coef = self._temp_cap(regime, event)
-        if has_box10_hover or is_prime_leader:
-            temp_cap = max(temp_cap, 4)  # 豁免早盘 STAGE_COLD 封顶
+        if ((has_box10_hover and self.struct_floor) or is_prime_leader) and not _struct_blocked:
+            temp_cap = max(temp_cap, 4)  # 豁免早盘 STAGE_COLD 封顶（结构成立且未失守才豁免）
         age_min, age_cap, age_coef = self._age(event, now)
         tier = min(tier, temp_cap, age_cap)
 
@@ -883,16 +906,27 @@ class FusionEngine:
             if lead_gap_v >= 25.0:
                 tier = min(tier, 2)
 
-        # L4 额外门槛：必须是龙头或强共振，且结构清晰度达标 (十日洗盘悬空突破/结构预判验证直接豁免板块滞后)
-        if tier >= 4 and not (event.is_leader or event.sector_resonance >= 60.0 or has_box10_hover):
+        # L4 额外门槛：必须是龙头或强共振，且结构清晰度达标
+        # (十日洗盘悬空突破/结构预判验证/板块总龙头 直接豁免板块滞后)
+        if tier >= 4 and not (
+            event.is_leader or event.sector_resonance >= 60.0 or has_box10_hover or is_prime_leader
+        ):
             tier = 3
         if tier >= 3 and event.structure_clarity > 0 and event.structure_clarity < 60.0:
             tier = min(tier, 2)
         if tier_cap is not None:
             tier = max(0, min(tier, int(tier_cap)))
-        if tier_floor is not None:
-            # 形态优先：明确异动结构成立时，允许越过 RAR 分档直接给级别
-            tier = max(tier, int(tier_floor))
+
+        # 结构失守/剔除的降级：
+        #   失守 → 最多 L2 试仓（等它重新站回来）；剔除 → 最多 L1 观察（当日不再当机会）。
+        #   这就是"不及预期就剔除出去，直到重新符合条件"的执行端落点。
+        #   判据直接用状态本身：时间轴只会从 CONFIRMED 掉到 BROKEN/EVICTED，
+        #   而 CONFIRMED 已要求"结构底色"，因此状态即证据，不再二次判断 is_structure_prejudged
+        #   （否则 close_over_vwap10 型候选会漏降档，实测确有 1 条 EVICTED 拿到 L2）。
+        if _struct_status == "EVICTED":
+            tier = min(tier, 1)
+        elif _struct_status == "BROKEN":
+            tier = min(tier, 2)
 
         spec = LADDER[tier]
         size = spec.base_size_pct * temp_coef * age_coef
@@ -915,16 +949,23 @@ class FusionEngine:
             targets.append({"price": round(max(r1, event.price * 1.06), 3), "action": "清仓"})
 
         struct_evs: List[str] = []
+        # 结构时间轴优先展示：操盘手要能看到"它现在到底还成不成立"，而不是只看到昨天的标签
+        if _struct_status == "EVICTED":
+            struct_evs.append("🚫结构剔除(失守{}次·当日不再主攻)".format(int(event.extra.get("struct_break_n") or 0)))
+        elif _struct_status == "BROKEN":
+            struct_evs.append("⚠️结构失守({}·保底已撤销)".format(str(event.extra.get("struct_reason") or "跌破均线")))
+
         if is_prime_leader:
             struct_evs.append("🚀板块总龙头(昨日强势VWAP突破带动)")
         elif is_struct_confirmed:
+            _cr = float(event.extra.get("struct_cushion_roll") or 0.0)
             if bool(event.extra.get("wash_quality")):
-                struct_evs.append("🎯结构验证(反复震荡洗盘充分·监听加速)")
+                struct_evs.append("🎯结构验证(洗盘充分·悬空{:+.2f}%)".format(_cr))
             else:
-                struct_evs.append("🎯结构验证(昨收站稳10V·均线粘合)")
-        elif bool(event.extra.get("is_structure_prejudged")):
+                struct_evs.append("🎯结构验证(昨收站稳10V·悬空{:+.2f}%)".format(_cr))
+        elif bool(event.extra.get("is_structure_prejudged")) and not _struct_blocked:
             struct_evs.append("🎯结构预判(昨收站稳10V蓄势)")
-        elif bool(event.extra.get("prev_strong_vwap")):
+        elif bool(event.extra.get("prev_strong_vwap")) and not _struct_blocked:
             struct_evs.append("🎯结构强势(昨日倍量突破10V)")
 
         if lead_lbl_v == "排头兵" and lead_gap_v <= 5.0 and not is_prime_leader:
@@ -1003,6 +1044,18 @@ class FusionBus:
                 prev.sources = list(dict.fromkeys(prev.sources + [event.source]))
         return self._decisions[event.code]
 
+    def _force_downgrade(self, d: FusionDecision) -> FusionDecision:
+        """强制降一档（不再走评分），保证组合预算一定收敛。
+
+        结构保底会在 evaluate 内部把档位顶回保底值，单靠 tier_cap 无法降档；
+        这里直接改档位与仓位，避免 rebalance 陷入死循环。
+        """
+        nt = max(0, int(d.tier) - 1)
+        spec = LADDER[nt]
+        size = spec.base_size_pct * float(d.temp_coef or 1.0) * float(d.age_coef or 1.0)
+        size = min(float(self.engine.max_single_size_pct), round(max(0.0, size), 1))
+        return replace(d, tier=nt, tier_name=spec.name, size_pct=size)
+
     def rebalance(self, max_l4: Optional[int] = None, max_total_pct: Optional[float] = None) -> List[FusionDecision]:
         """按级别 + RAR 重新分配组合预算：限制 L4 数量与总仓位。
 
@@ -1025,8 +1078,21 @@ class FusionBus:
             if decision.tier >= 4 and l4_used >= cap_l4:
                 decision = self.engine.evaluate(ev, rg, now=base.ts, tier_cap=3) if ev else decision
 
+            # 降档收敛：必须有硬上界。
+            # 旧实现只判断 "total + size > budget"，而结构保底会把 tier 顶回 4，
+            # 于是 evaluate 永远返回同一档 → while 死循环（实测 8s 未返回）。
+            _guard = 0
             while ev is not None and decision.tier > 0 and total + decision.size_pct > budget:
-                decision = self.engine.evaluate(ev, rg, now=base.ts, tier_cap=decision.tier - 1)
+                _guard += 1
+                if _guard > 6:
+                    decision = self._force_downgrade(decision)
+                    break
+                nxt = self.engine.evaluate(ev, rg, now=base.ts, tier_cap=decision.tier - 1)
+                if nxt.tier >= decision.tier:
+                    # 保底把档位顶回来了：强制降一档，保证组合预算一定收敛
+                    decision = self._force_downgrade(nxt)
+                else:
+                    decision = nxt
 
             if decision.tier >= 4:
                 l4_used += 1

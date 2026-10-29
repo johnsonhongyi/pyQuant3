@@ -834,6 +834,13 @@ def _row_is_structure_opportunity(rec: Dict[str, Any]) -> bool:
     patterns = list(rec.get("patterns") or fusion.get("patterns") or fusion.get("evidence") or [])
     p_str = " ".join(str(p) for p in patterns)
 
+    # 0. 结构时间轴优先：已失守/已剔除的票不再算"结构机会"（价格走坏了就要让位）
+    _status = str(struct.get("status") or rec.get("struct_status") or "")
+    if _status in ("BROKEN", "EVICTED"):
+        return False
+    if _status == "CONFIRMED":
+        return True
+
     # 1. 优先从紧凑结构字典 struct、顶层字段或 extra 提取结构预判标识
     if float(struct.get("is_structure_prejudged") or rec.get("is_structure_prejudged") or extra.get("is_structure_prejudged") or 0.0) == 1.0:
         return True

@@ -28,6 +28,13 @@ from ats.fusion.context import STRUCTURE_FIELDS
 from ats.ui.fusion_ladder_dialog import _row_is_structure_opportunity
 
 
+def _tmp_log_dir() -> str:
+    """测试专用落盘目录：绝不写生产 logs/fusion_shadow，否则当日复盘会被假数据污染。"""
+    import tempfile
+
+    return tempfile.mkdtemp(prefix="fusion_shadow_test_")
+
+
 def test_shandong_mining_structure_opportunity():
     """测试山东矿机 (002526)：多周期均线发散，昨日强势突破，命中结构机会。"""
     row = {
@@ -339,7 +346,7 @@ def test_k2_lagging_follower_cannot_get_l4():
     from ats.fusion.shadow import FusionShadow
     import time
     
-    shadow = FusionShadow(config={"sample_interval_s": 0.0, "session_gate": False})
+    shadow = FusionShadow(config={"sample_interval_s": 0.0, "session_gate": False, "log_dir": _tmp_log_dir()})
     now = time.time()
     
     # 1. 中国卫星 (首动龙头)：09:31:00 启动

@@ -57,6 +57,7 @@ from ats.fusion.trap import detect_traps, cross_day_risk, render_traps
 from ats.fusion.panel import build_panel, render_panel
 from ats.fusion.market_ctx import MarketHistory, DEFAULT_PATH as MARKET_PATH
 from ats.fusion.vanguard import SectorClock, LABEL_FOLLOW, LABEL_VANGUARD, LABEL_FLAG, LABEL_PRIME, LABEL_STRIKE
+from ats.fusion.structure_timeline import StructureTimeline, STATUS_BROKEN, STATUS_EVICTED, STATUS_LABEL
 from ats.fusion.lifecycle import CapitalGauge, MarketLifecycle, VanguardWatch
 from ats.fusion.sector import get_sector_map, get_theme_map, sector_strength, load_external_heat
 from dataclasses import replace
@@ -64,6 +65,9 @@ from dataclasses import replace
 _ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 _LIMIT_MAIN = 9.8
 _LIMIT_GROWTH = 19.6
+# 滚动悬空垫的窗口长度（分钟）。与实盘 enrich.intraday_fields(cushion_window=20) 的 20 根 1 分钟线等价。
+# 回放缓存是 3 分钟线，根数由 run() 按真实 bar 间隔换算，保证"时间"一致而不是"根数"一致。
+STRUCT_CUSHION_MINUTES = 20
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +189,7 @@ class ReplayConfig:
     fill_mode: str = "limit"         # limit=挂区间限价等回踩；market=次根开盘市价
     require_pattern: bool = True     # L3+ 必须命中至少一种异动形态（千金买马骨）
     pattern_floor: bool = False      # 形态是否可以直接抬级别（挖掘显示会稀释质量，默认关）
+    struct_floor: bool = True        # 结构验证/箱体悬空是否直通 L4（A/B 验证用，默认开）
     first_only: bool = False         # 每只票首次 L2+ 后不再评估（全市场自选用，省 3~5 倍）
     track: bool = True               # 赛马跟踪：带旧信号、第一波入局、入局后剔除
     track_enter_persist: float = 55.0   # 入局所需持续性分
@@ -274,7 +279,7 @@ class DayReplay:
     ):
         self.cache = cache if cache is not None else load_minute_cache(cache_path)
         self.cfg = config or ReplayConfig()
-        self.engine = engine or FusionEngine()
+        self.engine = engine or FusionEngine(params={"struct_floor": bool(self.cfg.struct_floor)})
         self._day_cache: Dict[Tuple[str, str], Dict[str, np.ndarray]] = {}
         # 赛马跟踪器：跨日复用同一实例才能携带"昨日入局"状态
         self.tracker: Optional[RaceTracker] = None
@@ -470,6 +475,13 @@ class DayReplay:
         clock = aligned["clock"]
         n_code, n_t = mat["close"].shape
 
+        # 滚动悬空垫的窗口必须按【时间】对齐，而不是按 bar 根数：
+        # 实盘是 1 分钟线（20 根 = 20 分钟），回放缓存是 3 分钟线（20 根 = 60 分钟），
+        # 若都写死 20 根，实盘与回放会得出不同的结构结论。
+        _bar_sec = float(clock[1] - clock[0]) if len(clock) > 1 else 180.0
+        _bar_sec = max(60.0, _bar_sec)
+        STRUCT_CUSHION_WIN = max(3, int(round(STRUCT_CUSHION_MINUTES * 60.0 / _bar_sec)))
+
         # 大盘情绪上下文：连续冰点/低温天数（"饿了几天"）来自历史，不含当日
         try:
             mkt_hist = MarketHistory(self.cfg.market_path or MARKET_PATH)
@@ -570,6 +582,9 @@ class DayReplay:
         sector_clock = SectorClock()
         sector_clock.reset(day)
         prime_leader_by_sector: Dict[str, str] = {}  # sector -> code (板块总龙头唯一性)
+        # 结构时间轴：与实盘 FusionShadow 同一套状态机（成立/失守/剔除/复活）
+        struct_timeline = StructureTimeline()
+        struct_timeline.reset(day)
         # 先锋队名册 + 资金冲锋号 + 阶段状态机（"先锋阵亡 -> 跟风鸟兽散 -> 退守"）
         vwatch = VanguardWatch()
         capital = CapitalGauge()
@@ -868,6 +883,42 @@ class DayReplay:
                         if cush_list:
                             _cushion = min(cush_list)
 
+                # 滚动悬空垫（时间可恢复）：只看最近 STRUCT_CUSHION_WIN 根，与实盘 enrich 同口径
+                #   必须跳过"首根有效 bar"：该根的 VWAP 就等于它自己的均价，low 必然 <= VWAP，
+                #   悬空垫恒为负，留在窗口里会把整个滚动垫永久压成 0（正是原 bug 的另一种形态）。
+                _cushion_roll = 0.0
+                if t >= 2:
+                    _fk = 0
+                    for _k in range(t + 1):
+                        if mat["vwap"][i, _k] > 0:
+                            _fk = _k
+                            break
+                    _s0 = max(_fk + 1, t - STRUCT_CUSHION_WIN + 1)
+                    _roll = [
+                        (mat["low"][i, k] - mat["vwap"][i, k]) / mat["vwap"][i, k] * 100.0
+                        for k in range(_s0, t + 1)
+                        if mat["vwap"][i, k] > 0
+                    ]
+                    _cushion_roll = min(_roll) if _roll else _cushion
+                _cushion_now = (
+                    (price - float(mat["vwap"][i, t])) / float(mat["vwap"][i, t]) * 100.0
+                    if float(mat["vwap"][i, t]) > 0 else 0.0
+                )
+
+                # 结构时间轴：回放与实盘同一套状态机，保证"实盘看到的"就是"回放验证的"
+                _tl = struct_timeline.update(
+                    code=codes[i],
+                    ts=float(clock[t]),
+                    price=price,
+                    vwap=vw,
+                    hi_pre1=float(_dc.get("hi_pre1") or 0.0),
+                    close_pre1=float(_dc.get("close_pre1") or 0.0),
+                    cushion_roll=_cushion_roll,
+                    cushion_now=_cushion_now,
+                    # 结构资格严格口径（与实盘 shadow 同构）：只认 is_structure_prejudged
+                    prejudged=bool(_dc.get("is_structure_prejudged")),
+                )
+
                 _pat_early = detect_patterns(
                     price=price, day_open=_day_open,
                     ma5=_ma5, ma10=_ma10, ma20=_ma20,
@@ -884,6 +935,8 @@ class DayReplay:
                     is_structure_prejudged=bool(_dc.get("is_structure_prejudged")),
                     close_over_vwap10=bool(_dc.get("close_over_vwap10")),
                     vwap10_touch_count=int(_dc.get("vwap10_touch_count") or 0),
+                    cushion_roll=_cushion_roll,
+                    struct_status=_tl.status,
                 )
                 patterns = list(_pat_early)
 
@@ -950,14 +1003,24 @@ class DayReplay:
                     lead_label_final = raw_lead_label
 
                 ev.extra["patterns"] = list(patterns)
+                # 结构时间轴状态同步进 extra，引擎据此决定"保底/降档/剔除"
+                ev.extra["struct_status"] = _tl.status
+                ev.extra["struct_confirm_n"] = _tl.confirm_n
+                ev.extra["struct_break_n"] = _tl.break_n
+                ev.extra["struct_reason"] = _tl.reason
+                ev.extra["struct_cushion_roll"] = _tl.cushion_roll
+                ev.extra["struct_drawdown_pct"] = _tl.drawdown_pct
 
                 if lead_label_final in (LABEL_VANGUARD, LABEL_FLAG):
                     vwatch.register(codes[i], _sector, float(clock[t]), price, _vw10)
 
                 _ps = pattern_score(patterns)
+                _struct_blocked = _tl.status in (STATUS_BROKEN, STATUS_EVICTED)
                 _floor = None
-                if "十日洗盘悬空突破" in patterns or "结构预判验证" in patterns or _is_prime:
-                    _floor = 4  # 直通 L4 主攻
+                if ("十日洗盘悬空突破" in patterns or "结构预判验证" in patterns) and not _struct_blocked and self.cfg.struct_floor:
+                    _floor = 4  # 结构成立才保底；已失守/剔除的票不再享受
+                elif _is_prime:
+                    _floor = 4
                 elif self.cfg.pattern_floor:
                     _floor = 3 if _ps >= 100 else (2 if _ps >= 70 else None)
                 decision = self.engine.evaluate(
@@ -1173,12 +1236,32 @@ class DayReplay:
                         "ice_days": int(day_ctx.ice_days) if day_ctx is not None else 0,
                         "hunger": round(float(day_ctx.hunger), 3) if day_ctx is not None else 1.0,
                         "ctx": day_ctx.label() if day_ctx is not None else "",
-                        "lead_label": _lead.label,
+                        "lead_label": lead_label_final,
                         "lead_score": round(_lead.score, 1),
                         "lead_rank": _lead.rank,
                         "lead_gap_min": round(_lead.lead_gap_min, 1),
                         "is_flag": bool(_lead.is_flag),
                         "sector_n": _lead.sector_n,
+                        # 结构时间轴（与实盘 shadow 落盘同构）
+                        "struct_status": _tl.status,
+                        "struct_confirm_n": int(_tl.confirm_n),
+                        "struct_break_n": int(_tl.break_n),
+                        "struct_reason": _tl.reason,
+                        "struct": {
+                            "status": _tl.status,
+                            "label": STATUS_LABEL.get(_tl.status, _tl.status),
+                            "confirm_n": int(_tl.confirm_n),
+                            "break_n": int(_tl.break_n),
+                            "cushion_roll": round(float(_tl.cushion_roll), 2),
+                            "cushion_now": round(float(_tl.cushion_now), 2),
+                            "drawdown_pct": round(float(_tl.drawdown_pct), 2),
+                            "reason": _tl.reason,
+                            # 结构底色来源：复盘时必须能回答"它凭什么算结构候选"
+                            "is_structure_prejudged": 1 if bool(_dc.get("is_structure_prejudged")) else 0,
+                            "close_over_vwap10": 1 if bool(_dc.get("close_over_vwap10")) else 0,
+                            "wash_quality": 1 if bool(_dc.get("wash_quality")) else 0,
+                            "prev_strong_vwap": 1 if bool(_dc.get("prev_strong_vwap")) else 0,
+                        },
                         "phase": life_state.phase if life_state is not None else "",
                         "survival": round(_s_rate, 2),
                         "capital": round(_cap_ratio, 2),
@@ -1803,6 +1886,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--top-k", type=int, default=20, help="自选前 K 只")
     parser.add_argument("--cutoff", default="14:00", help="自选时间上限 HH:MM")
     parser.add_argument("--state", default="", help="跟踪器状态文件（指定则跨日携带，收盘落盘）")
+    parser.add_argument("--no-struct-floor", action="store_true",
+                        help="关闭结构验证直通 L4 保底（A/B 对照实验用）")
     args = parser.parse_args(argv)
 
     focus = tuple(c.strip() for c in args.focus.split(",") if c.strip())
@@ -1810,7 +1895,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         cache_path=args.cache or None,
         config=ReplayConfig(top_n=args.top, step=args.step, focus_codes=focus,
                             fill_mode=args.fill, max_positions_per_day=args.max_pos,
-                            state_path=args.state),
+                            state_path=args.state,
+                            struct_floor=not args.no_struct_floor),
     )
     if not rp.cache:
         print("❌ 找不到可用的分钟线缓存")

@@ -146,6 +146,7 @@ def intraday_fields(
     price: float = 0.0,
     slope_window: int = 15,
     velocity_window: int = 10,
+    cushion_window: int = 20,
 ) -> Dict[str, float]:
     """由当日 1 分钟分时序列派生攻角/意图/结构清晰度等指标。
 
@@ -193,6 +194,32 @@ def intraday_fields(
             if min_vwap_cushion >= 0.25 and vwap_slope_up:
                 vwap_zero_touch = True
 
+    # ------------------------------------------------------------------
+    # 滚动悬空垫（时间可恢复）
+    #   min_vwap_cushion 是"自开盘以来的全局最小值"，单调不增：09:31 一次插针即全天失效。
+    #   实盘要求"价格随时间变化、结构可反复成立/失守"，故另算只看最近 cushion_window 根的
+    #   滚动最小值。价格重新站上均线后，滚动垫会自然回升，结构得以重新成立。
+    # ------------------------------------------------------------------
+    _win = max(1, int(cushion_window))
+    w0 = max(1, n - _win)
+    roll_cush = [
+        (lows[k] - vwap_series[k]) / vwap_series[k] * 100.0
+        for k in range(w0, n)
+        if vwap_series[k] > 0
+    ]
+    cushion_roll = min(roll_cush) if roll_cush else 0.0
+    last_vw = vwap_series[-1] if vwap_series else 0.0
+    ref_px = price if price > 0 else (closes[-1] if closes else 0.0)
+    cushion_now = ((ref_px - last_vw) / last_vw * 100.0) if last_vw > 0 else 0.0
+    _seg_n = max(1, n - w0)
+    hold_ratio = sum(1 for k in range(w0, n) if closes[k] >= vwap_series[k]) / float(_seg_n)
+    above_run = 0
+    for k in range(n - 1, -1, -1):
+        if closes[k] >= vwap_series[k]:
+            above_run += 1
+        else:
+            break
+
     # 早盘 3 <= n < 8 确认窗快速通道 (09:33~09:38 豁免数据饥饿死锁，仅在具备真实最低价 low 时激活)
     has_real_low = False
     if hasattr(bars, "columns") and "low" in bars.columns:
@@ -217,6 +244,10 @@ def intraday_fields(
                     "intent_score": 75.0,
                     "structure_clarity": 85.0,
                     "min_vwap_cushion": round(min_vwap_cushion, 2),
+                    "cushion_roll": round(cushion_roll, 2),
+                    "cushion_now": round(cushion_now, 2),
+                    "vwap_hold_ratio": round(hold_ratio, 3),
+                    "vwap_above_run": float(above_run),
                     "vwap_zero_touch": 1.0,
                 }
         return {}
@@ -264,6 +295,10 @@ def intraday_fields(
         "intent_score": round(intent_score, 2),
         "structure_clarity": round(structure_clarity, 2),
         "min_vwap_cushion": round(min_vwap_cushion, 2),
+        "cushion_roll": round(cushion_roll, 2),
+        "cushion_now": round(cushion_now, 2),
+        "vwap_hold_ratio": round(hold_ratio, 3),
+        "vwap_above_run": float(above_run),
         "vwap_zero_touch": 1.0 if vwap_zero_touch else 0.0,
     }
     if segment_vol_inc > 0:

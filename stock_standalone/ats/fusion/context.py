@@ -132,7 +132,7 @@ class DailyContext:
             "days_since_high": 0.0, "limit_up_streak": 0.0,
             "dist_ma20_pct": 0.0, "vol_ratio_5d": 1.0,
             "ret_std20": 0.0, "vol_mean20": 0.0, "vol_std20": 0.0,
-            "vwap5": 0.0, "vwap10": 0.0,
+            "vwap3": 0.0, "vwap5": 0.0, "vwap10": 0.0,
             "vol_ma5": 0.0, "vol_ma20": 0.0, "vol_dry": 1.0,
             "prev_pct": 0.0, "above_vwap10_days": 0,
             # 昨日形态：用于"前一日大涨、第二日急速杀跌"的风险预判
