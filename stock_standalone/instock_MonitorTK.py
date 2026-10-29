@@ -2123,6 +2123,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             "code": code, "name": sig.get('name', ''), "action": action,
                             "status": "拦截", "detail": "已有持仓"
                         })
+                        sig["kernel_allowed"] = False
+                        sig["kernel_reject_code"] = "ALREADY_POS"
+                        enrich_decision_item(sig, write_journal=True)
                         continue
                     if action in ("SELL", "REDUCE") and code not in positions:
                         blocked.append(f"{code}:NO_POS")
@@ -2131,6 +2134,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             "code": code, "name": sig.get('name', ''), "action": action,
                             "status": "拦截", "detail": "无此持仓"
                         })
+                        sig["kernel_allowed"] = False
+                        sig["kernel_reject_code"] = "NO_POS"
+                        enrich_decision_item(sig, write_journal=True)
                         continue
 
                     if win and win.winfo_exists():
@@ -2160,6 +2166,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             "code": code, "name": sig.get('name', ''), "action": action,
                             "status": "拦截", "detail": "持仓已满(10只)"
                         })
+                        sig["kernel_allowed"] = False
+                        sig["kernel_reject_code"] = "PORTFOLIO_FULL"
+                        enrich_decision_item(sig, write_journal=True)
                         continue
 
                     # 2. 非交易时段拦截
@@ -2170,6 +2179,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             "code": code, "name": sig.get('name', ''), "action": action,
                             "status": "拦截", "detail": "非交易时段"
                         })
+                        sig["kernel_allowed"] = False
+                        sig["kernel_reject_code"] = "NON_TRADING_HOURS"
+                        enrich_decision_item(sig, write_journal=True)
                         continue
 
                     # 3. 今日卖出冷却拦截
@@ -2181,6 +2193,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             "code": code, "name": sig.get('name', ''), "action": action,
                             "status": "拦截", "detail": "卖出冷却中"
                         })
+                        sig["kernel_allowed"] = False
+                        sig["kernel_reject_code"] = "SOLD_COOLDOWN"
+                        enrich_decision_item(sig, write_journal=True)
                         continue
 
                     if code in positions:
@@ -2190,6 +2205,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             "code": code, "name": sig.get('name', ''), "action": action,
                             "status": "拦截", "detail": "已有持仓"
                         })
+                        sig["kernel_allowed"] = False
+                        sig["kernel_reject_code"] = "ALREADY_POS"
+                        enrich_decision_item(sig, write_journal=True)
                         continue
 
                     if is_live:
@@ -2200,6 +2218,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 "code": code, "name": sig.get('name', ''), "action": action,
                                 "status": "拦截", "detail": "今日已买入过"
                             })
+                            sig["kernel_allowed"] = False
+                            sig["kernel_reject_code"] = "TODAY_BOUGHT"
+                            enrich_decision_item(sig, write_journal=True)
                             continue
 
                         ok, msg = trade_gw.submit_buy(
@@ -2233,9 +2254,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             enrich_decision_item(sig, write_journal=True)
                     else:
                         if code in self._bg_kernel_today_mock_buys:
+                            sig["kernel_allowed"] = False
+                            sig["kernel_reject_code"] = "MOCK_TODAY_BOUGHT"
+                            enrich_decision_item(sig, write_journal=True)
                             continue
                         if code in self._bg_kernel_today_mock_sells:
-                            # 冷却拦截
+                            sig["kernel_allowed"] = False
+                            sig["kernel_reject_code"] = "MOCK_SOLD_COOLDOWN"
+                            enrich_decision_item(sig, write_journal=True)
                             continue
                         
                         ok, msg = trade_gw.submit_buy(
@@ -2276,6 +2302,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             "code": code, "name": sig.get('name', ''), "action": action,
                             "status": "拦截", "detail": "当前无此持仓"
                         })
+                        sig["kernel_allowed"] = False
+                        sig["kernel_reject_code"] = "NO_POS"
+                        enrich_decision_item(sig, write_journal=True)
                         continue
 
                     if is_live:
@@ -2286,6 +2315,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 "code": code, "name": sig.get('name', ''), "action": action,
                                 "status": "拦截", "detail": "今日已卖出过"
                             })
+                            sig["kernel_allowed"] = False
+                            sig["kernel_reject_code"] = "TODAY_SOLD"
+                            enrich_decision_item(sig, write_journal=True)
                             continue
 
                         sell_price = float(price_map.get(code, price) or price)

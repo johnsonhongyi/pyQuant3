@@ -684,6 +684,11 @@ class DecisionDetailsDialog(QtWidgets.QDialog):
 
 
 class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
+
+    @staticmethod
+    def _noop_context():
+        import contextlib
+        return contextlib.nullcontext()
     """
     ⚡ 交易内核决策流水分析面板 (Trading Kernel Decision Flow)
     采用 PyQt6 构建的只读高性能监控看板，完美适配 Windows 多进程并发环境。
@@ -3146,15 +3151,98 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                     pass
         self._refresh_positions_tab()
 
-    def _manual_sell_position(self, code: str, name: str, show_message: bool = True):
-        """手动平仓单只个股（异步桥接老网关和平仓新交易内核，安全防GIL崩溃）"""
+    def _atomic_sell_position_core(self, code: str, name: str, reason: str = "操盘手手工平仓") -> float:
+        """[SSOT原子平仓核心] 同时清空老网关、新内核以及集中指挥中心持仓，回笼资金并落盘流水"""
+        price = 0.0
+        # 1. 物理计算平仓价格 (最新价优先)
+        if self.parent_app and hasattr(self.parent_app, "selector") and self.parent_app.selector is not None:
+            df_rt = getattr(self.parent_app.selector, 'df_all_realtime', None)
+            if df_rt is not None and code in df_rt.index:
+                price = float(df_rt.loc[code].get('trade', 0) or 0)
+
+        from trading_kernel.kernel_service import get_kernel_service
+        service = get_kernel_service()
+
+        if price <= 0 and service and service.paper_adapter and service.paper_adapter.account:
+            pos = service.paper_adapter.account.positions.get(code)
+            if pos:
+                price = float(pos.current_price or pos.entry_price or 0.0)
+
+        if price <= 0:
+            price = 1.0  # 安全低保底
+
+        # 2. 老版模拟网关原子出清与资金回笼
         try:
             from trade_gateway import get_trade_gateway
             trade_gw = getattr(self.parent_app, "_trade_gw", None) or get_trade_gateway()
-            if not trade_gw:
-                QtWidgets.QMessageBox.warning(self, "警告", "交易网关未就绪，无法手动平仓")
-                return
-                
+            if trade_gw:
+                trade_gw.submit_sell(code, price, reason=reason, force_manual=True)
+                with trade_gw._lock:
+                    leg_pos = trade_gw._positions.pop(code, None)
+                    if leg_pos:
+                        shares = getattr(leg_pos, "shares", 0)
+                        if hasattr(trade_gw, "_cash"):
+                            trade_gw._cash += float(shares) * price
+                    if hasattr(trade_gw, "_today_sold_codes"):
+                        trade_gw._today_sold_codes.add(code)
+                if hasattr(trade_gw, "_save_positions"):
+                    trade_gw._save_positions()
+        except Exception as e_gw:
+            logger.warning(f"Error selling from trade_gw: {e_gw}")
+
+        # 3. 新内核 paper_adapter 原子出清、退款保障与状态解阻
+        try:
+            if service and service.paper_adapter and service.paper_adapter.account:
+                import contextlib
+                adapter_lock = getattr(service.paper_adapter, "_submit_lock", None) or getattr(service, "_lock", None) or contextlib.nullcontext()
+                with adapter_lock:
+                    pos_rem = service.paper_adapter.account.positions.pop(code, None)
+                    if pos_rem is not None:
+                        service.paper_adapter.account.cash += float(getattr(pos_rem, "volume", 0.0) or 0.0) * price
+                    service.paper_adapter._execution_block_reason = None
+                if hasattr(service.state_manager, "set"):
+                    service.state_manager.set(code, "FLAT")
+        except Exception as e_clean:
+            logger.warning(f"Error cleaning paper position residual: {e_clean}")
+
+        # 4. 集中指挥中心联动出清
+        try:
+            from ats.strategy.ipo_trading_center import get_ipo_trading_center
+            ipo_center = get_ipo_trading_center()
+            if ipo_center and hasattr(ipo_center, "force_close_position"):
+                ipo_center.force_close_position(code, price=price, reason=reason)
+        except Exception as e_ipo:
+            logger.debug(f"Error closing from ipo_trading_center: {e_ipo}")
+
+        # 5. 构造虚拟 SELL 信号，物理写入交易流水
+        req_id = f"MANUAL_SELL_{code}_{int(time.time()*1000)}"
+        sig_sell = {
+            "code": code,
+            "name": name,
+            "signal_type": "手工平仓",
+            "action": "SELL",
+            "price": price,
+            "current_price": price,
+            "suggest_price": price,
+            "reason": reason,
+            "request_id": req_id,
+            "journal_ts": datetime.now().isoformat(),
+            "created_at": datetime.now().isoformat(),
+            "is_simulation": True,
+            "kernel_action": "SELL",
+            "kernel_allowed": True,
+        }
+        try:
+            from trading_kernel.kernel_service import enrich_decision_item
+            enrich_decision_item(sig_sell, write_journal=True)
+        except Exception as e_journal:
+            logger.warning(f"Error enriching sell journal: {e_journal}")
+
+        return price
+
+    def _manual_sell_position(self, code: str, name: str, show_message: bool = True):
+        """手动平仓单只个股（单线程安全桥接老网关和平仓新交易内核）"""
+        try:
             if show_message:
                 if not QtWidgets.QMessageBox.question(self, "确认", f"是否手工平仓所持股票 {name} ({code})？", 
                                                      QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No) == QtWidgets.QMessageBox.StandardButton.Yes:
@@ -3162,85 +3250,27 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
 
             def _async_sell_worker():
                 try:
-                    # 1. 物理计算平仓价格 (最新价优先)
-                    price = 0.0
-                    if self.parent_app and hasattr(self.parent_app, "selector") and self.parent_app.selector is not None:
-                        df_rt = getattr(self.parent_app.selector, 'df_all_realtime', None)
-                        if df_rt is not None and code in df_rt.index:
-                            price = float(df_rt.loc[code].get('trade', 0) or 0)
-                    
-                    if price <= 0:
-                        # Fallback 从 pos_table 或 adapter 获取
-                        try:
-                            from trading_kernel.kernel_service import get_kernel_service
-                            service = get_kernel_service()
-                            if service and service.paper_adapter:
-                                pos = service.paper_adapter.account.positions.get(code)
-                                if pos:
-                                    price = float(pos.current_price or pos.entry_price)
-                        except Exception:
-                            pass
-                    if price <= 0:
-                        price = 1.0  # 安全低保底
+                    price = self._atomic_sell_position_core(code, name, reason="内核面板上手工平仓")
+                    from trading_kernel.kernel_service import get_kernel_service
+                    service = get_kernel_service()
+                    if service and service.paper_adapter and hasattr(service.paper_adapter, "_save_state"):
+                        service.paper_adapter._save_state()
 
-                    # 2. 物理调用老版模拟网关执行平仓卖出，实现原有的平仓逻辑不变！
-                    trade_gw.submit_sell(code, price, reason="内核面板上手工平仓")
-
-                    # 3. 构造虚拟 SELL 信号，物理写入交易流水，并同步让新交易内核 paper_adapter 执行平仓！
-                    req_id = f"MANUAL_SELL_{code}_{int(time.time()*1000)}"
-                    sig_sell = {
-                        "code": code,
-                        "name": name,
-                        "signal_type": "手工平仓",
-                        "action": "SELL",
-                        "price": price,
-                        "current_price": price,
-                        "suggest_price": price,
-                        "reason": "内核面板上手工平仓",
-                        "request_id": req_id,
-                        "journal_ts": datetime.now().isoformat(),
-                        "created_at": datetime.now().isoformat(),
-                    }
-                    try:
-                        from trading_kernel.kernel_service import enrich_decision_item
-                        enrich_decision_item(sig_sell, write_journal=True)
-                    except Exception as e_journal:
-                        logger.warning(f"Error enriching sell journal: {e_journal}")
-
-                    # 4. 彻底自愈：若 paper_adapter 中仍有残留未出清持仓，执行原子出清与退款保障
-                    try:
-                        from trading_kernel.kernel_service import get_kernel_service
-                        service = get_kernel_service()
-                        if service and service.paper_adapter and service.paper_adapter.account:
-                            if code in service.paper_adapter.account.positions:
-                                pos_rem = service.paper_adapter.account.positions.pop(code, None)
-                                if pos_rem is not None:
-                                    service.paper_adapter.account.cash += float(pos_rem.volume) * price
-                            if hasattr(service.state_manager, "set"):
-                                service.state_manager.set(code, "FLAT")
-                            if hasattr(service.paper_adapter, "_save_state"):
-                                service.paper_adapter._save_state()
-                    except Exception as e_clean:
-                        logger.warning(f"Error cleaning paper position residual: {e_clean}")
-
-                    # 5. 回到 UI 线程刷新
                     def _on_sell_finished_ui():
                         self._refresh_positions_tab()
                         if show_message:
-                            toast_message(self.parent_app, f"手工平仓成功: {name} ({code})")
+                            toast_message(self.parent_app, f"手工平仓成功: {name} ({code}) @ {price:.2f}元")
 
                     QtCore.QTimer.singleShot(0, _on_sell_finished_ui)
                 except Exception as ex:
                     logger.error(f"Error in async_sell_worker: {ex}")
 
-            # 启动工作线程
-            t = threading.Thread(target=_async_sell_worker, daemon=True)
-            t.start()
+            threading.Thread(target=_async_sell_worker, daemon=True).start()
         except Exception as e:
             logger.error(f"Error in manual_sell_position: {e}")
 
     def _manual_sell_all_positions(self):
-        """右键一键全平所有内核实时持仓（含桥接旧持仓）"""
+        """右键一键全平所有内核实时持仓（含桥接旧持仓，原子批处理杜绝并发踩踏）"""
         try:
             from trading_kernel.kernel_service import get_kernel_service
             service = get_kernel_service()
@@ -3249,24 +3279,50 @@ class DecisionFlowPanel(QtWidgets.QWidget, WindowMixin):
                 return
                 
             positions = service.paper_adapter.get_positions()
-            if not positions:
+            # 汇总双边所有活跃持仓（内核 + 老网关并集），确保彻底清空绝无死角遗漏
+            all_target_codes = set(positions.keys())
+            try:
+                from trade_gateway import get_trade_gateway
+                trade_gw = getattr(self.parent_app, "_trade_gw", None) or get_trade_gateway()
+                if trade_gw:
+                    for old_pos in trade_gw.get_positions():
+                        c = old_pos.get("code")
+                        if c:
+                            all_target_codes.add(str(c).zfill(6))
+            except Exception:
+                pass
+
+            if not all_target_codes:
                 QtWidgets.QMessageBox.information(self, "提示", "当前无持仓")
                 return
                 
-            if not QtWidgets.QMessageBox.question(self, "确认", f"是否手工一键全平当前全部 {len(positions)} 只持仓？", 
+            if not QtWidgets.QMessageBox.question(self, "确认", f"是否手工一键全平当前全部 {len(all_target_codes)} 只持仓？", 
                                                  QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No) == QtWidgets.QMessageBox.StandardButton.Yes:
                 return
-                
-            # 批量执行平仓
-            for code, pos_dict in list(positions.items()):
-                name = ""
-                # 尝试查找股票名称
-                if self.parent_app and hasattr(self.parent_app, "df_all") and self.parent_app.df_all is not None:
-                    if code in self.parent_app.df_all.index:
-                        name = str(self.parent_app.df_all.loc[code].get("name", ""))
-                self._manual_sell_position(code, name, show_message=False)
-                
-            QtWidgets.QMessageBox.information(self, "完成", "已执行一键平仓所有持仓！")
+
+            def _async_sell_all_worker():
+                try:
+                    total_count = len(all_target_codes)
+                    for code in list(all_target_codes):
+                        name = ""
+                        if self.parent_app and hasattr(self.parent_app, "df_all") and self.parent_app.df_all is not None:
+                            if code in self.parent_app.df_all.index:
+                                name = str(self.parent_app.df_all.loc[code].get("name", ""))
+                        self._atomic_sell_position_core(code, name, reason="操盘手一键全平所有持仓")
+
+                    # 统一原子落盘
+                    if service.paper_adapter and hasattr(service.paper_adapter, "_save_state"):
+                        service.paper_adapter._save_state()
+
+                    def _on_sell_all_finished_ui():
+                        self._refresh_positions_tab()
+                        QtWidgets.QMessageBox.information(self, "完成", f"已成功手工一键全平全部 {total_count} 只持仓！资金已回笼。")
+
+                    QtCore.QTimer.singleShot(0, _on_sell_all_finished_ui)
+                except Exception as ex:
+                    logger.error(f"Error in async_sell_all_worker: {ex}")
+
+            threading.Thread(target=_async_sell_all_worker, daemon=True).start()
         except Exception as e:
             logger.error(f"Error in manual_sell_all_positions: {e}")
 

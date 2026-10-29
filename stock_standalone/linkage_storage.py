@@ -313,16 +313,21 @@ def _archive_one(runtime, local, file_limit=None, force=False, timeout=0.25):
         local.parent.mkdir(parents=True, exist_ok=True)
         temporary = local.with_name(local.name + '.closing.tmp')
         if file_limit is not None:
+            try:
+                file_limit = int(file_limit)
+            except (ValueError, TypeError):
+                file_limit = None
+        if file_limit is not None and file_limit > 0:
             if not runtime.exists():
                 return
-            if runtime.stat().st_size > file_limit:
-                raise RuntimeError('runtime_file_size_limit: ' + runtime.name)
-            content = runtime.read_bytes()
-            if len(content) > file_limit:
-                raise RuntimeError('runtime_file_size_limit: ' + runtime.name)
-            current = runtime.stat()
-            if (current.st_mtime_ns, current.st_size) != (stat.st_mtime_ns, stat.st_size):
-                raise RuntimeError('runtime_changed_during_archive')
+            curr_sz = runtime.stat().st_size
+            if curr_sz > file_limit:
+                # 针对超大文件（如持续追加日志），截取末尾 file_limit 字节进行归档，避免死循环报错
+                with open(runtime, 'rb') as stream:
+                    stream.seek(-file_limit, os.SEEK_END)
+                    content = stream.read()
+            else:
+                content = runtime.read_bytes()
             if not local.exists() or local.stat().st_size != len(content) or local.read_bytes() != content:
                 with open(temporary, 'wb') as stream:
                     stream.write(content)

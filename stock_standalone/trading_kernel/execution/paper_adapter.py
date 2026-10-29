@@ -663,15 +663,23 @@ class PaperExecutionAdapter(ExecutionAdapter):
             return self._submit_order_locked(order)
 
     def _submit_order_locked(self, order: ApprovedOrder) -> bool:
-        if self._execution_block_reason:
+        action = str(order.action or "").upper()
+        request_id = str(getattr(order, "request_id", "") or "")
+        is_manual_sell = (
+            action in {"SELL", "REDUCE"} and (
+                "MANUAL" in str(order.order_id).upper()
+                or "MANUAL" in request_id.upper()
+                or any(k in str(getattr(order, "reason", "")).lower() for k in ("手工", "手动", "manual", "一键全平", "操盘手"))
+            )
+        )
+        if self._execution_block_reason and not is_manual_sell:
             logger.error("[Trade Gate] PAPER order rejected: %s", self._execution_block_reason)
             return False
         if (not math.isfinite(order.size_pct) or not math.isfinite(order.price)
-                or order.size_pct <= 0 or order.price <= 0):
+                or (action != "SELL" and order.size_pct <= 0) or order.price <= 0):
             return False
 
         # Idempotency gate: retries must not mutate cash/positions twice.
-        request_id = str(getattr(order, "request_id", "") or "")
         for existing in self.orders:
             if not isinstance(existing, dict):
                 continue
@@ -703,7 +711,11 @@ class PaperExecutionAdapter(ExecutionAdapter):
             equity = 1000000.0
 
         import sys_utils
-        is_manual_order = "MANUAL" in str(order.order_id).upper() or "MANUAL" in request_id.upper()
+        is_manual_order = (
+            "MANUAL" in str(order.order_id).upper()
+            or "MANUAL" in request_id.upper()
+            or any(k in str(getattr(order, "reason", "")).lower() for k in ("手工", "手动", "manual", "一键全平", "操盘手"))
+        )
         bypass = self._is_test or self._is_simulation or is_manual_order
         if action in {"BUY", "ADD"}:
             # 校验是否为交易日交易时间（测试环境/模拟模式豁免）
@@ -779,8 +791,8 @@ class PaperExecutionAdapter(ExecutionAdapter):
             if sell_volume <= 0:
                 return False
 
-            # 校验 T+1 规则：当日买不能当日卖（开仓时间间隔需大于等于一天，测试环境/模拟模式豁免）
-            if not (self._is_test or self._is_simulation):
+            # 校验 T+1 规则：当日买不能当日卖（开仓时间间隔需大于等于一天，测试环境/模拟模式/手工强制平仓豁免）
+            if not (self._is_test or self._is_simulation or is_manual_order):
                 from trading_kernel.t1_position_facts import build_t1_position_facts
                 position_rows = {key: value.to_dict() for key, value in self.account.positions.items()}
                 facts = build_t1_position_facts(

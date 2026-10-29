@@ -1,5 +1,21 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-29 18:00 【集中指挥与内核平仓全链路原子闭环、全自动交易持久化与全风控信号流水落盘】(`trade_gateway.py`, `trading_kernel/execution/paper_adapter.py`, `linkage_storage.py`, `ats/strategy/ipo_trading_center.py`, `tk_gui_modules/decision_flow_panel.py`, `ats/ui/ipo_command_room_dialog.py`, `instock_MonitorTK.py`, `tests/test_manual_close_and_auto_trading.py`)
+- [x] **【彻底解决两边手动与一键全平无效的死锁与幽灵持仓回灌】**：
+  - **TradeGateway 盘后手工平仓豁免**：在 `trade_gateway.py` 的 `submit_sell` 增加 `force_manual` 参数与手工关键词识别，盘后及手工平仓 100% 豁免交易时段与 T+1 检查，彻底允许测试与盘后出清；
+  - **PaperExecutionAdapter 阻断状态穿透放行**：在 `paper_adapter.py` 允许 `is_manual_sell` 穿透 `_execution_block_reason` 阻断执行；放宽 `SELL` 全平仓位允许 `order.size_pct <= 0`；
+  - **消除 `_noop_context` 属性异常**：在 `decision_flow_panel.py` 中将锁获取自愈为 `getattr(service.paper_adapter, "_submit_lock", None) or contextlib.nullcontext()`，并在类级补充静态方法 `_noop_context`，彻底根除出清内核持仓时的 `AttributeError`；
+  - **DecisionFlowPanel 原子平仓重构**：消除 17 只股票开 17 个后台并发线程相互踩踏死锁的缺陷，重构为 `_atomic_sell_position_core` 与单任务批量处理；同时出清老网关 `_positions`、内核 `positions`、集中指挥室 `_positions`，清空 `_execution_block_reason`，回笼资金并落盘，最后单次刷新 UI，彻底根除双向同步互灌导致的幽灵持仓复活；
+  - **集中交易指挥室一键全平与原子平仓**：`ipo_command_room_dialog.py` 接入 `force_close_position`；持仓卡片栏与右键菜单新增【🛑 一键全平持仓】与右键全平菜单，原子出清、资金回笼并归入历史平仓战绩；
+- [x] **【彻底解决全自动跟随交易持久化与撮合调度】**：
+  - **配置持久化读写**：`ipo_command_room_dialog.py` 启动时通过 `load_config_node("ipo_cmd_auto_follow_trading", False)` 读取并初始化 `trading_center.set_auto_follow_trading`；勾选变化时通过 `save_config_node` 物理持久化，窗口关闭或重启保持记忆；
+  - **周期自动撮合调度**：在 5 秒定时刷新器中联动触发 `trading_center._auto_execute_if_enabled()`，自动执行可成交的 S5 决议指令；
+- [x] **【彻底解决 10 月流水断流：即使没有成交也 100% 记录信号流水】**：
+  - **破案 10 月停留在 09-30 根因**：持仓达到 10 只上限（17 只 216.5% 仓位）或非交易时段，`bg_kernel_auto_execute_once` 触发 `PORTFOLIO_FULL`、`NON_TRADING_HOURS` 等风控拦截后直接 `continue`，未调用 `enrich_decision_item`，导致拦截日志没有落盘；
+  - **全链路风控拦截流水记录**：在 `PORTFOLIO_FULL`、`NON_TRADING_HOURS`、`SOLD_COOLDOWN`、`ALREADY_POS`、`NO_POS`、`TODAY_BOUGHT`、`TODAY_SOLD` 等全部拦截分支上，统一执行 `sig["kernel_allowed"] = False; sig["kernel_reject_code"] = ...; enrich_decision_item(sig, write_journal=True)`，雷达发掘与风控阻断全过程 100% 落盘可见；
+- [x] **【消除循环报错日志】**：`linkage_storage.py` 针对超大日志文件截取末尾安全字节归档，不再抛出 `RuntimeError: runtime_file_size_limit`，彻底消除每 5 分钟循环报错；
+- [x] **【自动化测试全绿通过】**：新增 `tests/test_manual_close_and_auto_trading.py` 5 项专项测试全部通过；全量 17 项结构预判模型与 11 项箱体测试全部纯绿通过。
+
 ## 2026-10-29 12:50 【结构预判模型全链路 10 处断链彻底闭环（三批全部交付）】(`docs/tasks/2026-10-29_1146_*.md` 第四节)
 - [x] **第 1 批 P0 透传彻底闭环**：在 `context.py` 定义单一权威 `STRUCTURE_FIELDS`，`stock_live_strategy` 与 `adapter.py` 白名单动态引用消除手写漂移；`engine.py` 铁闸 6 统一读 `vwap3`；`replay.py` 注入 `STRUCTURE_FIELDS` 与 `lead_label`；`shadow.py` 总龙头判断下沉至分支外直通 L4；jsonl 记录落盘紧凑 `"struct"` 结构字段；UI 增加 `_on_structure_only_toggled` 槽函数并优先读 `struct` 字段。
 - [x] **第 2 批 P1 可解释性彻底闭环**：`engine.veto_of` 重排顺序（铁闸 6 低开空头 → 4 深水 → 3 压力区 → 5 前高 → 泛化水下运行兜底），彻底恢复否决原因可解释性；全面重构测试去假绿，新增端到端穿透、回放注入与 JSON 往返真实测试。

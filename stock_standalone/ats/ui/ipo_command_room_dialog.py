@@ -640,6 +640,8 @@ class IPOCommandRoomDialog(QDialog):
         self._current_signal_logs_list: List[Dict[str, Any]] = []
         self._current_aggregated_logs_list: List[Dict[str, Any]] = []
         self._voice_enabled = load_config_node("ipo_cmd_voice_enabled", True)
+        saved_auto_trade = load_config_node("ipo_cmd_auto_follow_trading", False)
+        self.trading_center.set_auto_follow_trading(saved_auto_trade)
 
         # 联动防抖定时器 (20ms)
         self._linkage_timer = QTimer(self)
@@ -772,6 +774,10 @@ class IPOCommandRoomDialog(QDialog):
         self.btn_pos_closed.clicked.connect(lambda: self._set_pos_view_mode("CLOSED"))
         h_pos_tabs.addWidget(self.btn_pos_closed)
         h_pos_tabs.addStretch()
+        self.btn_close_all_pos = QPushButton("🛑 一键全平持仓")
+        self.btn_close_all_pos.setStyleSheet("font-weight: bold; color: #ff4d4f; background-color: #3b181b; border: 1px solid #ff4d4f; border-radius: 4px; padding: 2px 8px;")
+        self.btn_close_all_pos.clicked.connect(self._close_all_positions)
+        h_pos_tabs.addWidget(self.btn_close_all_pos)
         v_pos.addLayout(h_pos_tabs)
 
         self.tbl_pos = IPOCommandRoomTableWidget(self)
@@ -1170,6 +1176,11 @@ class IPOCommandRoomDialog(QDialog):
 
         menu.addSeparator()
 
+        # 若有活跃持仓，提供一键全平选项
+        if len(self.trading_center._positions) > 0:
+            act_close_all = menu.addAction(f"🛑 一键全平全部活跃持仓 ({len(self.trading_center._positions)}只)")
+            act_close_all.triggered.connect(self._close_all_positions)
+
         # 5. 复制股票代码
         act_copy = menu.addAction(f"📋 复制股票代码: {code}")
         def _copy_c():
@@ -1299,20 +1310,46 @@ class IPOCommandRoomDialog(QDialog):
         return ""
 
     def _close_single_position(self, code: str, name: str):
-        """平仓单只持仓"""
+        """平仓单只持仓 (原子清退并回笼资金)"""
         pos = self.trading_center._positions.get(code)
         if not pos or pos.shares <= 0:
             return
-        d = IPOOrderDirective(
-            action="SELL", code=code, name=name, price=pos.current_price or pos.cost_price,
-            shares=pos.shares, size_pct=0.0, urgency="CRITICAL", reason="操盘手手动在指挥室执行平仓"
+        reply = QMessageBox.question(
+            self, "确认平仓", f"是否手工平仓所持股票 {name} ({code})？\n平仓后资金将即时回笼并转入历史战绩。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
-        self.trading_center.execute_directive(d)
-        QMessageBox.information(self, "已平仓", f"标的 [{name}({code})] 已成功平仓！资金已回笼。")
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        price = float(pos.current_price or pos.cost_price or 1.0)
+        success = self.trading_center.force_close_position(code, price=price, reason="操盘手手动在指挥室执行平仓")
+        if success:
+            QMessageBox.information(self, "已平仓", f"标的 [{name}({code})] 已成功平仓！资金已回笼。")
+        else:
+            QMessageBox.warning(self, "平仓提示", f"标的 [{name}({code})] 平仓未完成，请检查状态。")
         self.refresh_data()
+
+    def _close_all_positions(self):
+        """一键全平所有活跃持仓"""
+        positions = getattr(self.trading_center, "_positions", {})
+        if not positions:
+            QMessageBox.information(self, "提示", "当前无活跃持仓可平。")
+            return
+        reply = QMessageBox.question(
+            self, "确认一键全平",
+            f"确定要对当前持仓的全部 {len(positions)} 只股票执行一键全平吗？\n资金将全部回笼，持仓将转入历史战绩。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            closed_count = self.trading_center.close_all_positions(reason="操盘手在集中交易指挥室执行一键全平")
+            QMessageBox.information(self, "平仓完成", f"已成功平仓全部 {closed_count} 只持仓股票！资金已回笼。")
+            self.refresh_data()
 
     def _on_auto_trade_toggled(self, checked: bool):
         self.trading_center.set_auto_follow_trading(checked)
+        save_config_node("ipo_cmd_auto_follow_trading", bool(checked))
+        if checked:
+            self.trading_center._auto_execute_if_enabled()
+            self.refresh_data()
 
     def _on_rotation_toggled(self, checked: bool):
         """切换全仓轮动模式 (100% 动态接力换马)"""
@@ -1554,6 +1591,8 @@ class IPOCommandRoomDialog(QDialog):
 
     def _refresh_data_safely(self):
         try:
+            if self.trading_center.auto_follow_trading:
+                self.trading_center._auto_execute_if_enabled()
             self.refresh_data()
         except Exception:
             logger.exception("集中交易指挥室刷新数据失败")

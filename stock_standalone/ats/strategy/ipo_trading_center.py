@@ -707,6 +707,85 @@ class IPOTradingCenter:
             res = self.reconcile_authoritative_position(clean_code, auth_s, auth_sq, auto_resolve=True)
             return not res.get("is_blocked", False)
 
+    def force_close_position(self, code: str, price: float = 0.0, reason: str = "操盘手手动平仓") -> bool:
+        """【操盘手手动/一键强制平仓】：最高优先级人工干预，无视对账状态原子出清持仓、资金回笼并落盘"""
+        clean_code = str(code).strip().zfill(6)
+        with self._lock:
+            pos = self._positions.get(clean_code)
+            if not pos or pos.shares <= 0:
+                self._execution_blocked_codes.discard(clean_code)
+                self._reconciliation_mismatches.pop(clean_code, None)
+                self._save_persisted_ledger()
+                return True
+
+            exit_price = price if price > 0 else (pos.current_price if pos.current_price > 0 else pos.cost_price)
+            if exit_price <= 0:
+                exit_price = 1.0
+
+            pnl_amt = (exit_price - pos.cost_price) * pos.shares
+            pnl_pct = ((exit_price - pos.cost_price) / pos.cost_price * 100.0) if pos.cost_price > 0 else 0.0
+
+            closed_rec = {
+                "code": clean_code,
+                "name": pos.name,
+                "exit_date": time.strftime("%Y-%m-%d"),
+                "exit_time": time.strftime("%H:%M:%S"),
+                "cost_price": round(pos.cost_price, 2),
+                "exit_price": round(exit_price, 2),
+                "shares": int(pos.shares),
+                "realized_pnl_pct": round(pnl_pct, 2),
+                "realized_pnl_amount": round(pnl_amt, 2),
+                "exit_reason": f"🛑 {reason}",
+                "holding_days": 1,
+                "signal_tier": pos.signal_tier,
+                "strategy_tag": pos.strategy_tag,
+            }
+            self._closed_positions.append(closed_rec)
+            self.available_cash = round(self.available_cash + (pos.shares * exit_price), 2)
+            del self._positions[clean_code]
+            self.exit_engine.unregister_position(clean_code)
+            self._execution_blocked_codes.discard(clean_code)
+            self._reconciliation_mismatches.pop(clean_code, None)
+
+            self._append_signal_iteration_log(
+                action="SELL",
+                code=clean_code,
+                name=pos.name,
+                price=exit_price,
+                size_pct=0.0,
+                reason=f"🛑 {reason}出局: 现价 {exit_price:.2f} 斩仓，实现盈亏 {pnl_pct:+.2f}%",
+                signal_tier="MANUAL",
+            )
+
+            try:
+                from ats.unified_paper_account import execute_command_directive
+                d = IPOOrderDirective(
+                    action="SELL",
+                    code=clean_code,
+                    name=pos.name,
+                    price=exit_price,
+                    shares=pos.shares,
+                    size_pct=100.0,
+                    urgency="CRITICAL",
+                    reason=f"手工强制平仓: {reason}",
+                )
+                execute_command_directive(d)
+            except Exception as ex_k:
+                logger.debug(f"[IPO-TRADING] Routing force_close_position to TK failed: {ex_k}")
+
+            self._save_persisted_ledger()
+            return True
+
+    def close_all_positions(self, reason: str = "操盘手一键全平") -> int:
+        """【一键全平所有活跃持仓】：原子清空所有持仓，释放全部仓位与额度"""
+        with self._lock:
+            codes = list(self._positions.keys())
+        closed_count = 0
+        for c in codes:
+            if self.force_close_position(c, reason=reason):
+                closed_count += 1
+        return closed_count
+
     def is_execution_blocked(self, code: str) -> bool:
         """查询标的是否处于对账冲突阻断状态"""
         clean_code = str(code).strip().zfill(6)
@@ -3671,7 +3750,10 @@ class IPOTradingCenter:
         clean_code = str(directive.code).strip().zfill(6)
         action_upper = str(directive.action or "").upper()
         paper_report = getattr(self, "_paper_reconciliation", None)
-        if self._auto_load_ledger and (
+        is_manual_exit = (action_upper in EXIT_ACTIONS or "SELL" in action_upper) and any(
+            k in str(getattr(directive, "reason", "")).lower() for k in ("手工", "手动", "manual", "一键全平", "操盘手")
+        )
+        if not is_manual_exit and self._auto_load_ledger and (
             not isinstance(paper_report, dict)
             or paper_report.get("status") != "ALIGNED"
         ):

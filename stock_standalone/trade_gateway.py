@@ -489,6 +489,7 @@ class MockTradeGateway:
         code: str,
         price: float,
         reason: str = "",
+        force_manual: bool = False,
     ) -> tuple[bool, str]:
         """提交模拟卖出委托"""
         import sys
@@ -499,29 +500,31 @@ class MockTradeGateway:
         except Exception:
             is_simulation = False
 
+        is_manual = force_manual or any(k in str(reason).lower() for k in ("手工", "手动", "manual", "一键全平", "操盘手"))
+        bypass_hours = is_test or is_simulation or is_manual
+
         import sys_utils
-        if not sys_utils.is_active_trading_hours(bypass=is_test or is_simulation):
+        if not sys_utils.is_active_trading_hours(bypass=bypass_hours):
             msg = "当前时间不在连续交易时段（09:30-11:30, 13:00-15:00），禁止卖出交易"
             logger.warning(f"[TradeGateway] 卖出拒绝 {code}: {msg}")
             return False, msg
 
         with self._lock:
-            # [FIX][P0] 幂等保护：同一标的当日已平仓后，禁止再次卖出。
-            # 否则一旦持仓被对账流程回灌，止损会每 15 秒重复成交一次（实测 947 次/日）。
-            if code in self._today_sold_codes:
+            pos = self._positions.get(code)
+            if pos is None:
+                return False, f"{code} 不在持仓中"
+
+            # [FIX][P0] 幂等保护：同一标的当日已平仓后，禁止再次卖出。若非手工平仓且已在 _today_sold_codes 中则拦截
+            if not is_manual and code in self._today_sold_codes:
                 now_ts = time.time()
                 ck = f"sell_dup_{code}"
                 if now_ts - _GATEWAY_LOG_COOLDOWN.get(ck, 0) >= 300:
                     logger.warning(f"[TradeGateway] 卖出拦截 {code}: 当日已平仓，忽略重复卖出请求")
                     _GATEWAY_LOG_COOLDOWN[ck] = now_ts
                 return False, f"{code} 当日已平仓，重复卖出请求已忽略"
-
-            pos = self._positions.get(code)
-            if pos is None:
-                return False, f"{code} 不在持仓中"
             
-            # 校验 T+1 规则：当日买不能当日卖（开仓日期不能为今天，测试和回测模拟模式除外）
-            if not (is_test or is_simulation):
+            # 校验 T+1 规则：当日买不能当日卖（开仓日期不能为今天，测试、回测模拟与手工强制平仓除外）
+            if not (is_test or is_simulation or is_manual):
                 if pos.entry_time:
                     entry_date = pos.entry_time.date() if hasattr(pos.entry_time, 'date') else None
                     if not entry_date:
