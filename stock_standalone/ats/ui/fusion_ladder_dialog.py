@@ -545,6 +545,105 @@ class HeaderToolTip(QObject):
         return False
 
 
+
+class FusionSearchLineEdit(QLineEdit):
+    """梯度监视器专用快速搜索输入框。
+
+    特性：
+    - 支持股票代码 (code) 与名称 (name) 模糊查询；
+    - 支持右键弹出中文菜单一键粘贴 (📋 粘贴)，剪切，复制，清空；
+    - 鼠标中键一键粘贴剪贴板代码；
+    - 带有清除按钮 (ClearButton)；
+    - 支持 Enter/Return 快速选中第一个匹配行并联动主图；
+    - 支持 Esc 键清空搜索。
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setPlaceholderText("🔍 搜索代码/名称...")
+        self.setClearButtonEnabled(True)
+        self.setToolTip("输入股票代码 (如 600688/688) 或名称 (如 上海石化) 模糊查询\n支持右键菜单一键黏贴，按 Enter 键快速定位联动")
+        self.setStyleSheet(
+            "QLineEdit { "
+            "  background-color: #202028; color: #e6e6f0; "
+            "  border: 1px solid #3a3a48; border-radius: 3px; "
+            "  padding: 2px 6px; font-size: 8.5pt; "
+            "  min-width: 140px; max-width: 180px; "
+            "} "
+            "QLineEdit:focus { border: 1px solid #7fb3d5; background-color: #252530; }"
+        )
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.MiddleButton:
+            clip = QApplication.clipboard()
+            text = clip.text().strip() if clip else ""
+            if text:
+                self.setText(text)
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def contextMenuEvent(self, event) -> None:
+        """支持右键菜单一键粘贴及常用快捷操作。"""
+        menu = QMenu(self)
+        clip = QApplication.clipboard()
+        clip_text = clip.text().strip() if clip else ""
+
+        # 1. 粘贴 (支持直接黏贴剪贴板内容)
+        act_paste = menu.addAction("📋 粘贴 (Paste)")
+        act_paste.setShortcut("Ctrl+V")
+        act_paste.setEnabled(bool(clip_text))
+
+        def _do_paste() -> None:
+            c_text = QApplication.clipboard().text().strip()
+            if c_text:
+                if self.hasSelectedText():
+                    self.insert(c_text)
+                elif not self.text():
+                    self.setText(c_text)
+                else:
+                    self.insert(c_text)
+
+        act_paste.triggered.connect(_do_paste)
+
+        menu.addSeparator()
+
+        # 2. 剪切
+        act_cut = menu.addAction("✂️ 剪切 (Cut)")
+        act_cut.setShortcut("Ctrl+X")
+        act_cut.setEnabled(self.hasSelectedText() and not self.isReadOnly())
+        act_cut.triggered.connect(self.cut)
+
+        # 3. 复制
+        act_copy = menu.addAction("📄 复制 (Copy)")
+        act_copy.setShortcut("Ctrl+C")
+        act_copy.setEnabled(self.hasSelectedText())
+        act_copy.triggered.connect(self.copy)
+
+        # 4. 全选
+        act_select_all = menu.addAction("全选 (Select All)")
+        act_select_all.setShortcut("Ctrl+A")
+        act_select_all.setEnabled(bool(self.text()))
+        act_select_all.triggered.connect(self.selectAll)
+
+        menu.addSeparator()
+
+        # 5. 清空
+        act_clear = menu.addAction("❌ 清空 (Clear)")
+        act_clear.setEnabled(bool(self.text()))
+        act_clear.triggered.connect(self.clear)
+
+        menu.exec(event.globalPos())
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            if self.text():
+                self.clear()
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+
 def get_ats_custom_extra_cols() -> List[str]:
     """获取用户在 global.ini 中配置的 ats_col 自定义扩展列（排除已有的基础固定字段）"""
     try:
@@ -1353,6 +1452,27 @@ class FusionLadderDialog(QWidget, WindowMixin):
         v3.addWidget(self.txt_report, 1)
         self.tabs.addTab(page3, "验收与复盘")
 
+        # ---- 选项卡右上角搜索栏 (代码/名称模糊查询 + 右键黏贴) ----
+        search_box = QWidget(self.tabs)
+        search_box.setStyleSheet("background: transparent;")
+        sb_layout = QHBoxLayout(search_box)
+        sb_layout.setContentsMargins(0, 0, 6, 2)
+        sb_layout.setSpacing(6)
+
+        self.lbl_search_count = QLabel("")
+        self.lbl_search_count.setStyleSheet(
+            "font-size: 8.5pt; color: #8fd18f; font-weight: bold; background: transparent;"
+        )
+        self.lbl_search_count.hide()
+        sb_layout.addWidget(self.lbl_search_count)
+
+        self.ed_search = FusionSearchLineEdit(search_box)
+        self.ed_search.textChanged.connect(self._on_search_text_changed)
+        self.ed_search.returnPressed.connect(self._on_search_return_pressed)
+        sb_layout.addWidget(self.ed_search)
+
+        self.tabs.setCornerWidget(search_box, Qt.Corner.TopRightCorner)
+
         self._apply_all_narrow_modes()
 
     # ------------------------------------------------------------------
@@ -1478,6 +1598,114 @@ class FusionLadderDialog(QWidget, WindowMixin):
         if code and not name:
             name = name_of(code)
         return code, name
+
+
+    # ------------------------------------------------------------------
+    # 搜索与过滤逻辑（代码/名称模糊查询 + 右键黏贴 + 回车联动）
+    # ------------------------------------------------------------------
+    def _get_active_table(self) -> Optional[QTableWidget]:
+        """获取当前激活选项卡中的表格组件。"""
+        idx = self.tabs.currentIndex()
+        if idx == 0:
+            return self.tbl_live
+        elif idx == 1:
+            return self.tbl_replay
+        elif idx == 2:
+            return self.tbl_trades
+        elif idx == 3:
+            return self.tbl_track
+        return None
+
+    def _apply_search_filter(self, target_tbl: Optional[QTableWidget] = None) -> None:
+        """根据搜索框内容对目标表格执行行级模糊过滤。"""
+        tbl = target_tbl if target_tbl is not None else self._get_active_table()
+        if tbl is None:
+            if hasattr(self, "lbl_search_count"):
+                self.lbl_search_count.hide()
+            return
+
+        raw_kw = self.ed_search.text().strip() if hasattr(self, "ed_search") else ""
+        n_rows = tbl.rowCount()
+
+        if not raw_kw:
+            # 清空关键词：恢复显示全量行
+            for r in range(n_rows):
+                tbl.setRowHidden(r, False)
+            if hasattr(self, "lbl_search_count"):
+                self.lbl_search_count.setText("")
+                self.lbl_search_count.hide()
+            return
+
+        kw = raw_kw.lower()
+        # 清洗市场前缀 (如 sh600688 / sz002526 / bj832089 -> 纯代码)
+        pure_kw = kw.replace("sh", "").replace("sz", "").replace("bj", "")
+
+        # 占位提示单行不隐藏 (如"当前无符合..."或"非交易时段暂无当日记录")
+        if n_rows == 1:
+            c0, n0 = self._get_row_code_name(tbl, 0)
+            if not c0 and not n0:
+                tbl.setRowHidden(0, False)
+                if hasattr(self, "lbl_search_count"):
+                    self.lbl_search_count.hide()
+                return
+
+        match_count = 0
+        total_count = 0
+        for r in range(n_rows):
+            code, name = self._get_row_code_name(tbl, r)
+            if not code and not name:
+                # 非数据行若在搜索状态下隐藏
+                tbl.setRowHidden(r, True)
+                continue
+
+            total_count += 1
+            c_clean = code.lower().replace("sh", "").replace("sz", "").replace("bj", "")
+            n_clean = name.lower()
+
+            is_matched = bool(
+                (pure_kw and pure_kw in c_clean)
+                or (kw in code.lower())
+                or (kw in n_clean)
+            )
+
+            tbl.setRowHidden(r, not is_matched)
+            if is_matched:
+                match_count += 1
+
+        if hasattr(self, "lbl_search_count"):
+            self.lbl_search_count.setText(f"{match_count}/{total_count}")
+            if match_count > 0:
+                self.lbl_search_count.setStyleSheet(
+                    "font-size: 8.5pt; color: #8fd18f; font-weight: bold; background: transparent;"
+                )
+            else:
+                self.lbl_search_count.setStyleSheet(
+                    "font-size: 8.5pt; color: #ffa64d; font-weight: bold; background: transparent;"
+                )
+            self.lbl_search_count.show()
+
+    def _on_search_text_changed(self, text: str) -> None:
+        """输入框内容变化实时响应过滤。"""
+        self._apply_search_filter()
+
+    def _on_search_return_pressed(self) -> None:
+        """回车键响应：自动选中并联动第一条匹配的标的。"""
+        tbl = self._get_active_table()
+        if tbl is None:
+            return
+        for r in range(tbl.rowCount()):
+            if not tbl.isRowHidden(r):
+                old_row = tbl.currentRow()
+                tbl.selectRow(r)
+                it = tbl.item(r, 0)
+                if it:
+                    tbl.scrollToItem(it)
+                if old_row == r:
+                    code, name = self._get_row_code_name(tbl, r)
+                    if code:
+                        self._link_main_stock(code, name)
+                tbl.setFocus()
+                break
 
     def _on_table_item_clicked(self, item: QTableWidgetItem) -> None:
         if not item:
@@ -2981,6 +3209,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
         )
         warn = bool(stale or day_note or schema_note)
         self.lbl_status.setStyleSheet("color:#ffa64d; font-weight:bold;" if warn else "color:#8fd18f; font-weight:bold;")
+        self._apply_search_filter(tbl)
 
     # ------------------------------------------------------------------
     # 赛马跟踪（实盘影子流直出，不依赖回放）
@@ -3223,6 +3452,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
                     val_txt, val_raw = self._extract_stock_custom_val(df_strat, e["code"], ec)
                     t3.setItem(i, 14 + idx_ec, self._num_item(val_txt, val_raw))
         t3.setSortingEnabled(True)
+        self._apply_search_filter(t3)
 
     def _fill_table_hint(self, tbl: QTableWidget, text: str) -> None:
         """空表占位：写清"为什么没有数据"，不留白板。"""
@@ -3260,6 +3490,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 "信号面板由回放统计生成。实盘阶段可先看[实时梯度]与[赛马跟踪]；"
                 "收盘后点 [▶ 跑回放(回补)] 即可得到完整统计。"
             )
+        self._apply_search_filter()
 
     # ------------------------------------------------------------------
     # 回放与回补持久化
@@ -3576,6 +3807,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
 
         # 更新极窄列显示
         self._apply_all_narrow_modes()
+        self._apply_search_filter()
 
         self.lbl_status.setText(
             "状态：{} 回放完成并已回补落盘影子流({}条)｜评估 {}｜入局 {}".format(

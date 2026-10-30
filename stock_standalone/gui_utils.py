@@ -658,3 +658,196 @@ def rearrange_monitors_per_screen(align: str = "left", sort_by: str = "id", layo
                         current_x -= (w + margin_x)
             except Exception as e:
                 logger.error(f"Rearrange error: {e}")
+
+
+import math
+
+def rearrange_top10_windows_grid(
+    monitor_list: Optional[dict] = None,
+    trigger_win: Any = None,
+    stay_on_top: bool = True,
+    parent_app: Any = None
+) -> List[Any]:
+    """
+    概念前10小窗口自适应网格平铺与置顶（对齐 SBC 设计规范）
+    1. 自动提取所有存活的概念前10小窗口对象；
+    2. 多显示器识别并归类到各物理屏幕；
+    3. 按物理屏幕原有视觉空间坐标排序（从上到下、同一行从左到右），杜绝重排位置乱跳；
+    4. 优雅网格计算（1~2窗并排，4窗田字格2x2，6窗3x2，8窗4x2），紧凑铺满；
+    5. 全部平铺窗口自动执行前置置顶唤醒（Raise 和 TopMost View），不被主窗口遮挡；
+    6. 激活当前触发窗口，并持久化窗口位置。
+    """
+    global MONITORS
+    if not MONITORS:
+        init_monitors()
+
+    active_wins = []
+    seen_hwnds = set()
+    if monitor_list:
+        for info in monitor_list.values():
+            w = info.get("win") or info.get("toplevel")
+            if w and hasattr(w, "winfo_exists") and w.winfo_exists():
+                h_id = id(w)
+                if h_id not in seen_hwnds:
+                    seen_hwnds.add(h_id)
+                    active_wins.append(w)
+
+    if trigger_win and hasattr(trigger_win, "winfo_exists") and trigger_win.winfo_exists():
+        if id(trigger_win) not in seen_hwnds:
+            seen_hwnds.add(id(trigger_win))
+            active_wins.append(trigger_win)
+
+    if not active_wins:
+        return []
+
+    for w in active_wins:
+        try:
+            if hasattr(w, "state") and w.state() == "iconic":
+                w.deiconify()
+        except Exception:
+            pass
+
+    monitors = MONITORS or [(0, 0, 1920, 1080)]
+    screen_map: Dict[int, List[Any]] = {i: [] for i in range(len(monitors))}
+
+    for w in active_wins:
+        try:
+            wx, wy = w.winfo_x(), w.winfo_y()
+            ww, wh = w.winfo_width(), w.winfo_height()
+            cx, cy = wx + ww / 2.0, wy + wh / 2.0
+            placed = False
+            for s_idx, (l, t, r, b) in enumerate(monitors):
+                if l <= cx < r and t <= cy < b:
+                    screen_map[s_idx].append(w)
+                    placed = True
+                    break
+            if not placed:
+                screen_map[0].append(w)
+        except Exception:
+            screen_map[0].append(w)
+
+    for s_idx, wins_on_screen in screen_map.items():
+        if not wins_on_screen:
+            continue
+
+        l, t, r, b = monitors[s_idx]
+        count = len(wins_on_screen)
+
+        def _sort_by_spatial_order(wins):
+            if len(wins) <= 1:
+                return list(wins)
+            meta = []
+            for item in wins:
+                try:
+                    meta.append({
+                        "win": item,
+                        "x": item.winfo_x(),
+                        "y": item.winfo_y(),
+                        "w": item.winfo_width(),
+                        "h": item.winfo_height(),
+                        "cy": item.winfo_y() + item.winfo_height() / 2.0,
+                    })
+                except Exception:
+                    meta.append({"win": item, "x": 0, "y": 0, "w": 460, "h": 260, "cy": 130})
+            meta.sort(key=lambda m: (m["y"], m["x"]))
+            rows_clustered = []
+            for m in meta:
+                placed = False
+                for row in rows_clustered:
+                    avg_cy = sum(it["cy"] for it in row) / float(len(row))
+                    avg_h = sum(it["h"] for it in row) / float(len(row))
+                    if abs(m["cy"] - avg_cy) < max(80, avg_h * 0.45):
+                        row.append(m)
+                        placed = True
+                        break
+                if not placed:
+                    rows_clustered.append([m])
+            sorted_wins = []
+            for row in rows_clustered:
+                row.sort(key=lambda it: it["x"])
+                for it in row:
+                    sorted_wins.append(it["win"])
+            return sorted_wins
+
+        ordered_wins = _sort_by_spatial_order(wins_on_screen)
+
+        if count == 1:
+            cols = 1
+        elif count == 2:
+            cols = 2
+        elif count == 3:
+            cols = 3 if (r - l) >= 1400 else 2
+        elif count == 4:
+            cols = 2
+        elif count in (5, 6):
+            cols = 3
+        elif count in (7, 8):
+            cols = 4
+        else:
+            cols = max(2, math.ceil(math.sqrt(count)))
+
+        rows = math.ceil(count / cols)
+
+        margin_x = 8
+        margin_y = 6
+        pad_left = 10
+        pad_top = 8
+        pad_right = 10
+        pad_bottom = 32
+
+        screen_w = r - l
+        screen_h = b - t
+        avail_w = max(420, screen_w - pad_left - pad_right)
+        avail_h = max(240, screen_h - pad_top - pad_bottom)
+
+        calc_w = int((avail_w - (cols - 1) * margin_x) / cols)
+        calc_h = int((avail_h - (rows - 1) * margin_y) / rows)
+
+        if count == 1:
+            target_w = min(480, avail_w)
+            target_h = min(280, avail_h)
+        else:
+            target_w = max(380, min(calc_w, 600))
+            target_h = max(220, min(calc_h, 420))
+
+        for idx, w in enumerate(ordered_wins):
+            row_idx = idx // cols
+            col_idx = idx % cols
+            pos_x = l + pad_left + col_idx * (target_w + margin_x)
+            pos_y = t + pad_top + row_idx * (target_h + margin_y)
+            try:
+                w.geometry(f"{target_w}x{target_h}+{pos_x}+{pos_y}")
+            except Exception as e:
+                logger.debug(f"[重排几何应用失败] {e}")
+
+    for w in active_wins:
+        try:
+            w.deiconify()
+            w.lift()
+            if stay_on_top:
+                w.attributes("-topmost", True)
+                w._is_stay_on_top = True
+                if hasattr(w, "_btn_topmost") and w._btn_topmost.winfo_exists():
+                    w._btn_topmost.config(text="📌置顶:开", fg="#00c853")
+        except Exception:
+            pass
+
+    if trigger_win and hasattr(trigger_win, "winfo_exists") and trigger_win.winfo_exists():
+        try:
+            trigger_win.lift()
+            trigger_win.focus_force()
+        except Exception:
+            pass
+
+    if parent_app and hasattr(parent_app, "save_window_position"):
+        for w in active_wins:
+            try:
+                uniq = getattr(w, "_unique_code", None)
+                if uniq:
+                    parent_app.save_window_position(w, f"concept_top10_window-{uniq}")
+            except Exception:
+                pass
+
+    logger.info(f"🪟 [SBC设计一致] 共 {len(active_wins)} 个概念前10小窗口已在多屏网格平铺完成并置顶")
+    return active_wins
+

@@ -259,7 +259,8 @@ class TreeviewMixin:
                         t.multi_sort_click_count = multi_sort_click_count
                         try:
                             self.update_mixin_tree_headers(t)
-                            self.trigger_mixin_multi_level_sort(t)
+                            self.trigger_mixin_multi_level_sort(t, scroll_to_top=True)
+                            self._on_mixin_sort_post_action(t)
                         except Exception as ex:
                             logger.debug(f"Failed to sync sort for concept tree: {ex}")
 
@@ -282,6 +283,31 @@ class TreeviewMixin:
         clean_text = clean_text.replace("↑", "").replace("↓", "")
         clean_text = clean_text.replace("🔴[主]", "").replace("🟡[从]", "").replace("🟢[次]", "")
         return clean_text.strip()
+
+    def _on_mixin_sort_post_action(self, tree: ttk.Treeview) -> None:
+        """排序完成后联动：自动滚动至顶部，并选中高亮首行第一只股票"""
+        try:
+            tree.yview_moveto(0)
+            children = tree.get_children('')
+            if children:
+                first_item = children[0]
+                tree.selection_set(first_item)
+                tree.focus(first_item)
+                tree.see(first_item)
+                # 寻找拥有该 tree 的父级/顶级窗口
+                win = getattr(tree, "_parent_win", None) or tree.winfo_toplevel()
+                if win:
+                    win._selected_index = 0
+                    vals = tree.item(first_item, "values")
+                    if vals:
+                        code = str(vals[0]).zfill(6) if str(vals[0]).isdigit() else str(vals[0])
+                        win.select_code = code
+                        if hasattr(self, 'sender') and hasattr(self.sender, 'send'):
+                            self.sender.send(code)
+                if hasattr(self, '_highlight_tree_selection'):
+                    self._highlight_tree_selection(tree, first_item)
+        except Exception as e:
+            logger.debug(f"[_on_mixin_sort_post_action] error: {e}")
 
     def update_mixin_tree_headers(self, tree: ttk.Treeview) -> None:
         """根据当前多级排序状态刷新指定 Treeview 的表头，并重新绑定排序命令"""
@@ -368,7 +394,8 @@ class TreeviewMixin:
                 self.sort_level3_asc = tree.sort_level3_asc
                 
             self.update_mixin_tree_headers(tree)
-            self.trigger_mixin_multi_level_sort(tree)
+            self.trigger_mixin_multi_level_sort(tree, scroll_to_top=True)
+            self._on_mixin_sort_post_action(tree)
             self._save_mixin_ui_states(tree)
             return
             
@@ -400,7 +427,8 @@ class TreeviewMixin:
                 self.multi_sort_click_count = 0
             
         self.update_mixin_tree_headers(tree)
-        self.trigger_mixin_multi_level_sort(tree)
+        self.trigger_mixin_multi_level_sort(tree, scroll_to_top=True)
+        self._on_mixin_sort_post_action(tree)
         self._save_mixin_ui_states(tree)
 
     def set_mixin_multi_sort_level(self, tree: ttk.Treeview, col_name: str, level: int) -> None:
@@ -434,7 +462,8 @@ class TreeviewMixin:
             self.multi_sort_click_count = 1 if level == 1 else getattr(self, 'multi_sort_click_count', 0)
 
         self.update_mixin_tree_headers(tree)
-        self.trigger_mixin_multi_level_sort(tree)
+        self.trigger_mixin_multi_level_sort(tree, scroll_to_top=True)
+        self._on_mixin_sort_post_action(tree)
         self._save_mixin_ui_states(tree)
 
     def clear_mixin_multi_sort_level(self, tree: ttk.Treeview, col_name: str) -> None:
@@ -456,7 +485,8 @@ class TreeviewMixin:
                 self.multi_sort_click_count = 0
 
         self.update_mixin_tree_headers(tree)
-        self.trigger_mixin_multi_level_sort(tree)
+        self.trigger_mixin_multi_level_sort(tree, scroll_to_top=True)
+        self._on_mixin_sort_post_action(tree)
         self._save_mixin_ui_states(tree)
 
     def clear_all_mixin_multi_sort(self, tree: ttk.Treeview) -> None:
@@ -484,8 +514,8 @@ class TreeviewMixin:
             self.multi_sort_click_count = 0
 
         self.update_mixin_tree_headers(tree)
-        self.trigger_mixin_multi_level_sort(tree)
-            
+        self.trigger_mixin_multi_level_sort(tree, scroll_to_top=True)
+        self._on_mixin_sort_post_action(tree)
         self._save_mixin_ui_states(tree)
 
     def trigger_mixin_multi_level_sort(self, tree: ttk.Treeview, scroll_to_top: bool = False) -> None:

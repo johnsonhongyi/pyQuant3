@@ -1,5 +1,36 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-30 13:10 【TK概念前10小窗口排序联动滚动置顶与Q键自动网格重排置顶工程治理】(	k_gui_modules/treeview_mixin.py, gui_utils.py, instock_MonitorTK.py, 	ests/test_top10_sort_and_rearrange_grid.py)
+- [x] **【点击排序后自动滚动到顶部并选中首行联动】**：
+  - **后置动作彻底闭环 (_on_mixin_sort_post_action)**：无论是单级排序、多级排序还是跨概念窗口同步广播，排序完成后统一调用 	ree.yview_moveto(0) 自动回滚到顶部第一屏；
+  - **首行第一只股票高亮与联动发包**：自动选中排序后首行（	ree.selection_set(first_item)），更新宿主 _selected_index = 0 与 select_code，并通过 self.sender.send(code) 自动向关联软件/分时图发送行情联动，实现排序即定位龙头；
+- [x] **【小窗口分组按 Q 键自动重排并置顶（对齐 SBC 设计规范）】**：
+  - **多屏自适应网格平铺 (
+earrange_top10_windows_grid)**：自动识别并提取所有打开的概念前10小窗口，多显示器智能识别；
+  - **视觉空间行聚类稳定排列**：彻底根除重排左右乱跳，基于窗口原有视觉空间坐标行聚类排序；
+  - **优雅自适应网格计算**：1~2窗并排、4窗田字格2x2、6窗3x2、8窗4x2，规整平铺铺满当前屏幕；
+  - **前置置顶唤醒 (Raise & TopMost View)**：全平铺窗口自动开启 -topmost = True 并提升层级，彻底杜绝被主窗口覆盖；
+  - **交互体验与持久化对齐**：小窗口底部控制栏增加【🪟重排】与【📌置顶:关/开】快捷按钮，支持小窗口内按 **Q 键** 自动网格重排置顶、按 **T 键** 快速切换窗口置顶；
+- [x] **【自动化测试全绿通过】**：
+  - 新增 	ests/test_top10_sort_and_rearrange_grid.py 3 项专项测试全部通过；关联的 28 项 TK 响应式交互测试与 17 项核心模型测试全部 100% 纯绿通过。
+
+## 2026-10-30 12:35 【ATS融合梯度监视器右上角搜索栏与右键黏贴模糊查询治理】(`ats/ui/fusion_ladder_dialog.py`, `tests/test_fusion_ladder_search.py`, `docs/tasks/2026-10-30_1235_ATS融合梯度监视器搜索与右键黏贴模糊查询治理.md`)
+- [x] **【右上角 Corner Widget 搜索栏精确落地】**：
+  - **位置精准匹配用户附图**：利用 `QTabWidget.setCornerWidget(search_box, Qt.Corner.TopRightCorner)`，将轻量搜索栏优雅停靠在选项卡右侧空白区域，紧凑美观不占主控制条高度；
+  - **匹配结果动态计数**：内置动态计数器 `lbl_search_count`（如 `1/55`），无搜索时自动隐藏，有匹配呈现清新浅绿（`#8fd18f`），0 匹配呈现告警暖橙（`#ffa64d`）；
+- [x] **【股票代码 (Code) 与名称 (Name) 模糊过滤】**：
+  - **代码模糊与前缀自动清洗**：支持 6 位纯代码（如 `600688`）或子串代码（如 `688`），自动剥离从行情软件复制粘贴的 `sh/sz/bj` 市场前缀；
+  - **名称中文模糊匹配**：实时匹配股票中文简称（如 `上海石化`、`电研`、`银行` 等）；
+  - **行级无损过滤**：采用 Qt 高性能 `setRowHidden` 过滤，不破坏各列高精度数值排序模型与对象引用；
+- [x] **【右键黏贴与便捷键盘交互】**：
+  - **定制右键中文上下文菜单**：第一项提供 `📋 粘贴 (Paste)`，若剪贴板有文本立即高亮可用并一键黏贴，同时提供 `✂️ 剪切`、`📄 复制`、`全选` 与 `❌ 清空`；
+  - **鼠标中键直贴**：支持点击鼠标中键直接填充剪贴板内容；
+  - **回车键 (Enter) 快速联动定位**：搜索后按回车，光标自动高亮选中第一条匹配标的并联动主图（`_link_main_stock`）；
+  - **Esc 键一键清空**：按 Esc 键立即清空搜索并还原全量行；
+  - **跨 Tab 与后台刷新自愈保持**：Tab 切换、后台影子流每 2 秒更新重绘、回放完成重绘后，搜索过滤状态 100% 自动保持；
+- [x] **【自动化测试全绿通过（6 项新增专项 + 34 项核心回归 = 40 项全 PASS）】**：
+  - 新增 `tests/test_fusion_ladder_search.py` 覆盖组件挂载、代码/名称模糊查询、市场前缀清洗、剪贴板粘贴与回车联动、Tab 切换状态保持等 6 大核心场景，全部 100% 通过。
+
 ## 2026-10-30 11:20 【ATS打包闪退Stack Overflow根治、C栈扩容与开盘前启动底部成交量数据自愈治理】(`ats/bounded_evaluation_store.py`, `ats/capital_dragon_engine.py`, `ats/ledger_update_service.py`, `ats/request_gate.py`, `ats/main_ats.py`, `ats/next_day_watch_process.py`, `ats/ui/main_window.py`, `tests/test_stack_overflow_and_cold_start_market_summary.py`, `docs/tasks/2026-10-30_1110_ATS闪退StackOverflow与开盘前成交量无数据治理.md`)
 - [x] **【彻底根除打包 ATS 崩溃闪退 `Windows fatal exception: stack overflow`】**：
   - **深拷贝无限递归根因破案**：`ats/bounded_evaluation_store.py`（121 个候选标的海量 checkpoints 归档）、`ats/ledger_update_service.py`（QThread 栈空间受限下全量 `SignalEntry` 投影）、`ats/request_gate.py`（SingleFlight）高频无界调用 `copy.deepcopy`。原逻辑在剪枝前就递归深拷贝，Windows 子线程默认栈仅 512KB~1MB，海量对象层级递归直接击穿 Windows Guard Page 引发 SEH 致命异常退出；

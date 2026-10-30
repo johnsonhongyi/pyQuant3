@@ -114,7 +114,7 @@ from data_utils import (
 )
 from gui_utils import (
     bind_mouse_scroll, configure_treeview_rendering, get_monitor_by_point, rearrange_monitors_per_screen,get_monitor_index_for_window,
-    is_window_covered_pg
+    is_window_covered_pg, rearrange_top10_windows_grid
 )
 from tk_gui_modules.dpi_mixin import DPIMixin
 from tk_gui_modules.column_viewport import ColumnViewportTreeview
@@ -5844,7 +5844,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         def run_action(action):
 
             if action == "窗口重排":
-                rearrange_monitors_per_screen(align="left", sort_by="id", layout="horizontal",monitor_list=self._pg_top10_window_simple, win_var=self.win_var)
+                if hasattr(self, "rearrange_top10_windows_group") and getattr(self, "_pg_top10_window_simple", None):
+                    self.rearrange_top10_windows_group()
+                else:
+                    rearrange_monitors_per_screen(align="left", sort_by="id", layout="horizontal",monitor_list=self._pg_top10_window_simple, win_var=self.win_var)
             elif action == "Query编辑":
                 self.query_manager.open_editor()  # 打开 QueryHistoryManager 编辑窗口
             elif action == "停止刷新":
@@ -20570,6 +20573,47 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         win._btn_copy_expr = btn
 
    
+    def rearrange_top10_windows_group(self, trigger_win=None):
+        """【🪟 小窗口分组自动重排与置顶】按物理屏幕多显示器网格平铺所有存活的概念前10小窗口并前置置顶（对齐 SBC 设计）"""
+        try:
+            active_wins = rearrange_top10_windows_grid(
+                monitor_list=getattr(self, "_pg_top10_window_simple", {}),
+                trigger_win=trigger_win,
+                stay_on_top=True,
+                parent_app=self
+            )
+            count = len(active_wins)
+            if count > 0:
+                if hasattr(self, 'toast_message'):
+                    self.toast_message(f"🪟 共 {count} 个概念前10小窗口已网格重排并置顶 (Q键)")
+                elif 'toast_message' in globals():
+                    toast_message(self, f"🪟 共 {count} 个概念前10小窗口已网格重排并置顶 (Q键)")
+        except Exception as e:
+            logger.error(f"小窗口分组重排失败: {e}")
+
+    def toggle_top10_window_topmost(self, win):
+        """【📌 切换概念小窗口置顶状态】快捷键 T，无缝切换 StayOnTop"""
+        try:
+            if not win or not win.winfo_exists():
+                return
+            cur_top = getattr(win, "_is_stay_on_top", False)
+            new_top = not cur_top
+            win._is_stay_on_top = new_top
+            win.attributes("-topmost", new_top)
+            btn = getattr(win, "_btn_topmost", None)
+            if btn and btn.winfo_exists():
+                if new_top:
+                    btn.config(text="📌置顶:开", fg="#00c853")
+                else:
+                    btn.config(text="📌置顶:关", fg="#555555")
+            txt = "开启" if new_top else "关闭"
+            if hasattr(self, 'toast_message'):
+                self.toast_message(f"📌 概念窗口置顶已{txt} (T键)")
+            elif 'toast_message' in globals():
+                toast_message(self, f"📌 概念窗口置顶已{txt} (T键)")
+        except Exception as e:
+            logger.error(f"切换小窗口置顶失败: {e}")
+
     def show_concept_top10_window_simple(self, concept_name, code=None, auto_update=True, interval=30,stock_name=None,focus_force=False):
         """
         显示指定概念的前10放量上涨股，不复用已有窗口，简单独立创建
@@ -20633,6 +20677,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         win = tk.Toplevel(self)
         win.title(f"{concept_name} 概念前10放量上涨股")
         win.minsize(120, 80)
+        win._unique_code = unique_code
+        win._window_group = "concept_top10"
+        win._is_stay_on_top = False
 
         # 缓存窗口
         # --- 如果传了code但没传stock_name，则从self.df_all查找 ---
@@ -20689,6 +20736,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 保存引用，独立窗口不复用 _concept_top10_win
         win._tree_top10 = tree
+        tree._top10_win = win
+        tree._parent_win = win
         win._tree_top10.tag_configure("red_row", foreground="#ff3b30")     # 强红：涨幅或低点大于前一日
         win._tree_top10.tag_configure("orange_row", foreground="#ff8c00")  # 深橙：高位或突破
         win._tree_top10.tag_configure("green_row", foreground="#00c853")   # 亮绿：跌幅明显
@@ -20816,6 +20865,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         tree.bind("<Prior>", on_key)
         tree.bind("<Next>", on_key)
         tree.bind("<Return>", on_key)
+        # 快捷键支持：按 Q 键自动重排并置顶，按 T 键切换置顶 (与 SBC 设计一致)
+        win.bind("<Key-q>", lambda e, w=win: self.rearrange_top10_windows_group(trigger_win=w))
+        win.bind("<Key-Q>", lambda e, w=win: self.rearrange_top10_windows_group(trigger_win=w))
+        tree.bind("<Key-q>", lambda e, w=win: self.rearrange_top10_windows_group(trigger_win=w))
+        tree.bind("<Key-Q>", lambda e, w=win: self.rearrange_top10_windows_group(trigger_win=w))
+        win.bind("<Key-t>", lambda e, w=win: self.toggle_top10_window_topmost(w))
+        win.bind("<Key-T>", lambda e, w=win: self.toggle_top10_window_topmost(w))
+        tree.bind("<Key-t>", lambda e, w=win: self.toggle_top10_window_topmost(w))
+        tree.bind("<Key-T>", lambda e, w=win: self.toggle_top10_window_topmost(w))
         tree.focus_set()
 
         win._chk_auto = None # 已在 init 逻辑前移中处理
@@ -20868,6 +20926,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             win._btn_copy_expr = btn
 
         _bind_copy_expr(win)
+
+        # 🪟 重排与 📌 置顶按钮 (对齐 SBC 规范)
+        btn_rearrange = tk.Button(btn_frame, text="🪟重排", command=lambda w=win: self.rearrange_top10_windows_group(trigger_win=w))
+        btn_rearrange.pack(side="left", padx=2)
+        win._btn_rearrange = btn_rearrange
+
+        btn_topmost = tk.Button(btn_frame, text="📌置顶:关", command=lambda w=win: self.toggle_top10_window_topmost(w))
+        btn_topmost.pack(side="left", padx=2)
+        win._btn_topmost = btn_topmost
 
         # --- 状态栏 ---
         visible_count = len(df_concept[df_concept["percent"] > 2])
