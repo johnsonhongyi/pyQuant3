@@ -64,8 +64,8 @@ def test_top10_sort_scroll_to_top_and_select_first(tk_root):
     assert app.sender.send.call_args[0][0] == "603028"
 
 
-def test_rearrange_top10_windows_grid_and_stay_on_top(tk_root):
-    """验证需求2：按Q键/重排函数能对小窗口进行分组网格重排并置顶（与SBC设计一致）"""
+def test_rearrange_top10_windows_grid_and_no_forced_topmost(tk_root):
+    """验证需求2：按Q键自动网格重排并最前显示，但不强制置顶(置顶需手动开启或保留原有状态)"""
     w1 = tk.Toplevel(tk_root)
     w2 = tk.Toplevel(tk_root)
     w3 = tk.Toplevel(tk_root)
@@ -75,6 +75,12 @@ def test_rearrange_top10_windows_grid_and_stay_on_top(tk_root):
         w.title(f"概念窗口 {i}")
         w.geometry("400x250")
         w._unique_code = f"c_{i}"
+        w._is_stay_on_top = False
+        w.attributes("-topmost", False)
+
+    # 手动让 w2 处于置顶状态
+    w2._is_stay_on_top = True
+    w2.attributes("-topmost", True)
 
     monitor_list = {
         "c_0": {"win": w1},
@@ -83,21 +89,27 @@ def test_rearrange_top10_windows_grid_and_stay_on_top(tk_root):
         "c_3": {"win": w4},
     }
 
-    # 执行网格重排
+    # 执行网格重排（默认 stay_on_top=None，不强制修改置顶）
     parent_app = MagicMock()
     active_wins = rearrange_top10_windows_grid(
         monitor_list=monitor_list,
         trigger_win=w1,
-        stay_on_top=True,
+        stay_on_top=None,
         parent_app=parent_app
     )
 
     assert len(active_wins) == 4
+    # 验证 w1, w3, w4 不会被强制置顶
+    assert getattr(w1, "_is_stay_on_top", False) is False
+    assert bool(w1.attributes("-topmost")) is False
+    assert getattr(w3, "_is_stay_on_top", False) is False
+    assert bool(w3.attributes("-topmost")) is False
+    # 验证原本置顶的 w2 保持置顶
+    assert getattr(w2, "_is_stay_on_top", False) is True
+    assert bool(w2.attributes("-topmost")) is True
+
+    # 验证各窗口几何坐标已按 2x2 网格排布
     for w in [w1, w2, w3, w4]:
-        # 验证置顶属性已经开启
-        assert getattr(w, "_is_stay_on_top", False) is True
-        assert bool(w.attributes("-topmost")) is True
-        # 验证各窗口几何坐标已按 2x2 网格排布
         geom = w.geometry()
         assert "x" in geom and "+" in geom
 

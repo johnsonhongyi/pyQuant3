@@ -665,7 +665,7 @@ import math
 def rearrange_top10_windows_grid(
     monitor_list: Optional[dict] = None,
     trigger_win: Any = None,
-    stay_on_top: bool = True,
+    stay_on_top: Optional[bool] = None,
     parent_app: Any = None
 ) -> List[Any]:
     """
@@ -824,11 +824,19 @@ def rearrange_top10_windows_grid(
         try:
             w.deiconify()
             w.lift()
-            if stay_on_top:
+            if stay_on_top is True:
                 w.attributes("-topmost", True)
                 w._is_stay_on_top = True
                 if hasattr(w, "_btn_topmost") and w._btn_topmost.winfo_exists():
                     w._btn_topmost.config(text="📌置顶:开", fg="#00c853")
+            elif stay_on_top is False:
+                w.attributes("-topmost", False)
+                w._is_stay_on_top = False
+                if hasattr(w, "_btn_topmost") and w._btn_topmost.winfo_exists():
+                    w._btn_topmost.config(text="📌置顶:关", fg="#555555")
+            else:
+                # stay_on_top is None: 仅全部最前显示(lift/raise)，不强制改变置顶状态
+                pass
         except Exception:
             pass
 

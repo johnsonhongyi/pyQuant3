@@ -20574,20 +20574,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
    
     def rearrange_top10_windows_group(self, trigger_win=None):
-        """【🪟 小窗口分组自动重排与置顶】按物理屏幕多显示器网格平铺所有存活的概念前10小窗口并前置置顶（对齐 SBC 设计）"""
+        """【🪟 小窗口分组自动重排与最前显示】按物理屏幕网格平铺所有存活的概念前10小窗口并最前显示（不强制改变置顶状态，置顶仅手动开启）"""
         try:
             active_wins = rearrange_top10_windows_grid(
                 monitor_list=getattr(self, "_pg_top10_window_simple", {}),
                 trigger_win=trigger_win,
-                stay_on_top=True,
+                stay_on_top=None,  # 不强制置顶，仅全部最前唤醒，保留各自原有置顶设置
                 parent_app=self
             )
             count = len(active_wins)
             if count > 0:
                 if hasattr(self, 'toast_message'):
-                    self.toast_message(f"🪟 共 {count} 个概念前10小窗口已网格重排并置顶 (Q键)")
+                    self.toast_message(f"🪟 共 {count} 个概念前10小窗口已网格重排最前显示 (Q键)")
                 elif 'toast_message' in globals():
-                    toast_message(self, f"🪟 共 {count} 个概念前10小窗口已网格重排并置顶 (Q键)")
+                    toast_message(self, f"🪟 共 {count} 个概念前10小窗口已网格重排最前显示 (Q键)")
         except Exception as e:
             logger.error(f"小窗口分组重排失败: {e}")
 
