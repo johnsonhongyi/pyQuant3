@@ -1,5 +1,19 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-30 11:20 【ATS打包闪退Stack Overflow根治、C栈扩容与开盘前启动底部成交量数据自愈治理】(`ats/bounded_evaluation_store.py`, `ats/capital_dragon_engine.py`, `ats/ledger_update_service.py`, `ats/request_gate.py`, `ats/main_ats.py`, `ats/next_day_watch_process.py`, `ats/ui/main_window.py`, `tests/test_stack_overflow_and_cold_start_market_summary.py`, `docs/tasks/2026-10-30_1110_ATS闪退StackOverflow与开盘前成交量无数据治理.md`)
+- [x] **【彻底根除打包 ATS 崩溃闪退 `Windows fatal exception: stack overflow`】**：
+  - **深拷贝无限递归根因破案**：`ats/bounded_evaluation_store.py`（121 个候选标的海量 checkpoints 归档）、`ats/ledger_update_service.py`（QThread 栈空间受限下全量 `SignalEntry` 投影）、`ats/request_gate.py`（SingleFlight）高频无界调用 `copy.deepcopy`。原逻辑在剪枝前就递归深拷贝，Windows 子线程默认栈仅 512KB~1MB，海量对象层级递归直接击穿 Windows Guard Page 引发 SEH 致命异常退出；
+  - **通用有界栈保护深拷贝 `safe_deepcopy`**：实现基于 Python 原生支持的高性能安全深拷贝：针对高频 dict/list/tuple 控制递归最大深度（默认 100 层），超过深度自动浅拷贝降级截断；并支持 memo 字典防环，彻底消除堆栈溢出；
+  - **Checkpoints 裁剪剪枝前置**：在 `put()` 中将 `compact_checkpoints(value)` 调整至深拷贝之前执行，单股票历史 checkpoints 强制收敛在 64 条以内，消除数万个无效历史节点递归；
+  - **全系统进程 C 栈深度提升至 4MB**：在 `ats/main_ats.py` 与 `ats/next_day_watch_process.py` 启动入口显式调用 `threading.stack_size(4 * 1024 * 1024)`，将 Windows 默认线程栈提升 4~8 倍，为 Nuitka 编译版与子线程提供充足的 C 运行时调用栈裕度；
+- [x] **【彻底解决开盘前启动 ATS 底部成交量一直无数据（`等待行情`）故障】**：
+  - **日K线昨日基准提取精准纠偏**：`ats/capital_dragon_engine.py` 的 `_compute_market_summary_bg` 淘汰写死 `b_sh[-2]` 粗暴索引，实现 `_extract_prev_bar` 严格按日期小于今日（`dt < today_str`）提取昨日日K线，彻底消除开盘前最后一条 Bar 即为昨天却错误提取前天数据的严重偏差；
+  - **开盘前盘口预备大盘快照构建**：开盘前实时盘口尚未产生成交时，自动基于昨日指数收盘数据构建盘前就绪快照并写入 `self._bg_market_summary_cache`，激活底部常驻状态栏，彻底消除休眠跳过导致的缓存为空；
+  - **主窗口 UI 底部大盘摘要现场智能自愈**：在 `ats/ui/main_window.py` 的 `_refresh_market_volume_status` 注入现场自愈防线：若后台缓存未就绪，主窗口立即利用已有实时行情现场计算大盘摘要并回填 SSOT 缓存，杜绝常驻状态栏一直停留在“等待行情”；
+- [x] **【自动化测试全绿通过（5 项新增专项 + 61 项核心测试 = 66 项全 PASS）】**：
+  - 新增 `tests/test_stack_overflow_and_cold_start_market_summary.py` 覆盖超深结构安全拷贝、节点裁剪、开盘前基准提取、盘前快照就绪与主窗口自愈等 5 大核心场景，全部 100% 通过；
+  - 关联的 61 项测试（包含 27 项归档缓存契约测试、17 项结构预判模型测试、次日盯盘契约等）全部纯绿通过。
+
 ## 2026-10-29 18:00 【集中指挥与内核平仓全链路原子闭环、全自动交易持久化与全风控信号流水落盘】(`trade_gateway.py`, `trading_kernel/execution/paper_adapter.py`, `linkage_storage.py`, `ats/strategy/ipo_trading_center.py`, `tk_gui_modules/decision_flow_panel.py`, `ats/ui/ipo_command_room_dialog.py`, `instock_MonitorTK.py`, `tests/test_manual_close_and_auto_trading.py`)
 - [x] **【彻底解决两边手动与一键全平无效的死锁与幽灵持仓回灌】**：
   - **TradeGateway 盘后手工平仓豁免**：在 `trade_gateway.py` 的 `submit_sell` 增加 `force_manual` 参数与手工关键词识别，盘后及手工平仓 100% 豁免交易时段与 T+1 检查，彻底允许测试与盘后出清；

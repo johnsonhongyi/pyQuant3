@@ -1374,26 +1374,51 @@ class CapitalDragonEngine:
                     if not fetcher._is_connected or not fetcher.api:
                         fetcher.connect()
                     if fetcher._is_connected and fetcher.api:
-                        b_sh = fetcher.api.get_index_bars(4, 1, '000001', 0, 3)
-                        b_sz = fetcher.api.get_index_bars(4, 0, '399001', 0, 3)
-                        b_cy = fetcher.api.get_index_bars(4, 0, '399006', 0, 3)
-                        b_bj = fetcher.api.get_index_bars(4, 2, '899050', 0, 3)
+                        b_sh = fetcher.api.get_index_bars(4, 1, '000001', 0, 5)
+                        b_sz = fetcher.api.get_index_bars(4, 0, '399001', 0, 5)
+                        b_cy = fetcher.api.get_index_bars(4, 0, '399006', 0, 5)
+                        b_bj = fetcher.api.get_index_bars(4, 2, '899050', 0, 5)
 
-                        p_sh = b_sh[-2]['amount'] / 1e8 if b_sh and len(b_sh) >= 2 else 0.0
-                        p_sz = b_sz[-2]['amount'] / 1e8 if b_sz and len(b_sz) >= 2 else 0.0
-                        p_cy = b_cy[-2]['amount'] / 1e8 if b_cy and len(b_cy) >= 2 else 0.0
-                        p_bj = b_bj[-2]['amount'] / 1e8 if b_bj and len(b_bj) >= 2 else 0.0
-                        v_sh = b_sh[-2]['vol'] if b_sh and len(b_sh) >= 2 else 1.0
-                        v_sz = b_sz[-2]['vol'] if b_sz and len(b_sz) >= 2 else 1.0
-                        v_cy = b_cy[-2]['vol'] if b_cy and len(b_cy) >= 2 else 1.0
-                        v_bj = b_bj[-2]['vol'] if b_bj and len(b_bj) >= 2 else 1.0
-                        prev_data = {
-                            'sh': p_sh, 'sz': p_sz, 'cy': p_cy, 'bj': p_bj,
-                            'total': p_sh + p_sz + p_bj,
-                            'vol_sh': v_sh, 'vol_sz': v_sz, 'vol_cy': v_cy, 'vol_bj': v_bj
-                        }
-                        self._yesterday_index_amounts = prev_data
-                        self._yesterday_cache_date = today_str
+                        def _extract_prev_bar(bar_list):
+                            if not bar_list:
+                                return None
+                            valid_hist = []
+                            for bar in bar_list:
+                                dt_s = str(bar.get('datetime', ''))[:10]
+                                if not dt_s:
+                                    y = bar.get('year', 0)
+                                    m = bar.get('month', 0)
+                                    d = bar.get('day', 0)
+                                    if y and m and d:
+                                        dt_s = f"{y:04d}-{m:02d}-{d:02d}"
+                                if dt_s and dt_s < today_str:
+                                    valid_hist.append(bar)
+                            if valid_hist:
+                                return valid_hist[-1]
+                            return bar_list[-2] if len(bar_list) >= 2 else (bar_list[-1] if bar_list else None)
+
+                        bar_sh = _extract_prev_bar(b_sh)
+                        bar_sz = _extract_prev_bar(b_sz)
+                        bar_cy = _extract_prev_bar(b_cy)
+                        bar_bj = _extract_prev_bar(b_bj)
+
+                        p_sh = float(bar_sh['amount']) / 1e8 if bar_sh and bar_sh.get('amount') else 0.0
+                        p_sz = float(bar_sz['amount']) / 1e8 if bar_sz and bar_sz.get('amount') else 0.0
+                        p_cy = float(bar_cy['amount']) / 1e8 if bar_cy and bar_cy.get('amount') else 0.0
+                        p_bj = float(bar_bj['amount']) / 1e8 if bar_bj and bar_bj.get('amount') else 0.0
+                        v_sh = float(bar_sh['vol']) if bar_sh and bar_sh.get('vol') else 1.0
+                        v_sz = float(bar_sz['vol']) if bar_sz and bar_sz.get('vol') else 1.0
+                        v_cy = float(bar_cy['vol']) if bar_cy and bar_cy.get('vol') else 1.0
+                        v_bj = float(bar_bj['vol']) if bar_bj and bar_bj.get('vol') else 1.0
+
+                        if p_sh > 0 or p_sz > 0:
+                            prev_data = {
+                                'sh': p_sh, 'sz': p_sz, 'cy': p_cy, 'bj': p_bj,
+                                'total': round(p_sh + p_sz + p_bj, 1),
+                                'vol_sh': v_sh, 'vol_sz': v_sz, 'vol_cy': v_cy, 'vol_bj': v_bj
+                            }
+                            self._yesterday_index_amounts = prev_data
+                            self._yesterday_cache_date = today_str
             except Exception as e_prev:
                 logger.debug(f"[CapitalDragonEngine] 后台获取昨日指数基准异常: {e_prev}")
                 prev_data = getattr(self, '_yesterday_index_amounts', {}) or {}
@@ -1439,7 +1464,18 @@ class CapitalDragonEngine:
                 logger.debug(f"[CapitalDragonEngine] 从通达信日线提取收盘大盘数据异常: {e_bar}")
 
         if not extracted:
-            return  # 拉取失败，保留旧缓存，不用空结果覆盖
+            # 🛡️ 守卫：若实时盘口未成交且处于开盘前/休市期，但昨日基准存在，构造盘前预备大盘快照 (不留白，彻底激活UI)
+            if prev_data and float(prev_data.get('total', 0.0) or 0.0) > 0:
+                pre_extracted = {
+                    'sh': {'amount_yi': round(float(prev_data.get('sh', 0.0) or 0.0), 1), 'vol_ratio': 1.0},
+                    'sz': {'amount_yi': round(float(prev_data.get('sz', 0.0) or 0.0), 1), 'vol_ratio': 1.0},
+                    'cy': {'amount_yi': round(float(prev_data.get('cy', 0.0) or 0.0), 1), 'vol_ratio': 1.0},
+                    'bj': {'amount_yi': round(float(prev_data.get('bj', 0.0) or 0.0), 1), 'vol_ratio': 1.0},
+                }
+                res = self._build_summary_result(pre_extracted, prev_data, now_dt)
+                self._bg_market_summary_cache = res
+                self._bg_market_summary_ts = time.time()
+            return
 
         # ③ 写入后台缓存（原子覆盖，主线程下次读取即为最新值）
         res = self._build_summary_result(extracted, prev_data, now_dt)

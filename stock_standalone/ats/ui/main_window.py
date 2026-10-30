@@ -3598,7 +3598,17 @@ class ATSMainWindow(QMainWindow):
             from ats.capital_dragon_engine import CapitalDragonEngine
             cde = CapitalDragonEngine.get_instance()
             summary = cde.get_market_indices_and_volume_summary()
-            html = summary.get('formatted_html', '')
+            if not summary or not summary.get('formatted_html'):
+                # 🛡️ 智能自愈防线：若后台缓存未就绪，主窗口立即利用已有实时行情现场计算大盘摘要并回填
+                cur_df = getattr(self, '_cached_realtime_df', None)
+                if cur_df is None or cur_df.empty:
+                    cur_df = getattr(self, 'current_df', None)
+                if cur_df is not None and not cur_df.empty:
+                    try:
+                        summary = cde.get_market_indices_and_volume_summary(df_all=cur_df)
+                    except Exception:
+                        pass
+            html = summary.get('formatted_html', '') if summary else ''
             if not html and not self.lbl_market_volume_status.text():
                 html = '上证: -- | 深证: -- | 创业板: -- | 北证: -- | 总成交额: --（等待行情）'
             if html and self.lbl_market_volume_status.text() != html:

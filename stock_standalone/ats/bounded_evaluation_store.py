@@ -9,6 +9,59 @@ import time
 from collections import OrderedDict
 from ats.archive_policy import ARCHIVE_INTERVAL, archive_window
 
+def safe_deepcopy(x, memo=None, max_depth=100, _current_depth=0):
+    """
+    带栈深度保护的快速/安全深拷贝 (SSOT):
+    1. 针对归档系统常见的 dict, list, tuple, str, int, float 等高频结构做深度控制；
+    2. 若递归深度超过 max_depth，自动转为浅拷贝或截断，坚决阻止无限递归引发 Windows fatal exception: stack overflow；
+    3. 支持标准 memo 字典防循环引用。
+    """
+    if memo is None:
+        memo = {}
+    d = id(x)
+    if d in memo:
+        return memo[d]
+
+    if _current_depth > max_depth:
+        if isinstance(x, dict):
+            return dict(x)
+        elif isinstance(x, list):
+            return list(x)
+        return x
+
+    cls = type(x)
+    if cls in (int, float, str, bool, bytes, type(None)):
+        return x
+
+    if cls is list:
+        y = []
+        memo[d] = y
+        for item in x:
+            y.append(safe_deepcopy(item, memo, max_depth, _current_depth + 1))
+        return y
+
+    if cls is dict:
+        y = {}
+        memo[d] = y
+        for k, v in x.items():
+            y[safe_deepcopy(k, memo, max_depth, _current_depth + 1)] = safe_deepcopy(v, memo, max_depth, _current_depth + 1)
+        return y
+
+    if cls is tuple:
+        y = tuple(safe_deepcopy(item, memo, max_depth, _current_depth + 1) for item in x)
+        memo[d] = y
+        return y
+
+    if cls is set:
+        y = set(safe_deepcopy(item, memo, max_depth, _current_depth + 1) for item in x)
+        memo[d] = y
+        return y
+
+    try:
+        return copy.deepcopy(x, memo)
+    except Exception:
+        return x
+
 CHECKPOINT_LIMIT = 64
 WRITE_INTERVAL = ARCHIVE_INTERVAL
 RECOVERY_JOURNAL_NAME = '.ats_archive_recovery.json.gz'
@@ -80,12 +133,12 @@ def merge_evaluations(previous, value):
         return value
     for code, older in previous.get('candidates', {}).items():
         if code not in value.setdefault('candidates', {}):
-            value['candidates'][code] = copy.deepcopy(older)
+            value['candidates'][code] = safe_deepcopy(older)
             continue
         current = value['candidates'][code]
         old_points, new_points = older.get('checkpoints', []), current.get('checkpoints', [])
         if old_points and (not new_points or str(old_points[-1].get('observed_at')) > str(new_points[-1].get('observed_at'))):
-            current['candidate'] = copy.deepcopy(older.get('candidate', {}))
+            current['candidate'] = safe_deepcopy(older.get('candidate', {}))
         points = {str(p.get('observed_at', '')): p for p in old_points + new_points}
         current['checkpoints'] = [points[key] for key in sorted(points)]
         events = {}
@@ -178,7 +231,7 @@ class EvaluationStore:
 
         # ⚡ 锁外执行 deepcopy，持锁时间仅为微秒级引用提取
         if not need_disk_read:
-            return copy.deepcopy(val_to_copy)
+            return safe_deepcopy(val_to_copy)
 
         # 锁外加载磁盘与解压解析，彻底避免长持锁阻塞其他读写者
         try:
@@ -218,18 +271,21 @@ class EvaluationStore:
                 val_to_return = value
 
         # 锁外 deepcopy 结果并返回
-        return copy.deepcopy(val_to_return)
+        return safe_deepcopy(val_to_return)
 
     def peek(self, path, default=None):
         """Read only this process's memory; safe for GUI callers."""
         with self._lock:
             entry = self._cache.get(os.path.abspath(path))
             val = default if not entry or entry.get('missing') else entry['value']
-        return copy.deepcopy(val)
+        return safe_deepcopy(val)
 
     def put(self, path, value, writer, on_commit=None):
         path = os.path.abspath(path)
-        val_prepared = copy.deepcopy(value)
+        # 🛡️ 剪枝前置：若为评估文件，在深拷贝前先执行 compact_checkpoints 裁剪历史 checkpoints，消除成千上万无用节点
+        if os.path.basename(path).startswith('next_day_anomaly_eval_') and isinstance(value, dict):
+            compact_checkpoints(value)
+        val_prepared = safe_deepcopy(value)
         if os.path.basename(path).startswith('next_day_anomaly_eval_'):
             compact_checkpoints(val_prepared)
 
@@ -254,11 +310,11 @@ class EvaluationStore:
             already_saved = (on_commit is not None and not entry.get('dirty')
                              and entry.get('version') is not None)
         if already_saved:
-            on_commit(copy.deepcopy(val_prepared))
+            on_commit(safe_deepcopy(val_prepared))
 
     def append(self, path, value, writer, coalesce_key=None):
         path = os.path.abspath(path)
-        val_copy = copy.deepcopy(value)
+        val_copy = safe_deepcopy(value)
         # 锁外预查文件版本与收盘日，消除锁内 stat 调用
         pre_version = _version(path)
         pre_close_day = self._saved_close_day(path)
@@ -289,7 +345,7 @@ class EvaluationStore:
     def buffered_records(self, path):
         with self._lock:
             val = self._cache.get(os.path.abspath(path), {}).get('value', [])
-        return copy.deepcopy(val)
+        return safe_deepcopy(val)
 
     def _flush_loop(self):
         while True:
@@ -326,7 +382,7 @@ class EvaluationStore:
         temporary = None
         try:
             with self._lock:
-                dirty = [(path, copy.deepcopy(entry['value']))
+                dirty = [(path, safe_deepcopy(entry['value']))
                          for path, entry in self._cache.items() if entry.get('dirty')]
             if not dirty:
                 try:
@@ -468,7 +524,7 @@ class EvaluationStore:
                                 if path in self._cache:
                                     self._cache[path]['last_write'] = time.monotonic() - elapsed
                             continue
-                    original = copy.deepcopy(value) if os.path.basename(path).startswith('next_day_anomaly_eval_') else None
+                    original = safe_deepcopy(value) if os.path.basename(path).startswith('next_day_anomaly_eval_') else None
                     written = writer(path, value)
                     if written is False:
                         success = False
@@ -507,9 +563,9 @@ class EvaluationStore:
                 compare_value = []
             elif original is not None:
                 if current_value == original:
-                    new_value = copy.deepcopy(value)
+                    new_value = safe_deepcopy(value)
                 else:
-                    new_value = copy.deepcopy(current_value)
+                    new_value = safe_deepcopy(current_value)
                     merge_evaluations(value, new_value)
                 compare_value = value
             else:
@@ -549,7 +605,7 @@ class EvaluationStore:
                 if entry.get("dirty") and due:
                     raw_items.append((path, entry["value"]))
         # ⚡ 锁外执行 deepcopy，消除大归档复制期间持有缓存全局锁阻塞其他操作；COW保证锁外深拷贝无并发修改撕裂
-        return [(p, copy.deepcopy(v)) for p, v in raw_items]
+        return [(p, safe_deepcopy(v)) for p, v in raw_items]
 
     def paths(self, pattern):
         import fnmatch

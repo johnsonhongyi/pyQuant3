@@ -217,9 +217,9 @@ class LedgerUpdateService:
     @ledger_guard
     def capture_projection(self, universe_manager: Any):
         """Detach a coherent display view from canonical ledger and pool writers."""
-        from copy import deepcopy
-        return deepcopy(self.signal_ledger.entries), {
-            name: deepcopy(getattr(universe_manager, name, {}))
+        from ats.bounded_evaluation_store import safe_deepcopy
+        return safe_deepcopy(self.signal_ledger.entries), {
+            name: safe_deepcopy(getattr(universe_manager, name, {}))
             for name in ('radar_pool', 'watch_pool', 'trade_pool')
         }
 

@@ -149,4 +149,8 @@ class SingleFlight:
             raise TimeoutError('inflight_wait_timeout')
         if 'error' in state:
             raise state['error']
-        return copy.deepcopy(state['result'])
+        try:
+            from ats.bounded_evaluation_store import safe_deepcopy
+            return safe_deepcopy(state['result'])
+        except Exception:
+            return copy.deepcopy(state['result'])

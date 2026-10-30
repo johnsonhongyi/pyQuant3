@@ -5,6 +5,10 @@ import multiprocessing
 import os
 import pickle
 import threading
+try:
+    threading.stack_size(4 * 1024 * 1024)  # 4MB 安全栈深度
+except Exception:
+    pass
 import time
 
 logger = logging.getLogger("ATS.NextDayWatch")

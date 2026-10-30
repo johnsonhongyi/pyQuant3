@@ -7,6 +7,11 @@ Initializes the Qt6 Application and launches the ATS Terminal.
 import sys
 import os
 import multiprocessing
+import threading
+try:
+    threading.stack_size(4 * 1024 * 1024)  # 4MB 安全栈深度，根除 Windows/Nuitka 下子线程 Stack Overflow
+except Exception:
+    pass
 
 # Ensure project root is in python path (Nuitka / PyInstaller / dev 统一兼容的物理根目录方案)
 try:
