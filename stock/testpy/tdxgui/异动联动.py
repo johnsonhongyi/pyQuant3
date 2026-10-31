@@ -5024,7 +5024,7 @@ def rearrange_monitors_per_screen_no_bar(align="left", sort_by="create_time", la
         if not group:
             continue
 
-        l, t, r, b = MONITORS[idx]
+        l, t, r, b = _get_work_rect(MONITORS[idx])
         screen_width = r - l
         screen_height = b - t
         margin_x, margin_y = 10, 5
@@ -5142,7 +5142,7 @@ def rearrange_monitors_per_screen_noaltertdx(align="left", sort_by="create_time"
         elif sort_by == "title":
             group.sort(key=lambda info: info['stock_info'][1]) 
 
-        l, t, r, b = MONITORS[idx]
+        l, t, r, b = _get_work_rect(MONITORS[idx])
         screen_width = r - l
         screen_height = b - t
 
@@ -5280,7 +5280,7 @@ def rearrange_monitors_per_screen_vertical(align="left", sort_by="id"):
         else:
             pass  # 保持原顺序
 
-        l, t, r, b = MONITORS[idx]
+        l, t, r, b = _get_work_rect(MONITORS[idx])
         screen_height = b - t
 
         margin_y = 5
@@ -5352,7 +5352,7 @@ def rearrange_monitors_per_screen_vertical(align="left", sort_by="id"):
 #     for idx, group in screen_groups.items():
 #         if not group:
 #             continue
-#         l, t, r, b = MONITORS[idx]
+#         l, t, r, b = _get_work_rect(MONITORS[idx])
 #         current_x = l + 50  # 左上角偏移 50
 #         current_y = t + 50  # 左上角偏移 50
 #         margin_x = 5
@@ -6046,8 +6046,17 @@ def sort_column_archive_view(tree, col, reverse):
 #     archive_monitor_list()
 
 def save_monitor_list():
-    """保存当前的监控股票列表到文件"""
-    monitor_list = [win['stock_info'] for win in monitor_windows.values()]
+    """保存当前的监控股票列表到文件 (盘中带 _auto_popup 的临时窗口绝不写盘持久化)"""
+    monitor_list = []
+    is_after_market = (get_now_time_int() >= 1500)
+    for win_item in monitor_windows.values():
+        top = win_item.get("toplevel") if isinstance(win_item, dict) else None
+        # [🚀 核心保护] 盘中带有 _auto_popup 标记的临时报警窗口绝对不持久化到自选股，杜绝污染
+        if not is_after_market and top and hasattr(top, "_auto_popup") and getattr(top, "_auto_popup"):
+            continue
+        if "stock_info" in win_item and win_item["stock_info"]:
+            monitor_list.append(win_item["stock_info"])
+
     mo_list = []
 
     if monitor_list:
@@ -8712,11 +8721,43 @@ def update_position_window(window, window_id, is_main=False):
 # -----------------------------
 # 初始化显示器信息（支持多屏幕热检测与远程 RDP 动态自适应）
 # -----------------------------
+class MonitorItem(tuple):
+    """
+    兼具 4 元组与字典属性的显示器对象：
+    - 解包为 (left, top, right, bottom) 4元组，彻底防御旧代码 left, top, r, b = monitors[0] 解包崩溃 (expected 4, got 3)
+    - 支持 .monitor, .work, .flags 属性
+    - 支持 .get('work'), .get('monitor'), m['work'], m['monitor']
+    """
+    def __new__(cls, monitor_rect, work_rect=None, flags=0):
+        m_tup = tuple(monitor_rect) if isinstance(monitor_rect, (list, tuple)) else (0, 0, 1920, 1080)
+        obj = super(MonitorItem, cls).__new__(cls, m_tup)
+        obj.monitor = m_tup
+        obj.work = tuple(work_rect) if isinstance(work_rect, (list, tuple)) else m_tup
+        obj.flags = flags
+        return obj
+
+    def get(self, key, default=None):
+        if key == "monitor":
+            return self.monitor
+        elif key == "work":
+            return self.work
+        elif key == "flags":
+            return self.flags
+        return default
+
+    def __getitem__(self, item):
+        if isinstance(item, str):
+            val = self.get(item)
+            if val is not None:
+                return val
+            raise KeyError(item)
+        return super().__getitem__(item)
+
 MONITORS = []  # 全局缓存
 
 def get_all_monitors():
     """
-    [🚀 升级] 动态扫描所有显示器并返回包含物理区域 (monitor) 与工作区 (work) 的字典列表
+    [🚀 升级] 动态扫描所有显示器并返回包含物理区域 (monitor) 与工作区 (work) 的 MonitorItem 列表
     按物理 left 坐标升序排列（从左到右：Screen 0, Screen 1, Screen 2），精准适配任务栏
     """
     monitors = []
@@ -8726,11 +8767,11 @@ def get_all_monitors():
             info = win32api.GetMonitorInfo(handle_tuple[0])
             m_rect = info.get("Monitor")
             w_rect = info.get("Work", m_rect)
-            monitors.append({
-                "monitor": m_rect,
-                "work": w_rect,
-                "flags": info.get("Flags", 0)
-            })
+            monitors.append(MonitorItem(
+                monitor_rect=m_rect,
+                work_rect=w_rect,
+                flags=info.get("Flags", 0)
+            ))
     except Exception as e:
         logger.debug(f"win32api.EnumDisplayMonitors 获取显示器失败: {e}")
 
@@ -8741,17 +8782,17 @@ def get_all_monitors():
             ctypes.windll.user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(rect), 0)
             sw = ctypes.windll.user32.GetSystemMetrics(0)
             sh = ctypes.windll.user32.GetSystemMetrics(1)
-            monitors.append({
-                "monitor": (0, 0, sw, sh),
-                "work": (rect.left, rect.top, rect.right, rect.bottom),
-                "flags": 1
-            })
+            monitors.append(MonitorItem(
+                monitor_rect=(0, 0, sw, sh),
+                work_rect=(rect.left, rect.top, rect.right, rect.bottom),
+                flags=1
+            ))
         except Exception:
-            monitors.append({
-                "monitor": (0, 0, 1920, 1080),
-                "work": (0, 0, 1920, 1040),
-                "flags": 1
-            })
+            monitors.append(MonitorItem(
+                monitor_rect=(0, 0, 1920, 1080),
+                work_rect=(0, 0, 1920, 1040),
+                flags=1
+            ))
 
     # 按物理左坐标从左向右排列显示器，确保多屏分布顺序清晰
     monitors.sort(key=lambda m: _get_monitor_rect(m)[0])
@@ -8955,8 +8996,9 @@ def place_new_window(window, window_id, win_width=300, win_height=160, margin=2)
         except:
             continue
 
-    # 2. 默认放主屏幕（第一个）
-    left, top, right, bottom = monitors[0]
+    # 2. 默认放主屏幕（第一个），优先使用工作区
+    first_m = monitors[0] if monitors else (0, 0, 1920, 1040)
+    left, top, right, bottom = _get_work_rect(first_m)
     step_x, step_y = win_width + margin, win_height + margin
     max_x, max_y = right - win_width - margin, bottom - win_height - margin
 
@@ -9410,7 +9452,11 @@ def create_monitor_window(stock_info):
     btn_refresh.pack(side=tk.LEFT, padx=10)
     date_str = c_time[:10]
     # === 注册事件 ===
-    place_new_window(monitor_win, stock_code)
+    try:
+        place_new_window(monitor_win, stock_code)
+    except Exception as e_place:
+        logger.warning(f"place_new_window 异常 ({stock_code}): {e_place}")
+        monitor_win.geometry("300x160+100+100")
     refresh_stock_data(window_info, monitor_tree, item_id)
     monitor_win.protocol("WM_DELETE_WINDOW", lambda: on_close_monitor(window_info))
     monitor_win.bind("<FocusIn>", lambda e, w=monitor_win: on_monitor_window_focus(w))
@@ -12432,7 +12478,7 @@ def check_monitor_break_high4(monitor_windows: dict, df: pd.DataFrame, logger, f
                     trigger_monitor_flash(win_info)
                     shake_window(win)
 
-    # 3. 检查未打开的小窗口：自动弹出新标的 (分组限额最多 10 只，交易期自动运行)
+    # 3. 检查未打开的小窗口：自动弹出新标的 (严格限额最多 auto_popup_limit 只，硬性熔断保护)
     if auto_popup_enabled and (force_work_time or get_work_time()):
         # 统计当前存活的带 _auto_popup 标记的小窗口数量
         alive_auto_popups = [
@@ -12440,102 +12486,124 @@ def check_monitor_break_high4(monitor_windows: dict, df: pd.DataFrame, logger, f
             if hasattr(w_item.get("toplevel"), "_auto_popup") and getattr(w_item.get("toplevel"), "_auto_popup")
         ]
 
-        if len(alive_auto_popups) < auto_popup_limit:
-            # [🚀 核心修复] 提取全部候选股票代码列表并去重，避免整数索引被错误转为 000000，且不漏掉 head(50) 之后的股票
-            candidate_codes = []
-            if '代码' in df.columns:
-                candidate_codes = [str(c).strip().zfill(6) for c in df['代码'].dropna().unique() if str(c).strip()]
-            elif 'code' in df.columns:
-                candidate_codes = [str(c).strip().zfill(6) for c in df['code'].dropna().unique() if str(c).strip()]
-            else:
-                candidate_codes = [str(idx).strip().zfill(6) for idx in df.index if str(idx).strip().isdigit()]
+        # [🚀 绝对熔断] 只要当前存活自动弹出窗口已达上限（如10只），坚决直接返回，不创建任何新窗口
+        if len(alive_auto_popups) >= auto_popup_limit:
+            return
 
-            # 过滤掉已经打开监控窗口的标的
-            unmonitored_codes = [c for c in candidate_codes if c not in monitor_windows]
+        remaining_slots = auto_popup_limit - len(alive_auto_popups)
+        created_count = 0
 
-            # 若 df 包含代码列，建立最新事件行映射缓存
-            df_by_code = {}
-            if '代码' in df.columns:
-                try:
-                    for _, row_item in df.iterrows():
-                        c_val = str(row_item.get('代码', '')).strip().zfill(6)
-                        if c_val and c_val in unmonitored_codes and c_val not in df_by_code:
-                            df_by_code[c_val] = row_item.to_dict()
-                except Exception:
-                    pass
+        # [🚀 核心修复] 提取全部候选股票代码列表并去重，避免整数索引被错误转为 000000，且不漏掉 head(50) 之后的股票
+        candidate_codes = []
+        if '代码' in df.columns:
+            candidate_codes = [str(c).strip().zfill(6) for c in df['代码'].dropna().unique() if str(c).strip()]
+        elif 'code' in df.columns:
+            candidate_codes = [str(c).strip().zfill(6) for c in df['code'].dropna().unique() if str(c).strip()]
+        else:
+            candidate_codes = [str(idx).strip().zfill(6) for idx in df.index if str(idx).strip().isdigit()]
 
-            for code_str in unmonitored_codes:
-                if len(alive_auto_popups) >= auto_popup_limit:
-                    break
+        # 过滤掉已经打开监控窗口的标的
+        unmonitored_codes = [c for c in candidate_codes if c not in monitor_windows]
 
-                r_dict = get_stock_eval_dict(code_str)
+        # 若 df 包含代码列，建立最新事件行映射缓存
+        df_by_code = {}
+        if '代码' in df.columns:
+            try:
+                for _, row_item in df.iterrows():
+                    c_val = str(row_item.get('代码', '')).strip().zfill(6)
+                    if c_val and c_val in unmonitored_codes and c_val not in df_by_code:
+                        df_by_code[c_val] = row_item.to_dict()
+            except Exception:
+                pass
 
-                # 合并异动事件字段（严格防 0 覆盖原则）
-                evt_dict = df_by_code.get(code_str)
-                if evt_dict is None:
-                    if code_str in df.index:
-                        try:
-                            loc_row = df.loc[code_str]
-                            evt_dict = loc_row.to_dict() if hasattr(loc_row, "to_dict") else loc_row.iloc[0].to_dict()
-                        except Exception:
-                            pass
-                    else:
-                        try:
-                            c_int = int(code_str)
-                            if c_int in df.index:
-                                loc_row = df.loc[c_int]
-                                evt_dict = loc_row.to_dict() if hasattr(loc_row, "to_dict") else loc_row.iloc[0].to_dict()
-                        except Exception:
-                            pass
+        for code_str in unmonitored_codes:
+            # [🚀 严格限额] 达到配额立即强制终止循环，绝不多弹一个
+            if len(alive_auto_popups) >= auto_popup_limit or created_count >= remaining_slots:
+                break
 
-                if evt_dict:
-                    for k, v in evt_dict.items():
-                        if v is None or pd.isna(v):
-                            continue
-                        if k in ['close', '价格', '现价', 'now', 'nclose', 'percent', '涨幅', 'pct', 'pct_chg', 'vol', '量', 'volume']:
-                            try:
-                                if float(v) == 0.0 and float(r_dict.get(k, 0.0)) > 0:
-                                    continue
-                            except Exception:
-                                pass
-                        r_dict[k] = v
+            r_dict = get_stock_eval_dict(code_str)
 
-                hit_new = False
-                if filter_expr == "close > high4" and "high4" not in r_dict:
-                    c_val = r_dict.get(filterclose, r_dict.get("close", 0))
-                    h_val = r_dict.get(filterhigh4, 0)
+            # 合并异动事件字段（严格防 0 覆盖原则）
+            evt_dict = df_by_code.get(code_str)
+            if evt_dict is None:
+                if code_str in df.index:
                     try:
-                        if float(c_val) > float(h_val) and float(h_val) > 0:
-                            hit_new = True
+                        loc_row = df.loc[code_str]
+                        evt_dict = loc_row.to_dict() if hasattr(loc_row, "to_dict") else loc_row.iloc[0].to_dict()
                     except Exception:
                         pass
                 else:
-                    hit_new = eval_rearrange_condition(filter_expr, r_dict)
-
-                if hit_new:
-                    if len(alive_auto_popups) >= auto_popup_limit:
-                        break
-
-                    name_str = r_dict.get('name', r_dict.get('名称', code_str))
-                    pct_val = float(r_dict.get('percent', r_dict.get('涨幅', 0.0)))
-                    close_val = float(r_dict.get('close', r_dict.get('现价', 0.0)))
-                    vol_val = float(r_dict.get('vol', r_dict.get('量', 0.0)))
-                    c_time_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-                    new_s_info = [code_str, name_str, 1, 1.0, pct_val, close_val, vol_val, c_time_str]
-
                     try:
-                        create_monitor_window(new_s_info)
-                        new_win_info = monitor_windows.get(code_str)
-                        if new_win_info and "toplevel" in new_win_info:
-                            pop_win = new_win_info["toplevel"]
-                            pop_win._auto_popup = True   # 打上自动弹出分组标记
-                            pop_win._alter_tdx = True    # 打上红底标记
-                            trigger_monitor_flash(new_win_info)
-                            shake_window(pop_win)
-                            alive_auto_popups.append(code_str)
-                            logger.info(f"🚀 [AUTO_POPUP] 未监控标的 {code_str} {name_str} 命中策略 '{filter_expr}'，自动弹出新监控小窗口 ({len(alive_auto_popups)}/{auto_popup_limit})")
-                    except Exception as e_create:
-                        logger.error(f"自动创建监控窗口失败 ({code_str}): {e_create}")
+                        c_int = int(code_str)
+                        if c_int in df.index:
+                            loc_row = df.loc[c_int]
+                            evt_dict = loc_row.to_dict() if hasattr(loc_row, "to_dict") else loc_row.iloc[0].to_dict()
+                    except Exception:
+                        pass
+
+            if evt_dict:
+                for k, v in evt_dict.items():
+                    if v is None or pd.isna(v):
+                        continue
+                    if k in ['close', '价格', '现价', 'now', 'nclose', 'percent', '涨幅', 'pct', 'pct_chg', 'vol', '量', 'volume']:
+                        try:
+                            if float(v) == 0.0 and float(r_dict.get(k, 0.0)) > 0:
+                                continue
+                        except Exception:
+                            pass
+                    r_dict[k] = v
+
+            hit_new = False
+            if filter_expr == "close > high4" and "high4" not in r_dict:
+                c_val = r_dict.get(filterclose, r_dict.get("close", 0))
+                h_val = r_dict.get(filterhigh4, 0)
+                try:
+                    if float(c_val) > float(h_val) and float(h_val) > 0:
+                        hit_new = True
+                except Exception:
+                    pass
+            else:
+                hit_new = eval_rearrange_condition(filter_expr, r_dict)
+
+            if hit_new:
+                # 再次强校验限额
+                if len(alive_auto_popups) >= auto_popup_limit or created_count >= remaining_slots:
+                    break
+
+                # 预扣配额，杜绝任何异常死循环击穿限额
+                created_count += 1
+                alive_auto_popups.append(code_str)
+
+                name_str = r_dict.get('name', r_dict.get('名称', code_str))
+                pct_val = float(r_dict.get('percent', r_dict.get('涨幅', 0.0)))
+                close_val = float(r_dict.get('close', r_dict.get('现价', 0.0)))
+                vol_val = float(r_dict.get('vol', r_dict.get('量', 0.0)))
+                c_time_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+                new_s_info = [code_str, name_str, 1, 1.0, pct_val, close_val, vol_val, c_time_str]
+
+                try:
+                    create_monitor_window(new_s_info)
+                    new_win_info = monitor_windows.get(code_str)
+                    if new_win_info and "toplevel" in new_win_info:
+                        pop_win = new_win_info["toplevel"]
+                        pop_win._auto_popup = True   # 打上自动弹出分组标记
+                        pop_win._alter_tdx = True    # 打上红底标记
+                        trigger_monitor_flash(new_win_info)
+                        shake_window(pop_win)
+                        logger.info(f"🚀 [AUTO_POPUP] 未监控标的 {code_str} {name_str} 命中策略 '{filter_expr}'，自动弹出新监控小窗口 ({len(alive_auto_popups)}/{auto_popup_limit})")
+                except Exception as e_create:
+                    logger.error(f"自动创建监控窗口失败 ({code_str}): {e_create}")
+                    # 发生异常时，安全清理残留孤儿半成品窗口，绝不留在桌面上
+                    try:
+                        bad_info = monitor_windows.get(code_str)
+                        if bad_info and "toplevel" in bad_info:
+                            bw = bad_info["toplevel"]
+                            if bw and hasattr(bw, "winfo_exists") and bw.winfo_exists():
+                                bw.destroy()
+                        if code_str in monitor_windows:
+                            del monitor_windows[code_str]
+                    except Exception:
+                        pass
 
 
 def refresh_all_stock_data():

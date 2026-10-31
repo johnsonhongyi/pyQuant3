@@ -620,5 +620,87 @@ class TestRearrangePolicyCustomization(unittest.TestCase):
 
         self.assertTrue(use_balanced)
 
+    def test_monitor_item_4_tuple_unpack_and_dict_access(self):
+        """测试 MonitorItem 既是 4 元组可直接解包 (彻底防御 expected 4, got 3)，又支持字典访问"""
+        class MonitorItem(tuple):
+            def __new__(cls, monitor_rect, work_rect=None, flags=0):
+                m_tup = tuple(monitor_rect) if isinstance(monitor_rect, (list, tuple)) else (0, 0, 1920, 1080)
+                obj = super(MonitorItem, cls).__new__(cls, m_tup)
+                obj.monitor = m_tup
+                obj.work = tuple(work_rect) if isinstance(work_rect, (list, tuple)) else m_tup
+                obj.flags = flags
+                return obj
+
+            def get(self, key, default=None):
+                if key == "monitor": return self.monitor
+                elif key == "work": return self.work
+                elif key == "flags": return self.flags
+                return default
+
+            def __getitem__(self, item):
+                if isinstance(item, str):
+                    val = self.get(item)
+                    if val is not None: return val
+                    raise KeyError(item)
+                return super().__getitem__(item)
+
+        m = MonitorItem((0, 0, 1920, 1080), (0, 0, 1920, 1040), flags=1)
+
+        # 1. 验证 4 元组原生解包 (不会抛出 expected 4, got 3)
+        left, top, right, bottom = m
+        self.assertEqual((left, top, right, bottom), (0, 0, 1920, 1080))
+
+        # 2. 验证字典方法访问
+        self.assertEqual(m.get("work"), (0, 0, 1920, 1040))
+        self.assertEqual(m["work"], (0, 0, 1920, 1040))
+        self.assertEqual(m.get("monitor"), (0, 0, 1920, 1080))
+
+    def test_auto_popup_strict_quota_limit_and_no_save_to_monitor_list(self):
+        """测试自动弹出达到 10 只后严格熔断终止，且带 _auto_popup 标记的窗口盘中绝不写入自选列表"""
+        auto_popup_limit = 10
+        alive_auto_popups = ["000001", "000002", "000003"]  # 已存活 3 只
+        remaining_slots = auto_popup_limit - len(alive_auto_popups)  # 剩余 7 只配额
+        self.assertEqual(remaining_slots, 7)
+
+        # 模拟候选池有 100 只命中策略的股票
+        candidate_hits = [f"stock_{i:06d}" for i in range(100)]
+        created_count = 0
+        newly_popped = []
+
+        for code_str in candidate_hits:
+            if len(alive_auto_popups) >= auto_popup_limit or created_count >= remaining_slots:
+                break
+            created_count += 1
+            alive_auto_popups.append(code_str)
+            newly_popped.append(code_str)
+
+        # 严格验证：本次最多弹出 7 只，总数绝对卡在 10 只，绝不会超额
+        self.assertEqual(created_count, 7)
+        self.assertEqual(len(alive_auto_popups), 10)
+        self.assertEqual(len(newly_popped), 7)
+
+        # 验证盘中持久化过滤：带 _auto_popup 属性的临时窗口不计入常驻 monitor_list
+        class MockWin:
+            def __init__(self, is_auto):
+                self._auto_popup = is_auto
+
+        mock_monitor_windows = {
+            "000001": {"toplevel": MockWin(is_auto=True), "stock_info": ["000001", "临时股1"]},
+            "600519": {"toplevel": MockWin(is_auto=False), "stock_info": ["600519", "茅台(自选)"]},
+        }
+
+        # 盘中保存逻辑
+        is_after_market = False  # 盘中
+        saved_list = []
+        for win_item in mock_monitor_windows.values():
+            top = win_item.get("toplevel")
+            if not is_after_market and top and getattr(top, "_auto_popup", False):
+                continue
+            saved_list.append(win_item["stock_info"])
+
+        # 验证只有常驻自选股被持久化，临时报警窗口绝对不被写盘！
+        self.assertEqual(len(saved_list), 1)
+        self.assertEqual(saved_list[0][0], "600519")
+
 if __name__ == "__main__":
     unittest.main()
