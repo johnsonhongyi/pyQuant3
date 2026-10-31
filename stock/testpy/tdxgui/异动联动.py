@@ -3376,6 +3376,16 @@ def bring_all_monitors_to_front(event=None):
             if win and win.winfo_exists():
                 if win.state() == "iconic":
                     win.deiconify()
+                # 尺寸自愈防护：若检测到窗口尺寸异常偏小（被意外压扁或未初始化好），立即恢复为标准 300x160
+                try:
+                    w = win.winfo_width()
+                    h = win.winfo_height()
+                    if w < 100 or h < 100:
+                        x = win.winfo_x()
+                        y = win.winfo_y()
+                        win.geometry(f"300x160+{x}+{y}")
+                except Exception:
+                    pass
                 # 仅将窗口提升至最前，不加 attributes("-topmost", True)，不重排位置
                 win.lift()
                 count += 1
@@ -3939,25 +3949,34 @@ _rearrange_policy_dialog_win = None
 _rearrange_test_dialog_win = None
 
 def shake_window(win, shakes=8, distance=8, delay=30):
-    """窗口左右微抖震动效果，增强视觉提示感"""
+    """窗口左右微抖震动效果，增强视觉提示感 (纯位置位移，绝不压缩窗口尺寸)"""
     if not win or not hasattr(win, "winfo_exists") or not win.winfo_exists():
         return
     try:
+        # 先刷新未决布局
+        win.update_idletasks()
         orig_x = win.winfo_x()
         orig_y = win.winfo_y()
         w = win.winfo_width()
         h = win.winfo_height()
 
+        # 尺寸硬防护：若窗口尚未渲染完成或尺寸异常偏小 (< 100)，自动恢复为 300x160
+        if w < 100 or h < 100:
+            w, h = 300, 160
+            win.geometry(f"{w}x{h}+{orig_x}+{orig_y}")
+
         def _do_shake(step=0):
             if not win.winfo_exists() or step >= shakes * 2:
                 try:
-                    win.geometry(f"{w}x{h}+{orig_x}+{orig_y}")
+                    # 复位至原始位置（采用纯位置语法 +x+y，杜绝覆盖窗口宽高）
+                    win.geometry(f"+{orig_x}+{orig_y}")
                 except Exception:
                     pass
                 return
             dx = distance if (step % 2 == 0) else -distance
             try:
-                win.geometry(f"{w}x{h}+{orig_x + dx}+{orig_y}")
+                # 仅在 X 轴微移，绝不重设或修改宽和高
+                win.geometry(f"+{orig_x + dx}+{orig_y}")
             except Exception:
                 pass
             win.after(delay, _do_shake, step + 1)
@@ -4650,58 +4669,60 @@ def rearrange_monitors_per_screen(align=None, sort_by=None, layout=None):
     if not windows:
         return
 
-    # [🚀 增强] 依据自定义策略过滤规则评估所有窗口并动态标记 _alter_tdx
+    # [🚀 增强] 依据自定义策略过滤规则评估所有窗口并动态标记 _alter_tdx (完整指标级联获取与自动弹出保护)
     global GLOBAL_TOP_ALL, filterclose, filterhigh4
     for info in windows:
         win = info["toplevel"]
+        is_auto_popup = getattr(win, "_auto_popup", False)
+
         # 先清除旧标记，确保策略实时响应
         if hasattr(win, "_alter_tdx"):
             delattr(win, "_alter_tdx")
 
+        stock_code = ""
+        if "stock_info" in info and info["stock_info"]:
+            stock_code = str(info["stock_info"][0]).zfill(6)
+
+        # [🚀 核心修复] 使用全局权威的 get_stock_eval_dict 级联获取完整指标（含 nclose, ma5d, lastp1d 等）
+        row_dict = get_stock_eval_dict(stock_code) if stock_code else {}
+
+        # 补充来自 stock_info 的基础字段作为兜底
+        if "stock_info" in info and len(info["stock_info"]) >= 5:
+            si = info["stock_info"]
+            row_dict.setdefault("code", stock_code)
+            row_dict.setdefault("name", si[1] if len(si) > 1 else "")
+            pct_val = si[4] if len(si) > 4 else 0.0
+            try: pct_val = float(pct_val)
+            except Exception: pct_val = 0.0
+            row_dict.setdefault("percent", pct_val)
+            row_dict.setdefault("涨幅", pct_val)
+            pr_val = si[5] if len(si) > 5 else 0.0
+            try: pr_val = float(pr_val)
+            except Exception: pr_val = 0.0
+            row_dict.setdefault("price", pr_val)
+            row_dict.setdefault("close", pr_val)
+            v_val = si[6] if len(si) > 6 else 0.0
+            try: v_val = float(v_val)
+            except Exception: v_val = 0.0
+            row_dict.setdefault("vol", v_val)
+
+        is_hit = False
         if filter_enabled and filter_expr:
-            stock_code = ""
-            if "stock_info" in info and info["stock_info"]:
-                stock_code = str(info["stock_info"][0]).zfill(6)
-            
-            row_dict = {}
-            if 'GLOBAL_TOP_ALL' in globals() and GLOBAL_TOP_ALL is not None and not GLOBAL_TOP_ALL.empty:
-                if stock_code in GLOBAL_TOP_ALL.index:
-                    try:
-                        row_dict = GLOBAL_TOP_ALL.loc[stock_code].to_dict()
-                    except Exception:
-                        row_dict = {}
-
-            # 补充来自 stock_info 的基础字段
-            if "stock_info" in info and len(info["stock_info"]) >= 5:
-                si = info["stock_info"]
-                row_dict.setdefault("code", stock_code)
-                row_dict.setdefault("name", si[1] if len(si) > 1 else "")
-                pct_val = si[4] if len(si) > 4 else 0.0
-                try: pct_val = float(pct_val)
-                except Exception: pct_val = 0.0
-                row_dict.setdefault("percent", pct_val)
-                row_dict.setdefault("涨幅", pct_val)
-                pr_val = si[5] if len(si) > 5 else 0.0
-                try: pr_val = float(pr_val)
-                except Exception: pr_val = 0.0
-                row_dict.setdefault("price", pr_val)
-                row_dict.setdefault("close", pr_val)
-                v_val = si[6] if len(si) > 6 else 0.0
-                try: v_val = float(v_val)
-                except Exception: v_val = 0.0
-                row_dict.setdefault("vol", v_val)
-
             # 兜底支持 filterclose > filterhigh4
             if filter_expr == "close > high4" and "high4" not in row_dict:
                 c_v = row_dict.get(filterclose, row_dict.get("close", 0))
                 h_v = row_dict.get(filterhigh4, 0)
                 try:
                     if float(c_v) > float(h_v) and float(h_v) > 0:
-                        win._alter_tdx = True
+                        is_hit = True
                 except Exception:
                     pass
             elif eval_rearrange_condition(filter_expr, row_dict):
-                win._alter_tdx = True
+                is_hit = True
+
+        # [🚀 核心修复] 若命中策略，或者该窗口本身是当天自动弹出的报警窗口，均归入右下角报警分流组
+        if is_hit or is_auto_popup:
+            win._alter_tdx = True
 
     # 分组
     group_alter = []
@@ -4836,7 +4857,7 @@ def rearrange_monitors_per_screen(align=None, sort_by=None, layout=None):
                 try:
                     win.update_idletasks()
                     w, h = win.winfo_width(), win.winfo_height()
-                    if w < 50 or h < 50:
+                    if w < 100 or h < 100:
                         w, h = 300, 160
 
                     # 满高换列：如果超出工作区底部高度，则换到下一列
@@ -4864,7 +4885,7 @@ def rearrange_monitors_per_screen(align=None, sort_by=None, layout=None):
                 try:
                     win.update_idletasks()
                     w, h = win.winfo_width(), win.winfo_height()
-                    if w < 50 or h < 50:
+                    if w < 100 or h < 100:
                         w, h = 300, 160
 
                     if current_x + w + margin_x > work_r:
@@ -4894,7 +4915,7 @@ def rearrange_monitors_per_screen(align=None, sort_by=None, layout=None):
                 try:
                     win.update_idletasks()
                     w, h = win.winfo_width(), win.winfo_height()
-                    if w < 50 or h < 50:
+                    if w < 100 or h < 100:
                         w, h = 300, 160
 
                     if current_y - h < work_t:
@@ -4922,7 +4943,7 @@ def rearrange_monitors_per_screen(align=None, sort_by=None, layout=None):
                 try:
                     win.update_idletasks()
                     w, h = win.winfo_width(), win.winfo_height()
-                    if w < 50 or h < 50:
+                    if w < 100 or h < 100:
                         w, h = 300, 160
 
                     if current_x - w - margin_x < work_l:
@@ -5042,7 +5063,7 @@ def rearrange_monitors_per_screen_no_bar(align="left", sort_by="create_time", la
             try:
                 win.update_idletasks()
                 w, h = win.winfo_width(), win.winfo_height()
-                if w < 50 or h < 50:
+                if w < 100 or h < 100:
                     w, h = 300, 160
                 # 换行逻辑
                 if layout == "horizontal" and current_x + w + margin_x > r:
@@ -5067,7 +5088,7 @@ def rearrange_monitors_per_screen_no_bar(align="left", sort_by="create_time", la
             try:
                 win.update_idletasks()
                 w, h = win.winfo_width(), win.winfo_height()
-                if w < 50 or h < 50:
+                if w < 100 or h < 100:
                     w, h = 300, 160
 
                 # 横向优先排列：右向左
@@ -5170,7 +5191,7 @@ def rearrange_monitors_per_screen_noaltertdx(align="left", sort_by="create_time"
                 win.update_idletasks()
                 w = win.winfo_width()
                 h = win.winfo_height()
-                if w < 50 or h < 50:
+                if w < 100 or h < 100:
                     w, h = 300, 160
                 win_state = win_var.get()
                 if layout == "vertical" or  win_state:
@@ -5302,7 +5323,7 @@ def rearrange_monitors_per_screen_vertical(align="left", sort_by="id"):
                 win.update_idletasks()
                 w = win.winfo_width()
                 h = win.winfo_height()
-                if w < 50 or h < 50:
+                if w < 100 or h < 100:
                     w, h = 300, 160
 
                 if align == "right" and max_col_width == 0:
@@ -12604,6 +12625,14 @@ def check_monitor_break_high4(monitor_windows: dict, df: pd.DataFrame, logger, f
                             del monitor_windows[code_str]
                     except Exception:
                         pass
+
+    # [🚀 自动排列至特定区域] 本轮若有新自动弹出的窗口，立即自动触发重排并将其定位到右下角分流区域，绝不堆在左上角
+    if created_count > 0:
+        try:
+            logger.info(f"🚀 [AUTO_POPUP] 本轮新增自动弹出 {created_count} 个报警监控窗口，自动触发重排并定位至特定报警区域(右下角)")
+            rearrange_monitors_per_screen()
+        except Exception as e_arr:
+            logger.error(f"自动弹出后重排失败: {e_arr}")
 
 
 def refresh_all_stock_data():

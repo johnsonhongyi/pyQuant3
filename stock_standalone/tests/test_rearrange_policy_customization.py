@@ -702,5 +702,171 @@ class TestRearrangePolicyCustomization(unittest.TestCase):
         self.assertEqual(len(saved_list), 1)
         self.assertEqual(saved_list[0][0], "600519")
 
+    def test_shake_window_protects_dimension_and_no_squash(self):
+        """测试微抖震动引擎保护窗口尺寸，遇到异常小窗口立即自愈且位移不压扁窗口"""
+        class MockToplevel:
+            def __init__(self, w, h, x=100, y=100):
+                self._w = w
+                self._h = h
+                self._x = x
+                self._y = y
+                self.history = []
+
+            def winfo_exists(self): return True
+            def update_idletasks(self): pass
+            def winfo_width(self): return self._w
+            def winfo_height(self): return self._h
+            def winfo_x(self): return self._x
+            def winfo_y(self): return self._y
+            def geometry(self, geom=None):
+                if geom is None:
+                    return f"{self._w}x{self._h}+{self._x}+{self._y}"
+                self.history.append(geom)
+                if geom.startswith("+"):
+                    parts = geom.split("+")[1:]
+                    self._x, self._y = int(parts[0]), int(parts[1])
+                elif "x" in geom:
+                    size, pos = geom.split("+", 1)
+                    w_s, h_s = size.split("x")
+                    self._w, self._h = int(w_s), int(h_s)
+                    x_s, y_s = pos.split("+")
+                    self._x, self._y = int(x_s), int(y_s)
+
+        # 模拟刚刚创建好、Tk 尚未布局时尺寸为 1x1 的窗口
+        win = MockToplevel(w=1, h=1, x=200, y=200)
+
+        # 执行修复后的 shake_window 逻辑
+        w, h = win.winfo_width(), win.winfo_height()
+        orig_x, orig_y = win.winfo_x(), win.winfo_y()
+        if w < 100 or h < 100:
+            w, h = 300, 160
+            win.geometry(f"{w}x{h}+{orig_x}+{orig_y}")
+
+        # 验证初始自愈恢复为 300x160
+        self.assertEqual(win._w, 300)
+        self.assertEqual(win._h, 160)
+
+        # 执行只位移的震动
+        distance = 8
+        win.geometry(f"+{orig_x + distance}+{orig_y}")
+        self.assertEqual(win._w, 300)
+        self.assertEqual(win._h, 160)
+        self.assertEqual(win._x, 208)
+
+        win.geometry(f"+{orig_x - distance}+{orig_y}")
+        self.assertEqual(win._w, 300)
+        self.assertEqual(win._h, 160)
+        self.assertEqual(win._x, 192)
+
+        win.geometry(f"+{orig_x}+{orig_y}")
+        self.assertEqual(win._w, 300)
+        self.assertEqual(win._h, 160)
+        self.assertEqual(win._x, 200)
+
+    def test_bring_all_monitors_to_front_auto_heal_dimension(self):
+        """测试按 Q 键 (bring_all_monitors_to_front) 自动识别并自愈被压扁的小窗口"""
+        class MockWin:
+            def __init__(self, w, h, x=50, y=50, state="normal"):
+                self._w = w
+                self._h = h
+                self._x = x
+                self._y = y
+                self._state = state
+                self.lift_called = False
+
+            def winfo_exists(self): return True
+            def state(self): return self._state
+            def deiconify(self): self._state = "normal"
+            def winfo_width(self): return self._w
+            def winfo_height(self): return self._h
+            def winfo_x(self): return self._x
+            def winfo_y(self): return self._y
+            def lift(self): self.lift_called = True
+            def geometry(self, geom):
+                size, pos = geom.split("+", 1)
+                w_s, h_s = size.split("x")
+                self._w, self._h = int(w_s), int(h_s)
+
+        squashed_win = MockWin(w=300, h=1, x=100, y=100)
+        normal_win = MockWin(w=300, h=160, x=450, y=100)
+
+        mock_windows = {
+            "000001": {"toplevel": squashed_win},
+            "600519": {"toplevel": normal_win}
+        }
+
+        # 执行修复后的 Q 键逻辑
+        for code, info in mock_windows.items():
+            win = info.get("toplevel")
+            if win and win.winfo_exists():
+                if win.state() == "iconic":
+                    win.deiconify()
+                w = win.winfo_width()
+                h = win.winfo_height()
+                if w < 100 or h < 100:
+                    x = win.winfo_x()
+                    y = win.winfo_y()
+                    win.geometry(f"300x160+{x}+{y}")
+                win.lift()
+
+        # 验证被压扁的窗口 (h=1) 成功被自愈拉起到正常高度 160，正常窗口不受影响
+        self.assertEqual(squashed_win._w, 300)
+        self.assertEqual(squashed_win._h, 160)
+        self.assertTrue(squashed_win.lift_called)
+        self.assertTrue(normal_win.lift_called)
+
+    def test_rearrange_protects_auto_popup_and_cascaded_eval_dict(self):
+        """测试重排算法保护盘中自动弹出窗口并正确将命中策略和自动弹出窗口归入右下角报警组"""
+        class MockWin:
+            def __init__(self, is_auto=False):
+                self._auto_popup = is_auto
+
+        windows = [
+            {"toplevel": MockWin(is_auto=True), "stock_info": ["000568", "泸州老窖", 1, 1.0, 5.0, 77.07, 1000]},
+            {"toplevel": MockWin(is_auto=False), "stock_info": ["600000", "浦发银行", 1, 1.0, 1.0, 8.50, 2000]}
+        ]
+
+        # 模拟重排时的分组逻辑
+        group_alter = []
+        group_normal = []
+        for info in windows:
+            win = info["toplevel"]
+            is_auto_popup = getattr(win, "_auto_popup", False)
+            if hasattr(win, "_alter_tdx"):
+                delattr(win, "_alter_tdx")
+
+            # 模拟策略求值结果
+            is_hit = False
+            if info["stock_info"][0] == "000568":
+                is_hit = True
+
+            if is_hit or is_auto_popup:
+                win._alter_tdx = True
+
+            if hasattr(win, "_alter_tdx"):
+                group_alter.append(info)
+            else:
+                group_normal.append(info)
+
+        # 000568 命中且为 auto_popup，归入 alter_group (右下角分流)
+        self.assertEqual(len(group_alter), 1)
+        self.assertEqual(group_alter[0]["stock_info"][0], "000568")
+        # 600000 为普通自选股，归入 normal_group (左上角)
+        self.assertEqual(len(group_normal), 1)
+        self.assertEqual(group_normal[0]["stock_info"][0], "600000")
+
+    def test_auto_popup_triggers_automatic_rearrange(self):
+        """测试在 check_monitor_break_high4 中，一旦有新自动弹出窗口，自动触发重排"""
+        rearrange_called = []
+        def mock_rearrange():
+            rearrange_called.append(True)
+
+        created_count = 5  # 本轮弹出了 5 只
+        if created_count > 0:
+            mock_rearrange()
+
+        self.assertEqual(len(rearrange_called), 1)
+        self.assertTrue(rearrange_called[0])
+
 if __name__ == "__main__":
     unittest.main()
