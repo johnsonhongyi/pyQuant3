@@ -3556,7 +3556,15 @@ DEFAULT_REARRANGE_POLICY = {
     "layout": "horizontal",
     "action_alter": "bottom_right_red",
     "auto_popup_enabled": True,
-    "auto_popup_limit": 10
+    "auto_popup_limit": 10,
+    "expr_history": [
+        "close > high4",
+        "close > high4 and 涨幅 > 3",
+        "nclose > ma5d and per1d > 0 and nclose > lastp1d",
+        "涨幅 > 5",
+        "dff > 0",
+        "close > 10"
+    ]
 }
 
 def load_rearrange_policy():
@@ -3590,6 +3598,49 @@ def save_rearrange_policy(policy):
     except Exception as e:
         logger.error(f"保存重排策略失败: {e}")
         return False
+
+def get_filter_expr_history():
+    """获取持久化的最近 20 个不同的过滤表达式"""
+    policy = load_rearrange_policy()
+    history = policy.get("expr_history", [])
+    if not isinstance(history, list) or not history:
+        history = [
+            "close > high4",
+            "close > high4 and 涨幅 > 3",
+            "nclose > ma5d and per1d > 0 and nclose > lastp1d",
+            "涨幅 > 5",
+            "dff > 0",
+            "close > 10"
+        ]
+    cleaned = []
+    for h in history:
+        if isinstance(h, str) and h.strip() and h.strip() not in cleaned:
+            cleaned.append(h.strip())
+    return cleaned[:20]
+
+def record_filter_expr_history(expr):
+    """
+    [🚀 新增] 自动持久化过滤表达式，最多保留最近 20 个不同的表达式 (去重并前置)
+    """
+    if not expr or not isinstance(expr, str) or not expr.strip():
+        return get_filter_expr_history()
+    expr = expr.strip()
+
+    policy = load_rearrange_policy()
+    history = policy.get("expr_history", [])
+    if not isinstance(history, list):
+        history = []
+
+    # 剔除已有相同项 (忽略首尾空格)
+    history = [h.strip() for h in history if isinstance(h, str) and h.strip() and h.strip() != expr]
+    # 将最新表达式插入首位
+    history.insert(0, expr)
+    # 严格限制最多 20 个不同表达式
+    history = history[:20]
+
+    policy["expr_history"] = history
+    save_rearrange_policy(policy)
+    return history
 
 def eval_rearrange_condition(expr, row_dict):
     """安全评估重排过滤策略表达式"""
@@ -4080,9 +4131,27 @@ def open_rearrange_test_dialog(parent_win=None, var_parent_expr=None):
     btn_run = ttk.Button(expr_frame, text="▶ 执行测试")
     btn_run.pack(side=tk.LEFT, padx=3)
 
+    def on_select_test_history(event=None):
+        val = combo_test_history.get()
+        if val:
+            var_test_expr.set(val)
+            run_test_eval()
+
+    combo_test_history = ttk.Combobox(expr_frame, values=get_filter_expr_history(), state="readonly", width=16)
+    combo_test_history.set("📜 历史规则 ▾")
+    combo_test_history.bind("<<ComboboxSelected>>", on_select_test_history)
+    combo_test_history.pack(side=tk.LEFT, padx=2)
+
     def sync_to_parent():
+        t_val = var_test_expr.get().strip()
+        if t_val:
+            record_filter_expr_history(t_val)
+            try:
+                combo_test_history["values"] = get_filter_expr_history()
+            except Exception:
+                pass
         if var_parent_expr:
-            var_parent_expr.set(var_test_expr.get().strip())
+            var_parent_expr.set(t_val)
             toast_message(test_win, "已同步到重排策略过滤表达式！")
 
     btn_sync = ttk.Button(expr_frame, text="📥 同步至策略", command=sync_to_parent)
@@ -4342,7 +4411,20 @@ def open_rearrange_policy_dialog(parent_win=None):
     var_auto_popup = tk.BooleanVar(value=policy.get("auto_popup_enabled", True))
     chk_auto_popup = ttk.Checkbutton(frame_popup, text="🔔 盘中命中时自动弹出新监控小窗口 (限额10只，收盘归档)", variable=var_auto_popup)
     chk_auto_popup.pack(side=tk.LEFT)
-    btn_test_popup = ttk.Button(frame_popup, text="▶ 测试弹出/报警", width=14, command=lambda: test_realtime_popup_scan(win))
+
+    def on_click_test_popup():
+        # 同步界面当前的配置与表达式并记录到历史 20 个中
+        curr_e = var_expr.get().strip() or "close > high4"
+        policy["filter_expr"] = curr_e
+        policy["filter_enabled"] = var_enabled.get()
+        policy["auto_popup_enabled"] = var_auto_popup.get()
+        hist = record_filter_expr_history(curr_e)
+        policy["expr_history"] = hist
+        save_rearrange_policy(policy)
+        refresh_preset_combo()
+        test_realtime_popup_scan(win)
+
+    btn_test_popup = ttk.Button(frame_popup, text="▶ 测试弹出/报警", width=14, command=on_click_test_popup)
     btn_test_popup.pack(side=tk.LEFT, padx=(8, 0))
 
     frame_expr = ttk.Frame(lbl_group)
@@ -4359,22 +4441,18 @@ def open_rearrange_policy_dialog(parent_win=None):
                           command=lambda: open_rearrange_test_dialog(win, var_expr))
     btn_test.pack(side=tk.LEFT, padx=(2, 0))
 
-    # 常用预设下拉
-    presets = [
-        "close > high4",
-        "close > high4 and 涨幅 > 3",
-        "涨幅 > 5",
-        "涨幅 > 0",
-        "dff > 0",
-        "close > 10"
-    ]
+    # 常用预设与历史规则下拉 (持久化最近 20 个不同表达式)
+    def refresh_preset_combo():
+        history = get_filter_expr_history()
+        combo_preset["values"] = history
+
     def on_select_preset(event=None):
         val = combo_preset.get()
         if val:
             var_expr.set(val)
 
-    combo_preset = ttk.Combobox(lbl_group, values=presets, state="readonly", width=30)
-    combo_preset.set("常用预设规则 ▾")
+    combo_preset = ttk.Combobox(lbl_group, values=get_filter_expr_history(), state="readonly", width=36)
+    combo_preset.set("📜 常用规则与历史表达式 (最近20个) ▾")
     combo_preset.bind("<<ComboboxSelected>>", on_select_preset)
     combo_preset.pack(anchor="w", pady=3)
 
@@ -4423,8 +4501,12 @@ def open_rearrange_policy_dialog(parent_win=None):
     btn_frame.pack(fill=tk.X, pady=(10, 0))
 
     def apply_and_save():
+        curr_expr = var_expr.get().strip() or "close > high4"
+        # 自动持久化当前过滤表达式 (最多保留最近 20 个不同表达式)
+        updated_history = record_filter_expr_history(curr_expr)
+
         new_policy = {
-            "filter_expr": var_expr.get().strip() or "close > high4",
+            "filter_expr": curr_expr,
             "filter_enabled": var_enabled.get(),
             "sort_by": sort_map.get(var_sort.get(), "create_time"),
             "sort_reverse": var_reverse.get(),
@@ -4432,9 +4514,12 @@ def open_rearrange_policy_dialog(parent_win=None):
             "layout": var_layout.get(),
             "action_alter": "bottom_right_red",
             "auto_popup_enabled": var_auto_popup.get(),
-            "auto_popup_limit": policy.get("auto_popup_limit", 10)
+            "auto_popup_limit": policy.get("auto_popup_limit", 10),
+            "expr_history": updated_history
         }
         save_rearrange_policy(new_policy)
+        refresh_preset_combo()
+        combo_preset.set("📜 常用规则与历史表达式 (最近20个) ▾")
         try:
             WINDOW_GEOMETRIES["rearrange_policy_dialog"] = win.geometry()
             schedule_save_positions()
@@ -4456,6 +4541,8 @@ def open_rearrange_policy_dialog(parent_win=None):
         var_sort.set("按创建时间")
         var_reverse.set(True)
         var_layout.set(DEFAULT_REARRANGE_POLICY["layout"])
+        refresh_preset_combo()
+        combo_preset.set("📜 常用规则与历史表达式 (最近20个) ▾")
         toast_message(win, "已恢复默认重排策略！")
 
     btn_save = ttk.Button(btn_frame, text="💾 保存并立即重排", command=apply_and_save)
@@ -12100,24 +12187,37 @@ def trigger_monitor_flash(win_dict, flash_times=6, interval=300):
 def test_realtime_popup_scan(parent_win=None):
     """
     [🚀 新增] 测试实时弹出与报警功能入口：
-    豁免交易时间限制，立即使用当前已有的行情数据执行一次策略扫描，
+    豁免交易时间限制，立即使用未过滤的原始完整异动与行情数据执行一次策略扫描，
     测试已有窗口闪红报警与未打开新标的自动弹出功能
     """
     global realdatadf, loaded_df, GLOBAL_TOP_ALL, monitor_windows
+
+    # [🚀 核心修复] 优先使用原始未过滤的完整异动数据，杜绝被主界面条件过滤截断
     data = None
-    if 'GLOBAL_TOP_ALL' in globals() and GLOBAL_TOP_ALL is not None and not GLOBAL_TOP_ALL.empty:
-        data = GLOBAL_TOP_ALL
-    elif realdatadf is not None and not realdatadf.empty:
-        data = realdatadf
-    elif loaded_df is not None and not loaded_df.empty:
-        data = loaded_df
+    if 'loaded_df' in globals() and loaded_df is not None and not loaded_df.empty:
+        # loaded_df 为载入的完整历史/全天异动大表
+        data = loaded_df.copy()
     else:
         try:
-            df_sina = _get_sina_data_realtime()
-            if df_sina is not None and not df_sina.empty:
-                data = df_sina
-        except Exception:
-            pass
+            # 显式传入 h_enabled=False，获取未经主界面条件过滤的原始全量异动
+            raw_unfiltered = _get_stock_changes(h_enabled=False)
+            if raw_unfiltered is not None and not raw_unfiltered.empty:
+                data = raw_unfiltered
+        except Exception as e_raw:
+            logger.debug(f"获取全量原始异动失败: {e_raw}")
+
+    if data is None or data.empty:
+        if 'GLOBAL_TOP_ALL' in globals() and GLOBAL_TOP_ALL is not None and not GLOBAL_TOP_ALL.empty:
+            data = GLOBAL_TOP_ALL
+        elif realdatadf is not None and not realdatadf.empty:
+            data = realdatadf
+        else:
+            try:
+                df_sina = _get_sina_data_realtime()
+                if df_sina is not None and not df_sina.empty:
+                    data = df_sina
+            except Exception:
+                pass
 
     if data is None or data.empty:
         data = pd.DataFrame([
@@ -12153,8 +12253,8 @@ def check_monitor_break_high4(monitor_windows: dict, df: pd.DataFrame, logger, f
     """
     [🚀 升级] 全面与重排自定义策略对齐的监控报警与自动弹出引擎：
     1. 动态加载自定义重排策略 (filter_expr, filter_enabled)
-    2. 对当前已打开的监控窗口执行策略求值，命中则前置弹出、震动闪烁并标记红色高亮
-    3. 支持未打开小窗口自动弹出可选功能 (带 _auto_popup 分组标记，存活限额最多 10 只，关闭旧的允许弹出新的)
+    2. 对当前已打开的监控窗口执行策略求值，命中则前置弹出、震动闪烁并标记红色高亮 (防 0 覆盖)
+    3. 支持未打开小窗口自动弹出可选功能 (带 _auto_popup 分组标记，存活限额最多 10 只，全量标的候选池扫描，防 0 覆盖)
     """
     if df is None or df.empty:
         return
@@ -12179,19 +12279,42 @@ def check_monitor_break_high4(monitor_windows: dict, df: pd.DataFrame, logger, f
             continue
 
         row_dict = get_stock_eval_dict(stock_code)
-        # 合并 df 中的最新实时指标
+        
+        # [🚀 修复] 合并 df 中的最新实时指标 (严格防 0 覆盖，绝不被 0.0 冲毁有效价格)
+        loc_row_dict = None
         if stock_code in df.index:
             try:
-                row_dict.update(df.loc[stock_code].to_dict())
+                lr = df.loc[stock_code]
+                loc_row_dict = lr.to_dict() if hasattr(lr, "to_dict") else lr.iloc[0].to_dict()
             except Exception:
                 pass
         else:
             try:
                 c_int = int(stock_code)
                 if c_int in df.index:
-                    row_dict.update(df.loc[c_int].to_dict())
+                    lr = df.loc[c_int]
+                    loc_row_dict = lr.to_dict() if hasattr(lr, "to_dict") else lr.iloc[0].to_dict()
             except Exception:
                 pass
+        if loc_row_dict is None and '代码' in df.columns:
+            try:
+                sub = df[df['代码'].astype(str).str.zfill(6) == stock_code]
+                if not sub.empty:
+                    loc_row_dict = sub.iloc[0].to_dict()
+            except Exception:
+                pass
+
+        if loc_row_dict:
+            for k, v in loc_row_dict.items():
+                if v is None or pd.isna(v):
+                    continue
+                if k in ['close', '价格', '现价', 'now', 'nclose', 'percent', '涨幅', 'pct', 'pct_chg', 'vol', '量', 'volume']:
+                    try:
+                        if float(v) == 0.0 and float(row_dict.get(k, 0.0)) > 0:
+                            continue
+                    except Exception:
+                        pass
+                row_dict[k] = v
 
         # 策略求值
         is_hit = False
@@ -12224,25 +12347,64 @@ def check_monitor_break_high4(monitor_windows: dict, df: pd.DataFrame, logger, f
         ]
 
         if len(alive_auto_popups) < auto_popup_limit:
-            try:
-                pct_col = next((c for c in ['涨幅', 'percent', 'pct_chg'] if c in df.columns), None)
-                if pct_col:
-                    scan_df = df.sort_values(by=pct_col, ascending=False).head(50)
-                else:
-                    scan_df = df.head(50)
-            except Exception:
-                scan_df = df.head(50)
+            # [🚀 核心修复] 提取全部候选股票代码列表并去重，避免整数索引被错误转为 000000，且不漏掉 head(50) 之后的股票
+            candidate_codes = []
+            if '代码' in df.columns:
+                candidate_codes = [str(c).strip().zfill(6) for c in df['代码'].dropna().unique() if str(c).strip()]
+            elif 'code' in df.columns:
+                candidate_codes = [str(c).strip().zfill(6) for c in df['code'].dropna().unique() if str(c).strip()]
+            else:
+                candidate_codes = [str(idx).strip().zfill(6) for idx in df.index if str(idx).strip().isdigit()]
 
-            for idx_val, row in scan_df.iterrows():
-                code_str = str(idx_val).zfill(6)
-                if code_str in monitor_windows:
-                    continue  # 已有窗口，跳过
+            # 过滤掉已经打开监控窗口的标的
+            unmonitored_codes = [c for c in candidate_codes if c not in monitor_windows]
 
-                r_dict = get_stock_eval_dict(code_str)
+            # 若 df 包含代码列，建立最新事件行映射缓存
+            df_by_code = {}
+            if '代码' in df.columns:
                 try:
-                    r_dict.update(row.to_dict())
+                    for _, row_item in df.iterrows():
+                        c_val = str(row_item.get('代码', '')).strip().zfill(6)
+                        if c_val and c_val in unmonitored_codes and c_val not in df_by_code:
+                            df_by_code[c_val] = row_item.to_dict()
                 except Exception:
                     pass
+
+            for code_str in unmonitored_codes:
+                if len(alive_auto_popups) >= auto_popup_limit:
+                    break
+
+                r_dict = get_stock_eval_dict(code_str)
+
+                # 合并异动事件字段（严格防 0 覆盖原则）
+                evt_dict = df_by_code.get(code_str)
+                if evt_dict is None:
+                    if code_str in df.index:
+                        try:
+                            loc_row = df.loc[code_str]
+                            evt_dict = loc_row.to_dict() if hasattr(loc_row, "to_dict") else loc_row.iloc[0].to_dict()
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            c_int = int(code_str)
+                            if c_int in df.index:
+                                loc_row = df.loc[c_int]
+                                evt_dict = loc_row.to_dict() if hasattr(loc_row, "to_dict") else loc_row.iloc[0].to_dict()
+                        except Exception:
+                            pass
+
+                if evt_dict:
+                    for k, v in evt_dict.items():
+                        if v is None or pd.isna(v):
+                            continue
+                        if k in ['close', '价格', '现价', 'now', 'nclose', 'percent', '涨幅', 'pct', 'pct_chg', 'vol', '量', 'volume']:
+                            try:
+                                if float(v) == 0.0 and float(r_dict.get(k, 0.0)) > 0:
+                                    continue
+                            except Exception:
+                                pass
+                        r_dict[k] = v
 
                 hit_new = False
                 if filter_expr == "close > high4" and "high4" not in r_dict:

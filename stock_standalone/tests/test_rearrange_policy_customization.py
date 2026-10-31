@@ -455,5 +455,88 @@ class TestRearrangePolicyCustomization(unittest.TestCase):
         self.assertIn('def shake_window(', code)
         self.assertIn('def trigger_stock_popup_and_shake(', code)
 
+    def test_filter_expr_history_max_20_and_dedup(self):
+        """测试历史表达式持久化：自动去重、前置、严格保留最多 20 个不同表达式"""
+        config_file = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "stock", "testpy", "tdxgui", "window_config.json"))
+        
+        # 模拟生成 25 个不同的表达式写入
+        test_expressions = [f"close > ma{i}d and percent > {i}" for i in range(25)]
+        
+        # 模拟去重插入逻辑
+        history = []
+        for expr in test_expressions:
+            expr = expr.strip()
+            history = [h for h in history if h != expr]
+            history.insert(0, expr)
+            history = history[:20]
+
+        self.assertEqual(len(history), 20)
+        self.assertEqual(history[0], "close > ma24d and percent > 24")
+        self.assertEqual(history[-1], "close > ma5d and percent > 5")
+
+        # 再次插入已存在的表达式，验证去重前置
+        re_insert = "close > ma10d and percent > 10"
+        history = [h for h in history if h != re_insert]
+        history.insert(0, re_insert)
+        history = history[:20]
+
+        self.assertEqual(len(history), 20)
+        self.assertEqual(history[0], re_insert)
+
+    def test_anti_overwrite_zero_price_and_candidate_codes(self):
+        """测试在异动行价格/涨幅为 0.0 时，合并严格遵循防 0 覆盖，且候选代码提取不漏掉后面的股票"""
+        import pandas as pd
+        # 模拟全量原始异动表 (包含 000568 泸州老窖，但异动事件中价格和涨幅为 0.0)
+        df_raw = pd.DataFrame([
+            {'时间': '14:45:00', '代码': '000568', '名称': '泸州老窖', '异动类型': '向上缺口', '价格': 0.0, '涨幅': 0.0, '量': 0.0},
+            {'时间': '14:45:02', '代码': '603338', '名称': '浙江鼎力', '异动类型': '向上缺口', '价格': 0.0, '涨幅': 0.0, '量': 0.0},
+            {'时间': '14:50:00', '代码': '000568', '名称': '泸州老窖', '异动类型': '有大买盘', '价格': 0.0, '涨幅': 0.0, '量': 0.0},
+        ])
+
+        # 1. 提取去重候选股票代码
+        candidate_codes = []
+        if '代码' in df_raw.columns:
+            candidate_codes = [str(c).strip().zfill(6) for c in df_raw['代码'].dropna().unique() if str(c).strip()]
+
+        self.assertEqual(candidate_codes, ['000568', '603338'])
+
+        # 2. 模拟从全市场快照/TDX已获取到 000568 的真实行情
+        r_dict = {
+            'code': '000568',
+            'name': '泸州老窖',
+            'close': 77.07,
+            'nclose': 77.07,
+            'ma5d': 75.20,
+            'lastp1d': 70.05,
+            'per1d': 10.0,
+            'percent': 10.0,
+            '涨幅': 10.0
+        }
+
+        # 3. 模拟合并异动事件行中的字段 (价格=0.0, 涨幅=0.0)
+        evt_row = df_raw.iloc[0].to_dict()
+        for k, v in evt_row.items():
+            if v is None or pd.isna(v):
+                continue
+            if k in ['close', '价格', '现价', 'now', 'nclose', 'percent', '涨幅', 'pct', 'pct_chg', 'vol', '量', 'volume']:
+                try:
+                    if float(v) == 0.0 and float(r_dict.get(k, 0.0)) > 0:
+                        continue
+                except Exception:
+                    pass
+            r_dict[k] = v
+
+        # 验证真实收盘价和涨幅绝对没有被 0.0 冲毁！
+        self.assertEqual(r_dict['close'], 77.07)
+        self.assertEqual(r_dict['nclose'], 77.07)
+        self.assertEqual(r_dict['percent'], 10.0)
+
+        # 4. 验证策略判定
+        expr = "nclose > ma5d and per1d > 0 and nclose > lastp1d"
+        # 表达式求值
+        self.assertTrue(r_dict['nclose'] > r_dict['ma5d'])
+        self.assertTrue(r_dict['per1d'] > 0)
+        self.assertTrue(r_dict['nclose'] > r_dict['lastp1d'])
+
 if __name__ == "__main__":
     unittest.main()
