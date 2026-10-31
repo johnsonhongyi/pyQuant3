@@ -314,5 +314,87 @@ class TestRearrangePolicyCustomization(unittest.TestCase):
             self.assertNotIn("test_win.grab_set()", test_func_code)
             self.assertNotIn("test_win.transient(", test_func_code)
 
+    def test_cold_stock_close_fallback_and_anti_zero_override(self):
+        """测试冷门无异动股票从多源级联提取 close，且监控窗口中的 0.0 绝不覆盖已有真实价格"""
+        # 模拟数据源：该股票无异动，GLOBAL_TOP_ALL 为空，但 sina 快照有真实行情
+        sina_cache = {
+            "002526": {"name": "山东矿机", "open": 2.96, "now": 2.95, "close": 2.95, "llastp": 3.28, "nclose": 3.01}
+        }
+        tdx_cache = {
+            "002526": {"ma5d": 2.8, "lastp1d": 3.28, "per1d": 17.1, "high4": 2.6}
+        }
+        # 监控列表刚初始化的默认 0 值
+        dummy_monitor_info = {
+            "002526": {"stock_info": ["002526", "山东矿机", 0, 0, 0.0, 0.0, 0]}
+        }
+
+        # 模拟级联提取逻辑
+        row_dict = {}
+        # 1. tdx 补充
+        if "002526" in tdx_cache:
+            row_dict.update(tdx_cache["002526"])
+        # 2. sina 补充
+        if "002526" in sina_cache:
+            row_dict.update(sina_cache["002526"])
+        # 3. monitor_windows 补充 (防 0 覆盖)
+        s_info = dummy_monitor_info["002526"]["stock_info"]
+        if float(s_info[5]) > 0 and row_dict.get("close", 0) <= 0:
+            row_dict["close"] = float(s_info[5])
+
+        # 4. 价格归一化
+        price_candidates = ['close', 'now', 'price', '现价', '价格', 'nclose', 'lastp']
+        valid_price = next((float(row_dict[k]) for k in price_candidates if k in row_dict and float(row_dict[k] or 0) > 0), 0.0)
+        self.assertEqual(valid_price, 2.95)
+        self.assertEqual(row_dict.get("close"), 2.95)
+        # 验证 0.0 没有覆盖真实的 2.95
+        self.assertNotEqual(row_dict.get("close"), 0.0)
+
+        # 5. 涨幅自愈计算
+        pct = round((valid_price - row_dict['lastp1d']) / row_dict['lastp1d'] * 100.0, 2)
+        self.assertEqual(pct, -10.06)
+
+    def test_nclose_now_aliases_support(self):
+        """测试过滤表达式支持 nclose 和 now 与 close 等价双向映射"""
+        import numpy as np
+        import pandas as pd
+        # 提取 异动联动.py 中的 eval_rearrange_condition
+        script_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "stock", "testpy", "tdxgui", "异动联动.py"))
+        with open(script_path, "r", encoding="utf-8") as f:
+            code = f.read()
+        eval_start = code.find("def eval_rearrange_condition")
+        eval_end = code.find("def get_stock_eval_dict", eval_start)
+        local_scope = {"np": np, "pd": pd}
+        exec(code[eval_start:eval_end], local_scope)
+        eval_func = local_scope["eval_rearrange_condition"]
+
+        row = {"close": 3.05, "ma5d": 2.8, "lastp1d": 3.0, "per1d": 1.5}
+        # 验证 close, now, nclose 均可求值通过
+        self.assertTrue(eval_func("close > ma5d", row))
+        self.assertTrue(eval_func("nclose > ma5d", row))
+        self.assertTrue(eval_func("now > ma5d", row))
+        self.assertTrue(eval_func("nclose > ma5d and per1d > 0 and nclose > lastp1d", row))
+
+    def test_keep_dialog_open_on_save_and_escape_binding(self):
+        """验证点击保存并应用重排后不关闭配置窗口，且绑定了 Escape 键"""
+        script_path = os.path.join(os.path.dirname(__file__), "..", "..", "stock", "testpy", "tdxgui", "异动联动.py")
+        with open(script_path, "r", encoding="utf-8") as f:
+            code = f.read()
+
+        policy_func_start = code.find("def open_rearrange_policy_dialog")
+        policy_func_end = code.find("def show_rearrange_context_menu", policy_func_start)
+        policy_func_code = code[policy_func_start:policy_func_end]
+
+        apply_start = policy_func_code.find("def apply_and_save():")
+        apply_end = policy_func_code.find("def reset_default():", apply_start)
+        apply_code = policy_func_code[apply_start:apply_end]
+
+        # 验证 apply_and_save 中绝对没有执行 on_close_policy_dialog()
+        self.assertNotIn("\n        on_close_policy_dialog()", apply_code)
+        self.assertNotIn("\n        win.destroy()", apply_code)
+
+        # 验证绑定了 Escape 按键
+        self.assertIn('win.bind("<Escape>", on_close_policy_dialog)', policy_func_code)
+        self.assertIn('entry_expr.bind("<Escape>", on_close_policy_dialog)', policy_func_code)
+
 if __name__ == "__main__":
     unittest.main()

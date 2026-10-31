@@ -3598,11 +3598,14 @@ def eval_rearrange_condition(expr, row_dict):
     expr = expr.strip()
     aliases = {
         '涨幅': ['percent', 'pct_chg'],
-        'percent': ['涨幅'],
-        '现价': ['close', 'price'],
-        '价格': ['close', 'price'],
-        'close': ['现价', '价格', 'price'],
-        'price': ['现价', '价格', 'close'],
+        'percent': ['涨幅', 'pct_chg'],
+        'pct_chg': ['涨幅', 'percent'],
+        '现价': ['close', 'price', 'now', 'nclose'],
+        '价格': ['close', 'price', 'now', 'nclose'],
+        'close': ['现价', '价格', 'price', 'now', 'nclose'],
+        'price': ['现价', '价格', 'close', 'now', 'nclose'],
+        'now': ['close', '现价', '价格', 'price', 'nclose'],
+        'nclose': ['close', '现价', '价格', 'now', 'price'],
         '量': ['vol', 'volume'],
         '成交量': ['vol', 'volume'],
         'vol': ['量', '成交量', 'volume'],
@@ -3617,7 +3620,7 @@ def eval_rearrange_condition(expr, row_dict):
                 for target_alias in aliases[k]:
                     if target_alias not in eval_scope:
                         eval_scope[target_alias] = v
-    for default_key in ('close', 'high4', 'percent', 'price', 'vol', 'dff', 'dff2', 'rank', '涨幅', '现价', '价格', '量', '成交量'):
+    for default_key in ('close', 'now', 'nclose', 'high4', 'percent', 'price', 'vol', 'dff', 'dff2', 'rank', '涨幅', '现价', '价格', '量', '成交量'):
         if default_key not in eval_scope:
             eval_scope[default_key] = 0.0
 
@@ -3627,7 +3630,7 @@ def eval_rearrange_condition(expr, row_dict):
         return False
 
 def get_stock_eval_dict(code_str):
-    """根据股票代码获取其用于评估和查看的全部可用字段数据字典"""
+    """根据股票代码获取其用于评估和查看的全部可用字段数据字典 (支持多源级联与冷门个股行情回退)"""
     code_str = str(code_str).strip().zfill(6)
     row_dict = {}
     
@@ -3648,33 +3651,163 @@ def get_stock_eval_dict(code_str):
             except Exception:
                 pass
 
-    # 2. 尝试从 monitor_windows 取实时窗口补充
+    # 2. 尝试从全市场技术指标库补充 (补齐 ma5d, ma10d, high4, lastp1d, per1d 等)
+    try:
+        global today_tdx_df
+        base_tdx = today_tdx_df if 'today_tdx_df' in globals() and today_tdx_df is not None and not today_tdx_df.empty else _get_tdx_data_df()
+        if base_tdx is not None and not base_tdx.empty:
+            idx_tdx = code_str
+            if idx_tdx not in base_tdx.index:
+                try: idx_tdx = int(code_str)
+                except Exception: pass
+            if idx_tdx in base_tdx.index:
+                tdx_row = base_tdx.loc[idx_tdx]
+                tdx_dict = tdx_row.to_dict() if hasattr(tdx_row, "to_dict") else (tdx_row.iloc[0].to_dict() if isinstance(tdx_row, pd.DataFrame) else {})
+                for k, v in tdx_dict.items():
+                    if k not in row_dict or row_dict[k] is None or (isinstance(row_dict[k], (int, float)) and row_dict[k] == 0):
+                        row_dict[k] = v
+    except Exception as e:
+        logger.debug(f"从 TDX 数据补充指标失败: {e}")
+
+    # 3. 尝试从全市场实时行情快照补充 (确保冷门/无异动的股票也能获取最新 close, now, open, high, low, volume)
+    try:
+        global sina_data_df
+        sina_df = sina_data_df if 'sina_data_df' in globals() and sina_data_df is not None and not sina_data_df.empty else _get_sina_data_realtime(None)
+        if sina_df is not None and not sina_df.empty:
+            idx_sina = code_str
+            if idx_sina not in sina_df.index:
+                try: idx_sina = int(code_str)
+                except Exception: pass
+            if idx_sina in sina_df.index:
+                sina_row = sina_df.loc[idx_sina]
+                sina_dict = sina_row.to_dict() if hasattr(sina_row, "to_dict") else (sina_row.iloc[0].to_dict() if isinstance(sina_row, pd.DataFrame) else {})
+                for k, v in sina_dict.items():
+                    if k not in row_dict or row_dict[k] is None or (isinstance(row_dict[k], (int, float)) and row_dict[k] == 0):
+                        row_dict[k] = v
+    except Exception as e:
+        logger.debug(f"从 SINA 实时数据补充行情失败: {e}")
+
+    # 4. 尝试从 realdatadf (若有) 补充
+    try:
+        global realdatadf
+        if 'realdatadf' in globals() and realdatadf is not None and isinstance(realdatadf, pd.DataFrame) and not realdatadf.empty:
+            idx_rd = code_str
+            if idx_rd not in realdatadf.index:
+                try: idx_rd = int(code_str)
+                except Exception: pass
+            if idx_rd in realdatadf.index:
+                rd_row = realdatadf.loc[idx_rd]
+                rd_dict = rd_row.to_dict() if hasattr(rd_row, "to_dict") else (rd_row.iloc[0].to_dict() if isinstance(rd_row, pd.DataFrame) else {})
+                for k, v in rd_dict.items():
+                    if k not in row_dict or row_dict[k] is None or (isinstance(row_dict[k], (int, float)) and row_dict[k] == 0):
+                        row_dict[k] = v
+    except Exception:
+        pass
+
+    # 5. 尝试从 monitor_windows 取实时窗口补充 (防 0 覆盖，优先取 tree 第一项)
     global monitor_windows
     if monitor_windows and code_str in monitor_windows:
         info = monitor_windows[code_str]
+        # 5.1 尝试从小窗口 tree 提取最新一条已接收的异动
+        try:
+            m_tree = info.get("tree")
+            if m_tree and hasattr(m_tree, "get_children"):
+                items = m_tree.get_children()
+                if items:
+                    first_vals = m_tree.item(items[0], "values")
+                    # 小窗口 columns: ('时间', '异动类型', '涨幅', '价格', '量')
+                    if len(first_vals) >= 5:
+                        p_str = float(first_vals[3]) if first_vals[3] else 0.0
+                        pct_str = float(first_vals[2]) if first_vals[2] else 0.0
+                        vol_str = float(first_vals[4]) if first_vals[4] else 0.0
+                        if p_str > 0 and (row_dict.get("close", 0) <= 0):
+                            row_dict["close"] = p_str
+                            row_dict["price"] = p_str
+                        if pct_str != 0 and (row_dict.get("percent", 0) == 0):
+                            row_dict["percent"] = pct_str
+                        if vol_str > 0 and (row_dict.get("vol", 0) <= 0):
+                            row_dict["vol"] = vol_str
+        except Exception:
+            pass
+
+        # 5.2 补充来自 stock_info 的元数据 (但严格不以 0 覆盖已有有效值)
         if "stock_info" in info and info["stock_info"]:
             s_info = info["stock_info"]
             try:
-                row_dict["code"] = str(s_info[0])
-                row_dict["name"] = str(s_info[1])
-                row_dict["cour"] = float(s_info[2])
-                row_dict["ch_bc"] = float(s_info[3])
-                row_dict["percent"] = float(s_info[4])
-                row_dict["price"] = float(s_info[5])
-                row_dict["close"] = float(s_info[5])
-                row_dict["vol"] = float(s_info[6])
-                row_dict["time"] = str(s_info[-1])
+                if not row_dict.get("code"): row_dict["code"] = str(s_info[0])
+                if not row_dict.get("name"): row_dict["name"] = str(s_info[1])
+                if len(s_info) > 2 and float(s_info[2] or 0) > 0: row_dict["cour"] = float(s_info[2])
+                if len(s_info) > 3 and float(s_info[3] or 0) > 0: row_dict["ch_bc"] = float(s_info[3])
+                if len(s_info) > 4 and float(s_info[4] or 0) != 0 and (row_dict.get("percent", 0) == 0): row_dict["percent"] = float(s_info[4])
+                if len(s_info) > 5 and float(s_info[5] or 0) > 0 and (row_dict.get("close", 0) <= 0):
+                    row_dict["price"] = float(s_info[5])
+                    row_dict["close"] = float(s_info[5])
+                if len(s_info) > 6 and float(s_info[6] or 0) > 0 and (row_dict.get("vol", 0) <= 0): row_dict["vol"] = float(s_info[6])
+                if "time" not in row_dict: row_dict["time"] = str(s_info[-1])
             except Exception:
                 pass
 
-    # 3. 注入双向别名
+    # 6. 核心指标归一化与自愈 (SSOT: close / price / 现价 / 价格 / percent / 涨幅)
+    # 6.1 现价归一化: 按优先级在各个现价别名中寻找首个 > 0 的有效价格
+    price_candidates = ['close', 'now', 'price', '现价', '价格', 'nclose', 'lastp']
+    valid_price = 0.0
+    for pc in price_candidates:
+        if pc in row_dict and row_dict[pc] is not None:
+            try:
+                v_f = float(row_dict[pc])
+                if v_f > 0:
+                    valid_price = v_f
+                    break
+            except Exception:
+                pass
+    if valid_price > 0:
+        row_dict['close'] = valid_price
+        row_dict['now'] = valid_price
+        row_dict['price'] = valid_price
+        row_dict['现价'] = valid_price
+        row_dict['价格'] = valid_price
+        if 'nclose' not in row_dict or float(row_dict.get('nclose') or 0) <= 0:
+            row_dict['nclose'] = valid_price
+
+    # 6.2 涨幅计算自愈: 若 percent 为 0 但有 close 与昨收 (lastp1d 或 llastp)
+    curr_pct = 0.0
+    for pct_k in ['percent', '涨幅', 'pct_chg']:
+        if pct_k in row_dict and row_dict[pct_k] is not None:
+            try:
+                p_f = float(row_dict[pct_k])
+                if p_f != 0.0:
+                    curr_pct = p_f
+                    break
+            except Exception:
+                pass
+    if curr_pct == 0.0 and valid_price > 0:
+        prev_p = 0.0
+        for prev_k in ['lastp1d', 'llastp', 'prev_close', 'preclose']:
+            if prev_k in row_dict and row_dict[prev_k] is not None:
+                try:
+                    pv = float(row_dict[prev_k])
+                    if pv > 0:
+                        prev_p = pv
+                        break
+                except Exception:
+                    pass
+        if prev_p > 0:
+            curr_pct = round((valid_price - prev_p) / prev_p * 100.0, 2)
+    row_dict['percent'] = curr_pct
+    row_dict['涨幅'] = curr_pct
+    row_dict['pct_chg'] = curr_pct
+
+    # 7. 注入双向别名
     aliases = {
         '涨幅': ['percent', 'pct_chg'],
-        'percent': ['涨幅'],
-        '现价': ['close', 'price'],
-        '价格': ['close', 'price'],
-        'close': ['现价', '价格', 'price'],
-        'price': ['现价', '价格', 'close'],
+        'percent': ['涨幅', 'pct_chg'],
+        'pct_chg': ['涨幅', 'percent'],
+        '现价': ['close', 'price', 'now', 'nclose'],
+        '价格': ['close', 'price', 'now', 'nclose'],
+        'close': ['现价', '价格', 'price', 'now', 'nclose'],
+        'now': ['close', '现价', '价格', 'price', 'nclose'],
+        'nclose': ['close', '现价', '价格', 'now', 'price'],
+        'price': ['现价', '价格', 'close', 'now', 'nclose'],
         '量': ['vol', 'volume'],
         '成交量': ['vol', 'volume'],
         'vol': ['量', '成交量', 'volume'],
@@ -3696,11 +3829,14 @@ def evaluate_condition_detail(expr, row_dict):
     expr = expr.strip()
     aliases = {
         '涨幅': ['percent', 'pct_chg'],
-        'percent': ['涨幅'],
-        '现价': ['close', 'price'],
-        '价格': ['close', 'price'],
-        'close': ['现价', '价格', 'price'],
-        'price': ['现价', '价格', 'close'],
+        'percent': ['涨幅', 'pct_chg'],
+        'pct_chg': ['涨幅', 'percent'],
+        '现价': ['close', 'price', 'now', 'nclose'],
+        '价格': ['close', 'price', 'now', 'nclose'],
+        'close': ['现价', '价格', 'price', 'now', 'nclose'],
+        'price': ['现价', '价格', 'close', 'now', 'nclose'],
+        'now': ['close', '现价', '价格', 'price', 'nclose'],
+        'nclose': ['close', '现价', '价格', 'now', 'price'],
         '量': ['vol', 'volume'],
         '成交量': ['vol', 'volume'],
         'vol': ['量', '成交量', 'volume'],
@@ -3715,7 +3851,7 @@ def evaluate_condition_detail(expr, row_dict):
                 for target_alias in aliases[k]:
                     if target_alias not in eval_scope:
                         eval_scope[target_alias] = v
-    for default_key in ('close', 'high4', 'percent', 'price', 'vol', 'dff', 'dff2', 'rank', '涨幅', '现价', '价格', '量', '成交量'):
+    for default_key in ('close', 'now', 'nclose', 'high4', 'percent', 'price', 'vol', 'dff', 'dff2', 'rank', '涨幅', '现价', '价格', '量', '成交量'):
         if default_key not in eval_scope:
             eval_scope[default_key] = 0.0
 
@@ -3797,9 +3933,11 @@ def open_rearrange_test_dialog(parent_win=None, var_parent_expr=None):
             pass
         _rearrange_test_dialog_win = None
         test_win.destroy()
+        return "break"
 
     test_win.protocol("WM_DELETE_WINDOW", on_close_test_win)
     test_win.bind("<Escape>", on_close_test_win)
+    test_win.bind("<Key-Escape>", on_close_test_win)
 
     # 顶层布局
     top_frame = ttk.Frame(test_win, padding=(10, 8, 10, 4))
@@ -4019,6 +4157,9 @@ def open_rearrange_test_dialog(parent_win=None, var_parent_expr=None):
     combo_stock.bind("<<ComboboxSelected>>", refresh_data_and_test)
     entry_code.bind("<Return>", refresh_data_and_test)
     entry_test_expr.bind("<Return>", run_test_eval)
+    entry_test_expr.bind("<Escape>", on_close_test_win)
+    entry_code.bind("<Escape>", on_close_test_win)
+    txt_summary.bind("<Escape>", on_close_test_win)
 
     # 底部操作栏
     bottom_frame = ttk.Frame(test_win, padding=(10, 6, 10, 8))
@@ -4087,6 +4228,7 @@ def open_rearrange_policy_dialog(parent_win=None):
 
     win.protocol("WM_DELETE_WINDOW", on_close_policy_dialog)
     win.bind("<Escape>", on_close_policy_dialog)
+    win.bind("<Key-Escape>", on_close_policy_dialog)
 
     main_frame = ttk.Frame(win, padding=12)
     main_frame.pack(fill=tk.BOTH, expand=True)
@@ -4114,6 +4256,7 @@ def open_rearrange_policy_dialog(parent_win=None):
     var_expr = tk.StringVar(value=policy.get("filter_expr", "close > high4"))
     entry_expr = ttk.Entry(frame_expr, textvariable=var_expr, width=28)
     entry_expr.pack(side=tk.LEFT, padx=(6, 4), fill=tk.X, expand=True)
+    entry_expr.bind("<Escape>", on_close_policy_dialog)
 
     # [🚀 增强] 过滤右侧添加测试功能与可用字段数据查看简化版弹窗
     btn_test = ttk.Button(frame_expr, text="🧪 测试/详情", width=11,
@@ -4206,7 +4349,8 @@ def open_rearrange_policy_dialog(parent_win=None):
             toast_message(root, "✅ 策略已保存并完成重新排列！")
         except Exception as e:
             logger.error(f"重排执行异常: {e}")
-        on_close_policy_dialog()
+        # [🚀 用户需求] 保存并立即重排后保持配置窗口打开，不自动关闭，方便连续调试与观察
+        # on_close_policy_dialog()
 
     def reset_default():
         save_rearrange_policy(DEFAULT_REARRANGE_POLICY)

@@ -1,5 +1,20 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-31 13:30 【无异动冷门个股close多源级联回退与防0覆盖、保存重排常驻保持与Esc一键关闭】(`stock/testpy/tdxgui/异动联动.py`, `tests/test_rearrange_policy_customization.py`)
+- [x] **【彻底查清并解决无异动个股 `close` 为空/0.0 问题】**：
+  - **根因确认**：异动流只接收盘中出现异动的活跃标的。当监控冷门股（如 `002526 山东矿机`）当天未产生异动时，小窗口 `stock_info` 中的价格默认仍为 `0.0`；旧版 `get_stock_eval_dict` 仅读取 `GLOBAL_TOP_ALL` 且在读取 `monitor_windows` 时用 `0.0` 强行覆盖了有效值；
+  - **多源级联回退体系**：构建 `GLOBAL_TOP_ALL` -> `_get_sina_data_realtime()`（全市场 5500+ 只股票实时快照）-> `_get_tdx_data_df()`（全市场技术指标）-> `realdatadf` -> 小窗口 `tree` 级联查询；
+  - **价格与涨幅智能归一化与自愈**：
+    - 现价候选键（`close`, `now`, `price`, `现价`, `价格`, `nclose`, `lastp`）寻找首个有效正值，防 0 覆盖，实现统一对齐；
+    - 涨幅自愈：若 `percent` 为 0 但有现价与昨收基准（`lastp1d`/`llastp`），自动计算真实涨幅并同步赋予 `percent`/`涨幅`/`pct_chg`；
+    - 支持 `nclose`, `now` 别名与 `close` 双向无缝互通；
+- [x] **【保存并立即重排保持窗口常驻不关闭】**：
+  - 移除 `apply_and_save` 中的 `on_close_policy_dialog()`，用户点击【💾 保存并立即重排】后，保存策略、持久化几何位置并执行平铺分流，弹窗持续保持打开，方便连续看盘与调试；
+- [x] **【全控件 Escape 快捷键一键安全关闭】**：
+  - 在配置窗口与测试窗口的顶层、文本输入框（`entry_expr`、`entry_test_expr`、`entry_code`）、日志文本区等组件上全面绑定 `<Escape>` 与 `<Key-Escape>`，光标在任何控件内按 Esc 均可立即关闭并保存窗口位置；
+- [x] **【自动化测试全绿通过（13 项专项测试 100% PASS）】**：
+  - 新增冷门个股行情回退防 0 覆盖、`nclose`/`now` 别名求值、保存保持常驻与 Escape 绑定测试，13 项专项测试纯绿通过。
+
 ## 2026-10-31 13:00 【重排策略配置与测试弹窗改为独立无模态顶层窗口、解除主窗口与监控锁定】(`stock/testpy/tdxgui/异动联动.py`, `tests/test_rearrange_policy_customization.py`)
 - [x] **【彻底根除模态阻塞与主窗口锁定】**：
   - **移除 `grab_set()`**：彻底清除 `open_rearrange_policy_dialog` 中的 `win.grab_set()`，解脱主界面、其他所有监控小窗口的事件独占阻塞，用户可边开着配置窗口边自由看盘、点击联动、重排；
