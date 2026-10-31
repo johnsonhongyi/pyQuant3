@@ -4008,6 +4008,9 @@ def load_popup_blacklist():
             logger.debug(f"load_popup_blacklist failed: {e}")
     return {}
 
+_popup_blacklist_revision = 0
+
+
 def save_popup_blacklist(bl_dict):
     """保存用户自动弹出黑名单到 CONFIG_FILE"""
     data = {}
@@ -4018,9 +4021,11 @@ def save_popup_blacklist(bl_dict):
         except Exception:
             data = {}
     data["popup_blacklist"] = bl_dict
+    global _popup_blacklist_revision
     try:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
+        _popup_blacklist_revision += 1
         logger.info(f"✅ 自动弹出黑名单已持久化保存，共 {len(bl_dict)} 只股票")
         return True
     except Exception as e:
@@ -4657,8 +4662,9 @@ def get_stock_eval_dict(code_str, context=None):
 
     # 5. 尝试从 monitor_windows 取实时窗口补充 (防 0 覆盖，优先取 tree 第一项)
     global monitor_windows
-    if monitor_windows and code_str in monitor_windows:
-        info = monitor_windows[code_str]
+    eval_monitors = context.get("monitors", monitor_windows) if context is not None else monitor_windows
+    if eval_monitors and code_str in eval_monitors:
+        info = eval_monitors[code_str]
         # 5.1 尝试从小窗口 tree 提取最新一条已接收的异动
         try:
             m_tree = info.get("tree")
@@ -5269,25 +5275,35 @@ def open_rearrange_policy_dialog(parent_win=None):
     _rearrange_policy_dialog_win = win
     win.title("⚙️ 重排策略与过滤规则配置")
     
-    # [🚀 修复] 窗口位置恢复与持久化支持
+    # [🚀 修复] 窗口位置恢复与持久化支持 (默认高度提升为 540，防止遮挡底部按钮)
     saved_geo = WINDOW_GEOMETRIES.get("rearrange_policy_dialog")
+    target_w, target_h = 620, 540
     if saved_geo:
         try:
-            win.geometry(saved_geo)
+            # 检查持久化的高度，若历史高度过小 (<480)，自动提升到 540
+            parts = saved_geo.split("+")
+            w_h = parts[0].split("x")
+            cur_w = max(int(w_h[0]), 560)
+            cur_h = max(int(w_h[1]), 520)
+            pos_x = int(parts[1]) if len(parts) > 1 else 100
+            pos_y = int(parts[2]) if len(parts) > 2 else 100
+            win.geometry(f"{cur_w}x{cur_h}+{pos_x}+{pos_y}")
         except Exception:
-            win.geometry("560x440")
+            win.geometry(f"{target_w}x{target_h}")
     else:
-        win.geometry("560x440")
+        win.geometry(f"{target_w}x{target_h}")
         try:
             win.update_idletasks()
             pw = root
-            x = pw.winfo_x() + (pw.winfo_width() - 560) // 2
-            y = pw.winfo_y() + (pw.winfo_height() - 440) // 2
+            x = pw.winfo_x() + (pw.winfo_width() - target_w) // 2
+            y = pw.winfo_y() + (pw.winfo_height() - target_h) // 2
             win.geometry(f"+{max(0, x)}+{max(0, y)}")
         except Exception:
             pass
 
-    win.resizable(False, False)
+    # [🚀 彻底修复] 支持自由拉伸调整大小，并设置最小安全尺寸，绝不截断底部按钮
+    win.resizable(True, True)
+    win.minsize(560, 480)
     # [彻底独立无模态] 不调用 transient，不设置 grab_set，避免锁定主界面与监控小窗口，用户可并行操作
 
     def on_close_policy_dialog(event=None):
@@ -5303,6 +5319,10 @@ def open_rearrange_policy_dialog(parent_win=None):
     win.protocol("WM_DELETE_WINDOW", on_close_policy_dialog)
     win.bind("<Escape>", on_close_policy_dialog)
     win.bind("<Key-Escape>", on_close_policy_dialog)
+
+    # 先预留底部操作区，避免内容区耗尽 pack 的剩余空间。
+    btn_frame = ttk.Frame(win, padding=(12, 6, 12, 10))
+    btn_frame.pack(side=tk.BOTTOM, fill=tk.X)
 
     main_frame = ttk.Frame(win, padding=12)
     main_frame.pack(fill=tk.BOTH, expand=True)
@@ -5421,8 +5441,6 @@ def open_rearrange_policy_dialog(parent_win=None):
     chk_multi_screen.pack(anchor="w", pady=(4, 0))
 
     # 4. 底部按钮
-    btn_frame = ttk.Frame(main_frame)
-    btn_frame.pack(fill=tk.X, pady=(10, 0))
 
     def apply_and_save():
         curr_expr = var_expr.get().strip() or "close > high4"
@@ -8105,11 +8123,12 @@ def fast_insert(tree, dataframe):
         except Exception:
             tree_cols = ('时间', '代码', '名称', 'count', '异动类型', '涨幅', '价格', '量')
 
-        # 2. 识别需要从 tdx_df 提取的定制列 (不在 dataframe 中且不是 '异动类型')
+        # 2. 识别需要从 tdx_df 提取的定制列 (不在 dataframe 中，或者表头的 '量' 列需要从 TDX/Sina 行情增强为真正的量比)
         tdx_cols_to_fetch = []
         for col in tree_cols:
-            if col not in dataframe.columns and col != '异动类型':
-                tdx_cols_to_fetch.append(col)
+            if col != '异动类型':
+                if col not in dataframe.columns or col == '量':
+                    tdx_cols_to_fetch.append(col)
 
         # 3. 预先获取 tdx_df 并合并实时行情计算 dff, dff2, rank
         tdx_df = None
@@ -8196,6 +8215,22 @@ def fast_insert(tree, dataframe):
                     top_all['dff'].replace([np.inf, -np.inf], np.nan, inplace=True)
                     top_all['dff'].fillna(0, inplace=True)
                     
+                    # ----------------- 计算实时量比 vol_ratio -----------------
+                    try:
+                        if 'vol_ratio' not in top_all.columns:
+                            v_col = next((c for c in ['volume', 'vol', '成交量'] if c in top_all.columns), None)
+                            l6_col = next((c for c in ['last6vol'] if c in top_all.columns), None)
+                            if v_col and l6_col:
+                                l6v = pd.to_numeric(top_all[l6_col], errors='coerce').where(lambda v: v > 0)
+                                v_now = pd.to_numeric(top_all[v_col], errors='coerce')
+                                top_all['vol_ratio'] = (v_now.where(v_now >= 0) / l6v).replace([np.inf, -np.inf], np.nan).round(1)
+                            else:
+                                top_all['vol_ratio'] = np.nan
+                        else:
+                            top_all['vol_ratio'] = pd.to_numeric(top_all['vol_ratio'], errors='coerce').replace([np.inf, -np.inf], np.nan).where(lambda v: v >= 0).round(1)
+                    except Exception as e_vr:
+                        logger.debug(f"计算 vol_ratio 失败: {e_vr}")
+
                     # ----------------- 计算 Rank -----------------
                     try:
                         top_all = build_hma_and_trendscore_local(top_all)
@@ -8211,6 +8246,12 @@ def fast_insert(tree, dataframe):
                 if tdx_df is not None and not tdx_df.empty:
                     # 建立不区分大小写的列名映射
                     for target_col in tdx_cols_to_fetch:
+                        if target_col == '量':
+                            # [🚀 核心修复] 优先将表头的“量”映射为真实的量比指标 (vol_ratio)
+                            match_vr = next((c for c in ['vol_ratio', 'volume_ratio', '量比'] if c in tdx_df.columns), None)
+                            if match_vr:
+                                tdx_col_mappings['量'] = match_vr
+                                continue
                         target_lower = target_col.lower()
                         for c in tdx_df.columns:
                             if str(c).lower() == target_lower:
@@ -8219,13 +8260,22 @@ def fast_insert(tree, dataframe):
             except Exception as e:
                 logger.error(f"加载定制化 TDX 数据失败: {e}")
 
+        # 原始异动成交量与量比单位不同，缺失行情时显示空值。
+        if '量' in tree_cols:
+            dataframe.loc[:, '量'] = ''
+
         # 3.5 将计算得到的自定义指标写回原 dataframe 容器中（用于界面点击表头排序防 KeyError）
         if tdx_df is not None and not tdx_df.empty and '代码' in dataframe.columns:
             codes_str = dataframe['代码'].astype(str).str.zfill(6)
             for target_col in tdx_cols_to_fetch:
                 tdx_real_col = tdx_col_mappings.get(target_col)
                 if tdx_real_col and tdx_real_col in tdx_df.columns:
-                    dataframe.loc[:, target_col] = codes_str.map(tdx_df[tdx_real_col]).fillna("")
+                    mapped_series = codes_str.map(tdx_df[tdx_real_col])
+                    if target_col == '量':
+                        mapped_num = pd.to_numeric(mapped_series, errors='coerce').replace([np.inf, -np.inf], np.nan)
+                        dataframe.loc[:, '量'] = mapped_num.where(mapped_num >= 0).round(1).fillna('')
+                    else:
+                        dataframe.loc[:, target_col] = mapped_series.fillna("")
 
         # [🚀 核心修复] 在指标补齐后，立即自动应用当前生效的主表格排序列与顺序 (例如 rank, 涨幅, dff 等)
         try:
@@ -9545,7 +9595,8 @@ def on_close_monitor(window_info):
 
     # [🚀 挖掘与淘汰闭环] 若该窗口为自动弹出窗口（带 _auto_popup），手动关闭代表用户淘汰了该标的
     # 当日内自动挖掘和测试弹出绝对不再重复弹出该股票，从而能够持续挖掘后排未发现的标的！
-    if hasattr(window, "_auto_popup") and getattr(window, "_auto_popup"):
+    if (getattr(window, "_auto_popup", False)
+            or getattr(window, "_auto_popup_date", None) == datetime.now().strftime("%Y-%m-%d")):
         record_daily_dismissed(stock_code)
         logger.info(f"🚫 [DAILY_DISMISSED] 用户手动关闭淘汰了自动弹出标的 {stock_code}，今日内不再重复弹出")
 
@@ -13335,340 +13386,189 @@ def trigger_monitor_flash(win_dict, flash_times=6, interval=300):
     # _flash()
 
 
+_popup_scan_busy = False
+
+
 def test_realtime_popup_scan(parent_win=None, trigger_btn=None, is_async=True):
-    """
-    [🚀 极限性能引擎] 测试实时弹出与报警功能入口 (支持后台 Worker 线程异步并发，主线程 0 假死)
-    """
-    global root, monitor_windows, realdatadf, loaded_df, GLOBAL_TOP_ALL
+    """Luck 与配置弹窗共用后台扫描入口；is_async 保留调用兼容性。"""
+    if _popup_scan_busy:
+        return
+    old_text = trigger_btn.cget("text") if trigger_btn else None
+    if trigger_btn:
+        trigger_btn.config(text="⏳ 扫描中...", state="disabled")
 
-    # 若传入了触发按钮，立即切换为扫描状态并禁用，防止重复点击引发堆叠
-    if trigger_btn and hasattr(trigger_btn, "config"):
+    def completed(created, alive, limit, error):
+        if trigger_btn and trigger_btn.winfo_exists():
+            trigger_btn.config(text=old_text, state="normal")
+        target = parent_win if parent_win and parent_win.winfo_exists() else root
+        msg = f"扫描失败: {error}" if error else f"测试完成：新增 {created} 只，当日存活 {alive}/{limit} 只"
+        toast_message(target, msg)
+
+    check_monitor_break_high4(monitor_windows, None, logger, force_work_time=True,
+                             _on_complete=completed)
+
+
+def check_monitor_break_high4(monitor_windows: dict, df: pd.DataFrame, logger,
+                              force_work_time=False, _on_complete=None):
+    """后台求值，UI 分帧应用；测试与自动扫描共享当日存活额度。"""
+    global _popup_scan_busy
+    if _popup_scan_busy:
+        return
+    import queue
+    import threading
+
+    _popup_scan_busy = True
+    scan_date = datetime.now().strftime("%Y-%m-%d")
+    results = queue.Queue(maxsize=1)
+    # 仅在 UI 线程读取窗口元数据，后台不得访问 Tk 控件。
+    monitors = {c: {"stock_info": list(w.get("stock_info", []))}
+                for c, w in monitor_windows.items()}
+    sources = get_bulk_eval_context()
+    sources["monitors"] = monitors
+    source_data = df if df is not None else globals().get("loaded_df")
+    popup_allowed = force_work_time or get_work_time()
+    blacklist_revision = _popup_blacklist_revision
+
+    def alive_codes():
+        return {c for c, w in monitor_windows.items()
+                if w.get("toplevel") is not None and w["toplevel"].winfo_exists()
+                and (getattr(w["toplevel"], "_auto_popup_date", None) == scan_date
+                     or (not hasattr(w["toplevel"], "_auto_popup_date")
+                         and getattr(w["toplevel"], "_auto_popup", False)))}
+
+    def worker():
         try:
-            trigger_btn.config(text="⏳ 扫描中...", state="disabled")
-        except Exception:
-            pass
-
-    def _worker_proc():
-        try:
-            # 1. 在后台线程高速准备原始数据
-            data = None
-            if 'loaded_df' in globals() and loaded_df is not None and not loaded_df.empty:
-                data = loaded_df.copy()
-            else:
-                try:
-                    raw_unfiltered = _get_stock_changes(h_enabled=False)
-                    if raw_unfiltered is not None and not raw_unfiltered.empty:
-                        data = raw_unfiltered
-                except Exception as e_raw:
-                    logger.debug(f"获取全量原始异动失败: {e_raw}")
-
-            if data is None or data.empty:
-                if 'GLOBAL_TOP_ALL' in globals() and GLOBAL_TOP_ALL is not None and not GLOBAL_TOP_ALL.empty:
-                    data = GLOBAL_TOP_ALL.copy()
-                elif realdatadf is not None and not realdatadf.empty:
-                    data = realdatadf.copy()
-
-            if data is None or data.empty:
-                data = pd.DataFrame([
-                    {"代码": "600688", "名称": "上海石化", "close": 3.25, "high4": 3.10, "percent": 4.8, "涨幅": 4.8, "vol": 1500},
-                    {"代码": "002526", "名称": "山东矿机", "close": 5.60, "high4": 5.20, "percent": 7.7, "涨幅": 7.7, "vol": 3200},
-                    {"代码": "000001", "名称": "平安银行", "close": 11.80, "high4": 11.20, "percent": 5.4, "涨幅": 5.4, "vol": 5000},
-                ]).set_index("代码")
-
             policy = load_rearrange_policy()
-            filter_expr = policy.get("filter_expr", "close > high4")
-            limit = policy.get("auto_popup_limit", 10)
-
-            # 2. 回到主线程执行安全的 UI 窗口创建与重排更新
-            def _apply_on_ui():
-                try:
-                    before_popups = len([
-                        c for c, w_item in monitor_windows.items()
-                        if hasattr(w_item.get("toplevel"), "_auto_popup") and getattr(w_item.get("toplevel"), "_auto_popup")
-                    ])
-
-                    check_monitor_break_high4(monitor_windows, data, logger, force_work_time=True)
-
-                    after_popups = len([
-                        c for c, w_item in monitor_windows.items()
-                        if hasattr(w_item.get("toplevel"), "_auto_popup") and getattr(w_item.get("toplevel"), "_auto_popup")
-                    ])
-
-                    new_created = after_popups - before_popups
-                    msg = f"🔔 测试执行完成！\n策略: {filter_expr}\n本次新弹出窗口: {new_created} 只\n当前存活自动弹出窗口: {after_popups}/{limit} 只"
-                    target_win = parent_win if (parent_win and hasattr(parent_win, "winfo_exists") and parent_win.winfo_exists()) else root
-                    toast_message(target_win, msg)
-                finally:
-                    if trigger_btn and hasattr(trigger_btn, "config"):
-                        try:
-                            trigger_btn.config(text="▶ 测试弹出/报警", state="normal")
-                        except Exception:
-                            pass
-
-            if 'root' in globals() and root and hasattr(root, "after"):
-                root.after(0, _apply_on_ui)
-            else:
-                _apply_on_ui()
-
-        except Exception as e_bg:
-            logger.error(f"异步测试扫描异常: {e_bg}", exc_info=True)
-            if trigger_btn and hasattr(trigger_btn, "config"):
-                try:
-                    trigger_btn.config(text="▶ 测试弹出/报警", state="normal")
-                except Exception:
-                    pass
-
-    if is_async:
-        import threading
-        th = threading.Thread(target=_worker_proc, daemon=True, name="PopupScanWorker")
-        th.start()
-    else:
-        _worker_proc()
-
-def check_monitor_break_high4(monitor_windows: dict, df: pd.DataFrame, logger, force_work_time=False):
-    """
-    [🚀 升级] 全面与重排自定义策略对齐的监控报警与自动弹出引擎：
-    1. 动态加载自定义重排策略 (filter_expr, filter_enabled)
-    2. 对当前已打开的监控窗口执行策略求值，命中则前置弹出、震动闪烁并标记红色高亮 (防 0 覆盖)
-    3. 支持未打开小窗口自动弹出可选功能 (带 _auto_popup 分组标记，存活限额最多 10 只，全量标的候选池扫描，防 0 覆盖)
-    """
-    if df is None or df.empty:
-        return
-
-    created_count = 0
-
-    # 1. 加载重排自定义策略
-    policy = load_rearrange_policy()
-    filter_expr = policy.get("filter_expr", "close > high4")
-    filter_enabled = policy.get("filter_enabled", True)
-    auto_popup_enabled = policy.get("auto_popup_enabled", True)
-    auto_popup_limit = policy.get("auto_popup_limit", 10)
-
-    if not filter_enabled or not filter_expr or not filter_expr.strip():
-        return
-
-    # 2. 检查已打开的监控窗口
-    for win_info in list(monitor_windows.values()):
-        info = win_info.get("stock_info")
-        if not info:
-            continue
-        stock_code = str(info[0]).zfill(6) if info[0] else ""
-        if not stock_code:
-            continue
-
-        row_dict = get_stock_eval_dict(stock_code)
-        
-        # [🚀 修复] 合并 df 中的最新实时指标 (严格防 0 覆盖，绝不被 0.0 冲毁有效价格)
-        loc_row_dict = None
-        if stock_code in df.index:
-            try:
-                lr = df.loc[stock_code]
-                loc_row_dict = lr.to_dict() if hasattr(lr, "to_dict") else lr.iloc[0].to_dict()
-            except Exception:
-                pass
-        else:
-            try:
-                c_int = int(stock_code)
-                if c_int in df.index:
-                    lr = df.loc[c_int]
-                    loc_row_dict = lr.to_dict() if hasattr(lr, "to_dict") else lr.iloc[0].to_dict()
-            except Exception:
-                pass
-        if loc_row_dict is None and '代码' in df.columns:
-            try:
-                sub = df[df['代码'].astype(str).str.zfill(6) == stock_code]
-                if not sub.empty:
-                    loc_row_dict = sub.iloc[0].to_dict()
-            except Exception:
-                pass
-
-        if loc_row_dict:
-            for k, v in loc_row_dict.items():
-                if v is None or pd.isna(v):
+            limit = min(10, max(0, int(policy.get("auto_popup_limit", 10))))
+            expr = policy.get("filter_expr", "close > high4")
+            if not policy.get("filter_enabled", True) or not expr or not expr.strip():
+                results.put(([], [], limit, None))
+                return
+            ctx = {k: v.copy(deep=True) if isinstance(v, pd.DataFrame) else v
+                   for k, v in sources.items()}
+            data = source_data.copy(deep=True) if source_data is not None else None
+            if data is None or data.empty:
+                data = _get_stock_changes(h_enabled=False, h_query="")
+            if data is None or data.empty:
+                data = ctx.get("global_top")
+            if data is None or data.empty:
+                data = ctx.get("realdatadf")
+            events = {}
+            if data is not None and not data.empty:
+                key = next((c for c in ("代码", "code") if c in data.columns), None)
+                rows = data.copy()
+                rows.index = (rows[key] if key else rows.index).map(lambda c: str(c).strip().zfill(6))
+                events = rows[~rows.index.duplicated(keep="first")].to_dict("index")
+            blacklist = load_popup_blacklist()
+            dismissed = get_daily_dismissed_stocks()
+            candidates = [c for c in events if c not in monitors and c not in blacklist and c not in dismissed]
+            if not force_work_time:
+                candidates = candidates[:100]
+            alerts, popups = [], []
+            for code in list(monitors) + candidates:
+                if code not in monitors and (not popup_allowed or not policy.get("auto_popup_enabled", True)):
                     continue
-                if k in ['close', '价格', '现价', 'now', 'nclose', 'percent', '涨幅', 'pct', 'pct_chg', 'vol', '量', 'volume']:
-                    try:
-                        if float(v) == 0.0 and float(row_dict.get(k, 0.0)) > 0:
-                            continue
-                    except Exception:
-                        pass
-                row_dict[k] = v
-
-        # 策略求值
-        is_hit = False
-        if filter_expr == "close > high4" and "high4" not in row_dict:
-            c_val = row_dict.get(filterclose, row_dict.get("close", 0))
-            h_val = row_dict.get(filterhigh4, 0)
-            try:
-                if float(c_val) > float(h_val) and float(h_val) > 0:
-                    is_hit = True
-            except Exception:
-                pass
-        else:
-            is_hit = eval_rearrange_condition(filter_expr, row_dict)
-
-        if is_hit:
-            win = win_info.get("toplevel")
-            if win and win.winfo_exists():
-                if not hasattr(win, "_alter_tdx") or win.cget("bg") != "red":
-                    win._alter_tdx = True
-                    logger.info(f"🎯 [POLICY_ALERT] 监控窗口 {stock_code} 命中策略 '{filter_expr}'，触发闪红报警")
-                    trigger_monitor_flash(win_info)
-                    shake_window(win)
-
-    # 3. 检查未打开的小窗口：自动弹出新标的 (严格限额最多 auto_popup_limit 只，硬性熔断保护)
-    if auto_popup_enabled and (force_work_time or get_work_time()):
-        # 统计当前存活的带 _auto_popup 标记的小窗口数量
-        alive_auto_popups = [
-            c for c, w_item in monitor_windows.items()
-            if hasattr(w_item.get("toplevel"), "_auto_popup") and getattr(w_item.get("toplevel"), "_auto_popup")
-        ]
-
-        # [🚀 绝对熔断] 只要当前存活自动弹出窗口已达上限（如10只），坚决直接返回，不创建任何新窗口
-        if len(alive_auto_popups) >= auto_popup_limit:
-            return
-
-        remaining_slots = auto_popup_limit - len(alive_auto_popups)
-        created_count = 0
-
-        # [🚀 核心修复] 提取全部候选股票代码列表并去重，避免整数索引被错误转为 000000，且不漏掉 head(50) 之后的股票
-        candidate_codes = []
-        if '代码' in df.columns:
-            candidate_codes = [str(c).strip().zfill(6) for c in df['代码'].dropna().unique() if str(c).strip()]
-        elif 'code' in df.columns:
-            candidate_codes = [str(c).strip().zfill(6) for c in df['code'].dropna().unique() if str(c).strip()]
-        else:
-            candidate_codes = [str(idx).strip().zfill(6) for idx in df.index if str(idx).strip().isdigit()]
-
-        # 过滤掉已经打开监控窗口的标的、永久黑名单标的以及今日被手动关闭淘汰的标的
-        popup_bl_map = load_popup_blacklist()
-        daily_dismissed_set = get_daily_dismissed_stocks()
-        unmonitored_codes = [
-            c for c in candidate_codes 
-            if c not in monitor_windows and c not in popup_bl_map and c not in daily_dismissed_set
-        ]
-
-        # [🚀 极限性能保护] 盘中实盘模式下，候选池优先检查最新 100 只活跃标的，杜绝数千条全天历史扫描阻塞主线程
-        if not force_work_time and len(unmonitored_codes) > 100:
-            unmonitored_codes = unmonitored_codes[:100]
-
-        # [🚀 毫秒级向量化提取] 彻底废除慢速 iterrows，耗时从 1800ms 降至 2ms
-        df_by_code = {}
-        if '代码' in df.columns and unmonitored_codes:
-            try:
-                unmon_set = set(unmonitored_codes)
-                df_sub = df[df['代码'].astype(str).str.strip().str.zfill(6).isin(unmon_set)]
-                if not df_sub.empty:
-                    df_u = df_sub.drop_duplicates(subset=['代码'], keep='first')
-                    df_by_code = {
-                        str(k).strip().zfill(6): v 
-                        for k, v in df_u.set_index('代码').to_dict(orient='index').items()
-                    }
-            except Exception as e_vec:
-                logger.debug(f"向量化提取异动映射失败: {e_vec}")
-
-        # [🚀 批量上下文快照] 一次性加载全市场快照，单次扫描纯内存哈希查询，杜绝重复磁盘/网络I/O
-        eval_ctx = get_bulk_eval_context()
-
-        for code_str in unmonitored_codes:
-            # [🚀 严格限额] 达到配额立即强制终止循环，绝不多弹一个
-            if len(alive_auto_popups) >= auto_popup_limit or created_count >= remaining_slots:
-                break
-
-            r_dict = get_stock_eval_dict(code_str, context=eval_ctx)
-
-            # 合并异动事件字段（严格防 0 覆盖原则）
-            evt_dict = df_by_code.get(code_str)
-            if evt_dict is None:
-                if code_str in df.index:
-                    try:
-                        loc_row = df.loc[code_str]
-                        evt_dict = loc_row.to_dict() if hasattr(loc_row, "to_dict") else loc_row.iloc[0].to_dict()
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        c_int = int(code_str)
-                        if c_int in df.index:
-                            loc_row = df.loc[c_int]
-                            evt_dict = loc_row.to_dict() if hasattr(loc_row, "to_dict") else loc_row.iloc[0].to_dict()
-                    except Exception:
-                        pass
-
-            if evt_dict:
-                for k, v in evt_dict.items():
+                values = get_stock_eval_dict(code, context=ctx)
+                for k, v in events.get(code, {}).items():
                     if v is None or pd.isna(v):
                         continue
-                    if k in ['close', '价格', '现价', 'now', 'nclose', 'percent', '涨幅', 'pct', 'pct_chg', 'vol', '量', 'volume']:
+                    if k in ('close', '价格', '现价', 'now', 'nclose', 'percent', '涨幅', 'pct', 'pct_chg', 'vol', '量', 'volume'):
                         try:
-                            if float(v) == 0.0 and float(r_dict.get(k, 0.0)) > 0:
+                            if float(v) == 0 and float(values.get(k, 0)) > 0:
                                 continue
-                        except Exception:
+                        except (ValueError, TypeError):
                             pass
-                    r_dict[k] = v
-
-            hit_new = False
-            if filter_expr == "close > high4" and "high4" not in r_dict:
-                c_val = r_dict.get(filterclose, r_dict.get("close", 0))
-                h_val = r_dict.get(filterhigh4, 0)
-                try:
-                    if float(c_val) > float(h_val) and float(h_val) > 0:
-                        hit_new = True
-                except Exception:
-                    pass
-            else:
-                hit_new = eval_rearrange_condition(filter_expr, r_dict)
-
-            if hit_new:
-                # 再次强校验限额
-                if len(alive_auto_popups) >= auto_popup_limit or created_count >= remaining_slots:
-                    break
-
-                # 预扣配额，杜绝任何异常死循环击穿限额
-                created_count += 1
-                alive_auto_popups.append(code_str)
-
-                name_str = r_dict.get('name', r_dict.get('名称', code_str))
-                pct_val = float(r_dict.get('percent', r_dict.get('涨幅', 0.0)))
-                close_val = float(r_dict.get('close', r_dict.get('现价', 0.0)))
-                vol_val = float(r_dict.get('vol', r_dict.get('量', 0.0)))
-                c_time_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-                new_s_info = [code_str, name_str, 1, 1.0, pct_val, close_val, vol_val, c_time_str]
-
-                try:
-                    create_monitor_window(new_s_info)
-                    new_win_info = monitor_windows.get(code_str)
-                    if new_win_info and "toplevel" in new_win_info:
-                        pop_win = new_win_info["toplevel"]
-                        pop_win._auto_popup = True   # 打上自动弹出分组标记
-                        pop_win._alter_tdx = True    # 打上红底标记
-                        trigger_monitor_flash(new_win_info)
-                        shake_window(pop_win)
-                        logger.info(f"🚀 [AUTO_POPUP] 未监控标的 {code_str} {name_str} 命中策略 '{filter_expr}'，自动弹出新监控小窗口 ({len(alive_auto_popups)}/{auto_popup_limit})")
-                except Exception as e_create:
-                    logger.error(f"自动创建监控窗口失败 ({code_str}): {e_create}")
-                    # 发生异常时，安全清理残留孤儿半成品窗口，绝不留在桌面上
-                    try:
-                        bad_info = monitor_windows.get(code_str)
-                        if bad_info and "toplevel" in bad_info:
-                            bw = bad_info["toplevel"]
-                            if bw and hasattr(bw, "winfo_exists") and bw.winfo_exists():
-                                bw.destroy()
-                        if code_str in monitor_windows:
-                            del monitor_windows[code_str]
-                    except Exception:
-                        pass
-
-        # [🚀 自动排列至特定区域] 本轮若有新自动弹出的窗口，利用事件循环空闲帧 (after_idle) 平滑重排至右下角分流区，杜绝掉帧假死
-        if created_count > 0:
-            try:
-                logger.info(f"🚀 [AUTO_POPUP] 本轮新增自动弹出 {created_count} 个报警监控窗口，分帧自动触发重排并定位至特定报警区域(右下角)")
-                if 'root' in globals() and root and hasattr(root, "after_idle"):
-                    root.after_idle(rearrange_monitors_per_screen)
+                    values[k] = v
+                if expr == "close > high4" and "high4" not in values:
+                    hit = float(values.get(filterclose, values.get("close", 0))) > float(values.get(filterhigh4, 0)) > 0
                 else:
-                    rearrange_monitors_per_screen()
-            except Exception as e_arr:
-                logger.error(f"自动弹出后重排失败: {e_arr}")
+                    hit = eval_rearrange_condition(expr, values)
+                if not hit:
+                    continue
+                if code in monitors:
+                    alerts.append(code)
+                elif len(popups) < limit:
+                    popups.append((code, values))
+                if code not in monitors and len(popups) >= limit:
+                    break
+            results.put((alerts, popups, limit, None))
+        except Exception as exc:
+            logger.exception("后台异动扫描失败")
+            results.put(([], [], 10, str(exc)))
+
+    created = 0
+
+    def finish(limit, error=None):
+        global _popup_scan_busy
+        _popup_scan_busy = False
+        if created:
+            root.after_idle(rearrange_monitors_per_screen)
+        if _on_complete:
+            _on_complete(created, len(alive_codes()), limit, error)
+
+    def apply_next(actions, limit, error):
+        nonlocal created
+        try:
+            if blacklist_revision != _popup_blacklist_revision:
+                finish(limit, "黑名单已更改，请重新扫描")
+                return
+            if datetime.now().strftime("%Y-%m-%d") != scan_date:
+                finish(limit, "扫描已跨日，请重新扫描")
+                return
+            if not actions:
+                finish(limit, error)
+                return
+            code, values = actions.pop(0)
+            if values is None:
+                info = monitor_windows.get(code)
+                win = info.get("toplevel") if info else None
+                if win and win.winfo_exists() and (not getattr(win, "_alter_tdx", False) or win.cget("bg") != "red"):
+                    win._alter_tdx = True
+                    trigger_monitor_flash(info)
+                    shake_window(win)
+            elif (code not in monitor_windows and len(alive_codes()) < limit
+                  and (force_work_time or get_work_time())
+                  and code not in get_daily_dismissed_stocks()):
+                info = [code, values.get('name', values.get('名称', code)), 1, 1.0,
+                        float(values.get('percent', values.get('涨幅', 0)) or 0),
+                        float(values.get('close', values.get('现价', 0)) or 0),
+                        float(values.get('vol', values.get('量', 0)) or 0),
+                        datetime.now().strftime("%Y-%m-%d %H:%M")]
+                try:
+                    create_monitor_window(info)
+                    win_info = monitor_windows.get(code)
+                    if win_info:
+                        win = win_info['toplevel']
+                        win._auto_popup_date = scan_date
+                        win._auto_popup = True
+                        win._alter_tdx = True
+                        created += 1
+                        trigger_monitor_flash(win_info)
+                        shake_window(win)
+                except Exception:
+                    logger.exception("自动创建监控窗口失败: %s", code)
+                    bad = monitor_windows.pop(code, None)
+                    if bad and bad.get('toplevel'):
+                        bad['toplevel'].destroy()
+            root.after(20, lambda: apply_next(actions, limit, error))
+        except Exception as exc:
+            logger.exception("应用异动扫描结果失败")
+            finish(limit, str(exc))
+
+    def poll():
+        try:
+            alerts, popups, limit, error = results.get_nowait()
+        except queue.Empty:
+            root.after(50, poll)
+            return
+        apply_next([(c, None) for c in alerts] + popups, limit, error)
+
+    try:
+        threading.Thread(target=worker, daemon=True, name="PopupScanWorker").start()
+        root.after(50, poll)
+    except Exception as exc:
+        logger.exception("启动异动扫描失败")
+        finish(10, str(exc))
 
 
 def refresh_all_stock_data():
