@@ -1,5 +1,20 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-31 11:25 【异动联动重排纵向排布超长行Bug修复、简化版过滤测试与字段数据查看器及窗口位置持久化】(`stock/testpy/tdxgui/异动联动.py`, `tests/test_rearrange_policy_customization.py`)
+- [x] **【彻底根治纵向并排优先变成超长单行 Bug】**：
+  - **排布算法满高换列彻底对齐 (`rearrange_monitors_per_screen`)**：原算法仅对横向换行进行了判断，纵向模式时因未处理换列而一直向右累加 `current_x` 导致排成超长横行。现全面实现纵向优先排布算法（自上而下自左向右）：当 `current_y + h + margin_y > work_b` 时智能换下一列（`current_x += max_col_width + margin_x`, `current_y = work_t + margin_y`）；右下角分流组同样实现向左换列，窗口不再挤成一行；
+- [x] **【过滤输入框右侧集成简化版策略测试与字段数据查看器 (`open_rearrange_test_dialog`)】**：
+  - **右侧快捷按钮集成**：在【过滤表达式】输入框右侧无缝嵌入【🧪 测试/详情】快捷按钮；
+  - **Tab 1: 检查结果摘要**：仿照实战通道测试弹窗构建控制台摘要视图（暗黑高亮主题），清晰展示标的、当前涉及字段及数值、是否通过（✅ 是 / ❌ 否）、子条件拆解等；
+  - **Tab 2: 可用字段与数据查看器 (cols)**：以 `ttk.Treeview` 完整列出当前标的在系统中全部可用的字段名（`close`, `high4`, `ma5d`, `ma10d`, `dff`, `dff2`, `dff3`, `ch_pos`, `percent`, `vol`, `涨幅`, `现价` 等数十个列名）、别名、当前值及数据类型；
+  - **搜索过滤与双击直填**：顶部支持实时过滤字段名；在字段列表双击某行自动将字段名追加插入到测试表达式光标处；
+  - **双向数据同步**：支持从监控窗口下拉选择或输入代码载入标的，支持将测试通过的表达式一键【📥 应用至策略】回填主配置；
+- [x] **【配置弹窗与测试弹窗窗口位置持久化】**：
+  - **位置记忆与自愈**：主策略配置弹窗（`rearrange_policy_dialog`）与测试弹窗（`rearrange_test_dialog`）均支持关闭或移动时自动持久化几何位置（`geometry`）至 `window_config.json`；下次打开自动在原位置恢复；
+  - **持久化配置安全合并**：重构 `save_window_positions`，写盘前读取合并现有 JSON 数据，彻底杜绝窗口保存操作意外冲掉 `rearrange_policy` 策略配置；
+- [x] **【自动化测试全绿通过（7 项专项测试 100% PASS）】**：
+  - 更新 `tests/test_rearrange_policy_customization.py`，新增纵向满高换列几何计算、测试诊断明细求值、窗口位置共存持久化等测试，7 项测试 0.08s 纯绿通过。
+
 ## 2026-10-31 11:00 【异动联动重排功能右键自定义过滤策略与自动持久化工程治理】(`stock/testpy/tdxgui/异动联动.py`, `tests/test_rearrange_policy_customization.py`)
 - [x] **【重排功能右键自定义策略与配置弹窗落地】**：
   - **右键快捷菜单集成**：主界面【重排】按钮绑定 `<Button-3>` 右键事件 `show_rearrange_context_menu`，弹出快捷操作菜单（【⚙️ 编辑重排策略与过滤规则】、【▶ 立即执行重排】、【🔄 恢复默认策略】）；

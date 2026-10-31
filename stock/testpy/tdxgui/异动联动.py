@@ -3624,27 +3624,442 @@ def eval_rearrange_condition(expr, row_dict):
     except Exception as e:
         return False
 
+def get_stock_eval_dict(code_str):
+    """根据股票代码获取其用于评估和查看的全部可用字段数据字典"""
+    code_str = str(code_str).strip().zfill(6)
+    row_dict = {}
+    
+    # 1. 尝试从 GLOBAL_TOP_ALL 取
+    global GLOBAL_TOP_ALL
+    if 'GLOBAL_TOP_ALL' in globals() and GLOBAL_TOP_ALL is not None and not GLOBAL_TOP_ALL.empty:
+        idx_match = code_str
+        if idx_match not in GLOBAL_TOP_ALL.index:
+            try: idx_match = int(code_str)
+            except Exception: pass
+        if idx_match in GLOBAL_TOP_ALL.index:
+            try:
+                row = GLOBAL_TOP_ALL.loc[idx_match]
+                if hasattr(row, "to_dict"):
+                    row_dict.update(row.to_dict())
+                elif isinstance(row, pd.DataFrame) and not row.empty:
+                    row_dict.update(row.iloc[0].to_dict())
+            except Exception:
+                pass
+
+    # 2. 尝试从 monitor_windows 取实时窗口补充
+    global monitor_windows
+    if monitor_windows and code_str in monitor_windows:
+        info = monitor_windows[code_str]
+        if "stock_info" in info and info["stock_info"]:
+            s_info = info["stock_info"]
+            try:
+                row_dict["code"] = str(s_info[0])
+                row_dict["name"] = str(s_info[1])
+                row_dict["cour"] = float(s_info[2])
+                row_dict["ch_bc"] = float(s_info[3])
+                row_dict["percent"] = float(s_info[4])
+                row_dict["price"] = float(s_info[5])
+                row_dict["close"] = float(s_info[5])
+                row_dict["vol"] = float(s_info[6])
+                row_dict["time"] = str(s_info[-1])
+            except Exception:
+                pass
+
+    # 3. 注入双向别名
+    aliases = {
+        '涨幅': ['percent', 'pct_chg'],
+        'percent': ['涨幅'],
+        '现价': ['close', 'price'],
+        '价格': ['close', 'price'],
+        'close': ['现价', '价格', 'price'],
+        'price': ['现价', '价格', 'close'],
+        '量': ['vol', 'volume'],
+        '成交量': ['vol', 'volume'],
+        'vol': ['量', '成交量', 'volume'],
+        'volume': ['量', '成交量', 'vol'],
+        'high4': ['前高4', 'h4'],
+    }
+    for k, v in list(row_dict.items()):
+        if k in aliases:
+            for target_alias in aliases[k]:
+                if target_alias not in row_dict:
+                    row_dict[target_alias] = v
+
+    return row_dict
+
+def evaluate_condition_detail(expr, row_dict):
+    """安全评估重排过滤策略表达式并返回详细测试报告"""
+    if not expr or not expr.strip():
+        return False, "❌ 过滤表达式为空", {}, []
+    expr = expr.strip()
+    aliases = {
+        '涨幅': ['percent', 'pct_chg'],
+        'percent': ['涨幅'],
+        '现价': ['close', 'price'],
+        '价格': ['close', 'price'],
+        'close': ['现价', '价格', 'price'],
+        'price': ['现价', '价格', 'close'],
+        '量': ['vol', 'volume'],
+        '成交量': ['vol', 'volume'],
+        'vol': ['量', '成交量', 'volume'],
+        'volume': ['量', '成交量', 'vol'],
+        'high4': ['前高4', 'h4'],
+    }
+    eval_scope = {}
+    for k, v in row_dict.items():
+        if v is not None and not (isinstance(v, float) and np.isnan(v)):
+            eval_scope[str(k)] = v
+            if k in aliases:
+                for target_alias in aliases[k]:
+                    if target_alias not in eval_scope:
+                        eval_scope[target_alias] = v
+    for default_key in ('close', 'high4', 'percent', 'price', 'vol', 'dff', 'dff2', 'rank', '涨幅', '现价', '价格', '量', '成交量'):
+        if default_key not in eval_scope:
+            eval_scope[default_key] = 0.0
+
+    import re
+    # 提取涉及变量
+    tokens = re.findall(r'[a-zA-Z_一-龥][a-zA-Z0-9_一-龥]*', expr)
+    keywords = {'and', 'or', 'not', 'in', 'is', 'True', 'False', 'None'}
+    involved_vars = {}
+    for t in tokens:
+        if t not in keywords and t in eval_scope:
+            involved_vars[t] = eval_scope[t]
+
+    # 子条件拆解
+    sub_conditions = []
+    parts = re.split(r'\s+(?:and|or)\s+', expr)
+    for p in parts:
+        p_clean = p.strip().strip("()")
+        if p_clean:
+            try:
+                sub_res = bool(eval(p_clean, {"__builtins__": {}}, eval_scope))
+                sub_conditions.append((p_clean, sub_res, None))
+            except Exception as ex:
+                sub_conditions.append((p_clean, False, str(ex)))
+
+    try:
+        total_res = bool(eval(expr, {"__builtins__": {}}, eval_scope))
+        return total_res, None, involved_vars, sub_conditions
+    except Exception as e:
+        return False, str(e), involved_vars, sub_conditions
+
+def open_rearrange_test_dialog(parent_win=None, var_parent_expr=None):
+    """
+    [🚀 新增] 重排策略过滤测试与可用字段数据查看弹窗 (简化版，支持窗口位置持久化)
+    """
+    global WINDOW_GEOMETRIES
+    test_win = tk.Toplevel(parent_win or root)
+    test_win.title("🧪 重排策略过滤测试与字段数据查看")
+    
+    # 窗口位置恢复与持久化
+    saved_geo = WINDOW_GEOMETRIES.get("rearrange_test_dialog")
+    if saved_geo:
+        try:
+            test_win.geometry(saved_geo)
+        except Exception:
+            test_win.geometry("700x560")
+    else:
+        test_win.geometry("700x560")
+        try:
+            test_win.update_idletasks()
+            pw = parent_win or root
+            x = pw.winfo_x() + (pw.winfo_width() - 700) // 2
+            y = pw.winfo_y() + (pw.winfo_height() - 560) // 2
+            test_win.geometry(f"+{max(0, x)}+{max(0, y)}")
+        except Exception:
+            pass
+
+    if hasattr(test_win, "transient"):
+        test_win.transient(parent_win or root)
+
+    def on_close_test_win(event=None):
+        try:
+            WINDOW_GEOMETRIES["rearrange_test_dialog"] = test_win.geometry()
+            schedule_save_positions()
+        except Exception:
+            pass
+        test_win.destroy()
+
+    test_win.protocol("WM_DELETE_WINDOW", on_close_test_win)
+    test_win.bind("<Escape>", on_close_test_win)
+
+    # 顶层布局
+    top_frame = ttk.Frame(test_win, padding=(10, 8, 10, 4))
+    top_frame.pack(fill=tk.X)
+
+    # 标的选择
+    ttk.Label(top_frame, text="股票标的:").pack(side=tk.LEFT)
+    stock_options = []
+    global monitor_windows
+    if monitor_windows:
+        for c, info in monitor_windows.items():
+            name = info.get("stock_info", ["", ""])[1] if "stock_info" in info else ""
+            stock_options.append(f"{c} {name}".strip())
+    if not stock_options:
+        global GLOBAL_TOP_ALL
+        if 'GLOBAL_TOP_ALL' in globals() and GLOBAL_TOP_ALL is not None and not GLOBAL_TOP_ALL.empty:
+            for c in GLOBAL_TOP_ALL.index[:10]:
+                stock_options.append(str(c).zfill(6))
+    if not stock_options:
+        stock_options = ["600688 上海石化", "002526 山东矿机", "000001 平安银行"]
+
+    var_stock = tk.StringVar(value=stock_options[0] if stock_options else "")
+    combo_stock = ttk.Combobox(top_frame, values=stock_options, textvariable=var_stock, width=22)
+    combo_stock.pack(side=tk.LEFT, padx=(4, 8))
+
+    ttk.Label(top_frame, text="或输入代码:").pack(side=tk.LEFT)
+    var_custom_code = tk.StringVar()
+    entry_code = ttk.Entry(top_frame, textvariable=var_custom_code, width=10)
+    entry_code.pack(side=tk.LEFT, padx=(2, 6))
+
+    btn_fetch = ttk.Button(top_frame, text="🔄 载入数据")
+    btn_fetch.pack(side=tk.LEFT, padx=2)
+
+    # 测试表达式输入与控制
+    expr_frame = ttk.Frame(test_win, padding=(10, 4, 10, 6))
+    expr_frame.pack(fill=tk.X)
+
+    ttk.Label(expr_frame, text="测试表达式:").pack(side=tk.LEFT)
+    initial_expr = var_parent_expr.get() if var_parent_expr else "close > high4"
+    var_test_expr = tk.StringVar(value=initial_expr)
+    entry_test_expr = ttk.Entry(expr_frame, textvariable=var_test_expr, width=36)
+    entry_test_expr.pack(side=tk.LEFT, padx=(4, 6), fill=tk.X, expand=True)
+
+    btn_run = ttk.Button(expr_frame, text="▶ 执行测试")
+    btn_run.pack(side=tk.LEFT, padx=3)
+
+    def sync_to_parent():
+        if var_parent_expr:
+            var_parent_expr.set(var_test_expr.get().strip())
+            toast_message(test_win, "已同步到重排策略过滤表达式！")
+
+    btn_sync = ttk.Button(expr_frame, text="📥 同步至策略", command=sync_to_parent)
+    btn_sync.pack(side=tk.LEFT, padx=3)
+
+    # 中部 Tab 视图 (结果摘要 / 所有可用字段)
+    nb = ttk.Notebook(test_win)
+    nb.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
+
+    # Tab 1: 结果摘要
+    tab_summary = ttk.Frame(nb)
+    nb.add(tab_summary, text=" 📋 检查结果摘要 ")
+
+    txt_summary = tk.Text(tab_summary, wrap=tk.WORD, bg="#12131a", fg="#e2e2e5",
+                          insertbackground="#ffffff", selectbackground="#264f78",
+                          font=("Consolas", 10))
+    scroll_txt = ttk.Scrollbar(tab_summary, orient=tk.VERTICAL, command=txt_summary.yview)
+    txt_summary.configure(yscrollcommand=scroll_txt.set)
+    txt_summary.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    scroll_txt.pack(side=tk.RIGHT, fill=tk.Y)
+
+    # 配置高亮标签
+    txt_summary.tag_config("title", foreground="#58a6ff", font=("Consolas", 10, "bold"))
+    txt_summary.tag_config("pass", foreground="#3fb950", font=("Consolas", 10, "bold"))
+    txt_summary.tag_config("fail", foreground="#f85149", font=("Consolas", 10, "bold"))
+    txt_summary.tag_config("var_key", foreground="#d2a8ff")
+    txt_summary.tag_config("var_val", foreground="#79c0ff")
+    txt_summary.tag_config("sub_ok", foreground="#3fb950")
+    txt_summary.tag_config("sub_fail", foreground="#f85149")
+
+    # Tab 2: 字段与数据详情
+    tab_cols = ttk.Frame(nb)
+    nb.add(tab_cols, text=" 📊 可用字段与数据查看 (cols) ")
+
+    col_filter_frame = ttk.Frame(tab_cols, padding=(4, 4, 4, 4))
+    col_filter_frame.pack(fill=tk.X)
+    ttk.Label(col_filter_frame, text="🔍 过滤字段名:").pack(side=tk.LEFT)
+    var_col_filter = tk.StringVar()
+    entry_col_filter = ttk.Entry(col_filter_frame, textvariable=var_col_filter, width=20)
+    entry_col_filter.pack(side=tk.LEFT, padx=4)
+    ttk.Label(col_filter_frame, text="💡 提示: 双击字段行可直接插入到测试表达式",
+              foreground="#888888", font=("Microsoft YaHei", 8)).pack(side=tk.LEFT, padx=6)
+
+    tree_cols = ttk.Treeview(tab_cols, columns=("col", "alias", "val", "type"), show="headings", height=12)
+    tree_cols.heading("col", text="字段名 (col)")
+    tree_cols.heading("alias", text="别名 / 描述")
+    tree_cols.heading("val", text="当前数值 (value)")
+    tree_cols.heading("type", text="数据类型")
+    tree_cols.column("col", width=160, anchor="w")
+    tree_cols.column("alias", width=140, anchor="w")
+    tree_cols.column("val", width=160, anchor="w")
+    tree_cols.column("type", width=90, anchor="center")
+
+    scroll_tree = ttk.Scrollbar(tab_cols, orient=tk.VERTICAL, command=tree_cols.yview)
+    tree_cols.configure(yscrollcommand=scroll_tree.set)
+    tree_cols.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    scroll_tree.pack(side=tk.RIGHT, fill=tk.Y)
+
+    # 双击字段行插入到表达式
+    def on_tree_double_click(event):
+        sel = tree_cols.selection()
+        if sel:
+            item = tree_cols.item(sel[0])
+            col_name = item["values"][0]
+            current_text = var_test_expr.get()
+            if current_text:
+                var_test_expr.set(current_text + " " + col_name)
+            else:
+                var_test_expr.set(col_name)
+            entry_test_expr.focus_set()
+            entry_test_expr.icursor(tk.END)
+
+    tree_cols.bind("<Double-Button-1>", on_tree_double_click)
+
+    # 当前缓存的数据字典
+    cached_row_dict = {}
+
+    def get_selected_code():
+        custom = var_custom_code.get().strip()
+        if custom:
+            return custom.zfill(6)
+        combo_val = var_stock.get().strip()
+        if combo_val:
+            parts = combo_val.split()
+            return parts[0].zfill(6)
+        return "600688"
+
+    def refresh_data_and_test(event=None):
+        nonlocal cached_row_dict
+        code = get_selected_code()
+        cached_row_dict = get_stock_eval_dict(code)
+        
+        # 刷新 Tab 2 字段表格
+        refresh_col_tree()
+        # 执行测试并刷新 Tab 1
+        run_test_eval()
+
+    def refresh_col_tree(event=None):
+        tree_cols.delete(*tree_cols.get_children())
+        filter_str = var_col_filter.get().strip().lower()
+        alias_map = {
+            "percent": "涨幅(%)", "涨幅": "percent", "close": "现价/收盘价", "现价": "close",
+            "price": "价格", "high4": "前高4日最高价", "vol": "成交量", "volume": "成交量",
+            "cour": "异动次数", "ch_bc": "异动强度", "dff": "DFF差值", "dff2": "DFF2指标",
+            "rank": "行业/板块排名", "time": "最新时间", "code": "股票代码", "name": "股票名称"
+        }
+        for k in sorted(cached_row_dict.keys(), key=lambda x: str(x)):
+            k_str = str(k)
+            if filter_str and (filter_str not in k_str.lower() and filter_str not in str(alias_map.get(k, "")).lower()):
+                continue
+            v = cached_row_dict[k]
+            v_str = f"{v:.4f}" if isinstance(v, float) else str(v)
+            t_str = type(v).__name__
+            alias_desc = alias_map.get(k, "-")
+            tree_cols.insert("", tk.END, values=(k_str, alias_desc, v_str, t_str))
+
+    entry_col_filter.bind("<KeyRelease>", refresh_col_tree)
+
+    def run_test_eval(event=None):
+        expr = var_test_expr.get().strip()
+        code = get_selected_code()
+        name = cached_row_dict.get("name", "")
+        close_val = cached_row_dict.get("close", cached_row_dict.get("现价", "-"))
+        pct_val = cached_row_dict.get("percent", cached_row_dict.get("涨幅", "-"))
+
+        total_pass, err_msg, inv_vars, sub_conds = evaluate_condition_detail(expr, cached_row_dict)
+
+        txt_summary.delete("1.0", tk.END)
+        txt_summary.insert(tk.END, "[ 检查结果摘要 ]\n", "title")
+        txt_summary.insert(tk.END, f"股票: {code} {name}  (最新价: {close_val}, 涨幅: {pct_val}%)\n")
+        txt_summary.insert(tk.END, "=" * 60 + "\n")
+        txt_summary.insert(tk.END, f"测试表达式: {expr}\n")
+        if err_msg:
+            txt_summary.insert(tk.END, f"求值状态: {err_msg}\n", "fail")
+        else:
+            if total_pass:
+                txt_summary.insert(tk.END, "是否通过: ✅ 是 (命中重排策略分流，排在右下角红底)\n", "pass")
+            else:
+                txt_summary.insert(tk.END, "是否通过: ❌ 否 (未命中过滤条件，按常规排布)\n", "fail")
+        
+        txt_summary.insert(tk.END, "-" * 60 + "\n")
+        txt_summary.insert(tk.END, "当前涉及字段及数值:\n")
+        if inv_vars:
+            for vk, vv in inv_vars.items():
+                txt_summary.insert(tk.END, f"  - ")
+                txt_summary.insert(tk.END, f"{vk}: ", "var_key")
+                txt_summary.insert(tk.END, f"{vv}\n", "var_val")
+        else:
+            txt_summary.insert(tk.END, "  (无涉及变量或变量未定义)\n")
+
+        txt_summary.insert(tk.END, "\n子条件拆解求值明细:\n")
+        if sub_conds:
+            for sub_p, sub_ok, sub_err in sub_conds:
+                if sub_err:
+                    txt_summary.insert(tk.END, f"  ❌ {sub_p}  ->  {sub_err}\n", "sub_fail")
+                elif sub_ok:
+                    txt_summary.insert(tk.END, f"  ✔ {sub_p}  ->  [True]\n", "sub_ok")
+                else:
+                    txt_summary.insert(tk.END, f"  ✖ {sub_p}  ->  [False]\n", "sub_fail")
+        else:
+            txt_summary.insert(tk.END, "  (单项条件)\n")
+        
+        txt_summary.insert(tk.END, "=" * 60 + "\n")
+        txt_summary.insert(tk.END, f"提示: 点击上方 [ 📊 可用字段与数据查看 ] 标签页可查看当前股票全部可用列\n")
+
+    btn_fetch.config(command=refresh_data_and_test)
+    btn_run.config(command=run_test_eval)
+    combo_stock.bind("<<ComboboxSelected>>", refresh_data_and_test)
+    entry_code.bind("<Return>", refresh_data_and_test)
+    entry_test_expr.bind("<Return>", run_test_eval)
+
+    # 底部操作栏
+    bottom_frame = ttk.Frame(test_win, padding=(10, 6, 10, 8))
+    bottom_frame.pack(fill=tk.X)
+
+    btn_close = ttk.Button(bottom_frame, text="关闭窗口 (Esc)", command=on_close_test_win)
+    btn_close.pack(side=tk.RIGHT, padx=4)
+
+    btn_view_cols = ttk.Button(bottom_frame, text="📊 查看全部字段 (cols)", command=lambda: nb.select(tab_cols))
+    btn_view_cols.pack(side=tk.LEFT, padx=4)
+
+    btn_apply = ttk.Button(bottom_frame, text="📥 应用至策略并关闭", command=lambda: [sync_to_parent(), on_close_test_win()])
+    btn_apply.pack(side=tk.RIGHT, padx=4)
+
+    # 首次载入数据
+    refresh_data_and_test()
+
 def open_rearrange_policy_dialog(parent_win=None):
-    """打开重排策略与过滤规则编辑配置弹窗"""
+    """打开重排策略与过滤规则编辑配置弹窗 (支持窗口位置记忆与测试功能)"""
+    global WINDOW_GEOMETRIES
     policy = load_rearrange_policy()
     
     win = tk.Toplevel(parent_win or root)
     win.title("⚙️ 重排策略与过滤规则配置")
-    win.geometry("500x420")
+    
+    # [🚀 修复] 窗口位置恢复与持久化支持
+    saved_geo = WINDOW_GEOMETRIES.get("rearrange_policy_dialog")
+    if saved_geo:
+        try:
+            win.geometry(saved_geo)
+        except Exception:
+            win.geometry("560x440")
+    else:
+        win.geometry("560x440")
+        try:
+            win.update_idletasks()
+            pw = parent_win or root
+            x = pw.winfo_x() + (pw.winfo_width() - 560) // 2
+            y = pw.winfo_y() + (pw.winfo_height() - 440) // 2
+            win.geometry(f"+{max(0, x)}+{max(0, y)}")
+        except Exception:
+            pass
+
     win.resizable(False, False)
     if hasattr(win, "transient"):
         win.transient(parent_win or root)
     win.grab_set()
 
-    # 居中显示
-    try:
-        win.update_idletasks()
-        pw = parent_win or root
-        x = pw.winfo_x() + (pw.winfo_width() - 500) // 2
-        y = pw.winfo_y() + (pw.winfo_height() - 420) // 2
-        win.geometry(f"+{max(0, x)}+{max(0, y)}")
-    except Exception:
-        pass
+    def on_close_policy_dialog(event=None):
+        try:
+            WINDOW_GEOMETRIES["rearrange_policy_dialog"] = win.geometry()
+            schedule_save_positions()
+        except Exception:
+            pass
+        win.destroy()
+
+    win.protocol("WM_DELETE_WINDOW", on_close_policy_dialog)
+    win.bind("<Escape>", on_close_policy_dialog)
 
     main_frame = ttk.Frame(win, padding=12)
     main_frame.pack(fill=tk.BOTH, expand=True)
@@ -3662,8 +4077,13 @@ def open_rearrange_policy_dialog(parent_win=None):
     ttk.Label(frame_expr, text="过滤表达式:").pack(side=tk.LEFT)
 
     var_expr = tk.StringVar(value=policy.get("filter_expr", "close > high4"))
-    entry_expr = ttk.Entry(frame_expr, textvariable=var_expr, width=32)
-    entry_expr.pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
+    entry_expr = ttk.Entry(frame_expr, textvariable=var_expr, width=28)
+    entry_expr.pack(side=tk.LEFT, padx=(6, 4), fill=tk.X, expand=True)
+
+    # [🚀 增强] 过滤右侧添加测试功能与可用字段数据查看简化版弹窗
+    btn_test = ttk.Button(frame_expr, text="🧪 测试/详情", width=11,
+                          command=lambda: open_rearrange_test_dialog(win, var_expr))
+    btn_test.pack(side=tk.LEFT, padx=(2, 0))
 
     # 常用预设下拉
     presets = [
@@ -3740,6 +4160,11 @@ def open_rearrange_policy_dialog(parent_win=None):
         }
         save_rearrange_policy(new_policy)
         try:
+            WINDOW_GEOMETRIES["rearrange_policy_dialog"] = win.geometry()
+            schedule_save_positions()
+        except Exception:
+            pass
+        try:
             rearrange_monitors_per_screen()
             toast_message(win, "✅ 策略已保存并完成重新排列！")
         except Exception as e:
@@ -3761,7 +4186,7 @@ def open_rearrange_policy_dialog(parent_win=None):
     btn_reset = ttk.Button(btn_frame, text="🔄 恢复默认", command=reset_default)
     btn_reset.pack(side=tk.RIGHT, padx=4)
 
-    btn_cancel = ttk.Button(btn_frame, text="关闭", command=win.destroy)
+    btn_cancel = ttk.Button(btn_frame, text="关闭", command=on_close_policy_dialog)
     btn_cancel.pack(side=tk.LEFT, padx=4)
 
 def show_rearrange_context_menu(event):
@@ -3968,65 +4393,123 @@ def rearrange_monitors_per_screen(align=None, sort_by=None, layout=None):
         # ======================
         # 左上角排列（normal）
         # ======================
-        current_x = work_l + margin_x
-        current_y = work_t + margin_y
-        max_row_height = 0
+        if layout == "vertical":
+            # 纵向并排：自上而下，满高自动换列
+            current_x = work_l + margin_x
+            current_y = work_t + margin_y
+            max_col_width = 0
 
-        for win_info in normal_group:
-            win = win_info["toplevel"]
-            try:
-                win.update_idletasks()
-                w, h = win.winfo_width(), win.winfo_height()
-                if w < 50 or h < 50:
-                    w, h = 300, 160
+            for win_info in normal_group:
+                win = win_info["toplevel"]
+                try:
+                    win.update_idletasks()
+                    w, h = win.winfo_width(), win.winfo_height()
+                    if w < 50 or h < 50:
+                        w, h = 300, 160
 
-                if layout == "horizontal" and current_x + w + margin_x > work_r:
-                    current_x = work_l + margin_x
-                    current_y += max_row_height + margin_y
-                    max_row_height = 0
+                    # 满高换列：如果超出工作区底部高度，则换到下一列
+                    if current_y + h + margin_y > work_b:
+                        current_x += max_col_width + margin_x
+                        current_y = work_t + margin_y
+                        max_col_width = 0
 
-                win.geometry(f"{w}x{h}+{current_x}+{current_y}")
-                win.configure(bg="SystemButtonFace")
+                    win.geometry(f"{w}x{h}+{current_x}+{current_y}")
+                    win.configure(bg="SystemButtonFace")
 
-                current_x += w + margin_x
-                max_row_height = max(max_row_height, h)
+                    current_y += h + margin_y
+                    max_col_width = max(max_col_width, w)
 
-            except Exception as e:
-                logger.info(f"⚠ 窗口排列失败: {e}")
+                except Exception as e:
+                    logger.info(f"⚠ 窗口排列失败: {e}")
+        else:
+            # 横向并排：自左向右，满宽自动换行
+            current_x = work_l + margin_x
+            current_y = work_t + margin_y
+            max_row_height = 0
+
+            for win_info in normal_group:
+                win = win_info["toplevel"]
+                try:
+                    win.update_idletasks()
+                    w, h = win.winfo_width(), win.winfo_height()
+                    if w < 50 or h < 50:
+                        w, h = 300, 160
+
+                    if current_x + w + margin_x > work_r:
+                        current_x = work_l + margin_x
+                        current_y += max_row_height + margin_y
+                        max_row_height = 0
+
+                    win.geometry(f"{w}x{h}+{current_x}+{current_y}")
+                    win.configure(bg="SystemButtonFace")
+
+                    current_x += w + margin_x
+                    max_row_height = max(max_row_height, h)
+
+                except Exception as e:
+                    logger.info(f"⚠ 窗口排列失败: {e}")
 
         # 右下角排列（alter_group）
         taskbar_height_bottom = get_bottom_taskbar_height()
         current_x = work_r - margin_x
         current_y = work_b - margin_y - taskbar_height_bottom  # 自动上移避开底部任务栏
-        max_row_height = 0
 
-        for win_info in alter_group:
-            win = win_info["toplevel"]
-            try:
-                win.update_idletasks()
-                w, h = win.winfo_width(), win.winfo_height()
-                if w < 50 or h < 50:
-                    w, h = 300, 160
+        if layout == "vertical":
+            # 纵向并排：从右下角自下向上排列，超出顶部则向左换列
+            max_col_width = 0
+            for win_info in alter_group:
+                win = win_info["toplevel"]
+                try:
+                    win.update_idletasks()
+                    w, h = win.winfo_width(), win.winfo_height()
+                    if w < 50 or h < 50:
+                        w, h = 300, 160
 
-                # 横向优先，向左排列
-                if current_x - w - margin_x < work_l:
-                    current_x = work_r - margin_x
-                    current_y -= max_row_height + margin_y
-                    max_row_height = 0
+                    if current_y - h < work_t:
+                        current_x -= max_col_width + margin_x
+                        current_y = work_b - margin_y - taskbar_height_bottom
+                        max_col_width = 0
 
-                # 防止越过顶部
-                if current_y - h < work_t:
-                    break
+                    if current_x - w < work_l:
+                        break
 
-                win.geometry(f"{w}x{h}+{current_x - w}+{current_y - h}")
-                win.configure(bg="red")
-                win._alter_tdx = True
+                    win.geometry(f"{w}x{h}+{current_x - w}+{current_y - h}")
+                    win.configure(bg="red")
+                    win._alter_tdx = True
 
-                current_x -= w + margin_x
-                max_row_height = max(max_row_height, h)
+                    current_y -= h + margin_y
+                    max_col_width = max(max_col_width, w)
 
-            except Exception as e:
-                logger.info(f"⚠ 窗口排列失败: {e}")
+                except Exception as e:
+                    logger.info(f"⚠ 窗口排列失败: {e}")
+        else:
+            # 横向并排：从右下角自右向左排列，超出左边界则向上换行
+            max_row_height = 0
+            for win_info in alter_group:
+                win = win_info["toplevel"]
+                try:
+                    win.update_idletasks()
+                    w, h = win.winfo_width(), win.winfo_height()
+                    if w < 50 or h < 50:
+                        w, h = 300, 160
+
+                    if current_x - w - margin_x < work_l:
+                        current_x = work_r - margin_x
+                        current_y -= max_row_height + margin_y
+                        max_row_height = 0
+
+                    if current_y - h < work_t:
+                        break
+
+                    win.geometry(f"{w}x{h}+{current_x - w}+{current_y - h}")
+                    win.configure(bg="red")
+                    win._alter_tdx = True
+
+                    current_x -= w + margin_x
+                    max_row_height = max(max_row_height, h)
+
+                except Exception as e:
+                    logger.info(f"⚠ 窗口排列失败: {e}")
 
 
 def rearrange_monitors_per_screen_no_bar(align="left", sort_by="create_time", layout="horizontal"):
@@ -7548,10 +8031,15 @@ def save_window_positions():
 
     logger.info(f'save:{WINDOW_GEOMETRIES}')
     try:
-        config_data = {
-            "window_geometries": WINDOW_GEOMETRIES,
-            "column_widths": COLUMN_WIDTHS
-        }
+        config_data = {}
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                    config_data = json.load(f)
+            except Exception:
+                config_data = {}
+        config_data["window_geometries"] = WINDOW_GEOMETRIES
+        config_data["column_widths"] = COLUMN_WIDTHS
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(config_data, f, ensure_ascii=False, indent=4)
         logger.info("所有窗口和列宽配置已保存。")
