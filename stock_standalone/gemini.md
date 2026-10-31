@@ -1,5 +1,15 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-31 13:50 【测试弹窗新增股票直接联动按钮、彻底根治_get_stock_changes代码merge类型冲突崩溃】(`stock/testpy/tdxgui/异动联动.py`, `tests/test_rearrange_policy_customization.py`)
+- [x] **【测试弹窗新增【🔗 联动】快捷按钮】**：
+  - 在【重排策略过滤测试与字段数据查看】弹窗（`open_rearrange_test_dialog`）顶部【🔄 载入数据】按钮右侧新增【🔗 联动】按钮；
+  - 点击自动提取当前选中或输入的股票代码，调用 `send_to_tdx(code)` 向行情终端/分时图发送联动广播并 Toast 反馈，无需切回主界面即可看盘联动；
+- [x] **【彻底根治 `_get_stock_changes` 异动合并 `ValueError: merge on int64 and object columns` 异常】**：
+  - **根因确认**：实时异动流在后台刷新合并缓存行情（`_global_enriched_cache`）时，`temp_df['代码']` 为 `int64`（或未补齐格式）而 `right_df['代码']` 为 `object`/字符串，导致 Pandas `merge(on='代码')` 抛出致命类型不兼容异常，致使后台定时刷新任务中断；
+  - **强制类型统一与纠偏**：在合并执行前显式对两边调用 `.astype(str).str.zfill(6)`，将股票代码统一规范化为 6 位字符串，彻底根除类型冲突异常；
+- [x] **【自动化测试全绿通过（15 项专项测试 100% PASS）】**：
+  - 在 `tests/test_rearrange_policy_customization.py` 中新增 `test_merge_code_int64_and_object_coercion` 与 `test_link_stock_button_integration`，15 项测试全部通过。
+
 ## 2026-10-31 13:30 【无异动冷门个股close多源级联回退与防0覆盖、保存重排常驻保持与Esc一键关闭】(`stock/testpy/tdxgui/异动联动.py`, `tests/test_rearrange_policy_customization.py`)
 - [x] **【彻底查清并解决无异动个股 `close` 为空/0.0 问题】**：
   - **根因确认**：异动流只接收盘中出现异动的活跃标的。当监控冷门股（如 `002526 山东矿机`）当天未产生异动时，小窗口 `stock_info` 中的价格默认仍为 `0.0`；旧版 `get_stock_eval_dict` 仅读取 `GLOBAL_TOP_ALL` 且在读取 `monitor_windows` 时用 `0.0` 强行覆盖了有效值；

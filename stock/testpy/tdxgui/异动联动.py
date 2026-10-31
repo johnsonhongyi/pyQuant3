@@ -3971,6 +3971,19 @@ def open_rearrange_test_dialog(parent_win=None, var_parent_expr=None):
     btn_fetch = ttk.Button(top_frame, text="🔄 载入数据")
     btn_fetch.pack(side=tk.LEFT, padx=2)
 
+    # [🚀 增强] 股票直接联动按钮
+    def do_link_current_stock():
+        code = get_selected_code()
+        if code:
+            try:
+                send_to_tdx(code)
+                toast_message(test_win, f"🔗 已联动股票: {code}")
+            except Exception as e:
+                logger.error(f"联动股票失败: {e}")
+
+    btn_link = ttk.Button(top_frame, text="🔗 联动", width=8, command=do_link_current_stock)
+    btn_link.pack(side=tk.LEFT, padx=(4, 2))
+
     # 测试表达式输入与控制
     expr_frame = ttk.Frame(test_win, padding=(10, 4, 10, 6))
     expr_frame.pack(fill=tk.X)
@@ -6671,16 +6684,22 @@ def _get_stock_changes(selected_type=None, stock_code=None, h_enabled=None, h_qu
 
         # 从缓存中提取并合并行情列
         if temp_df is not None and _global_enriched_cache is not None and not _global_enriched_cache.empty:
-            if '代码' in _global_enriched_cache.columns:
+            if '代码' in _global_enriched_cache.columns and '代码' in temp_df.columns:
                 # 剔除 _global_enriched_cache 中与 temp_df 重名且不需要保留的重复列（代码除外），防止合并冲突
                 cols_to_use = _global_enriched_cache.columns.difference(
                     temp_df.columns.difference(['代码'])
                 )
-                right_df = _global_enriched_cache[cols_to_use]
+                right_df = _global_enriched_cache[cols_to_use].copy()
+                # [🚀 修复] 统一两边的'代码'列为 6 位字符串格式，彻底杜绝 int64 与 object 冲突导致的 ValueError
+                try:
+                    temp_df['代码'] = temp_df['代码'].astype(str).str.zfill(6)
+                    right_df['代码'] = right_df['代码'].astype(str).str.zfill(6)
+                except Exception:
+                    pass
                 # 合并最新的行情列到异动列表中，保留 temp_df 所有的异动事件列（时间、事件、相关信息等）
                 temp_df = temp_df.merge(right_df, on='代码', how='left')
             else:
-                logger.warning("_get_stock_changes: 缓存中缺少 '代码' 列")
+                logger.warning("_get_stock_changes: 缓存或temp_df中缺少 '代码' 列")
     
     # 彻底确保所有策略常用指标列都存在于 DataFrame 中以防御 PandasQueryEngine 的未定义报错
     if temp_df is not None and not temp_df.empty:

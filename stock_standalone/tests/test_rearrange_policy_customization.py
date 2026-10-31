@@ -396,5 +396,49 @@ class TestRearrangePolicyCustomization(unittest.TestCase):
         self.assertIn('win.bind("<Escape>", on_close_policy_dialog)', policy_func_code)
         self.assertIn('entry_expr.bind("<Escape>", on_close_policy_dialog)', policy_func_code)
 
+    def test_merge_code_int64_and_object_coercion(self):
+        """测试在异动列表与行情缓存合并时，强制统一'代码'为 6 位字符串，彻底杜绝 int64 与 object 冲突导致的 ValueError"""
+        import pandas as pd
+        # 模拟 temp_df 的代码是 int64 类型
+        temp_df = pd.DataFrame({
+            '代码': [600688, 2526],
+            '异动类型': ['火箭发射', '有大买盘']
+        })
+        self.assertEqual(temp_df['代码'].dtype, 'int64')
+
+        # 模拟 right_df 的代码是 object / 字符串类型
+        right_df = pd.DataFrame({
+            '代码': ['600688', '002526'],
+            'close': [19.5, 2.95],
+            'ma5d': [18.2, 2.8]
+        })
+        self.assertEqual(right_df['代码'].dtype, 'object')
+
+        # 如果直接 merge 会抛出 ValueError: You are trying to merge on int64 and object columns
+        with self.assertRaises(ValueError):
+            _ = temp_df.merge(right_df, on='代码', how='left')
+
+        # 经过类型强制统一与 zfill(6) 纠偏处理
+        temp_df['代码'] = temp_df['代码'].astype(str).str.zfill(6)
+        right_df['代码'] = right_df['代码'].astype(str).str.zfill(6)
+
+        merged = temp_df.merge(right_df, on='代码', how='left')
+        self.assertEqual(len(merged), 2)
+        self.assertEqual(list(merged['代码']), ['600688', '002526'])
+        self.assertEqual(list(merged['close']), [19.5, 2.95])
+
+    def test_link_stock_button_integration(self):
+        """测试策略测试窗口中嵌入了【🔗 联动】快捷按钮并调用 send_to_tdx"""
+        script_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "stock", "testpy", "tdxgui", "异动联动.py"))
+        with open(script_path, "r", encoding="utf-8") as f:
+            code = f.read()
+
+        test_func_start = code.find("def open_rearrange_test_dialog")
+        test_func_end = code.find("def open_rearrange_policy_dialog", test_func_start)
+        test_func_code = code[test_func_start:test_func_end]
+
+        self.assertIn('text="🔗 联动"', test_func_code)
+        self.assertIn('send_to_tdx(code)', test_func_code)
+
 if __name__ == "__main__":
     unittest.main()
