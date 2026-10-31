@@ -70,6 +70,15 @@ class AIFollowTests(unittest.TestCase):
         self.assertEqual(self.state["cash"], 500000)
         self.assertEqual(self.state["positions"], [])
 
+    def test_large_optional_evidence_is_marked_and_bounded(self):
+        self.state['events'] = [{'detail': '测' * 2000} for _ in range(30)]
+        job = ai.enqueue(self.db, self.state, NOW)
+        raw, evidence_hash = self.db.execute('SELECT context,evidence_hash FROM ai_jobs WHERE id=?', (job,)).fetchone()
+        context = json.loads(raw)
+        self.assertIn('recent_decisions', context['omitted_evidence'])
+        self.assertEqual(context['stocks'][0]['symbol'], '600001.SH')
+        self.assertEqual(ai.digest(context), evidence_hash)
+
     def test_follow_requires_known_stock_evidence_and_valid_range(self):
         ai.validate_result(self.proposal, self.context)
         for change in ({"symbol": "600002.SH"}, {"evidence_refs": ["invented"]},
@@ -120,6 +129,15 @@ class AIFollowTests(unittest.TestCase):
         ai.sync_ai(self.db,self.state,NOW)
         self.assertEqual(self.state['ai_latest']['id'],'entry-job')
         self.assertEqual(self.state['ai_review']['id'],identity)
+
+    def test_sync_shows_jobs_after_switching_bridges(self):
+        identity = ai.enqueue(self.db, self.state, NOW)
+        self.state['ai_settings']['node_id'] = 'old-bridge'
+        self.db.execute("UPDATE ai_jobs SET status='expired' WHERE id=?", (identity,))
+        ai.sync_ai(self.db, self.state, NOW)
+        self.assertEqual(self.state['ai']['jobs'][0]['id'], identity)
+        self.assertEqual(self.state['ai']['jobs'][0]['error'], '等待桌面领取超时')
+        self.assertTrue(self.state['ai']['desktop_online'])
 
     def test_corrupt_completed_result_is_observable_and_does_not_crash(self):
         identity=ai.enqueue(self.db,self.state,NOW)

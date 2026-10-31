@@ -385,13 +385,13 @@ wait_healthy() {
     while [ "$attempts" -gt 0 ]; do
         status=$(docker inspect --format '{{.State.Health.Status}}' "$name" 2>/dev/null || true)
         [ "$status" = healthy ] && return 0
-        [ "$status" = unhealthy ] && break
         attempts=$((attempts - 1))
         sleep 2
     done
     return 1
 }
-wait_healthy stockstrategy-api 45 || fail 'New API did not become healthy; rolling back.'
+# The shared SQLite database may need several minutes of startup recovery.
+wait_healthy stockstrategy-api 300 || fail 'New API did not become healthy; rolling back.'
 
 docker run -d \
     --name stockstrategy-web --label "$MANAGED_LABEL=stockstrategy" --label "io.easy-stock.app-version=$RELEASE" \

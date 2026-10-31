@@ -291,6 +291,27 @@ class AntigravityChatTests(unittest.TestCase):
                 self.assertEqual(saved["proposal"], proposal)
                 self.assertEqual(saved["token_usage"]["inputTokens"], 100)
 
+    def test_oversized_ats_evidence_is_explicitly_omitted(self):
+        proposal = {"market_view": "missing", "rotation_view": "unknown", "answer": "observe", "plans": []}
+        job = {"id": "bounded", "lease_token": "lease", "context": {
+            "model": "claude-sonnet-4-6", "reasoning_effort": "auto", "stocks": []}}
+        job['evidence_hash'] = agent.digest(job['context'])
+        models = agent._parse_model_catalog("claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n")
+        peer = Mock()
+        peer.desktop_runtime_probe.snapshot.return_value = {'data_root': 'fixture'}
+        def run(command, **kwargs):
+            payload = kwargs['stdin_bytes']
+            self.assertLessEqual(len(payload), 64 * 1024)
+            self.assertIn('ATS evidence omitted: CLI input size limit', payload.decode('utf-8'))
+            event = {"event": "result", "result": {"status": "SUCCESS", "response": json.dumps(proposal)}}
+            kwargs['stdout_callback'](json.dumps(event).encode() + b'\n')
+            return SimpleNamespace(returncode=0, stdout=b'')
+        with tempfile.TemporaryDirectory() as directory, sqlite3.connect(':memory:') as ledger:
+            with patch.object(agent, 'ProgressPublisher'), patch.object(agent, '_emit_log'), \
+                 patch.object(agent, 'ats_evidence', return_value={'data': '测' * 30000}), \
+                 patch.object(agent, 'run_bounded_cli', side_effect=run):
+                agent.run_antigravity_strategy(peer, job, 'agy', Path(directory), models, ledger, Mock())
+
     def test_progress_publisher_uses_only_valid_agy_conversation_ids(self):
         sent = []
 

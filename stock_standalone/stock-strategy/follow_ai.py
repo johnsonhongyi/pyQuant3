@@ -2,6 +2,7 @@
 import hashlib
 import json
 import math
+import sqlite3
 import uuid
 from datetime import timedelta
 
@@ -74,6 +75,27 @@ def enqueue(db, state, now, question="", force=False, stage=None):
     context["workflow_stage"] = phase
     context["ai_runtime"] = {"model": policy.get("model", "gpt-6-luna"), "reasoning_effort": policy.get("reasoning_effort", "medium")}
     context['auto_research_revision'] = policy.get('revision', 0)
+    # Keep all stock and freshness evidence; trim only explicitly marked optional
+    # summaries before hashing so both bridges receive the same frozen input.
+    def input_size():
+        envelope = {'context': context, 'question': question[:4000], 'evidence_hash': '0' * 64}
+        return len(json.dumps(envelope, ensure_ascii=False, allow_nan=False).encode('utf-8'))
+    omitted = []
+    for key in ('recent_decisions',):
+        if input_size() > 24000:
+            context[key] = []
+            omitted.append(key)
+    for dim in ('industry', 'theme'):
+        if input_size() > 24000:
+            context['rotation'][dim]['rows'] = []
+            omitted.append('rotation.' + dim + '.rows')
+    if input_size() > 24000:
+        context['account']['recent_closed'] = []
+        omitted.append('account.recent_closed')
+    if omitted:
+        context['omitted_evidence'] = omitted
+    if input_size() > 24000:
+        raise ValueError('AI_EVIDENCE_TOO_LARGE')
     if not force and phase != "intraday" and state.get("ai_phase_requested") == phase + ":" + context["trade_date"]:
         return None
     if db.execute("SELECT COUNT(*) FROM ai_jobs WHERE node_id=? AND workspace_id=? AND status IN ('queued','running') AND expires_at>?",
@@ -144,21 +166,19 @@ def sync_ai(db, state, now):
     db.execute("UPDATE ai_jobs SET status='expired' WHERE status IN ('queued','running') AND expires_at<=?", (now.isoformat(),))
     try:
         db.execute("UPDATE automatic_research_runs SET usage_known=1, total_tokens=COALESCE(total_tokens, 0) WHERE usage_known=0 AND job_id IN (SELECT id FROM ai_jobs WHERE status IN ('expired','failed','cancelled','completed'))")
-        db.execute("DELETE FROM ai_jobs WHERE status IN ('expired', 'cancelled') AND id NOT IN (SELECT id FROM ai_jobs WHERE status IN ('expired', 'cancelled') ORDER BY created_at DESC LIMIT 3)")
-        cutoff_7d = (now - timedelta(days=7)).isoformat()
-        db.execute("DELETE FROM ai_jobs WHERE status='completed' AND created_at < ?", (cutoff_7d,))
-        cutoff_30d = (now - timedelta(days=30)).date().isoformat()
-        db.execute("DELETE FROM automatic_research_runs WHERE day < ?", (cutoff_30d,))
-    except Exception:
-        pass
-    policy = state.get("ai_settings", DEFAULT_AI)
-    rows = db.execute("SELECT id,status,question,created_at,finished_at,result,evidence_hash,trade_date,context FROM ai_jobs WHERE node_id=? AND workspace_id=? ORDER BY created_at DESC LIMIT 20",
-                      (policy.get("node_id", ""), policy.get("workspace_id", ""))).fetchall()
+    except sqlite3.OperationalError as exc:
+        if 'no such table' not in str(exc):
+            raise
+    runtime_row = db.execute('SELECT body FROM desktop_chat_config WHERE id=1').fetchone()
+    policy = json.loads(runtime_row[0]) if runtime_row else {}
+    rows = db.execute("SELECT id,status,question,created_at,finished_at,result,evidence_hash,trade_date,context,lease_token FROM ai_jobs ORDER BY created_at DESC LIMIT 20").fetchall()
     jobs = []
     for row in rows:
-        job_id, status, question, created, finished, raw, evidence_hash, trade_date, context_raw = row
+        job_id, status, question, created, finished, raw, evidence_hash, trade_date, context_raw, lease = row
         item = {"id": job_id, "status": status, "question": question, "created_at": created, "finished_at": finished,
                 "evidence_hash": evidence_hash, "trade_date": trade_date}
+        if status == 'expired':
+            item['error'] = '执行或回传超时' if lease else '等待桌面领取超时'
         if raw:
             try:
                 result = json.loads(raw)

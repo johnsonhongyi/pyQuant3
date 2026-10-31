@@ -644,7 +644,7 @@ def main():
                     sync_ai(control, state, datetime.now(BJ))
                 except (sqlite3.Error, ValueError, KeyError, TypeError) as exc:
                     # AI transport cannot undo already completed exits or paper fills.
-                    event(state, datetime.now(BJ), "AI_ERROR", reason=type(exc).__name__)
+                    event(state, datetime.now(BJ), "AI_ERROR", reason=str(exc)[:200] or type(exc).__name__)
                 state["cycle_status"] = result
                 state["cycle_finished_at"] = datetime.now(BJ).isoformat()
                 beat("waiting")
