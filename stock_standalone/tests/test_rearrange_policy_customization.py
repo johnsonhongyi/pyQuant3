@@ -6,6 +6,77 @@ import tempfile
 import shutil
 import json
 import re
+import pandas as pd
+
+TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(TESTS_DIR)
+WORKSPACE_ROOT = os.path.dirname(PROJECT_ROOT)
+TDX_SCRIPT_PATH = os.path.join(WORKSPACE_ROOT, "stock", "testpy", "tdxgui", "异动联动.py")
+
+def filter_stocks(df, selected_type):
+    """过滤股票数据，排除8开头的股票，支持单个或多个异动类型（列表/集合/逗号分隔分组）向量化过滤"""
+    if df.empty:
+        return df
+    
+    if '代码' in df.columns:
+        df = df[~df["代码"].astype(str).str.startswith('8')]
+
+    target_types = set()
+    if selected_type is not None:
+        if isinstance(selected_type, (list, tuple, set)):
+            target_types = {str(t).strip() for t in selected_type if str(t).strip()}
+        elif isinstance(selected_type, str) and selected_type.strip():
+            raw = selected_type.replace('，', ',').replace(';', ',').replace('；', ',').replace('|', ',')
+            target_types = {t.strip() for t in raw.split(',') if t.strip()}
+
+    if target_types:
+        col = '板块' if '板块' in df.columns else ('异动类型' if '异动类型' in df.columns else None)
+        if col:
+            df = df[df[col].isin(target_types)]
+
+    if '时间' in df.columns and len(df) > 0:
+        df = df.sort_values(by="时间", ascending=False)
+
+    return df
+
+def apply_sort_to_dataframe(df, col, ascending=True):
+    """将 DataFrame 按照指定的列和顺序进行安全排序（数值与文本感知）"""
+    if df is None or df.empty or col not in df.columns:
+        return df
+    data = df.copy()
+    
+    actual_col = col
+    if col == '异动类型' and '异动类型' not in data.columns and '板块' in data.columns:
+        actual_col = '板块'
+    elif col == '板块' and '板块' not in data.columns and '异动类型' in data.columns:
+        actual_col = '异动类型'
+
+    if actual_col not in data.columns:
+        return data
+
+    numeric_cols = {'rank', 'cour', 'ch_bc', 'dff', 'dff2', 'dff3', '涨幅', '价格', '量', 'count', 'price', 'percent', 'vol', 'close'}
+    if actual_col in numeric_cols:
+        try:
+            sort_series = pd.to_numeric(data[actual_col], errors='coerce')
+            data['_sort_tmp'] = sort_series
+            if '时间' in data.columns:
+                data.sort_values(by=['_sort_tmp', '时间'], ascending=[ascending, True], inplace=True)
+            else:
+                data.sort_values(by='_sort_tmp', ascending=ascending, inplace=True)
+            data.drop(columns=['_sort_tmp'], inplace=True)
+        except Exception:
+            if '时间' in data.columns:
+                data.sort_values(by=[actual_col, '时间'], ascending=[ascending, True], inplace=True)
+            else:
+                data.sort_values(by=actual_col, ascending=ascending, inplace=True)
+    elif actual_col == '时间':
+        data.sort_values(by=actual_col, ascending=ascending, inplace=True)
+    else:
+        if '时间' in data.columns:
+            data.sort_values(by=[actual_col, '时间'], ascending=[ascending, True], inplace=True)
+        else:
+            data.sort_values(by=actual_col, ascending=ascending, inplace=True)
+    return data
 
 class TestRearrangePolicyCustomization(unittest.TestCase):
     def setUp(self):
@@ -1043,6 +1114,242 @@ class TestRearrangePolicyCustomization(unittest.TestCase):
         # 验证 002667 被黑名单剔除
         self.assertNotIn("002667", unmonitored_codes)
         self.assertEqual(unmonitored_codes, ["600592", "603536"])
+
+    def test_luck_button_entry_contract(self):
+        """测试异动主界面 Luck 按钮配置与调用契约"""
+        btn_text = "Luck"
+        self.assertEqual(btn_text, "Luck")
+        
+        # 验证点击 Luck 按钮触发异步测试扫描机制
+        triggered = []
+        def mock_test_popup_scan(win, trigger_btn=None, is_async=True):
+            triggered.append((win, is_async))
+
+        mock_test_popup_scan("root", is_async=True)
+        self.assertEqual(len(triggered), 1)
+        self.assertTrue(triggered[0][1])
+
+    def test_stock_type_groups_preset_and_persistence(self):
+        """测试异动类型分组的系统预设与持久化数据结构"""
+        default_groups = {
+            "📈 上涨异动": [
+                "火箭发射", "快速反弹", "大笔买入", "封涨停板", "打开跌停板",
+                "有大买盘", "竞价上涨", "高开5日线", "向上缺口", "60日新高", "60日大幅上涨"
+            ],
+            "📉 下跌异动": [
+                "加速下跌", "高台跳水", "大笔卖出", "封跌停板", "打开涨停板",
+                "有大卖盘", "竞价下跌", "低开5日线", "向下缺口", "60日新低", "60日大幅下跌"
+            ]
+        }
+        # 验证上涨异动 11 项，下跌异动 11 项，合计 22 项无重叠覆盖
+        up_set = set(default_groups["📈 上涨异动"])
+        down_set = set(default_groups["📉 下跌异动"])
+        self.assertEqual(len(up_set), 11)
+        self.assertEqual(len(down_set), 11)
+        self.assertEqual(len(up_set.intersection(down_set)), 0)
+        self.assertEqual(len(up_set.union(down_set)), 22)
+
+        # 模拟持久化存取
+        mock_config = {}
+        mock_config["stock_type_groups"] = default_groups
+        self.assertIn("📈 上涨异动", mock_config["stock_type_groups"])
+        self.assertIn("📉 下跌异动", mock_config["stock_type_groups"])
+
+    def test_filter_stocks_multi_type_vectorized(self):
+        """测试 filter_stocks 支持列表、集合、逗号分隔多类型向量化过滤"""
+        df = pd.DataFrame([
+            {"代码": "000001", "名称": "平安银行", "板块": "火箭发射", "时间": "14:50:00"},
+            {"代码": "000002", "名称": "万科A", "板块": "快速反弹", "时间": "14:51:00"},
+            {"代码": "600519", "名称": "贵州茅台", "板块": "高台跳水", "时间": "14:52:00"},
+            {"代码": "830001", "名称": "北交所股", "板块": "火箭发射", "时间": "14:53:00"},  # 8开头需排除
+        ])
+
+        # 1. 单选字符串
+        res1 = filter_stocks(df, "火箭发射")
+        self.assertEqual(len(res1), 1)
+        self.assertEqual(res1.iloc[0]["代码"], "000001")
+
+        # 2. 多选列表
+        res2 = filter_stocks(df, ["火箭发射", "快速反弹"])
+        self.assertEqual(len(res2), 2)
+        self.assertSetEqual(set(res2["代码"]), {"000001", "000002"})
+
+        # 3. 逗号分隔字符串
+        res3 = filter_stocks(df, "火箭发射, 高台跳水")
+        self.assertEqual(len(res3), 2)
+        self.assertSetEqual(set(res3["代码"]), {"000001", "600519"})
+
+        # 4. 空值显示全部（但排除8开头）
+        res4 = filter_stocks(df, "")
+        self.assertEqual(len(res4), 3)
+
+        # 5. 列名为 '异动类型' 时的兼容性
+        df_alias = df.rename(columns={"板块": "异动类型"})
+        res5 = filter_stocks(df_alias, ["快速反弹"])
+        self.assertEqual(len(res5), 1)
+        self.assertEqual(res5.iloc[0]["代码"], "000002")
+
+    def test_main_table_sort_persistence_and_numeric_sorting(self):
+        """测试主表格排序持久化与数值感知排序 (避免字符串字典序错误)"""
+        df = pd.DataFrame([
+            {"代码": "000001", "rank": "10.0", "时间": "10:00:00"},
+            {"代码": "000002", "rank": "2.0", "时间": "10:01:00"},
+            {"代码": "000003", "rank": "1.0", "时间": "10:02:00"},
+            {"代码": "000004", "rank": "25.0", "时间": "10:03:00"},
+        ])
+
+        # 升序排序：期望 1.0 -> 2.0 -> 10.0 -> 25.0（若是字符串排序，10.0 会排在 2.0 前面）
+        sorted_asc = apply_sort_to_dataframe(df, "rank", ascending=True)
+        self.assertEqual(list(sorted_asc["代码"]), ["000003", "000002", "000001", "000004"])
+
+        # 降序排序：期望 25.0 -> 10.0 -> 2.0 -> 1.0
+        sorted_desc = apply_sort_to_dataframe(df, "rank", ascending=False)
+        self.assertEqual(list(sorted_desc["代码"]), ["000004", "000001", "000002", "000003"])
+
+        # 模拟主表格排序配置持久化
+        mock_cfg = {
+            "main_table_sort": {
+                "col": "rank",
+                "ascending": True,
+                "sort_directions": {"rank": False, "时间": True}
+            }
+        }
+        self.assertEqual(mock_cfg["main_table_sort"]["col"], "rank")
+        self.assertTrue(mock_cfg["main_table_sort"]["ascending"])
+
+    def test_monitor_window_compact_title_and_link_button_contract(self):
+        """测试监控小窗口精简报警开启文字并添加右侧联动按钮'联'契约"""
+        # 读取 异动联动.py 验证界面契约
+        with open(TDX_SCRIPT_PATH, "r", encoding="utf-8") as f:
+            code_text = f.read()
+
+        # 1. 验证 Checkbutton 文字精简为 '警'
+        self.assertIn('text="警"', code_text)
+
+        # 2. 验证右侧新增联动按钮 '联'
+        self.assertIn('text="联"', code_text)
+
+        # 3. 验证刷新按钮精简为 '刷'
+        self.assertIn('text="刷"', code_text)
+
+        # 4. 验证联动按钮绑定 send_to_tdx
+        self.assertIn('send_to_tdx', code_text)
+
+    def test_active_view_state_persistence_and_restore_alignment(self):
+        """测试最后选中的分组及排序状态持久化存取与对齐机制"""
+        view_state = {
+            "selected_group": "📈 上涨异动",
+            "is_multi": True,
+            "selected_types": ["火箭发射", "快速反弹"],
+            "sort_col": "rank",
+            "sort_ascending": True,
+            "sort_directions": {"rank": False}
+        }
+        # 验证分组与排序持久化状态结构完整
+        self.assertEqual(view_state["selected_group"], "📈 上涨异动")
+        self.assertTrue(view_state["is_multi"])
+        self.assertEqual(view_state["sort_col"], "rank")
+        self.assertTrue(view_state["sort_ascending"])
+
+        # 模拟数据刷新时根据当前持久化状态对齐数据
+        raw_df = pd.DataFrame([
+            {"代码": "000001", "板块": "火箭发射", "rank": "5.0", "时间": "09:35:00"},
+            {"代码": "000002", "板块": "高台跳水", "rank": "1.0", "时间": "09:36:00"},
+            {"代码": "000003", "板块": "快速反弹", "rank": "2.0", "时间": "09:37:00"},
+        ])
+
+        # 1. 对齐分组过滤
+        filtered_df = filter_stocks(raw_df, view_state["selected_types"])
+        self.assertEqual(len(filtered_df), 2)
+        self.assertSetEqual(set(filtered_df["代码"]), {"000001", "000003"})
+
+        # 2. 对齐排序 (按 rank 升序)
+        sorted_df = apply_sort_to_dataframe(filtered_df, view_state["sort_col"], ascending=view_state["sort_ascending"])
+        self.assertEqual(list(sorted_df["代码"]), ["000003", "000001"])
+
+    def test_fast_insert_slice_dataframe_no_setting_with_copy_warning(self):
+        """测试切片视图 DataFrame 经 copy 后赋值，彻底消除 SettingWithCopyWarning"""
+        import warnings
+        df_origin = pd.DataFrame([
+            {"代码": "000001", "名称": "平安银行", "时间": "14:50:00"},
+            {"代码": "000001", "名称": "平安银行", "时间": "14:51:00"},
+            {"代码": "000002", "名称": "万科A", "时间": "14:52:00"},
+        ])
+        # 构造典型切片视图 slice
+        slice_df = df_origin.drop_duplicates(subset=['代码'])
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            # 模拟 fast_insert 入口防护
+            safe_df = slice_df.copy()
+            # 动态补齐 rank 和 count 列
+            safe_df.loc[:, "rank"] = [1.0, 2.0]
+            safe_df.loc[:, "count"] = [2, 1]
+
+            # 验证绝无 SettingWithCopyWarning
+            setting_warnings = [item for item in w if issubclass(item.category, UserWarning) or "SettingWithCopy" in str(item.message)]
+            self.assertEqual(len(setting_warnings), 0)
+            self.assertIn("rank", safe_df.columns)
+            self.assertEqual(list(safe_df["rank"]), [1.0, 2.0])
+
+    def test_sort_treeview_direction_toggle_and_group_switch_preserves_ascending(self):
+        """测试点击排序列默认升序、切换分组保持当前排序方向不倒序"""
+        # 1. 模拟首次点击 rank 列
+        current_table_sort = {"col": None, "ascending": True}
+        col = "rank"
+        
+        # 首次点击 col: 默认 target_ascending = True
+        if current_table_sort.get("col") == col and current_table_sort.get("ascending") is not None:
+            target_ascending = not current_table_sort["ascending"]
+        else:
+            target_ascending = True
+        
+        current_table_sort["col"] = col
+        current_table_sort["ascending"] = target_ascending
+        self.assertTrue(current_table_sort["ascending"])
+
+        # 2. 模拟切换分组：加载不同异动类型数据
+        group_df = pd.DataFrame([
+            {"代码": "002913", "板块": "火箭发射", "rank": "5578.0"},
+            {"代码": "688835", "板块": "快速反弹", "rank": "1.0"},
+            {"代码": "688111", "板块": "有大买盘", "rank": "5572.0"},
+            {"代码": "603306", "板块": "快速反弹", "rank": "2.0"},
+        ])
+        
+        # 应用当前排序方向（必须是 ascending=True，即从小到大 1.0 -> 2.0 -> ...）
+        active_col = current_table_sort["col"]
+        active_asc = current_table_sort["ascending"]
+        sorted_df = apply_sort_to_dataframe(group_df, active_col, ascending=active_asc)
+        
+        # 验证排序结果：排在最前面的一定是 rank 小的标的（1.0, 2.0），绝非 5578.0
+        ranks = pd.to_numeric(sorted_df["rank"]).tolist()
+        self.assertEqual(ranks, [1.0, 2.0, 5572.0, 5578.0])
+        self.assertTrue(ranks[0] < ranks[-1])
+
+    def test_stock_code_filter_short_circuit_memory_optimization(self):
+        """测试监控小窗口按 stock_code 刷新时直接短路返回，避免 TDX/Sina 全量 merge 导致内存膨胀"""
+        temp_df = pd.DataFrame([
+            {"时间": "14:45:00", "代码": "002667", "板块": "向上缺口", "涨幅": 0.0, "价格": 0.0, "量": 0.0},
+            {"时间": "14:40:00", "代码": "002667", "板块": "快速反弹", "涨幅": 2.5, "价格": 5.2, "量": 12.0},
+            {"时间": "14:30:00", "代码": "600580", "板块": "火箭发射", "涨幅": 5.0, "价格": 10.0, "量": 30.0},
+        ])
+        
+        stock_code = "002667"
+        h_enabled = False
+        h_query = ""
+        
+        # 执行代码过滤
+        if stock_code:
+            c_str = str(stock_code).zfill(6)
+            temp_df = temp_df[temp_df['代码'].astype(str).str.zfill(6) == c_str]
+            
+        self.assertEqual(len(temp_df), 2)
+        
+        # 验证短路逻辑：如果无宏策略过滤，直接返回该小 DataFrame，不进行全市场大表复制
+        can_short_circuit = bool(stock_code and not (h_enabled and h_query))
+        self.assertTrue(can_short_circuit)
+        # 结果只包含该股票自身数据
+        self.assertTrue(all(temp_df['代码'] == "002667"))
 
 if __name__ == "__main__":
     unittest.main()

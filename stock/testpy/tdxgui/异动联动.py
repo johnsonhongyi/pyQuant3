@@ -1964,11 +1964,18 @@ def get_stock_changes(selected_type=None, stock_code=None):
     }
 
     if selected_type:
-        if selected_type in symbol_map:
-            params['type'] = symbol_map[selected_type]
+        type_list = []
+        if isinstance(selected_type, (list, tuple, set)):
+            type_list = [str(t).strip() for t in selected_type if str(t).strip()]
+        elif isinstance(selected_type, str) and selected_type.strip():
+            raw = selected_type.replace('，', ',').replace(';', ',').replace('；', ',').replace('|', ',')
+            type_list = [t.strip() for t in raw.split(',') if t.strip()]
+
+        valid_codes = [symbol_map[t] for t in type_list if t in symbol_map]
+        if valid_codes:
+            params['type'] = ','.join(valid_codes)
         else:
-            messagebox.showerror("错误", f"无效的异动类型: {selected_type}")
-            return pd.DataFrame()
+            params['type'] = ','.join(symbol_map.values())
     else:
         params['type'] = ','.join(symbol_map.values())
     
@@ -2050,23 +2057,32 @@ def get_stock_changes(selected_type=None, stock_code=None):
         return pd.DataFrame()
 
 
-def filter_stocks(df,selected_type):
-    """过滤股票数据，排除8开头的股票、名称带*的股票、ST股票"""
+def filter_stocks(df, selected_type):
+    """过滤股票数据，排除8开头的股票，支持单个或多个异动类型（列表/集合/逗号分隔分组）向量化过滤"""
     if df.empty:
         return df
     
     # 排除8开头的股票
-    df = df[~df["代码"].astype(str).str.startswith('8')]
+    if '代码' in df.columns:
+        df = df[~df["代码"].astype(str).str.startswith('8')]
 
-    if selected_type is not None and isinstance(selected_type, str) and selected_type != '':
-        df = df[df['板块'] == selected_type]
+    # 解析 target_types
+    target_types = set()
+    if selected_type is not None:
+        if isinstance(selected_type, (list, tuple, set)):
+            target_types = {str(t).strip() for t in selected_type if str(t).strip()}
+        elif isinstance(selected_type, str) and selected_type.strip():
+            raw = selected_type.replace('，', ',').replace(';', ',').replace('；', ',').replace('|', ',')
+            target_types = {t.strip() for t in raw.split(',') if t.strip()}
+
+    if target_types:
+        col = '板块' if '板块' in df.columns else ('异动类型' if '异动类型' in df.columns else None)
+        if col:
+            df = df[df[col].isin(target_types)]
+
     if '时间' in df.columns and len(df) > 0:
         df = df.sort_values(by="时间", ascending=False)
 
-    # 排除名称中带*的股票
-    # df = df[~df["名称"].str.contains('\\*')]
-    # 排除ST股票
-    # df = df[~df["名称"].str.startswith('ST')]
     return df
 
 def get_today(sep='-'):
@@ -2092,29 +2108,51 @@ def _get_latest_trade_day():
         return get_today()
 
 def populate_treeview(data=None):
-    """填充表格数据 (带 UI 线程安全锁)"""
+    """填充表格数据 (带 UI 线程安全锁，并自动对齐当前分组过滤与排序状态)"""
     with ui_update_lock:
-        global viewdf
+        global viewdf, realdatadf, loaded_df
 
     tree.delete(*tree.get_children())
+    
+    # 统一获取当前选择的异动类型（支持多选与分组）
+    current_type = type_var.get() if 'type_var' in globals() and type_var else ""
+
     if data is None:
-        data = get_stock_changes()
+        # [🚀 极速开屏保护] 优先使用已有内存数据源，若未加载调用轻量 get_stock_changes，绝不在主线程走耗时的 TDX 行情增强
+        if loaded_df is not None and not loaded_df.empty:
+            data = loaded_df.copy()
+        elif realdatadf is not None and not realdatadf.empty:
+            data = realdatadf.copy()
+        else:
+            data = get_stock_changes()
+
+    if data is None or data.empty:
+        status_var.set("无数据")
+        tree.insert("", "end", values=("无数据", "", "", "", ""))
+        return
+
+    # [🚀 核心修复] 每次数据加载或刷新（含切换日期、极速刷新等）自动对齐当前分组过滤
+    if current_type:
+        data = filter_stocks(data, current_type)
+
+    if data.empty:
+        status_var.set("无数据")
+        tree.insert("", "end", values=("无数据", "", "", "", ""))
+        return
 
     if '涨幅' not in data.columns:
         data = process_full_dataframe(data)
 
-    viewdf = data.copy()
-    uniq_state =uniq_var.get()
-    if data is not None and not data.empty and uniq_state:
-        data = data.drop_duplicates(subset=['代码'])
-
-    if data is not None and not data.empty:
-        if 'count'  not in data.columns:
-            data['count'] = data.groupby('代码')['代码'].transform('count')
-        fast_insert(tree,data)
+    uniq_state = uniq_var.get() if 'uniq_var' in globals() and uniq_var else False
+    if uniq_state:
+        data = data.drop_duplicates(subset=['代码']).copy()
     else:
-        status_var.set("无数据")
-        tree.insert("", "end", values=("无数据", "", "", "", ""))
+        data = data.copy()
+
+    if 'count' not in data.columns and not data.empty:
+        data['count'] = data.groupby('代码')['代码'].transform('count')
+
+    fast_insert(tree, data)
 
 def check_string_type(s: str) -> bool:
     """检查输入是否为文本/关键词查询（非空且非纯数字）"""
@@ -2374,17 +2412,22 @@ def search_by_code_old(event=None):
         search_by_type()
 
 def search_by_type():
-    """按异动类型搜索"""
-    global last_searched_code
+    """按异动类型搜索 (优先复用全量内存数据源，耗时0.1ms，绝不重新打网络或跑耗时增强)"""
+    global last_searched_code, realdatadf, loaded_df
     selected_type = type_var.get()
-    # code_entry.delete(0, tk.END)
     safe_set_stock_code(code_entry)
 
     status_var.set(f"加载{selected_type if selected_type else '所有'}异动数据")
-    data = _get_stock_changes(selected_type=selected_type)
+    source_df = loaded_df if (loaded_df is not None and not loaded_df.empty) else realdatadf
+    if source_df is not None and not source_df.empty:
+        data = filter_stocks(source_df.copy(), selected_type) if selected_type else source_df.copy()
+    else:
+        data = get_stock_changes()
+        if selected_type and data is not None and not data.empty:
+            data = filter_stocks(data, selected_type)
     populate_treeview(data)
     if last_searched_code:
-        scroll_to_code_in_treeview(tree,last_searched_code)
+        scroll_to_code_in_treeview(tree, last_searched_code)
 
 def quick_refresh_ui(event=None, is_auto=False):
     """极速刷新 UI：仅应用当前过滤条件，不重新加载底层数据流"""
@@ -3578,6 +3621,280 @@ DEFAULT_REARRANGE_POLICY = {
     ]
 }
 
+# =========================================================================
+# 📊 异动类型多选分组体系与持久化管理
+# =========================================================================
+DEFAULT_STOCK_TYPE_GROUPS = {
+    "📈 上涨异动": [
+        "火箭发射", "快速反弹", "大笔买入", "封涨停板", "打开跌停板",
+        "有大买盘", "竞价上涨", "高开5日线", "向上缺口", "60日新高", "60日大幅上涨"
+    ],
+    "📉 下跌异动": [
+        "加速下跌", "高台跳水", "大笔卖出", "封跌停板", "打开涨停板",
+        "有大卖盘", "竞价下跌", "低开5日线", "向下缺口", "60日新低", "60日大幅下跌"
+    ]
+}
+
+# =========================================================================
+# 📊 激活视图状态（最后选中的分组、多选类型列表、排序列与顺序）统一持久化体系
+# =========================================================================
+def load_active_view_state():
+    """从 window_config.json 读取最后激活的分组与排序状态"""
+    state = {
+        "selected_group": "【全部】",
+        "is_multi": False,
+        "selected_types": [],
+        "sort_col": None,
+        "sort_ascending": True,
+        "sort_directions": {}
+    }
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if "active_view_state" in data and isinstance(data["active_view_state"], dict):
+                state.update(data["active_view_state"])
+            elif "main_table_sort" in data and isinstance(data["main_table_sort"], dict):
+                # 兼容历史 key
+                state["sort_col"] = data["main_table_sort"].get("col")
+                state["sort_ascending"] = data["main_table_sort"].get("ascending", True)
+                if "sort_directions" in data["main_table_sort"]:
+                    state["sort_directions"] = data["main_table_sort"]["sort_directions"]
+        except Exception as e:
+            logger.debug(f"load_active_view_state failed: {e}")
+    return state
+
+def save_active_view_state(group=None, is_multi=None, selected_types=None, sort_col=None, sort_ascending=None, sort_dirs=None):
+    """保存当前激活的分组与排序状态到 window_config.json"""
+    state = load_active_view_state()
+    if group is not None:
+        state["selected_group"] = str(group)
+    if is_multi is not None:
+        state["is_multi"] = bool(is_multi)
+    if selected_types is not None:
+        state["selected_types"] = [str(t) for t in selected_types]
+    if sort_col is not None:
+        state["sort_col"] = sort_col
+    if sort_ascending is not None:
+        state["sort_ascending"] = bool(sort_ascending)
+    if sort_dirs is not None and isinstance(sort_dirs, dict):
+        state["sort_directions"] = sort_dirs
+
+    data = {}
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+    
+    data["active_view_state"] = state
+    # 保持对 main_table_sort 节点的兼容同步
+    data["main_table_sort"] = {
+        "col": state.get("sort_col"),
+        "ascending": state.get("sort_ascending", True),
+        "sort_directions": state.get("sort_directions", {}),
+        "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+        logger.info(f"✅ 视图状态已成功持久化: 分组[{state.get('selected_group')}], 排序[{state.get('sort_col')}:{state.get('sort_ascending')}]")
+        return True
+    except Exception as e:
+        logger.error(f"保存视图状态失败: {e}")
+        return False
+
+def load_stock_type_groups():
+    """从 window_config.json 读取异动类型分组配置，如果不存在则使用默认预设"""
+    groups = {k: list(v) for k, v in DEFAULT_STOCK_TYPE_GROUPS.items()}
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if "stock_type_groups" in data and isinstance(data["stock_type_groups"], dict):
+                user_groups = data["stock_type_groups"]
+                for g_name, g_items in user_groups.items():
+                    if isinstance(g_items, list):
+                        groups[g_name] = [str(x) for x in g_items if str(x) in symbol_map]
+        except Exception as e:
+            logger.debug(f"load_stock_type_groups failed: {e}")
+    return groups
+
+def save_stock_type_groups(groups):
+    """保存异动类型分组配置到 window_config.json"""
+    if not isinstance(groups, dict):
+        return False
+    data = {}
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+    data["stock_type_groups"] = groups
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+        logger.info(f"✅ 异动类型分组配置已成功持久化保存: {list(groups.keys())}")
+        return True
+    except Exception as e:
+        logger.error(f"保存异动类型分组配置失败: {e}")
+        return False
+
+# =========================================================================
+# 📊 主表格排序列及排序方向持久化与自动恢复体系
+# =========================================================================
+current_table_sort = {
+    "col": None,
+    "ascending": True
+}
+try:
+    _init_view_cfg = load_active_view_state()
+    if _init_view_cfg.get("sort_col"):
+        current_table_sort["col"] = _init_view_cfg["sort_col"]
+        current_table_sort["ascending"] = _init_view_cfg.get("sort_ascending", True)
+    if "sort_directions" in _init_view_cfg and isinstance(_init_view_cfg["sort_directions"], dict):
+        sort_directions.update(_init_view_cfg["sort_directions"])
+except Exception:
+    pass
+
+def load_main_table_sort():
+    """从 window_config.json 读取主表格上次的排序方式与顺序"""
+    cfg = {"col": None, "ascending": True, "sort_directions": {}}
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if "main_table_sort" in data and isinstance(data["main_table_sort"], dict):
+                saved = data["main_table_sort"]
+                if "col" in saved:
+                    cfg["col"] = saved["col"]
+                if "ascending" in saved:
+                    cfg["ascending"] = bool(saved["ascending"])
+                if "sort_directions" in saved and isinstance(saved["sort_directions"], dict):
+                    cfg["sort_directions"] = saved["sort_directions"]
+        except Exception as e:
+            logger.debug(f"load_main_table_sort failed: {e}")
+    return cfg
+
+def save_main_table_sort(col, ascending, sort_dirs=None):
+    """保存主表格当前排序列及排序方向到 window_config.json"""
+    global current_table_sort
+    current_table_sort["col"] = col
+    current_table_sort["ascending"] = ascending
+
+    data = {}
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+    
+    table_sort_cfg = {
+        "col": col,
+        "ascending": ascending,
+        "update_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    if sort_dirs and isinstance(sort_dirs, dict):
+        table_sort_cfg["sort_directions"] = sort_dirs
+
+    data["main_table_sort"] = table_sort_cfg
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+        logger.info(f"✅ 主表格排序配置已持久化: col={col}, ascending={ascending}")
+        return True
+    except Exception as e:
+        logger.error(f"保存主表格排序配置失败: {e}")
+        return False
+
+def apply_sort_to_dataframe(df, col, ascending=True):
+    """将 DataFrame 按照指定的列和顺序进行安全排序（数值与文本感知，支持级联指标补齐）"""
+    if df is None or df.empty or not col:
+        return df
+    data = df.copy()
+    
+    actual_col = col
+    if col == '异动类型' and '异动类型' not in data.columns and '板块' in data.columns:
+        actual_col = '板块'
+    elif col == '板块' and '板块' not in data.columns and '异动类型' in data.columns:
+        actual_col = '异动类型'
+
+    # 若指标列暂未在 data 中（如 rank, dff 等），尝试从全局行情指标快照级联补全
+    if actual_col not in data.columns and '代码' in data.columns:
+        global GLOBAL_TOP_ALL
+        if 'GLOBAL_TOP_ALL' in globals() and GLOBAL_TOP_ALL is not None and not GLOBAL_TOP_ALL.empty:
+            target_lower = actual_col.lower()
+            match_c = None
+            for c in GLOBAL_TOP_ALL.columns:
+                if str(c).lower() == target_lower:
+                    match_c = c
+                    break
+            if match_c:
+                codes_str = data['代码'].astype(str).str.zfill(6)
+                data[actual_col] = codes_str.map(GLOBAL_TOP_ALL[match_c]).fillna("")
+
+    if actual_col not in data.columns:
+        return data
+
+    numeric_cols = {'rank', 'cour', 'ch_bc', 'dff', 'dff2', 'dff3', '涨幅', '价格', '量', 'count', 'price', 'percent', 'vol', 'close'}
+    if actual_col in numeric_cols:
+        try:
+            sort_series = pd.to_numeric(data[actual_col], errors='coerce')
+            data['_sort_tmp'] = sort_series
+            if '时间' in data.columns:
+                data.sort_values(by=['_sort_tmp', '时间'], ascending=[ascending, True], inplace=True)
+            else:
+                data.sort_values(by='_sort_tmp', ascending=ascending, inplace=True)
+            data.drop(columns=['_sort_tmp'], inplace=True)
+        except Exception as e:
+            logger.debug(f"数值列排序降级: {e}")
+            if '时间' in data.columns:
+                data.sort_values(by=[actual_col, '时间'], ascending=[ascending, True], inplace=True)
+            else:
+                data.sort_values(by=actual_col, ascending=ascending, inplace=True)
+    elif actual_col == '时间':
+        data.sort_values(by=actual_col, ascending=ascending, inplace=True)
+    else:
+        if '时间' in data.columns:
+            data.sort_values(by=[actual_col, '时间'], ascending=[ascending, True], inplace=True)
+        else:
+            data.sort_values(by=actual_col, ascending=ascending, inplace=True)
+    return data
+
+def restore_last_table_sort(tree):
+    """
+    启动后延迟数据加载完成后，自动恢复持久化的主表格排序列与排序顺序
+    """
+    global viewdf, sort_directions, current_table_sort
+    cfg = load_main_table_sort()
+    col = cfg.get("col")
+    if not col:
+        return
+    ascending = cfg.get("ascending", True)
+    if "sort_directions" in cfg and isinstance(cfg["sort_directions"], dict):
+        sort_directions.update(cfg["sort_directions"])
+    sort_directions[col] = ascending
+    if col == '异动类型':
+        sort_directions['板块'] = ascending
+
+    current_table_sort["col"] = col
+    current_table_sort["ascending"] = ascending
+
+    if viewdf is not None and not viewdf.empty:
+        data = viewdf.copy()
+        uniq_state = uniq_var.get() if 'uniq_var' in globals() and uniq_var else False
+        if uniq_state:
+            data = data.drop_duplicates(subset=['代码'])
+        data = apply_sort_to_dataframe(data, col, ascending=ascending)
+        if 'count' not in data.columns and not data.empty:
+            data = process_full_dataframe(data)
+            data['count'] = data.groupby('代码')['代码'].transform('count')
+        load_df_to_treeview(tree, data)
+        logger.info(f"✅ [启动自愈] 已成功恢复主表格持久化排序: 列[{col}], 顺序[{'升序(从小到大)' if ascending else '降序(从大到小)'}]")
+
 def load_rearrange_policy():
     """从 window_config.json 读取持久化的重排策略"""
     policy = DEFAULT_REARRANGE_POLICY.copy()
@@ -3950,6 +4267,235 @@ def open_blacklist_manager_dialog(parent_win=None):
 
     # 初始载入
     refresh_tree()
+
+
+# =========================================================================
+# ⚙️ 异动类型多选与分组配置集中管理窗口
+# =========================================================================
+_stock_type_group_dialog_win = None
+
+def open_stock_type_group_manager(parent=None):
+    """
+    打开异动类型多选与分组配置管理独立顶层窗口
+    支持查看、新建、重命名、删除分组，自由勾选异动类型并持久化保存
+    """
+    global _stock_type_group_dialog_win, symbol_map
+    if _stock_type_group_dialog_win and _stock_type_group_dialog_win.winfo_exists():
+        _stock_type_group_dialog_win.deiconify()
+        _stock_type_group_dialog_win.lift()
+        _stock_type_group_dialog_win.focus_force()
+        return
+
+    win = tk.Toplevel(parent if parent else root)
+    _stock_type_group_dialog_win = win
+    win.title("⚙️ 异动类型分组管理与自定义配置")
+    win.geometry("640x520")
+    win.minsize(580, 460)
+
+    win_key = "stock_type_group_manager_dialog"
+    if win_key in WINDOW_GEOMETRIES:
+        try:
+            win.geometry(WINDOW_GEOMETRIES[win_key])
+        except Exception:
+            pass
+
+    def on_close_group_dialog(event=None):
+        global _stock_type_group_dialog_win
+        try:
+            if win.winfo_exists():
+                WINDOW_GEOMETRIES[win_key] = win.geometry()
+                schedule_save_positions()
+        except Exception:
+            pass
+        _stock_type_group_dialog_win = None
+        win.destroy()
+
+    win.protocol("WM_DELETE_WINDOW", on_close_group_dialog)
+    win.bind("<Escape>", on_close_group_dialog)
+    win.bind("<Key-Escape>", on_close_group_dialog)
+
+    # 全部异动类型清单
+    all_types = list(symbol_map.keys())
+
+    # 本地工作副本
+    working_groups = load_stock_type_groups()
+
+    main_f = ttk.Frame(win, padding=10)
+    main_f.pack(fill=tk.BOTH, expand=True)
+
+    # 1. 顶部操作栏（分组选择与新建、删除）
+    top_f = ttk.LabelFrame(main_f, text="分组选择与管理", padding=8)
+    top_f.pack(fill=tk.X, pady=(0, 8))
+
+    ttk.Label(top_f, text="当前分组:").pack(side=tk.LEFT)
+    var_cur_group = tk.StringVar()
+    combo_grp = ttk.Combobox(top_f, textvariable=var_cur_group, state="readonly", width=18)
+    combo_grp.pack(side=tk.LEFT, padx=(4, 8))
+
+    # 复选框状态变量字典
+    chk_vars = {t: tk.BooleanVar(value=False) for t in all_types}
+
+    def on_group_switched(event=None):
+        grp_name = var_cur_group.get()
+        items = working_groups.get(grp_name, [])
+        for t, var in chk_vars.items():
+            var.set(t in items)
+
+    def update_combo_list(sel_name=None):
+        names = list(working_groups.keys())
+        combo_grp["values"] = names
+        if sel_name and sel_name in names:
+            var_cur_group.set(sel_name)
+        elif names:
+            var_cur_group.set(names[0])
+        on_group_switched()
+
+    combo_grp.bind("<<ComboboxSelected>>", on_group_switched)
+
+    def do_new_group():
+        from tkinter import simpledialog
+        new_name = simpledialog.askstring("新建分组", "请输入新分组名称:", parent=win)
+        if new_name and new_name.strip():
+            new_name = new_name.strip()
+            if new_name in working_groups:
+                messagebox.showwarning("提示", f"分组 [{new_name}] 已存在！", parent=win)
+                return
+            working_groups[new_name] = []
+            update_combo_list(new_name)
+            toast_message(win, f"已创建新分组: {new_name}")
+
+    def do_rename_group():
+        cur = var_cur_group.get()
+        if not cur:
+            return
+        if cur in ["📈 上涨异动", "📉 下跌异动"]:
+            messagebox.showinfo("提示", "预设核心分组不支持重命名！", parent=win)
+            return
+        from tkinter import simpledialog
+        new_name = simpledialog.askstring("重命名分组", f"将 [{cur}] 重命名为:", initialvalue=cur, parent=win)
+        if new_name and new_name.strip() and new_name.strip() != cur:
+            new_name = new_name.strip()
+            if new_name in working_groups:
+                messagebox.showwarning("提示", f"分组 [{new_name}] 已存在！", parent=win)
+                return
+            working_groups[new_name] = working_groups.pop(cur)
+            update_combo_list(new_name)
+            toast_message(win, f"已重命名为: {new_name}")
+
+    def do_delete_group():
+        cur = var_cur_group.get()
+        if not cur:
+            return
+        if cur in ["📈 上涨异动", "📉 下跌异动"]:
+            messagebox.showwarning("提示", "预设核心分组不能删除！如需重置可点击【恢复默认】", parent=win)
+            return
+        if messagebox.askyesno("确认删除", f"确定要删除分组 [{cur}] 吗？", parent=win):
+            working_groups.pop(cur, None)
+            update_combo_list()
+            toast_message(win, f"已删除分组: {cur}")
+
+    def do_reset_default():
+        if messagebox.askyesno("恢复默认", "确定要将预设分组恢复为系统初始状态吗？", parent=win):
+            for k, v in DEFAULT_STOCK_TYPE_GROUPS.items():
+                working_groups[k] = list(v)
+            update_combo_list(var_cur_group.get())
+            toast_message(win, "已恢复系统预设分组")
+
+    btn_new = ttk.Button(top_f, text="➕ 新建分组", command=do_new_group)
+    btn_new.pack(side=tk.LEFT, padx=3)
+
+    btn_rename = ttk.Button(top_f, text="✏️ 重命名", command=do_rename_group)
+    btn_rename.pack(side=tk.LEFT, padx=3)
+
+    btn_del = ttk.Button(top_f, text="🗑️ 删除分组", command=do_delete_group)
+    btn_del.pack(side=tk.LEFT, padx=3)
+
+    btn_reset = ttk.Button(top_f, text="🔄 恢复默认", command=do_reset_default)
+    btn_reset.pack(side=tk.RIGHT, padx=3)
+
+    # 2. 中部包含的异动类型复选矩阵
+    matrix_f = ttk.LabelFrame(main_f, text="组内包含的异动类型 (勾选即加入当前分组)", padding=8)
+    matrix_f.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+
+    # 快捷操作行
+    tool_row = ttk.Frame(matrix_f)
+    tool_row.pack(fill=tk.X, pady=(0, 6))
+
+    def sync_chk_to_working():
+        cur = var_cur_group.get()
+        if cur:
+            working_groups[cur] = [t for t in all_types if chk_vars[t].get()]
+
+    def set_all_up():
+        up_items = set(DEFAULT_STOCK_TYPE_GROUPS["📈 上涨异动"])
+        for t, v in chk_vars.items():
+            v.set(t in up_items)
+        sync_chk_to_working()
+
+    def set_all_down():
+        down_items = set(DEFAULT_STOCK_TYPE_GROUPS["📉 下跌异动"])
+        for t, v in chk_vars.items():
+            v.set(t in down_items)
+        sync_chk_to_working()
+
+    def set_all(state):
+        for v in chk_vars.values():
+            v.set(state)
+        sync_chk_to_working()
+
+    def invert_all():
+        for v in chk_vars.values():
+            v.set(not v.get())
+        sync_chk_to_working()
+
+    ttk.Button(tool_row, text="全选上涨", command=set_all_up).pack(side=tk.LEFT, padx=2)
+    ttk.Button(tool_row, text="全选下跌", command=set_all_down).pack(side=tk.LEFT, padx=2)
+    ttk.Button(tool_row, text="全选", command=lambda: set_all(True)).pack(side=tk.LEFT, padx=2)
+    ttk.Button(tool_row, text="反选", command=invert_all).pack(side=tk.LEFT, padx=2)
+    ttk.Button(tool_row, text="清空", command=lambda: set_all(False)).pack(side=tk.LEFT, padx=2)
+
+    # 网格展示 22 个类型
+    grid_f = ttk.Frame(matrix_f)
+    grid_f.pack(fill=tk.BOTH, expand=True)
+
+    def on_check_toggled():
+        sync_chk_to_working()
+
+    cols_count = 5
+    for idx, t in enumerate(all_types):
+        r, c = divmod(idx, cols_count)
+        cb = tk.Checkbutton(grid_f, text=t, variable=chk_vars[t], command=on_check_toggled,
+                            font=('Microsoft YaHei', 8), padx=2, pady=2)
+        cb.grid(row=r, column=c, sticky=tk.W, padx=4, pady=2)
+
+    for c in range(cols_count):
+        grid_f.grid_columnconfigure(c, weight=1)
+
+    # 3. 底部操作栏
+    bot_f = ttk.Frame(main_f)
+    bot_f.pack(fill=tk.X)
+
+    ttk.Label(bot_f, text="提示: 修改后点击保存将持久化至 window_config.json", foreground="#666666").pack(side=tk.LEFT)
+
+    def do_save(apply_to_main=False):
+        sync_chk_to_working()
+        ok = save_stock_type_groups(working_groups)
+        if ok:
+            cur = var_cur_group.get()
+            if 'refresh_main_group_combo' in globals():
+                refresh_main_group_combo()
+            if apply_to_main and 'apply_group_to_main' in globals():
+                apply_group_to_main(cur)
+            toast_message(win, "✅ 分组配置已成功保存！")
+        else:
+            messagebox.showerror("错误", "保存分组配置失败！", parent=win)
+
+    ttk.Button(bot_f, text="关闭 (Esc)", command=on_close_group_dialog).pack(side=tk.RIGHT, padx=(4, 0))
+    ttk.Button(bot_f, text="💾 仅保存分组", command=lambda: do_save(False)).pack(side=tk.RIGHT, padx=(4, 0))
+    ttk.Button(bot_f, text="🚀 保存并立即应用", command=lambda: do_save(True)).pack(side=tk.RIGHT, padx=(4, 0))
+
+    # 初始加载列表
+    update_combo_list()
 
 def eval_rearrange_condition(expr, row_dict):
     """安全评估重排过滤策略表达式"""
@@ -6671,12 +7217,13 @@ def get_stock_changes_time(selected_type=None, stock_code=None, update_interval_
             if stock_code:
                 stock_code = stock_code.zfill(6)
                 temp_df = temp_df[temp_df["代码"].astype(str).str.zfill(6) == str(stock_code)]
-        # 如果是全选，但内存数据不为空，直接返回全部内存数据
+        # 如果是全选，但内存数据不为空，直接返回全部内存数据 (按代码查询时直接切片，防止内存暴涨)
         elif is_all_selected and len(realdatadf) > 0:
-            temp_df = realdatadf.copy()
             if stock_code:
-                stock_code = stock_code.zfill(6)
-                temp_df = temp_df[temp_df["代码"].astype(str).str.zfill(6) == str(stock_code)]
+                stock_code = str(stock_code).zfill(6)
+                temp_df = realdatadf[realdatadf["代码"].astype(str).str.zfill(6) == stock_code].copy()
+            else:
+                temp_df = realdatadf.copy()
         # 否则 (内存数据为空，或者是要获取特定类型但内存没有)，再去请求网络
         else:
             temp_df = get_stock_changes(selected_type=selected_type, stock_code=stock_code)
@@ -7207,6 +7754,11 @@ def _get_stock_changes(selected_type=None, stock_code=None, h_enabled=None, h_qu
     if temp_df.empty:
         return temp_df
 
+    # [🚀 性能与内存极限优化] 如果只是按代码获取某单只股票异动列表，且无宏策略过滤，直接返回！
+    # 彻底杜绝监控小窗口高频刷新时对全市场 5000+ 股票进行 TDX/Sina 大表 merge 与内存膨胀！
+    if stock_code and not (h_enabled and h_query):
+        return temp_df
+
     # === 6) Data Enrichment (Merge TDX & Sina) with Caching ===
     # [🚀 修复] 智能行情增强策略：
     # 1. 衔接模式 (Enrich)：只要加载的是“最新交易日”的存档，就执行增强逻辑，以补齐 TDX/Sina 等完整指标列。
@@ -7538,7 +8090,10 @@ def build_hma_and_trendscore_local(
 
 
 def fast_insert(tree, dataframe):
+    global viewdf
     if dataframe is not None and not dataframe.empty:
+        # [🚀 彻底修复 SettingWithCopyWarning] 强制断开切片引用副本
+        dataframe = dataframe.copy()
         # 批量插入
         if 'count' in dataframe.columns and dataframe[dataframe['count'] > 0].empty:
             logger.info(f'fast_insert:count retry process_full_dataframe:{dataframe[:1]}')
@@ -7670,7 +8225,23 @@ def fast_insert(tree, dataframe):
             for target_col in tdx_cols_to_fetch:
                 tdx_real_col = tdx_col_mappings.get(target_col)
                 if tdx_real_col and tdx_real_col in tdx_df.columns:
-                    dataframe[target_col] = codes_str.map(tdx_df[tdx_real_col]).fillna("")
+                    dataframe.loc[:, target_col] = codes_str.map(tdx_df[tdx_real_col]).fillna("")
+
+        # [🚀 核心修复] 在指标补齐后，立即自动应用当前生效的主表格排序列与顺序 (例如 rank, 涨幅, dff 等)
+        try:
+            active_col = current_table_sort.get("col") or load_main_table_sort().get("col")
+            if active_col:
+                if current_table_sort.get("col"):
+                    active_asc = current_table_sort.get("ascending", True)
+                else:
+                    active_asc = load_main_table_sort().get("ascending", True)
+                dataframe = apply_sort_to_dataframe(dataframe, active_col, ascending=active_asc)
+        except Exception as e_sort_fast:
+            logger.debug(f"fast_insert 自动恢复持久化排序失败: {e_sort_fast}")
+
+        # 同步更新全局 viewdf，确保包含所有指标列与排序状态
+        global viewdf
+        viewdf = dataframe.copy()
 
         # 4. 转换并批量插入数据
         df_cols_avail = dataframe.columns.tolist()
@@ -7714,7 +8285,6 @@ def fast_insert(tree, dataframe):
         
         # 无论是否进行了提取合并，均在 fast_insert 退出前强行将最新的 dataframe 写回全局 viewdf
         if dataframe is not None:
-            global viewdf
             viewdf = dataframe.copy()
 
 
@@ -8758,43 +9328,43 @@ def bring_monitor_to_front_old(active_window):
     #         root.attributes('-topmost', 1)
     #         root.attributes('-topmost', 0)
 
-def sort_treeview(tree, col, reverse):
+def sort_treeview(tree, col, reverse=False):
     """
-    点击列标题时，对Treeview的内容进行排序。
+    点击列标题时，对Treeview的内容进行排序并持久化最后的排序方式及顺序。
     """
-    global viewdf
+    global viewdf, sort_directions, current_table_sort
     data = viewdf.copy()
-    uniq_state =uniq_var.get()
+    uniq_state = uniq_var.get() if 'uniq_var' in globals() and uniq_var else False
     if data is not None and not data.empty and uniq_state:
         data = data.drop_duplicates(subset=['代码'])
 
-    if col == '异动类型':
-        col = "板块"
-    # 获取当前排序方向，如果未设置则默认为 False (升序)
-    reverse_sort = sort_directions.get(col, False)
-    
-    # --- 核心逻辑修改部分 ---
-    if col == '时间':
-        # 如果点击的是“时间”列，强制按增序排序（reverse=False）
-        data.sort_values(by=col, ascending=not reverse_sort, inplace=True)
-        # 强制更新排序方向为 True，以便下一次点击时为降序
-        sort_directions[col] = not reverse_sort
-    else:
-        # 其他列正常切换排序方向
-        if col not in data.columns:
-            data[col] = ""
-        data.sort_values(by=[col,'时间'], ascending=[not reverse_sort,True], inplace=True)
-        # 更新排序方向
-        sort_directions[col] = not reverse_sort
+    actual_col = "板块" if (col == '异动类型' and '板块' in data.columns) else col
 
-    # if '相关信息'  in data.columns:
-    #     data.drop(columns=['相关信息'], inplace=True)
-    # 重新加载排序后的 DataFrame 到 Treeview
-    if 'count'  not in data.columns:
+    # [🚀 核心修复] 彻底纠正排序方向语义：
+    # 首次点击或切换列时，默认升序（从小到大，例如 rank 从 1.0 开始）；再次点击相同列时取反为降序
+    if current_table_sort.get("col") == col and current_table_sort.get("ascending") is not None:
+        target_ascending = not current_table_sort["ascending"]
+    else:
+        target_ascending = True
+
+    current_table_sort["col"] = col
+    current_table_sort["ascending"] = target_ascending
+    sort_directions[actual_col] = target_ascending
+    if col != actual_col:
+        sort_directions[col] = target_ascending
+
+    data = apply_sort_to_dataframe(data, col, ascending=target_ascending)
+    viewdf = data.copy()
+
+    if 'count' not in data.columns and not data.empty:
         data = process_full_dataframe(data)
         data['count'] = data.groupby('代码')['代码'].transform('count')
     load_df_to_treeview(tree, data)
-    # populate_treeview(data)
+
+    # 自动持久化最后的排序方式及顺序
+    save_main_table_sort(col=col, ascending=target_ascending, sort_dirs=sort_directions)
+    # 同步更新持久化视图状态，保证排序列与排序方向一致
+    persist_current_ui_view_state()
 
 
 def get_column_width(tree_name, col, default_w):
@@ -9012,8 +9582,12 @@ def on_closing(window, window_id):
         save_timer = None
 
     time.sleep(1)
-    # 2. 保存监控列表和窗口位置（建议放线程里异步保存）
+    # 2. 保存监控列表、窗口位置及主表格排序与分组视图状态（建议放线程里异步保存）
     try:
+        if 'persist_current_ui_view_state' in globals():
+            persist_current_ui_view_state()
+        elif current_table_sort.get("col"):
+            save_main_table_sort(current_table_sort["col"], current_table_sort["ascending"], sort_directions)
         save_monitor_list()
         for win_id in list(WINDOWS_BY_ID.keys()):
             win = WINDOWS_BY_ID.get(win_id) # 修复变量名错误: window_id -> win_id
@@ -9743,14 +10317,26 @@ def create_monitor_window(stock_info):
     top_frame = ttk.Frame(monitor_win)
     top_frame.pack(fill=tk.X, padx=5, pady=5)
 
-    # 报警开关
+    # 报警开关 (精简为“警”)
     alerts_enabled[stock_code] = tk.IntVar(value=1)
-    cb = tk.Checkbutton(top_frame, text="报警开启", variable=alerts_enabled[stock_code])
+    cb = tk.Checkbutton(top_frame, text="警", variable=alerts_enabled[stock_code], font=('Microsoft YaHei', 8))
     cb.pack(side=tk.LEFT, anchor='w')
 
-    # 添加：创建时间标签
-    lbl_time = ttk.Label(top_frame, text=f"创建时间: {c_time}", foreground="gray")
-    lbl_time.pack(side=tk.LEFT, padx=10)
+    # 添加：创建时间标签 (紧凑显示时分)
+    disp_time = c_time[11:16] if len(c_time) >= 16 else c_time
+    lbl_time = ttk.Label(top_frame, text=f"{disp_time}", foreground="gray", font=('Microsoft YaHei', 8))
+    lbl_time.pack(side=tk.LEFT, padx=(2, 4))
+
+    # 右侧联动与刷新按钮紧凑排布
+    def do_monitor_link(c=stock_code, n=stock_name):
+        send_to_tdx(c)
+        try:
+            toast_message(monitor_win, f"联动: {c} {n}")
+        except Exception:
+            pass
+
+    btn_link = ttk.Button(top_frame, text="联", width=2, command=do_monitor_link)
+    btn_link.pack(side=tk.RIGHT, padx=(1, 2))
 
 
     # === 样式 ===
@@ -9867,13 +10453,14 @@ def create_monitor_window(stock_info):
         except Exception as e:
            logger.error(f"MonitorDFCF: 手动刷新异常 -> {stock_code}: {e}", exc_info=True)
 
-    # === 🔄 刷新按钮 ===
+    # === 🔄 刷新按钮 (精简为“刷”，靠右排布在“联”左侧) ===
     btn_refresh = ttk.Button(
         top_frame,
-        text="刷新",
+        text="刷",
+        width=2,
         command=lambda code=stock_code: refresh_manual(code)
     )
-    btn_refresh.pack(side=tk.LEFT, padx=10)
+    btn_refresh.pack(side=tk.RIGHT, padx=(1, 1))
     date_str = c_time[:10]
     # === 注册事件 ===
     try:
@@ -13819,74 +14406,257 @@ if __name__ == "__main__":
                             bd=0, highlightthickness=0)  # 边框也设为0
         cb.pack(side=tk.LEFT, padx=1)  # 外部间距减小到1像素
     # Frame
-    type_frame = tk.LabelFrame(root, text="异动类型选择", font=('Microsoft YaHei', 9),
-                               padx=3, pady=3, bg="#f9f9f9")
-    type_frame.pack(fill=tk.X,padx=3, pady=3)
+    type_frame = tk.LabelFrame(root, text="异动类型选择 (支持单选/多选/分组)", font=('Microsoft YaHei', 9),
+                                padx=3, pady=3, bg="#f9f9f9")
+    type_frame.pack(fill=tk.X, padx=3, pady=3)
 
-    # stock_types list
     stock_types = [
-        "火箭发射","高开5日线","向上缺口","封涨停板", "60日新高", "快速反弹",   
-        "大笔买入","竞价上涨",  "60日大幅上涨", "有大买盘","加速下跌", "打开跌停板", 
+        "火箭发射", "高开5日线", "向上缺口", "封涨停板", "60日新高", "快速反弹",   
+        "大笔买入", "竞价上涨", "60日大幅上涨", "有大买盘", "加速下跌", "打开跌停板", 
         "高台跳水", "大笔卖出", "封跌停板", "打开涨停板", "有大卖盘", "竞价下跌", 
         "低开5日线", "向下缺口", "60日新低", "60日大幅下跌"
     ]
 
-
-
-    # Radio variable
+    global type_var, multi_select_var, type_bool_vars, type_checkbuttons, var_main_group, combo_main_group
     type_var = tk.StringVar(value="")
+    multi_select_var = tk.BooleanVar(value=False)
+    type_bool_vars = {st: tk.BooleanVar(value=False) for st in stock_types}
+    type_checkbuttons = {}
 
     radio_container = tk.Frame(type_frame, bg="#f9f9f9")
     radio_container.pack(fill=tk.BOTH, expand=True)
 
-    # Store buttons
-    buttons = []
+    def get_selected_stock_types():
+        """获取当前所有被选中的异动类型列表"""
+        return [st for st in stock_types if type_bool_vars[st].get()]
+
+    def persist_current_ui_view_state():
+        """持久化当前 UI 的分组与排序状态到 window_config.json（保证排序列不被冲毁）"""
+        grp = var_main_group.get() if 'var_main_group' in globals() else "【全部】"
+        is_m = multi_select_var.get() if 'multi_select_var' in globals() else False
+        sel_types = get_selected_stock_types()
+        # 严格保护排序列：优先从 current_table_sort 取，若为空则从持久化读取，绝不置 None
+        saved_v = load_active_view_state()
+        s_col = current_table_sort.get("col") or saved_v.get("sort_col")
+        if current_table_sort.get("col"):
+            s_asc = current_table_sort.get("ascending", True)
+        else:
+            s_asc = saved_v.get("sort_ascending", True)
+        s_dirs = sort_directions if 'sort_directions' in globals() else {}
+        save_active_view_state(group=grp, is_multi=is_m, selected_types=sel_types, 
+                               sort_col=s_col, sort_ascending=s_asc, sort_dirs=s_dirs)
+
+    def on_stock_type_clicked(clicked_type):
+        """处理异动类型复选框点击事件（智能兼容单选与多选，并自动持久化）"""
+        is_multi = multi_select_var.get()
+        if not is_multi:
+            # 单选模式：互斥选中
+            if type_bool_vars[clicked_type].get():
+                for st, v in type_bool_vars.items():
+                    if st != clicked_type:
+                        v.set(False)
+                type_var.set(clicked_type)
+            else:
+                type_var.set("")
+        else:
+            # 多选模式：自由勾选组合
+            sel = get_selected_stock_types()
+            type_var.set(",".join(sel) if sel else "")
+
+        # 检查是否匹配某个预设分组
+        sel_set = set(get_selected_stock_types())
+        matched_group = "【全部】" if not sel_set else "【自定义选择】"
+        all_groups = load_stock_type_groups()
+        for g_name, g_items in all_groups.items():
+            if set(g_items) == sel_set:
+                matched_group = g_name
+                break
+        var_main_group.set(matched_group)
+
+        # 立即持久化视图状态并刷新
+        persist_current_ui_view_state()
+        search_by_type()
+
+    def on_multi_mode_toggle():
+        """多选模式切换处理"""
+        if not multi_select_var.get():
+            sel = get_selected_stock_types()
+            if len(sel) > 1:
+                first = sel[0]
+                for st, v in type_bool_vars.items():
+                    v.set(st == first)
+                type_var.set(first)
+                search_by_type()
+        persist_current_ui_view_state()
+
+    def clear_stock_type_selection():
+        """清空所有异动类型选择，显示全部并持久化"""
+        for v in type_bool_vars.values():
+            v.set(False)
+        type_var.set("")
+        var_main_group.set("【全部】")
+        persist_current_ui_view_state()
+        search_by_type()
+
+    def invert_selected_types():
+        """反向勾选异动类型，自动激活多选模式并持久化"""
+        multi_select_var.set(True)
+        for v in type_bool_vars.values():
+            v.set(not v.get())
+        sel = get_selected_stock_types()
+        type_var.set(",".join(sel) if sel else "")
+        var_main_group.set("【自定义选择】")
+        persist_current_ui_view_state()
+        search_by_type()
+
+    def on_group_selected(event=None):
+        """主界面分组下拉框选择处理并持久化"""
+        grp = var_main_group.get()
+        if not grp or grp == "【全部】":
+            clear_stock_type_selection()
+            return
+        if grp == "【自定义选择】":
+            return
+        all_groups = load_stock_type_groups()
+        if grp in all_groups:
+            items = set(all_groups[grp])
+            multi_select_var.set(True)
+            for st, v in type_bool_vars.items():
+                v.set(st in items)
+            sel = get_selected_stock_types()
+            type_var.set(",".join(sel) if sel else "")
+            persist_current_ui_view_state()
+            search_by_type()
+
+    def refresh_main_group_combo():
+        """供分组弹窗修改后实时刷新主界面下拉框"""
+        all_groups = load_stock_type_groups()
+        names = ["【全部】"] + list(all_groups.keys())
+        combo_main_group["values"] = names
+
+    def apply_group_to_main(grp_name):
+        """供弹窗直接应用某分组到主界面"""
+        refresh_main_group_combo()
+        if grp_name:
+            var_main_group.set(grp_name)
+            on_group_selected()
+
+    # 创建 22 个 Checkbutton
     for stock_type in stock_types:
-        btn = tk.Radiobutton(
+        btn = tk.Checkbutton(
             radio_container, 
             text=stock_type, 
-            variable=type_var, 
-            value=stock_type,
-            command=search_by_type,
+            variable=type_bool_vars[stock_type], 
+            command=lambda st=stock_type: on_stock_type_clicked(st),
             font=('Microsoft YaHei', 8),
             bg="#f9f9f9",
             activebackground="#e6f3ff",
-            padx=5, pady=2
+            padx=3, pady=2
         )
-        buttons.append(btn)
+        type_checkbuttons[stock_type] = btn
 
-    # 初始显示，避免初始化宽度问题
-    for i, btn in enumerate(buttons):
-        btn.grid(row=i, column=0, sticky=tk.W, padx=5, pady=3)
-
-
-    width = radio_container.winfo_width()
-    if width <= 1:
-        cols = 5  # 初始化时默认5列
-    else:
-        # 估算每个按钮的宽度，包括 padx
-        btn_width = 110  
-        # 计算列数，约束最少5列，最多10列
-        cols = width // btn_width
-        # logger.info(f'cols:{cols}')
-        if cols < 5:
-            cols = 5
-        elif cols > 11:
-            cols = 11
-
-    # 清空布局
-    for btn in buttons:
-        btn.grid_forget()
-
-    # 重新布局
-    for i, btn in enumerate(buttons):
+    # 5 列网格布局
+    cols = 5
+    for i, stock_type in enumerate(stock_types):
         row, col = divmod(i, cols)
-        btn.grid(row=row, column=col, sticky=tk.W, padx=5, pady=3)
+        type_checkbuttons[stock_type].grid(row=row, column=col, sticky=tk.W, padx=3, pady=2)
 
-    # 列权重
+    # 第 5 行第 2 列~第 4 列嵌入分组控制栏
+    group_ctrl_frame = tk.Frame(radio_container, bg="#f9f9f9")
+    group_ctrl_frame.grid(row=4, column=2, columnspan=3, sticky="we", padx=(6, 2), pady=2)
+
+    chk_multi = tk.Checkbutton(
+        group_ctrl_frame, 
+        text="多选", 
+        variable=multi_select_var, 
+        command=on_multi_mode_toggle,
+        font=('Microsoft YaHei', 8, 'bold'), 
+        bg="#f9f9f9", 
+        activebackground="#e6f3ff"
+    )
+    chk_multi.pack(side=tk.LEFT, padx=(2, 4))
+
+    tk.Label(group_ctrl_frame, text="分组:", font=('Microsoft YaHei', 8), bg="#f9f9f9").pack(side=tk.LEFT, padx=(2, 2))
+    var_main_group = tk.StringVar(value="【全部】")
+    all_init_groups = load_stock_type_groups()
+    combo_main_group = ttk.Combobox(
+        group_ctrl_frame, 
+        textvariable=var_main_group, 
+        values=["【全部】"] + list(all_init_groups.keys()), 
+        state="readonly", 
+        width=13, 
+        font=('Microsoft YaHei', 8)
+    )
+    combo_main_group.pack(side=tk.LEFT, padx=(2, 4))
+    combo_main_group.bind("<<ComboboxSelected>>", on_group_selected)
+
+    btn_manage_group = tk.Button(
+        group_ctrl_frame, 
+        text="⚙️ 分组管理", 
+        command=lambda: open_stock_type_group_manager(root),
+        font=('Microsoft YaHei', 8), 
+        bg="#e8f0fe", 
+        relief="groove", 
+        padx=4, pady=1
+    )
+    btn_manage_group.pack(side=tk.LEFT, padx=(2, 4))
+
+    btn_invert = tk.Button(
+        group_ctrl_frame, 
+        text="反选", 
+        command=invert_selected_types,
+        font=('Microsoft YaHei', 8), 
+        bg="#f5f5f5", 
+        relief="groove", 
+        padx=3, pady=1
+    )
+    btn_invert.pack(side=tk.LEFT, padx=(2, 2))
+
+    btn_clear_type = tk.Button(
+        group_ctrl_frame, 
+        text="清空选择", 
+        command=clear_stock_type_selection,
+        font=('Microsoft YaHei', 8), 
+        bg="#f5f5f5", 
+        relief="groove", 
+        padx=3, pady=1
+    )
+    btn_clear_type.pack(side=tk.LEFT, padx=(2, 2))
+
     for c in range(cols):
         radio_container.grid_columnconfigure(c, weight=1)
-            
+
+    # [🚀 核心功能：恢复最后持久化的分组与选择状态]
+    def restore_last_active_group_state():
+        saved_view = load_active_view_state()
+        saved_group = saved_view.get("selected_group", "【全部】")
+        saved_is_multi = saved_view.get("is_multi", False)
+        saved_types = set(saved_view.get("selected_types", []))
+        
+        # 恢复多选模式开关
+        multi_select_var.set(saved_is_multi)
+        
+        if saved_group != "【全部】" and saved_group in load_stock_type_groups():
+            # 恢复预设/自定义分组
+            var_main_group.set(saved_group)
+            group_items = set(load_stock_type_groups()[saved_group])
+            for st, v in type_bool_vars.items():
+                v.set(st in group_items)
+            type_var.set(",".join(load_stock_type_groups()[saved_group]))
+            logger.info(f"✅ [启动自愈] 成功恢复持久化异动分组: [{saved_group}]")
+        elif saved_types:
+            # 恢复自定义勾选集合
+            var_main_group.set("【自定义选择】")
+            for st, v in type_bool_vars.items():
+                v.set(st in saved_types)
+            type_var.set(",".join([st for st in stock_types if st in saved_types]))
+            logger.info(f"✅ [启动自愈] 成功恢复持久化多选异动类型: {len(saved_types)} 类")
+        else:
+            var_main_group.set("【全部】")
+            type_var.set("")
+
+    # 立即应用最后持久化的分组状态到 UI
+    restore_last_active_group_state()
     # --- History Strategy Filter Section ---
     history_frame = tk.Frame(root, bg="#f0f0f0", padx=5, pady=2)
     history_frame.pack(fill=tk.X, padx=10)
@@ -14399,6 +15169,27 @@ if __name__ == "__main__":
                          padx=5, pady=2)
     clear_all_btn.pack(side=tk.RIGHT, padx=2)
 
+    # [🚀 新增] Luck 挖掘与测试弹出快捷按钮 (左键异步挖掘弹出，右键快捷菜单)
+    def show_luck_context_menu(event):
+        try:
+            m = tk.Menu(root, tearoff=0)
+            m.add_command(label="🎯 立即执行 Luck 挖掘弹出", 
+                          command=lambda: test_realtime_popup_scan(root, trigger_btn=btn_luck, is_async=True))
+            m.add_separator()
+            m.add_command(label="⚙️ 配置重排与挖掘策略...", command=lambda: open_rearrange_policy_dialog(root))
+            m.add_command(label="🚫 管理自动弹出黑名单...", command=lambda: open_blacklist_manager_dialog(root))
+            m.post(event.x_root, event.y_root)
+        except Exception as e_m:
+            logger.debug(f"Luck 右键菜单异常: {e_m}")
+
+    btn_luck = tk.Button(search_frame, text="Luck", 
+                         command=lambda: test_realtime_popup_scan(root, trigger_btn=btn_luck, is_async=True),
+                         font=('Microsoft YaHei', 9, 'bold'),
+                         fg="#b71c1c",
+                         padx=6, pady=2)
+    btn_luck.pack(side=tk.RIGHT, padx=(2, 6))
+    btn_luck.bind("<Button-3>", show_luck_context_menu)
+
     
 
 
@@ -14500,6 +15291,8 @@ if __name__ == "__main__":
 
     # 初始加载数据
     root.after(100, lambda: populate_treeview())
+    # [🚀 启动自愈] 延迟数据加载完成后自动恢复主表格持久化排序方式与顺序
+    root.after(600, lambda: restore_last_table_sort(tree))
 
     load_alerts()
 
@@ -14638,22 +15431,29 @@ if __name__ == "__main__":
 
     process_queue(root)
 
-    # 自动加载并开启监控窗口
+    # 自动加载并开启监控窗口 (分帧平滑异步创建，释放 Tkinter 事件泵，彻底杜绝白屏卡死)
     initial_monitor_list = load_monitor_list()
     if initial_monitor_list:
-        for stock_info in initial_monitor_list:
-            if isinstance(stock_info, list) and stock_info:
-                stock_code = stock_info[0]
-                if stock_code not in monitor_windows:
-                    monitor_win = create_monitor_window(stock_info)
-                    monitor_windows[stock_code] = monitor_win
-            elif isinstance(stock_info, str):
-                stock_code = stock_info
-                # 重新构造 stock_info，以便 create_monitor_window 使用
-                # 注意：这里需要你自行获取完整信息或根据需要调整逻辑
-                if stock_code not in monitor_windows:
-                    monitor_win = create_monitor_window([stock_code, "未知", "未知", 0, 0])
-                    monitor_windows[stock_code] = monitor_win
+        def _schedule_create_monitor(idx=0):
+            if idx >= len(initial_monitor_list):
+                return
+            stock_info = initial_monitor_list[idx]
+            try:
+                if isinstance(stock_info, list) and stock_info:
+                    stock_code = stock_info[0]
+                    if stock_code not in monitor_windows:
+                        monitor_win = create_monitor_window(stock_info)
+                        monitor_windows[stock_code] = monitor_win
+                elif isinstance(stock_info, str):
+                    stock_code = stock_info
+                    if stock_code not in monitor_windows:
+                        monitor_win = create_monitor_window([stock_code, "未知", "未知", 0, 0])
+                        monitor_windows[stock_code] = monitor_win
+            except Exception as e_m_create:
+                logger.debug(f"创建监控窗口异常 ({stock_info}): {e_m_create}")
+            root.after(35, lambda: _schedule_create_monitor(idx + 1))
+
+        root.after(80, lambda: _schedule_create_monitor(0))
 
     # 主线程启动后
     # root.after(1000, process_ui_queue)
