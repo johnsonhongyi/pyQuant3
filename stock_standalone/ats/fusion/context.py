@@ -45,7 +45,8 @@ def _find_daily_path() -> Optional[str]:
 
 
 STRUCTURE_FIELDS = (
-    "vwap3", "vwap5", "vwap10",
+    "vwap3", "vwap5", "vwap10", "vwap_observed_days",
+    "vwap_prev2_value", "vwap_prev2_volume", "vwap_prev4_value", "vwap_prev4_volume",
     "hi_10d", "lo_10d", "hi_pre1", "lo_pre1", "close_pre1",
     "amp_10d", "vwap_disp", "is_box10_ready",
     "vwap10_touch_count", "vwap10_hold_days",
@@ -188,6 +189,9 @@ class DailyContext:
 
         # 10 日 / 5 日 / 3 日累计均价（VWAP）与 10 日箱体标量 (V2 规范：量纲自校准 + 标量预计算)
         amt = v["amount"][: idx + 1]
+        out["vwap_observed_days"] = float(sum(
+            1 for a, volume in zip(amt[-5:], vol[-5:]) if a > 0 and volume > 0
+        ))
         # 单日均价量纲自校准门禁 (防止 amount(千元)/vol(手) 引发 10x/100x 偏差)
         def _calibrated_vwap_day(a_val, v_val, h_val, l_val, c_val):
             if l_val <= 0 or h_val <= 0:
@@ -224,6 +228,16 @@ class DailyContext:
 
             vwaps_arr = np.array(vwaps_10)
             vols_arr = np.array(vols_10)
+
+            # 跨日锚点只含历史日；盘中再合并当日累计成交。
+            for count in (2, 4):
+                if win_10 >= count and all(
+                    amt[k] > 0 and vol[k] > 0
+                    and lows_arr[k] * 0.95 <= amt[k] / vol[k] <= h[k] * 1.05
+                    for k in range(n - count, n)
+                ):
+                    out["vwap_prev{}_value".format(count)] = float(np.sum(vwaps_arr[-count:] * vols_arr[-count:]))
+                    out["vwap_prev{}_volume".format(count)] = float(np.sum(vols_arr[-count:]))
 
             # 计算 V3, V5, V10
             sv3 = np.sum(vols_arr[-3:])

@@ -17,6 +17,12 @@ SERVICE = Path(os.environ.get("EASY_STOCK_FOLLOW_SERVICE_DIR", str(ROOT / "sourc
 BJ = ZoneInfo("Asia/Shanghai")
 VERSION = "paper-follow-v1"
 
+import attribution
+import loop_state
+import optimizer
+import signal_engine
+import strong_scan
+
 
 def number(value):
     if isinstance(value, bool):
@@ -235,6 +241,7 @@ def initial():
     return {"version": VERSION, "mode": "paper", "initial_cash": 500000,
             "cash": 500000, "positions": [], "closed": [], "events": [],
             "seen": [], "kill": False, "enabled": True,
+            "loop": {}, "strong_scan": {}, "attribution": {}, "optimizer": {}, "regime": {},
             "settings": {"limit_up": True, "theme_trend": True, "theme_ids": []}}
 
 
@@ -335,9 +342,23 @@ def wait_next_cycle(db, seconds=180):
 def load_config():
     snapshot = os.environ.get("EASY_STOCK_FOLLOW_CONFIG")
     if snapshot:
-        return json.loads(Path(snapshot).read_text(encoding="utf-8"))
-    import yaml
-    return yaml.safe_load((SERVICE / "strategy.yaml").read_text(encoding="utf-8"))
+        cfg = json.loads(Path(snapshot).read_text(encoding="utf-8"))
+    else:
+        try:
+            import yaml
+            cfg = yaml.safe_load((SERVICE / "strategy.yaml").read_text(encoding="utf-8"))
+        except ImportError:
+            import simple_config
+            cfg = simple_config.load(SERVICE / "strategy.yaml")
+    try:
+        account_db = os.environ.get("EASY_STOCK_FOLLOW_DB", str(ROOT / "logs" / "auto-follow.db"))
+        params = optimizer.load_params(account_db)
+        if params:
+            cfg = optimizer.apply_overrides(cfg, params)
+            cfg["runtime_params"] = {"version": params.get("version"), "overrides": params.get("overrides") or {}}
+    except (OSError, ValueError, TypeError, KeyError):
+        pass
+    return cfg
 
 
 def backend_market(api, now):
@@ -366,7 +387,7 @@ def event(state, now, action, code="", **details):
 
 
 def sell(state, p, price, reason, now):
-    pnl = round((price - p["buy_price"]) * p["shares"], 2)
+    pnl = round((price - p["buy_price"]) * p["shares"], 2) + p.get("realized_partial", 0)
     state["cash"] = round(state["cash"] + price * p["shares"], 2)
     state["closed"].append({**p, "sell_date": now.date().isoformat(), "sell_price": price,
                             "sold_at": now.isoformat(), "pnl": pnl, "reason": reason})
@@ -374,7 +395,17 @@ def sell(state, p, price, reason, now):
     event(state, now, "SELL", p["symbol"], price=price, pnl=pnl, reason=reason)
 
 
-def cycle(state, cfg, api, now, calendar, sentiment, external_kill, clock=None, should_stop=None):
+def sell_partial(state, p, price, shares, reason, now):
+    pnl = round((price - p["buy_price"]) * shares, 2)
+    state["cash"] = round(state["cash"] + price * shares, 2)
+    p["shares"] -= shares
+    p["realized_partial"] = round(p.get("realized_partial", 0) + pnl, 2)
+    p["partial_done"] = True
+    event(state, now, "PARTIAL_SELL", p["symbol"], price=price, shares=shares, pnl=pnl,
+          reason=reason, remaining=p["shares"])
+
+
+def cycle(state, cfg, api, now, calendar, sentiment, external_kill, clock=None, should_stop=None, journal=None):
     day = now.date().isoformat()
     session_time = now.strftime("%H:%M")
     if not calendar.is_trading_day(day, "CN") or not ("09:30" <= session_time < "11:30" or "13:00" <= session_time < "15:00"):
@@ -385,7 +416,10 @@ def cycle(state, cfg, api, now, calendar, sentiment, external_kill, clock=None, 
     # Exit monitoring precedes candidate/market-data gates; T+1 is absolute.
     for p in list(state["positions"]):
         try:
-            q = api("/api/v1/quotes/realtime?" + urlencode({"symbols": p["symbol"]}))["data"][0]
+            quotes = api("/api/v1/quotes/realtime?" + urlencode({"symbols": p["symbol"]})).get("data") or []
+            if not quotes:
+                raise ValueError("quote unavailable")
+            q = quotes[0]
             price, change = quote_ok(q, clock() if clock else now)
             if symbol(q["symbol"]) != p["symbol"]:
                 raise ValueError("quote symbol mismatch")
@@ -402,9 +436,25 @@ def cycle(state, cfg, api, now, calendar, sentiment, external_kill, clock=None, 
                 continue
             ret = price / p["buy_price"] - 1
             scfg = cfg["sell"]
+            p["peak"] = max(p.get("peak", p["buy_price"]), price)
+            p["mfe"] = max(p.get("mfe", 0), ret)
+            p["mae"] = min(p.get("mae", 0), ret)
             held = (now.date() - datetime.fromisoformat(p["buy_date"]).date()).days
-            reason = ("take_profit" if ret >= scfg["take_profit"] else
-                      "stop_loss" if ret <= scfg["stop_loss"] else
+            partial_at = scfg.get("partial_take_profit")
+            if partial_at and not p.get("partial_done") and ret >= partial_at:
+                ratio = scfg.get("partial_ratio", 0.5)
+                lots = int(p["shares"] * ratio / 100) * 100
+                if 0 < lots < p["shares"]:
+                    sell_partial(state, p, price, lots, "partial_take_profit", now)
+                    continue
+            trailing_arm = scfg.get("trailing_arm")
+            trailing_giveback = scfg.get("trailing_giveback")
+            trailing = bool(trailing_arm and trailing_giveback and
+                            p["peak"] >= p["buy_price"] * (1 + trailing_arm) and
+                            price <= p["peak"] * (1 - trailing_giveback))
+            reason = ("stop_loss" if ret <= scfg["stop_loss"] else
+                      "trailing_stop" if trailing else
+                      "take_profit" if ret >= scfg["take_profit"] else
                       "vwap_stop" if price < p["buy_vwap"] * (1 - scfg["vwap_stop"]) else
                       "break_ma10" if scfg["break_ma10"] and price < p["buy_vwap10"] else
                       "time_stop" if held >= scfg["max_hold_days"] else None)
@@ -425,25 +475,44 @@ def cycle(state, cfg, api, now, calendar, sentiment, external_kill, clock=None, 
     bcfg = cfg["buy"]
     if callable(sentiment):
         sentiment = sentiment()
-    if "backend_status" in sentiment:
-        market_blocked = sentiment["backend_status"] not in ("高位延续", "高位震荡") or sentiment["risk_score"] >= 40
-    else:
-        score = number(sentiment["score"])
-        threshold = bcfg["min_market_sentiment"]
-        if sentiment.get("water", {}).get("days_declining", 0) >= 3 or sentiment.get("risk_appetite", {}).get("level") == "低":
-            threshold = bcfg["min_market_sentiment_low_water"]
-        market_blocked = sentiment.get("error") or score < threshold or (bcfg["forbid_dead_day"] and sentiment.get("dead_day")) or score <= -60
-    event(state, now, "MARKET_GATE", evidence=sentiment,
+    regime = loop_state.classify(sentiment, cfg)
+    state["regime"] = regime
+    run = loop_state.new_run(now, regime)
+    market_blocked = False
+    if regime["code"] == "legacy":
+        if "backend_status" in sentiment:
+            market_blocked = sentiment["backend_status"] not in ("高位延续", "高位震荡") or sentiment["risk_score"] >= 40
+        else:
+            score = number(sentiment["score"])
+            threshold = bcfg["min_market_sentiment"]
+            if sentiment.get("water", {}).get("days_declining", 0) >= 3 or sentiment.get("risk_appetite", {}).get("level") == "低":
+                threshold = bcfg["min_market_sentiment_low_water"]
+            market_blocked = sentiment.get("error") or score < threshold or (bcfg["forbid_dead_day"] and sentiment.get("dead_day")) or score <= -60
+    event(state, now, "MARKET_GATE", evidence=sentiment, regime=regime,
           reason="%s / risk=%s" % (sentiment.get("backend_status", "sentiment"), sentiment.get("risk_score", sentiment.get("score"))))
     state["market"] = {**sentiment, "checked_at": now.isoformat()}
     if market_blocked:
         event(state, now, "BLOCK", reason="market_gate")
+        loop_state.finish(state, run, now, "market_gate")
         return "market_gate"
+    if regime["code"] == "defense":
+        event(state, now, "BLOCK", reason="regime_defense", regime=regime)
+        loop_state.finish(state, run, now, "defense")
+        return "defense"
     ladder = api("/api/v1/short-term/limit-up-ladder")["data"]
     overview = api("/api/v1/themes/overview")
     settings = state.get("settings", {})
-    pool = candidates(ladder, overview, clock() if clock else now, previous_day, settings)
-    state["last_scan_at"] = (clock() if clock else now).isoformat()
+    checked_now = clock() if clock else now
+    pool = candidates(ladder, overview, checked_now, previous_day, settings)
+    if regime["code"] != "legacy":
+        try:
+            strong_scan.refresh(state, api, checked_now, cfg, ladder, overview)
+            strong_scan.merge(pool, state, cfg)
+        except (KeyError, ValueError, TypeError, OSError) as exc:
+            event(state, now, "STRONG_SCAN_ERROR", reason=str(exc)[:200])
+    pool.sort(key=lambda c: (-(c.get("scan_score") or 0), -(c.get("streak") or 0), c["symbol"]))
+    run["candidates"] = len(pool)
+    state["last_scan_at"] = checked_now.isoformat()
     state["themes"] = [{"id": t["theme"], "name": t["name"], "change_percent": t.get("change_percent"),
                         "rising_nodes": t.get("rising_nodes"), "falling_nodes": t.get("falling_nodes"),
                         "source": overview.get("meta", {}).get("source"), "snapshot_at": overview.get("meta", {}).get("fetched_at")}
@@ -454,6 +523,11 @@ def cycle(state, cfg, api, now, calendar, sentiment, external_kill, clock=None, 
         if previous_plans.get(c["symbol"]):
             c["plan"] = previous_plans[c["symbol"]]
         c.update(status="waiting", checked_at=state["last_scan_at"])
+    loop_cfg = (cfg.get("execution") or {}).get("signal") or {}
+    max_evaluations = int(loop_cfg.get("max_evaluations", 14))
+    pool_changes = [c["change_percent"] for c in pool if isinstance(c.get("change_percent"), (int, float))]
+    pool_changes += [row["change_percent"] for row in ((state.get("strong_scan") or {}).get("rows") or [])
+                     if isinstance(row.get("change_percent"), (int, float))]
     for c in pool:
         code = c["symbol"]
         if should_stop and should_stop():
@@ -463,11 +537,18 @@ def cycle(state, cfg, api, now, calendar, sentiment, external_kill, clock=None, 
         if key in state["seen"] or any(p["symbol"] == code for p in state["positions"]):
             c.update(status="held", reason="already_held_or_traded_today")
             continue
-        if len(state["positions"]) >= bcfg["max_positions"]:
+        max_positions = min(bcfg["max_positions"], regime["max_positions"] or bcfg["max_positions"])
+        if len(state["positions"]) >= max_positions:
             c.update(status="blocked", reason="max_positions")
             continue
+        if run["counts"]["scored"] >= max_evaluations:
+            c.update(status="waiting", reason="evaluation_budget")
+            continue
         try:
-            q = api("/api/v1/quotes/realtime?" + urlencode({"symbols": code}))["data"][0]
+            quotes = api("/api/v1/quotes/realtime?" + urlencode({"symbols": code})).get("data") or []
+            if not quotes:
+                raise ValueError("quote unavailable")
+            q = quotes[0]
             if symbol(q["symbol"]) != code:
                 raise ValueError("quote symbol mismatch")
             checked_quote_at = clock() if clock else now
@@ -479,41 +560,158 @@ def cycle(state, cfg, api, now, calendar, sentiment, external_kill, clock=None, 
             current_clock = checked_at.strftime("%H:%M")
             if checked_at.date() != now.date() or not ("09:30" <= current_clock < "11:30" or "13:00" <= current_clock < "15:00"):
                 break
-            anchors = entry_ok(q, minute, daily, cfg, checked_at, previous_day)
             price = number(q["price"])
-            from follow_ai import ai_entry_gate
-            try:
-                ai_decision = ai_entry_gate(state, code, price, checked_at)
+            if regime["code"] == "legacy":
+                anchors = entry_ok(q, minute, daily, cfg, checked_at, previous_day)
+                from follow_ai import ai_entry_gate
+                try:
+                    ai_decision = ai_entry_gate(state, code, price, checked_at)
+                    event(state, checked_at, "AI_DECISION", code, decision=ai_decision)
+                except ValueError as exc:
+                    event(state, checked_at, "AI_DECISION", code, decision={"status": "blocked", "reason": str(exc),
+                          "job_id": state.get("ai_latest", {}).get("id"), "evidence_hash": state.get("ai_latest", {}).get("evidence_hash")})
+                    raise
+                evaluation = None
+                threshold = 0
+            else:
+                from follow_ai import ai_overlay
+                ai_decision = ai_overlay(state, code, price, checked_at, cfg)
                 event(state, checked_at, "AI_DECISION", code, decision=ai_decision)
-            except ValueError as exc:
-                event(state, checked_at, "AI_DECISION", code, decision={"status": "blocked", "reason": str(exc),
-                      "job_id": state.get("ai_latest", {}).get("id"), "evidence_hash": state.get("ai_latest", {}).get("evidence_hash")})
-                raise
+                theme = next((t for t in overview.get("data", []) if t.get("theme") == c.get("theme")), None)
+                theme_info = None
+                if theme:
+                    leaders = theme.get("leader_stocks") or []
+                    rank = None
+                    for index, leader in enumerate(leaders, 1):
+                        try:
+                            if symbol(leader.get("symbol")) == code:
+                                rank = index
+                                break
+                        except (KeyError, ValueError, TypeError):
+                            continue
+                    changes = sorted((number(t.get("change_percent") or 0) for t in overview.get("data", [])), reverse=True)
+                    theme_change = number(theme.get("change_percent") or 0)
+                    theme_info = {"change_percent": theme_change,
+                                  "rising_nodes": theme.get("rising_nodes"),
+                                  "falling_nodes": theme.get("falling_nodes"),
+                                  "leader_rank": rank,
+                                  "rank": changes.index(theme_change) + 1 if theme_change in changes else None}
+                evaluation = signal_engine.evaluate(c, q, minute, daily, {
+                    "now": checked_at, "today": day, "previous_day": previous_day, "cfg": cfg,
+                    "regime": regime, "theme": theme_info, "ai": ai_decision,
+                    "pool_change_median": sorted(pool_changes)[len(pool_changes) // 2] if pool_changes else None,
+                })
+                c.update(score=evaluation["score"], raw_score=evaluation["raw_score"],
+                         layers=evaluation["layers"], blockers=evaluation["blockers"],
+                         notes=evaluation["notes"], ai=ai_decision)
+                loop_state.bump(run, "scored")
+                threshold = regime["min_score"]
+                if evaluation["blockers"]:
+                    reason, status = evaluation["blockers"][0], "blocked"
+                    loop_state.blocker(run, reason, code)
+                    c.update(status="skipped", reason=reason)
+                    event(state, checked_at, "SKIP", code, reason=reason, score=evaluation["score"],
+                          threshold=threshold, blockers=evaluation["blockers"])
+                    if journal is not None:
+                        attribution.record(journal, checked_at, evaluation, status, reason, regime["code"], threshold)
+                    continue
+                loop_state.bump(run, "structure_pass")
+                if evaluation["score"] < threshold:
+                    reason, status = "score below threshold", "below_score"
+                    loop_state.blocker(run, reason, code)
+                    c.update(status="skipped", reason=reason)
+                    event(state, checked_at, "SKIP", code, reason=reason, score=evaluation["score"],
+                          threshold=threshold, blockers=[])
+                    if journal is not None:
+                        attribution.record(journal, checked_at, evaluation, status, reason, regime["code"], threshold)
+                    continue
+                loop_state.bump(run, "score_pass")
+                if ai_decision.get("veto"):
+                    reason, status = "AI veto", "ai_veto"
+                    loop_state.blocker(run, reason, code)
+                    c.update(status="skipped", reason=reason)
+                    event(state, checked_at, "SKIP", code, reason=reason, score=evaluation["score"],
+                          threshold=threshold, blockers=[])
+                    if journal is not None:
+                        attribution.record(journal, checked_at, evaluation, status, reason, regime["code"], threshold)
+                    continue
+                loop_state.bump(run, "ai_pass")
+                anchors = {"buy_vwap": evaluation["metrics"].get("vwap1"),
+                           "buy_vwap10": evaluation["metrics"].get("vwap10")}
             c.update(price=price, change_percent=q["change_percent"], source=q["meta"]["source"], trade_time=q["trade_time"])
-            amount = min(bcfg["amount_per_trade"], state["cash"])
+            exposure = regime["exposure"] if regime["code"] != "legacy" else 1.0
+            amount = min(bcfg["amount_per_trade"] * exposure, state["cash"])
             shares = int(amount / price / 100) * 100
             if should_stop and should_stop():
                 c.update(status="blocked", reason="pending_stop_command")
                 continue
             if shares <= 0:
                 c.update(status="blocked", reason="insufficient_cash")
+                if evaluation is not None and journal is not None:
+                    attribution.record(journal, checked_at, evaluation, "risk_blocked", "insufficient_cash", regime["code"], threshold)
                 continue
+            if evaluation is not None:
+                loop_state.bump(run, "risk_pass")
+                loop_state.bump(run, "orders")
             state["cash"] = round(state["cash"] - shares * price, 2)
             identity = {k: c[k] for k in ("symbol", "name", "route", "theme", "streak") if k in c}
-            state["positions"].append({**identity, **anchors, "ai_decision": ai_decision, "shares": shares, "buy_price": price,
-                                       "last_price": price, "buy_date": day,
-                                       "bought_at": checked_at.isoformat(), "trade_id": key,
-                                       "source": q["meta"]["source"], "trade_time": q["trade_time"], "last_price_at": q["trade_time"]})
-            c.update(status="bought", reason="P8_P25_confirmed")
+            position = {**identity, **anchors, "ai_decision": ai_decision, "shares": shares, "buy_price": price,
+                        "last_price": price, "buy_date": day, "bought_at": checked_at.isoformat(),
+                        "trade_id": key, "source": q["meta"]["source"], "trade_time": q["trade_time"],
+                        "last_price_at": q["trade_time"], "mfe": 0, "mae": 0, "peak": price}
+            if evaluation is not None:
+                position.update(entry_score=evaluation["score"], entry_regime=regime["code"],
+                                entry_layers=evaluation["layers"])
+            state["positions"].append(position)
+            c.update(status="bought", reason="score_admitted" if evaluation is not None else "P8_P25_confirmed")
             state["seen"].append(key)
+            if evaluation is not None:
+                loop_state.bump(run, "fills")
+                if journal is not None:
+                    attribution.record(journal, checked_at, evaluation, "filled", "score_admitted", regime["code"], threshold)
             event(state, now, "BUY", code, route=c["route"], price=price, shares=shares,
-                  ai_decision=ai_decision,
+                  score=evaluation["score"] if evaluation is not None else None,
+                  regime=regime["code"], exposure=exposure, ai_decision=ai_decision,
                   fill_model="fresh_quote_reference", fee_model="CN_existing_zero_fee")
         except (KeyError, ValueError, TypeError, OSError) as exc:
             c.update(status="skipped", reason=str(exc))
             event(state, now, "SKIP", code, reason=str(exc))
+            if regime["code"] != "legacy":
+                loop_state.blocker(run, str(exc)[:80], code)
     state["seen"] = [key for key in state["seen"] if key.startswith(day + ":")]
+    loop_state.finish(state, run, now, "completed")
     return "completed"
+
+
+def after_cycle(journal, state, cfg, api, now, calendar, account_db, result):
+    """Settlement, attribution and optimization run outside the trading loop."""
+    session_done = now.strftime("%H:%M") >= "15:05"
+    trading_day = calendar.is_trading_day(now.date().isoformat(), "CN")
+    if session_done or not trading_day:
+        try:
+            attribution.settle(journal, api, now)
+            summary = attribution.summary(journal, now)
+            state["attribution"] = summary
+            optimizer.run(journal, state, cfg, now, account_db, summary)
+        except (sqlite3.Error, KeyError, ValueError, TypeError, OSError) as exc:
+            event(state, now, "LOOP_ERROR", reason="settle/optimize:%s" % str(exc)[:160])
+    if not trading_day or not ("09:15" <= now.strftime("%H:%M") <= "15:30"):
+        if not (state.get("strong_scan") or {}).get("rows"):
+            try:
+                ladder = api("/api/v1/short-term/limit-up-ladder")["data"]
+                overview = api("/api/v1/themes/overview")
+                strong_scan.refresh(state, api, now, cfg, ladder, overview)
+            except (KeyError, ValueError, TypeError, OSError) as exc:
+                state["strong_scan"] = {"checked_at": now.isoformat(), "rows": [], "errors": [str(exc)[:160]]}
+    regime = state.get("regime") or loop_state.classify(state.get("market") or {}, cfg)
+    state["regime"] = regime
+    if result in ("outside_session", "kill_switch", "paused", "degraded"):
+        run = loop_state.new_run(now, regime, len(state.get("candidates") or []))
+        loop_state.finish(state, run, now, result)
+    state["risk_config"] = {**(state.get("risk_config") or {}),
+                            "regime": regime.get("code"), "exposure": regime.get("exposure"),
+                            "entry_threshold": regime.get("min_score"),
+                            "regime_max_positions": regime.get("max_positions")}
 
 
 def main():
@@ -536,6 +734,7 @@ def main():
     try:
         db = connect(args.db)
         control = connect_control(args.db)
+        journal = attribution.connect(args.db)
         from follow_ai import init_ai
         init_ai(control)
     except (sqlite3.Error, OSError) as exc:
@@ -582,18 +781,20 @@ def main():
                 except (sqlite3.Error, ValueError, KeyError, TypeError) as exc:
                     event(state, now, "AI_ERROR", reason=type(exc).__name__)
                 state["last_heartbeat"] = now.isoformat()
-                state["engine_revision"] = "paper-follow-ai-v4"
+                state["engine_revision"] = "paper-follow-loop-v5"
                 cfg = load_config()
                 def beat(phase):
                     control.execute("INSERT OR REPLACE INTO runtime VALUES(1,?,?)", (datetime.now(BJ).isoformat(), phase))
                 def worker_api(path, timeout=25):
+                    if "/kline/batch" in path or "/hot-ranks" in path:
+                        timeout = max(timeout, 45)
                     beat("scanning")
                     try:
                         return dr.api(path, timeout=timeout)
                     finally:
                         beat("scanning")
                 beat("processing")
-                state["risk_config"] = {"strategy_version": cfg["version"], "max_positions": cfg["buy"]["max_positions"],
+                state["risk_config"] = {"strategy_version": cfg.get("runtime_version") or cfg["version"], "max_positions": cfg["buy"]["max_positions"],
                                         "amount_per_trade": cfg["buy"]["amount_per_trade"], "max_day_chg": cfg["buy"]["max_day_chg"],
                                         "take_profit": cfg["sell"]["take_profit"], "stop_loss": cfg["sell"]["stop_loss"],
                                         "daily_loss_limit": cfg["decision_gate"]["kill"]["max_day_loss_pct"]}
@@ -622,7 +823,8 @@ def main():
                     try:
                         result = cycle(state, cfg, worker_api, now, calendar, market, external_kill,
                                        clock=lambda: datetime.now(BJ),
-                                       should_stop=lambda: bool(control.execute("SELECT 1 FROM commands WHERE status='pending' AND action IN ('pause','kill') LIMIT 1").fetchone()))
+                                       should_stop=lambda: bool(control.execute("SELECT 1 FROM commands WHERE status='pending' AND action IN ('pause','kill') LIMIT 1").fetchone()),
+                                       journal=journal)
                     except (KeyError, ValueError, TypeError, OSError) as exc:
                         # Commit completed exits and their evidence even if entry data failed.
                         event(state, now, "CYCLE_ERROR", reason=str(exc))
@@ -645,6 +847,10 @@ def main():
                 except (sqlite3.Error, ValueError, KeyError, TypeError) as exc:
                     # AI transport cannot undo already completed exits or paper fills.
                     event(state, datetime.now(BJ), "AI_ERROR", reason=str(exc)[:200] or type(exc).__name__)
+                try:
+                    after_cycle(journal, state, cfg, worker_api, datetime.now(BJ), calendar, args.db, result)
+                except (sqlite3.Error, KeyError, ValueError, TypeError, OSError) as exc:
+                    event(state, datetime.now(BJ), "LOOP_ERROR", reason=str(exc)[:200])
                 state["cycle_status"] = result
                 state["cycle_finished_at"] = datetime.now(BJ).isoformat()
                 beat("waiting")
@@ -672,6 +878,7 @@ def main():
     finally:
         db.close()
         control.close()
+        journal.close()
 
 
 if __name__ == "__main__":

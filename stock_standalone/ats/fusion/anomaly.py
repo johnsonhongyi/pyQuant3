@@ -26,6 +26,8 @@ PATTERN_TWO_YANG = "两阳加速"
 PATTERN_BOX10_VWAP_HOVER = "十日洗盘悬空突破"
 PATTERN_STRUCTURE_CONFIRM = "结构预判验证"
 PATTERN_STRUCTURE_BREAK = "结构失守"
+PATTERN_COUNTER_RECLAIM = "逆势收复启动"
+PATTERN_COUNTER_HOLD = "逆势收复持稳"
 
 PATTERN_LABELS = {
     PATTERN_PIERCE: "🕯️ 一阳穿三线",
@@ -38,10 +40,37 @@ PATTERN_LABELS = {
     PATTERN_BOX10_VWAP_HOVER: "🚀 十日洗盘悬空突破",
     PATTERN_STRUCTURE_CONFIRM: "🎯 结构预判验证",
     PATTERN_STRUCTURE_BREAK: "⚠️ 结构失守",
+    PATTERN_COUNTER_RECLAIM: "🧭 逆势收复启动",
+    PATTERN_COUNTER_HOLD: "🧭 逆势收复持稳",
 }
+
+
+def counter_reclaim(price, vwap, vwap3, vwap5, prev_close, pct,
+                    market_pct, sector_resonance, vol_ratio, velocity, hold_ratio, sector_pct=None):
+    """弱市中识别站回多周期均价且分时走强的早期观察信号。"""
+    return bool(
+        market_pct is not None and market_pct <= -0.5
+        and sector_pct is not None and sector_pct >= 0.2
+        and sector_resonance >= 58 and vol_ratio >= 0.8
+        and 0 <= pct <= 4.5 and velocity > 0 and hold_ratio >= 0.5
+        and min(price, vwap, vwap3, vwap5, prev_close) > 0
+        and price >= max(vwap, vwap3, vwap5, prev_close)
+        and price <= vwap * 1.03
+    )
 
 # 结构失守：既不是买点也不是异动，只用于撤销结构保底，因此不参与形态强度加分
 PATTERN_NEGATIVE = (PATTERN_STRUCTURE_BREAK,)
+
+
+def rolling_vwaps(context, today_vwap, today_volume):
+    """将截至昨日日线成交量与当日累计成交合并，返回含今日的 3/5 日均价。"""
+    values = []
+    for days in (2, 4):
+        vol = float(context.get("vwap_prev{}_volume".format(days)) or 0)
+        amount = float(context.get("vwap_prev{}_value".format(days)) or 0)
+        values.append((amount + today_vwap * today_volume) / (vol + today_volume)
+                      if vol > 0 and amount > 0 and today_vwap > 0 and today_volume > 0 else 0.0)
+    return values
 
 
 def detect_patterns(
@@ -159,6 +188,7 @@ def pattern_score(patterns: List[str]) -> float:
         PATTERN_SELF_ABNORMAL: 30.0, PATTERN_VWAP_BREAK: 35.0,
         PATTERN_LATENT_BREAK: 45.0, PATTERN_DRY_UP: 45.0, PATTERN_TWO_YANG: 40.0,
         PATTERN_BOX10_VWAP_HOVER: 60.0, PATTERN_STRUCTURE_CONFIRM: 60.0,
+        PATTERN_COUNTER_RECLAIM: 0.0, PATTERN_COUNTER_HOLD: 0.0,
     }
     # 负向形态（结构失守）不计入强度，避免"越失守分越高"
     pos = [p for p in patterns if p not in PATTERN_NEGATIVE]

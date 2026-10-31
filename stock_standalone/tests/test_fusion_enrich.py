@@ -21,6 +21,11 @@ def test_rising_series_scores_high():
     assert 0 <= out["structure_clarity"] <= 100
 
 
+def test_above_vwap_uses_each_bars_cumulative_vwap():
+    out = intraday_fields(_bars([10, 11, 12, 13, 14, 15, 16, 17]), vwap=17, price=17)
+    assert out["minutes_above_vwap"] == 7
+
+
 def test_falling_series_scores_low_slope():
     closes = [10.0 - i * 0.01 for i in range(30)]
     out = intraday_fields(_bars(closes), vwap=10.2, price=closes[-1])

@@ -44,9 +44,29 @@ def stock_plan(stock, quote, minute, daily, cfg, now, previous_day, state):
     try:
         if af.symbol(quote["symbol"]) != stock["symbol"]:
             raise ValueError("quote symbol mismatch")
-        af.entry_ok(quote, minute, daily, cfg, now, previous_day)
-        plan["structure_ready"] = True
-        plan["blocker"] = None
+        execution = (cfg or {}).get("execution") or {}
+        if execution:
+            import signal_engine
+            regime = state.get("regime") or {}
+            evaluation = signal_engine.evaluate(stock, quote, minute, daily, {
+                "now": now, "today": now.date().isoformat(), "previous_day": previous_day, "cfg": cfg,
+                "regime": regime, "theme": None, "ai": {}, "pool_change_median": None})
+            plan["score"] = evaluation["score"]
+            plan["layers"] = evaluation["layers"]
+            plan["blockers"] = evaluation["blockers"]
+            plan["notes"] = evaluation["notes"]
+            threshold = regime.get("min_score") or execution.get("signal", {}).get("entry_threshold") or 0
+            plan["threshold"] = threshold
+            if evaluation["blockers"]:
+                raise ValueError(evaluation["blockers"][0])
+            if evaluation["score"] < threshold:
+                raise ValueError("score below threshold")
+            plan["structure_ready"] = True
+            plan["blocker"] = None
+        else:
+            af.entry_ok(quote, minute, daily, cfg, now, previous_day)
+            plan["structure_ready"] = True
+            plan["blocker"] = None
     except (KeyError, ValueError, TypeError) as exc:
         plan["structure_ready"] = False
         plan["blocker"] = str(exc)
@@ -71,9 +91,26 @@ def stock_plan(stock, quote, minute, daily, cfg, now, previous_day, state):
         check("P8 量价连续", m.get("volume_price_rising") is True),
         check("冲高回落否决", not (m.get("change_percent", 0) > 3 and m.get("price", 0) < m.get("high", 0) * .99)),
         check("高开低走否决", not (m.get("open", 0) >= m.get("previous_close", float("inf")) * 1.02 and m.get("price", 0) < m.get("open", 0)))]
+    if (cfg or {}).get("execution") and plan.get("layers"):
+        layers = plan["layers"]
+        plan["checks"] = [
+            check("趋势层", layers.get("trend", {}).get("score", 0) >= 18),
+            check("日内VWAP结构", layers.get("intraday", {}).get("score", 0) >= 18),
+            check("相对强度", layers.get("relative", {}).get("score", 0) >= 10),
+            check("题材", layers.get("theme", {}).get("score", 0) >= 7),
+            check("流动性", layers.get("liquidity", {}).get("score", 0) >= 8),
+            check("综合评分", plan.get("score", 0) >= plan.get("threshold", 0)),
+        ]
+        plan["conditions"] = ["报价与分钟线须为当日有效数据，日线须覆盖上一完整交易日",
+            "趋势层：多日 VWAP 排列、MA20、MA5 斜率",
+            "日内层：VWAP 带站位、日内 VWAP≥3日 VWAP、最近三根量价齐升",
+            "相对强度：5日强度、距20日高点、当日池内分位",
+            "题材与流动性：题材扩散、成交额、非ST/非封板",
+            "综合评分须达到当前市场状态门槛（分歧/震荡/进攻不同）"]
     price = m.get("price", 0)
     if price > 0:
-        plan["reference_shares"] = int(min(cfg["buy"]["amount_per_trade"], state["cash"]) / price / 100) * 100
+        exposure = (state.get("regime") or {}).get("exposure", 1) or 0
+        plan["reference_shares"] = int(min(cfg["buy"]["amount_per_trade"] * exposure, state["cash"]) / price / 100) * 100
         plan["reference_amount"] = plan["reference_shares"] * price
         plan["take_profit_reference"] = price * (1 + cfg["sell"]["take_profit"])
         plan["stop_loss_reference"] = price * (1 + cfg["sell"]["stop_loss"])
@@ -81,10 +118,14 @@ def stock_plan(stock, quote, minute, daily, cfg, now, previous_day, state):
     blocker = plan.get("blocker")
     if plan["fresh_quote"]:
         responses = {"P4 change gate": "涨幅不在允许区间，等待降温后重新评估，不追涨",
+            "P4 falling knife": "跌幅过深，等待止跌并重新站稳 VWAP",
             "P25 trend gate": "多日趋势尚未满足，保留观察，等待趋势恢复",
+            "P8 VWAP gate": "VWAP 偏离过大，等待回归有效区间，不追高",
+            "P8 below VWAP": "价格跌破 VWAP 带下沿，等待重新站稳",
             "P8 volume-price gate": "等待最近三根量价连续确认，当前不抢跑",
             "intraday pullback veto": "冲高回落，暂缓入场，等待重新站稳且量价恢复",
             "opening trap": "高开低走触发否决，等待结构修复",
+            "score below threshold": "多层评分低于当前市场状态门槛，等待更强的结构确认",
             "sealed limit-up": "涨停封板，无法验证可成交，不假定买入"}
         plan["response"] = responses.get(blocker, plan["response"])
         if blocker == "P8 VWAP gate" and "intraday_vwap" in m:
@@ -110,24 +151,34 @@ def stock_plan(stock, quote, minute, daily, cfg, now, previous_day, state):
     return plan
 
 
+def _snapshot_ok(meta, now, age=1800):
+    """Return (error, post_close). After the close, the last session snapshot is
+    still valid *reference* evidence, but it must be labelled as such."""
+    import auto_follow as af
+    try:
+        af.fresh(meta, now, age)
+        return None, False
+    except (KeyError, ValueError, TypeError) as exc:
+        trade_date = str(meta.get("trade_date") or "")[:10]
+        if trade_date and trade_date < now.date().isoformat() and now.strftime("%H:%M") >= "15:00":
+            return None, True
+        return str(exc), False
+
+
 def rotation_snapshot(payload, previous, now):
     import auto_follow as af
     meta = payload.get("meta", {})
-    error = None
-    try:
-        af.fresh(meta, now, 1800)
-        if not meta.get("trade_date"):
-            raise ValueError("资金流缺少交易日，只作来源快照参考")
-    except (KeyError, ValueError, TypeError) as exc:
-        error = str(exc)
+    error, post_close = _snapshot_ok(meta, now)
+    if not meta.get("trade_date"):
+        error = error or "资金流缺少交易日，只作来源快照参考"
     rows = []
     for item in payload.get("data", []):
         try:
             item_meta = item.get("meta", meta)
-            try:
-                af.fresh(item_meta, now, 1800)
-            except (KeyError, ValueError, TypeError) as exc:
-                error = str(exc)
+            item_error, item_post = _snapshot_ok(item_meta, now)
+            if item_error:
+                error = item_error
+            post_close = post_close or item_post
             fields = item_meta.get("available_fields", [])
             field = "main_net_inflow" if "main_net_inflow" in fields else "net_inflow"
             if field not in fields:
@@ -153,7 +204,7 @@ def rotation_snapshot(payload, previous, now):
             for key in ("rank_change", "flow_change"):
                 if key in before:
                     row[key] = before[key]
-    return {"checked_at": now.isoformat(), "meta": meta, "error": error, "rows": rows,
+    return {"checked_at": now.isoformat(), "meta": meta, "error": error, "rows": rows, "post_close": post_close,
             "coverage": len(rows), "unit": "CNY", "comparison_at": previous.get("meta", {}).get("fetched_at") if comparable and changed else previous.get("comparison_at")}
 
 
@@ -226,7 +277,10 @@ def refresh_research(state, cfg, api, now, calendar, force=False, should_stop=No
             break
         try:
             code = stock["symbol"]
-            q = api("/api/v1/quotes/realtime?" + urlencode({"symbols": code}))["data"][0]
+            quotes = api("/api/v1/quotes/realtime?" + urlencode({"symbols": code})).get("data") or []
+            if not quotes:
+                raise ValueError("quote unavailable")
+            q = quotes[0]
             minute = api("/api/v1/quotes/kline?" + urlencode({"symbol": code, "period": "5", "limit": 60}))["data"]
             daily = api("/api/v1/quotes/kline?" + urlencode({"symbol": code, "period": "day", "limit": 30}))["data"]
             plan = stock_plan(stock, q, minute, daily, cfg, clock() if clock else now, previous_day, state)

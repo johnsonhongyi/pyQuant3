@@ -18,7 +18,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 
-from ats.fusion.replay import DayReplay, ReplayConfig, cross_section_cuts, FusionEngine
+from ats.fusion.replay import DayReplay, ReplayConfig
+from ats.fusion.anomaly import PATTERN_COUNTER_RECLAIM
 
 
 def _key(patterns: Iterable[str]) -> str:
@@ -33,20 +34,14 @@ def collect(
     cuts: Optional[Tuple[Tuple[float, int], ...]] = None,
     cache: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    """逐日跑全市场回放，收集"首次达到 L2+"的事件（含形态、事后收益）。"""
+    """逐日收集首次 L2+ 或逆势收复观察；分档只使用事件之前的数据。"""
     rp = DayReplay(config=ReplayConfig(top_n=top_n, step=step), cache=cache)
     out: List[Dict[str, Any]] = []
     for day in days:
-        if cuts is None:
-            sample = DayReplay(cache=rp.cache, engine=FusionEngine(), config=ReplayConfig(top_n=300, step=2))
-            sample.run(day, collect_only=True)
-            day_cuts = cross_section_cuts(getattr(sample, "_rar_by_t", {}))
-        else:
-            day_cuts = cuts
-        res = rp.run(day, cuts_override=day_cuts, first_only=True, active_only=True)
+        res = rp.run(day, cuts_override=cuts)
         first: Dict[str, Dict[str, Any]] = {}
         for r in sorted(res.records, key=lambda x: x["ts"]):
-            if r["tier"] >= 2 and r["code"] not in first:
+            if (r["tier"] >= 2 or PATTERN_COUNTER_RECLAIM in r.get("patterns", [])) and r["code"] not in first:
                 first[r["code"]] = r
         for r in first.values():
             # 全字段透传：structure/sector/sector_rank/vol_dry 等分层字段一个都不能丢
@@ -218,7 +213,7 @@ def render(report: Dict[str, Any], singles: List[Dict[str, Any]], days: List[str
         lines.append("- 无样本")
         return "\n".join(lines)
     b = report["base"]
-    lines.append("- 样本 {} 条（每票每日取首次 L2+）｜基准：胜率 {:.1%}、平均收盘 {:+.2f}%".format(
+    lines.append("- 样本 {} 条（每票每日取首次 L2+ 或逆势观察）｜基准：胜率 {:.1%}、平均收盘 {:+.2f}%".format(
         report["n"], b["win_rate"], b["avg_ret"]))
     lines.append("")
     lines.append("## 单形态边际")

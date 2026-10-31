@@ -180,7 +180,19 @@ def build_event(
     if vwap <= 0:
         missing.append("vwap")
 
-    pct = _first_num([(row, "percent"), (row, "change_pct"), (row, "pct"), (snap, "percent")])
+    raw_pct = _num(_first_raw([(row, "percent"), (row, "change_pct"), (row, "pct"), (snap, "percent")]), float("nan"))
+    prev_close = _first_num([(row, "lastp1d"), (row, "pre_close"), (row, "prev_close"),
+                             (snap, "pre_close"), (snap, "prev_close"), (snap, "last_close")])
+    if price > 0 and prev_close > 0:
+        pct = (price / prev_close - 1.0) * 100.0
+        pct_source = "price_prev_close"
+    elif raw_pct == raw_pct:
+        pct = raw_pct
+        pct_source = "reported"
+    else:
+        pct = 0.0
+        pct_source = "missing"
+        missing.append("pct")
     day_high = _first_num([(row, "high"), (row, "high_price"), (snap, "high_price")])
     day_low = _first_num([(row, "low"), (row, "low_price"), (snap, "low_price")])
     amount = _first_num([(row, "amount"), (snap, "amount")])
@@ -274,7 +286,6 @@ def build_event(
             (snap, "ma10dcum"),
             (snap, "vwap_10d"),
             (snap, "vwap10"),
-            (row, "vwap_cum_5d"),
         ]
     )
     ret5d = _first_num([(row, "per5d"), (row, "ret5d"), (snap, "ret5d"), (snap, "per5d")])
@@ -288,7 +299,9 @@ def build_event(
     # K3 数据源对齐：优先读 DailyContext 严格日线计算的 prev_pct，取不到再用分时快照 per1d
     prev_pct_val = _first_num([(snap, "prev_pct"), (row, "prev_pct"), (snap, "per1d"), (row, "per1d")], 0.0)
 
-    extra: Dict[str, Any] = {"missing": missing, "has_rs": has_rs, "mkt_ret5": mkt_ret5, "prev_pct": prev_pct_val}
+    extra: Dict[str, Any] = {"missing": missing, "has_rs": has_rs, "mkt_ret5": mkt_ret5, "prev_pct": prev_pct_val,
+                             "pct_source": pct_source, "reported_pct": raw_pct if raw_pct == raw_pct else None,
+                             "quote_prev_close": prev_close if prev_close > 0 else None}
     from ats.fusion.context import STRUCTURE_FIELDS
     extra_keys = set(STRUCTURE_FIELDS) | {
         "lead_score",
@@ -301,6 +314,8 @@ def build_event(
         "hunger",
         "ice_days",
         "sector",
+        "market_pct", "sector_pct",
+        "reclaim_vwap3", "reclaim_vwap5",
         "latent_break",
         "patterns",
         "min_vwap_cushion",
@@ -327,7 +342,7 @@ def build_event(
         source=source,
         price=price,
         vwap=vwap,
-        vwap_5d=_first_num([(row, "vwap_cum_5d"), (snap, "vwap_cum_5d"), (row, "vwap_5d"), (snap, "vwap_5d")]),
+        vwap_5d=_first_num([(row, "vwap_cum_5d"), (snap, "vwap_cum_5d"), (row, "vwap_5d"), (snap, "vwap_5d"), (row, "vwap5"), (snap, "vwap5")]),
         vwap_10d=vwap_10d,
         sbc_supp=_first_num([(snap, "sbc_supp_price"), (row, "sbc_supp_price")]),
         sbc_rev=_first_num([(snap, "sbc_rev_price"), (row, "sbc_rev_price")]),

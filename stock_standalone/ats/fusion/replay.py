@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 from ats.fusion.names import name_of
 from ats.fusion.trade_sim import T1Simulator, render_trades, summarize_trades
 from ats.fusion.context import get_daily_context
-from ats.fusion.anomaly import detect_patterns, pattern_score, PATTERN_LATENT_BREAK
+from ats.fusion.anomaly import counter_reclaim, detect_patterns, pattern_score, rolling_vwaps, PATTERN_COUNTER_HOLD, PATTERN_COUNTER_RECLAIM, PATTERN_LATENT_BREAK
 from ats.fusion.premarket import get_premarket
 from ats.fusion.structure import classify as classify_structure
 from ats.fusion.tracker import RaceTracker, TrackConfig, render_entries, STAGE_ENTER, STAGE_EVICT
@@ -177,8 +177,9 @@ def _is_growth_board(code: str) -> bool:
 @dataclass
 class ReplayConfig:
     top_n: int = 600                 # 参与回放的标的数（按成交额代理排序）
+    structure_seed_n: int = 100      # TK 历史结构池补充名额
     step: int = 1                    # 每 N 根 bar 评估一次
-    min_bars: int = 20               # 当日最少 bar 数
+    min_bars: int = 1                # 当前时点之前所需的最少 bar 数
     record_tier_min: int = 1         # 只记录 L1 以上（否决原因单独计数）
     max_records: int = 20000
     focus_codes: Tuple[str, ...] = ()   # 验收标的：无论成交额排名如何都纳入
@@ -196,6 +197,9 @@ class ReplayConfig:
     track_max_chase: float = 5.0        # 首异动到入局的最大涨幅（第一波）
     state_path: str = ""             # 跟踪器状态落盘路径（空=不落盘）；用于跨日携带
     market_path: str = ""            # 市场上下文（温度/冰点天数）落盘路径
+    persist_context: bool = False    # 仅显式启用时写入跨日上下文
+    use_production_history: bool = True
+    history_root: str = ""
 
 
 @dataclass
@@ -280,6 +284,7 @@ class DayReplay:
         self.cache = cache if cache is not None else load_minute_cache(cache_path)
         self.cfg = config or ReplayConfig()
         self.engine = engine or FusionEngine(params={"struct_floor": bool(self.cfg.struct_floor)})
+        self._base_cuts = self.engine.cuts
         self._day_cache: Dict[Tuple[str, str], Dict[str, np.ndarray]] = {}
         # 赛马跟踪器：跨日复用同一实例才能携带"昨日入局"状态
         self.tracker: Optional[RaceTracker] = None
@@ -306,7 +311,7 @@ class DayReplay:
         start, end = day_bounds(day)
         ts = arr["time"].astype("int64")
         mask = (ts >= start) & (ts < end)
-        if int(mask.sum()) < self.cfg.min_bars:
+        if not mask.any():
             return None
         sub = arr[mask]
         v = sub["volume"].astype("float64")
@@ -342,6 +347,7 @@ class DayReplay:
             "taker": taker,
             "bid": bid,
             "above_vwap": above_vwap,
+            "minutes_above_vwap": np.cumsum(above_vwap) * 3.0,
         }
         self._day_cache[key] = out
         return out
@@ -355,12 +361,9 @@ class DayReplay:
         mask = ts < start
         if mask.any():
             return float(arr["close"][mask][-1])
-        # 缓存里没有前一日（如缓存起始日）：用当日首根 bar 的开盘价代理前收，
-        # 否则该日整池都因 prev_close=0 被剔除，形成"最早一天全盲"的假象。
-        m2 = (ts >= start) & (ts < start + 86400)
-        if m2.any():
-            return float(arr["open"][m2][0])
-        return 0.0
+        # 缓存首日用截至昨日的 TK 日线，不把当日开盘价冒充前收。
+        ctx = get_daily_context()
+        return float(ctx.asof(code, day).get("close_pre1") or 0.0) if ctx.ok else 0.0
 
     def _prev_high(self, code: str, day: str) -> float:
         arr = self.cache.get(code)
@@ -380,27 +383,36 @@ class DayReplay:
         return float(np.max(sub["high"][m2]))
 
     # -- 宇宙与矩阵 -------------------------------------------------------
-    def _universe(self, day: str, focus: Iterable[str] = (), active_only: bool = False) -> List[str]:
+    def _universe(self, day: str, focus: Iterable[str] = (), active_only: bool = False, include_focus: bool = True) -> List[str]:
         scored: List[Tuple[float, str]] = []
         for code in self.cache:
-            sl = self._slice_day(code, day)
-            if sl is None:
-                continue
             prev = self._prev_close(code, day)
             if prev <= 0:
                 continue
-            if active_only:
-                # 候选池预筛：当日从未涨过 0.8% 的票，引擎本来也不会给 L2+，
-                # 先剔掉可以省 2/3 算力（只影响"看谁"，不影响"怎么看"）。
-                if float(np.nanmax(sl["close"])) / prev - 1.0 < 0.008:
-                    continue
-            amount_proxy = float(sl["cum_vol"][-1] * sl["close"][-1])
+            # 用最近一个历史交易日的成交量选池，不能使用当日收盘数据。
+            arr = self.cache[code]
+            start, _ = day_bounds(day)
+            prior = arr[arr["time"] < start]
+            if len(prior):
+                prior_day = time.strftime("%Y-%m-%d", time.localtime(int(prior["time"][-1])))
+                prior_start, _ = day_bounds(prior_day)
+                prior = prior[prior["time"] >= prior_start]
+                amount_proxy = float(np.sum(prior["volume"]) * prior["close"][-1])
+            else:
+                amount_proxy = 0.0
             scored.append((amount_proxy, code))
         scored.sort(reverse=True)
         picked = [c for _, c in scored[: max(1, self.cfg.top_n)]]
+        if self.cfg.structure_seed_n > 0:
+            ctx = get_daily_context()
+            if ctx.ok:
+                seeds = ctx.box10_pool(day) | ctx.structure_pool(day)
+                picked_set = set(picked)
+                extra = [c for _, c in scored if c in seeds and c not in picked_set]
+                picked.extend(extra[:self.cfg.structure_seed_n])
 
         # 验收标的强制纳入：哪怕成交额排不进 TopN
-        for raw in list(focus) + list(self.cfg.focus_codes):
+        for raw in (list(focus) + list(self.cfg.focus_codes)) if include_focus else ():
             code = str(raw).strip().zfill(6)
             if code in self.cache and code not in picked and self._slice_day(code, day) is not None:
                 picked.append(code)
@@ -419,11 +431,12 @@ class DayReplay:
 
         mat = {
             k: np.full((n_code, n_t), np.nan, dtype="float64")
-            for k in ("open", "close", "high", "low", "vwap", "volume", "cum_vol", "taker", "bid", "above_vwap")
+            for k in ("open", "close", "high", "low", "vwap", "volume", "cum_vol", "taker", "bid", "above_vwap", "minutes_above_vwap")
         }
         prev_close = np.zeros(n_code, dtype="float64")
         prev_high = np.zeros(n_code, dtype="float64")
         ref = np.array(clock, dtype="int64")
+        new_bar = np.zeros((n_code, n_t), dtype=bool)
 
         for i, code in enumerate(codes):
             s = slices[code]
@@ -432,6 +445,7 @@ class DayReplay:
             if not valid.any():
                 continue
             pos = idx[valid]
+            new_bar[i, valid] = s["ts"][pos] == ref[valid]
             for key in mat:
                 mat[key][i, valid] = s[key][pos]
             prev_close[i] = self._prev_close(code, day)
@@ -441,6 +455,7 @@ class DayReplay:
             "codes": codes,
             "clock": ref,
             "mat": mat,
+            "new_bar": new_bar,
             "prev_close": prev_close,
             "prev_high": prev_high,
             "limit_pct": np.array([_LIMIT_GROWTH if _is_growth_board(c) else _LIMIT_MAIN for c in codes]),
@@ -456,19 +471,30 @@ class DayReplay:
         collect_only: bool = False,
         first_only: Optional[bool] = None,
         active_only: bool = False,
+        carry_codes: Iterable[str] = (),
     ) -> ReplayResult:
         day = day or today_str()
         if first_only is not None:
             self.cfg.first_only = bool(first_only)
-        if cuts_override:
-            self.engine.cuts = cuts_override
-        codes = self._universe(day, focus, active_only=active_only)
-        aligned = self._align(codes, day)
+        self.engine.cuts = cuts_override or self._base_cuts
+        initial_candidates = set(self._universe(day, active_only=active_only, include_focus=False))
+        carried = {str(code).zfill(6) for code in carry_codes if str(code).zfill(6) in self.cache}
+        initial_candidates.update(carried)
+        candidates = set(initial_candidates)
+        for raw in list(focus) + list(self.cfg.focus_codes):
+            code = str(raw).strip().zfill(6)
+            if code in self.cache and self._slice_day(code, day) is not None:
+                candidates.add(code)
+        candidate_activation: Dict[str, float] = {}
+        # 市场温度与板块强度使用完整分钟缓存；候选预算只限制个股评分。
+        aligned = self._align(list(self.cache), day)
         if aligned is None:
             return ReplayResult(day=day, meta={"error": "当日无可用分钟线", "codes": 0})
 
         codes = aligned["codes"]
+        candidate_mask = np.array([c in candidates for c in codes], dtype=bool)
         mat = aligned["mat"]
+        new_bar = aligned["new_bar"]
         prev_close = aligned["prev_close"]
         prev_high = aligned["prev_high"]
         limit_pct = aligned["limit_pct"]
@@ -490,7 +516,7 @@ class DayReplay:
                 mkt_hist.seed_from_daily()
         except Exception:
             mkt_hist = None
-        day_ctx = mkt_hist.context_for(day) if mkt_hist is not None else None
+        day_ctx = mkt_hist.context_for(day, temp_open=50.0, breadth=0.0) if mkt_hist is not None else None
         if day_ctx is not None:
             logger.info("[replay] %s 上下文：%s", day, day_ctx.label())
 
@@ -500,6 +526,7 @@ class DayReplay:
         phase_path: List[Dict[str, Any]] = []      # 阶段变化轨迹（当日上下文沉淀用）
         _last_phase = ""
         records: List[Dict[str, Any]] = []
+        dropped_records = 0
         veto_counts: Dict[str, int] = {}
         eval_count = 0
 
@@ -507,6 +534,7 @@ class DayReplay:
             str(c).strip().zfill(6) for c in list(focus) + list(self.cfg.focus_codes)
         }
         focus_diag: Dict[str, Dict[str, Any]] = {}
+        focus_trace: Dict[str, List[Dict[str, Any]]] = {}
         rar_samples: List[float] = []
         # 赛马跟踪：一只票一条状态，跨 bar 连续迭代（带旧信号）
         entries: List[Dict[str, Any]] = []
@@ -552,16 +580,12 @@ class DayReplay:
 
         # 注意：tdx_last_df.h5 是"最新一天盘前"的快照，直接套到历史某天就是未来函数。
         # 历史回放一律用 DailyContext 按 (code, day) 现算的 VWAP10；盘前表只做兜底。
-        try:
-            _pm = get_premarket()
-            _pm_vwap = {c: _pm.vwap10(c) for c in codes} if _pm.ok else {}
-        except Exception:
-            _pm_vwap = {}
         vwap10_map = {}
         for _c in codes:
             _v = float((daily_ctx.get(_c) or {}).get("vwap10", 0.0))
-            vwap10_map[_c] = _v if _v > 0 else float(_pm_vwap.get(_c, 0.0))
+            vwap10_map[_c] = _v
         latent: Dict[str, float] = {}
+        reclaim_first: Dict[str, float] = {}
         # 赛道（板块）索引：个股分类是"蓄势"，板块才是"赛道"
         try:
             _sm = get_sector_map()
@@ -593,6 +617,8 @@ class DayReplay:
         _cap_ratio = 1.0            # 最近一根的资金量能比；无 bar 时保持中性 1.0
         _s_rate, _s_total = 1.0, 0  # 先锋存活率（最近 60 分钟窗口）；无 bar 时中性
         row_of = {c: i for i, c in enumerate(codes)}
+        from ats.fusion.history_events import HistoricalEvents
+        history = HistoricalEvents(self.cfg.history_root or _app_root(), day) if self.cfg.use_production_history else None
 
         launch_idx = np.full(n_code, -1, dtype="int64")
         day_high = np.full(n_code, np.nan)
@@ -658,13 +684,26 @@ class DayReplay:
                     }
                 )
 
+            if history is not None:
+                for hist_code, hist_kind, hist_data in history.advance(float(clock[t])):
+                    eligible = ((hist_kind == "gradient" and hist_data.get("tier", 0) >= 1 and not hist_data.get("veto"))
+                                or (hist_kind == "ledger" and hist_data.get("tier") in ("WATCH", "TRADE")))
+                    if eligible and hist_code in row_of:
+                        if hist_code not in initial_candidates:
+                            candidate_activation.setdefault(hist_code, float(clock[t]))
+                        candidate_mask[row_of[hist_code]] = True
+
             if t % max(1, self.cfg.step) != 0:
                 continue
+
+            if self.cfg.cuts_mode == "percentile" and not cuts_override and self._rar_by_t:
+                self.engine.cuts = cross_section_cuts(self._rar_by_t)
 
             # 相对强度：个股 5 根 bar 收益 - 全池等权 5 根 bar 收益
             ret5_arr = ret5_mat[:, t]
             mkt_ret5 = float(np.nanmean(ret5_arr)) if np.isfinite(ret5_arr).any() else 0.0
             mkt_pct = float(np.mean(pct[v])) if v.any() else 0.0
+            mkt_median_pct = float(np.median(pct[v])) if v.any() else None
 
             # 赛道实时强度与排名（每个时点重算，避免用当日收盘）
             sec_strength: Dict[str, float] = {}
@@ -745,9 +784,14 @@ class DayReplay:
                     base_mae = float(np.nanmean(_bn))
 
             for i in range(n_code):
-                if not valid[i] or prev_close[i] <= 0 or done[i]:
+                if not candidate_mask[i] or not valid[i] or not new_bar[i, t] or prev_close[i] <= 0 or done[i]:
                     continue
-                if launch_idx[i] < 0 and pct[i] < 0.5 and codes[i] not in focus_set:
+                if (self.cfg.min_bars > 1 and np.searchsorted(
+                        self._slice_day(codes[i], day)["ts"], int(clock[t]), side="right"
+                    ) < self.cfg.min_bars):
+                    continue
+                if (launch_idx[i] < 0 and pct[i] < 0 and codes[i] not in focus_set
+                        and codes[i] not in carried and (history is None or codes[i] not in history.latest)):
                     continue   # 未启动且无涨幅，跳过（省算力）；验收标的例外，便于诊断"为什么没抓到"
 
                 price = float(close[i])
@@ -765,15 +809,18 @@ class DayReplay:
                 vol_ratio = max(0.2, min(8.0, vol_ratio))
 
                 # --- 从 bar 推导的意愿代理（替代实时盘的攻角/意图分） ---
-                base_i = max(0, t - 5)
-                ret5 = (price / float(mat["close"][i, base_i]) - 1.0) * 100.0 if mat["close"][i, base_i] > 0 else 0.0
+                _bars = self._slice_day(codes[i], day)
+                _bar_i = int(np.searchsorted(_bars["ts"], int(clock[t]), side="right") - 1)
+                _closes, _vols = _bars["close"], _bars["volume"]
+                base_i = max(0, _bar_i - 5)
+                ret5 = (price / float(_closes[base_i]) - 1.0) * 100.0 if _closes[base_i] > 0 else 0.0
                 slope_proxy = _clamp(40.0 + ret5 * 25.0, 10.0, 100.0)
-                vel_proxy = (price / float(mat["close"][i, max(0, t - 3)]) - 1.0) * 100.0 if mat["close"][i, max(0, t - 3)] > 0 else 0.0
-                recent = _clean(mat["volume"][i, max(0, t - 2): t + 1])
-                older = _clean(mat["volume"][i, max(0, t - 8): max(1, t - 2)])
+                vel_proxy = (price / float(_closes[max(0, _bar_i - 3)]) - 1.0) * 100.0 if _closes[max(0, _bar_i - 3)] > 0 else 0.0
+                recent = _clean(_vols[max(0, _bar_i - 2): _bar_i + 1])
+                older = _clean(_vols[max(0, _bar_i - 8): max(1, _bar_i - 2)])
                 accel = (_mean_small(recent) / max(1e-9, _mean_small(older))) if recent and older else 1.0
                 accel = max(0.3, min(3.0, accel))
-                seg = _clean(mat["close"][i, max(0, t - 4): t + 1])
+                seg = _clean(_closes[max(0, _bar_i - 4): _bar_i + 1])
                 if len(seg) >= 2:
                     up_n = sum(1 for a, b in zip(seg, seg[1:]) if b > a)
                     up_ratio_i = up_n / (len(seg) - 1)
@@ -801,7 +848,8 @@ class DayReplay:
                 # 结构清晰度代理：最近 10 根 bar 中站上均价的比例
                 # 注意：mat 初始为 NaN，窗口内可能整段缺失——必须按"清洗后"的长度判断，
                 # 否则 _mean_small([]) 会返回 NaN 并把 NaN 传进 structure_clarity。
-                _av = _clean(mat["above_vwap"][i, max(0, t - 9): t + 1])
+                _av = _clean(_bars["above_vwap"][max(0, _bar_i - 9): _bar_i + 1])
+                _hold = _mean_small(_clean(_bars["above_vwap"][max(0, _bar_i - 6): _bar_i + 1])) if _av else 0.0
                 clarity_proxy = _mean_small(_av) * 100.0 if _av else 0.0
                 taker_proxy = float(mat["taker"][i, t]) if _isfinite(mat["taker"][i, t]) else 50.0
                 bid_proxy = float(mat["bid"][i, t]) if _isfinite(mat["bid"][i, t]) else 50.0
@@ -826,10 +874,8 @@ class DayReplay:
                     taker_buy_ratio=max(30.0, min(85.0, taker_proxy)),
                     bid_pressure=max(35.0, min(90.0, bid_proxy)),
                     structure_clarity=clarity_proxy,
-                    minutes_above_vwap=(
-                        float(max(0.0, (float(clock[t]) - float(clock[launch_idx[i]])) / 60.0))
-                        if launch_idx[i] >= 0 else 0.0
-                    ),
+                    # 3 分钟 K 线的站上时间近似值；缺失 bar 不计入。
+                    minutes_above_vwap=float(mat["minutes_above_vwap"][i, t]),
                     slope_score=slope_proxy,
                     intent_score=intent_proxy,
                     velocity_pct=vel_proxy,
@@ -851,6 +897,7 @@ class DayReplay:
                     days_since_high=float(_dc.get("days_since_high", 0.0)),
                     limit_up_streak=float(_dc.get("limit_up_streak", 0.0)),
                     dist_ma20_pct=float(_dc.get("dist_ma20_pct", 0.0)),
+                    vwap_5d=float(_dc.get("vwap5", 0.0)),
                     vwap_10d=float(vwap10_map.get(codes[i], 0.0)),
                     rs5=float(ret5_arr[i] - mkt_ret5) if _isfinite(ret5_arr[i]) else 0.0,
                     rs_day=float(pct[i] - mkt_pct),
@@ -939,6 +986,42 @@ class DayReplay:
                     struct_status=_tl.status,
                 )
                 patterns = list(_pat_early)
+                historical_context = dict(history.latest.get(codes[i], {})) if history is not None else {}
+                _rv3, _rv5 = rolling_vwaps(_dc, vw, float(mat["cum_vol"][i, t]))
+                _clock_time = time.localtime(int(clock[t]))
+                _minute = _clock_time.tm_hour * 60 + _clock_time.tm_min
+                _elapsed = min(120, max(0, _minute - 570)) + min(120, max(0, _minute - 780))
+                _daily_volume = float(_dc.get("vol_ma5") or 0)
+                _day_ratio = (float(mat["cum_vol"][i, t]) / _daily_volume * 240 / _elapsed
+                              if _daily_volume > 0 and _elapsed > 0 else 0)
+                if _dc.get("vwap_observed_days", 0) >= 5 and counter_reclaim(price, vw, _rv3,
+                                   _rv5, float(_dc.get("close_pre1") or 0),
+                                   float(pct[i]), mkt_median_pct,
+                                   ev.sector_resonance, _day_ratio, vel_proxy,
+                                   _hold,
+                                   sec_strength.get(_sm.get(codes[i])) if sec_index else None):
+                    patterns.append(PATTERN_COUNTER_RECLAIM)
+                    reclaim_first.setdefault(codes[i], float(clock[t]))
+                elif (codes[i] in reclaim_first and vel_proxy >= -0.3 and _av
+                      and _hold >= 0.7
+                      and counter_reclaim(price, vw, _rv3, _rv5, float(_dc.get("close_pre1") or 0),
+                                          float(pct[i]), mkt_median_pct,
+                                          ev.sector_resonance, _day_ratio, 0.001,
+                                          _hold,
+                                          sec_strength.get(_sm.get(codes[i])) if sec_index else None)):
+                    patterns.append(PATTERN_COUNTER_HOLD)
+                if codes[i] in focus_set:
+                    focus_trace.setdefault(codes[i], []).append({
+                        "time": time.strftime("%H:%M", time.localtime(int(clock[t]))),
+                        "price": round(price, 3), "pct": round(float(pct[i]), 2),
+                        "vwap": round(vw, 3), "vwap3": round(_rv3, 3), "vwap5": round(_rv5, 3),
+                        "market_pct": round(mkt_median_pct, 2) if mkt_median_pct is not None else None,
+                        "sector_resonance": round(ev.sector_resonance, 1), "vol_ratio": round(_day_ratio, 2),
+                        "sector_pct": round(sec_strength[_sm.get(codes[i])], 2) if sec_index and _sm.get(codes[i]) in sec_strength else None,
+                        "velocity": round(vel_proxy, 2),
+                        "hold_ratio": round(_hold, 2) if _av else None,
+                        "reclaim": PATTERN_COUNTER_RECLAIM in patterns,
+                    })
 
                 # 潜伏池：大盘在跌、它在悄悄抗跌（涨幅还不大），先记下来
                 if mkt_ret5 < -0.3 and _rs5 >= 1.0 and float(pct[i]) < 3.0:
@@ -1042,6 +1125,7 @@ class DayReplay:
                 # ---- 赛马跟踪：把这根 bar 接进这只票的历史（带上旧信号）----
                 # 注意：无论是否被否决、是否达到记录门槛，都要更新，
                 # 否则"被否决一次就永久失联"，正是之前召回上不去的根因。
+                _traps, _grisk = [], 0.0
                 if race is not None:
                     _before = race.get(codes[i])
                     _prev_stage = _before.stage if _before is not None else ""
@@ -1150,11 +1234,13 @@ class DayReplay:
                 if collect_only:
                     continue
 
-                if decision.tier < self.cfg.record_tier_min:
+                if (decision.tier < self.cfg.record_tier_min and not historical_context and codes[i] not in carried
+                        and not ({PATTERN_COUNTER_RECLAIM, PATTERN_COUNTER_HOLD} & set(patterns))):
                     key = decision.veto_reason.split("(")[0] if decision.veto_reason else "RAR不足"
                     veto_counts[key] = veto_counts.get(key, 0) + 1
                     continue
                 if len(records) >= self.cfg.max_records:
+                    dropped_records += 1
                     continue
 
                 fm = fut_max[i, t]
@@ -1200,6 +1286,15 @@ class DayReplay:
                         "excess": round(excess, 2),
                         "ignition": round(ignition, 1),
                         "patterns": patterns,
+                        "production_history": historical_context,
+                        "carried_observation": codes[i] in carried,
+                        "counter_reclaim_first_ts": reclaim_first.get(codes[i]),
+                        "reclaim_detail": {
+                            "vwap3": round(_rv3, 3), "vwap5": round(_rv5, 3),
+                            "market_pct": round(mkt_median_pct, 2) if mkt_median_pct is not None else None,
+                            "sector_pct": round(sec_strength[_sm.get(codes[i])], 2) if sec_index and _sm.get(codes[i]) in sec_strength else None,
+                            "vol_ratio": round(_day_ratio, 2), "velocity": round(vel_proxy, 2), "hold_ratio": round(_hold, 2),
+                        } if codes[i] in reclaim_first else {},
                         "structure": classify_structure(_dc, price, float(pct[i])),
                         "sector": _sm.get(codes[i]) if sec_index else "",
                         "theme": max(_tm.get(codes[i]) or [""], key=lambda t: theme_rank.get(t, 0.0)) if theme_index else "",
@@ -1275,21 +1370,17 @@ class DayReplay:
                 day_ctx.temp_max = max(day_ctx.temp_max if t else float(regime.temp), float(regime.temp))
                 day_ctx.temp_close = float(regime.temp)
                 day_ctx.stage = regime.stage
-                # 宽度以日线全市场为准；只有没有种子数据时才用盘内宽度
-                if day_ctx.breadth <= 0 and valid.any():
+                if valid.any():
                     day_ctx.breadth = float(np.mean(pct[valid] > 0))
 
-            if collect_only and t_rar:
+            if t_rar:
                 self._rar_by_t[int(clock[t])] = t_rar
 
             if progress is not None:
-                try:
-                    progress(t + 1, n_t)
-                except Exception:
-                    pass
+                progress(t + 1, n_t)
 
         # 收盘落盘：市场上下文（供次日算"冰点第几天"）
-        if mkt_hist is not None and day_ctx is not None:
+        if self.cfg.persist_context and mkt_hist is not None and day_ctx is not None:
             try:
                 mkt_hist.record(day_ctx)
                 mkt_hist.save()
@@ -1298,7 +1389,7 @@ class DayReplay:
 
         # 收盘落盘：当日实盘上下文快照（阶段路径 / 资金 / 先锋 / 入局计数）。
         # 回放也沉淀，这样"缺失重建"和"上下文交接"在离线环境里同样可验证。
-        if not collect_only:
+        if self.cfg.persist_context and not collect_only:
             try:
                 from ats.fusion.session_ctx import SessionContextStore, ledger_summary
 
@@ -1318,7 +1409,7 @@ class DayReplay:
                 logger.warning("[replay] 保存当日上下文失败：%s", exc)
 
         # 收盘落盘：明天不是新的一天
-        if race is not None and self.cfg.state_path:
+        if self.cfg.persist_context and race is not None and self.cfg.state_path:
             try:
                 race.save(self.cfg.state_path)
             except Exception as exc:
@@ -1363,12 +1454,19 @@ class DayReplay:
         focus_all = [str(c).strip().zfill(6) for c in list(focus) + list(self.cfg.focus_codes)]
         meta = {
             "day": day,
-            "codes": n_code,
+            "codes": int(candidate_mask.sum()),
+            "candidate_codes": [codes[i] for i in np.flatnonzero(candidate_mask)],
+            "initial_candidate_codes": sorted(initial_candidates),
+            "candidate_activation": candidate_activation,
+            "market_codes": n_code,
             "bars": n_t,
             "evaluations": eval_count,
             "records": len(records),
+            "records_truncated": dropped_records,
             "focus": list(dict.fromkeys(focus_all)),
             "focus_diag": focus_diag,
+            "focus_trace": focus_trace,
+            "production_history": history.stats if history is not None else {"enabled": False},
             "rar_dist": {
                 "p50": round(float(np.percentile(rar_samples, 50)), 1) if rar_samples else 0.0,
                 "p90": round(float(np.percentile(rar_samples, 90)), 1) if rar_samples else 0.0,
@@ -1420,22 +1518,7 @@ class DayReplay:
             - 提升     = 命中率 / 全市场基准命中率。
         """
         self.cfg.step = max(2, int(self.cfg.step))
-        if self.cfg.cuts_mode == "percentile":
-            try:
-                sample = DayReplay(
-                    cache=self.cache,
-                    engine=FusionEngine(params=self.engine.params),
-                    config=ReplayConfig(top_n=300, step=2, cuts_mode="percentile"),
-                )
-                sample.run(day, collect_only=True)
-                cuts = cross_section_cuts(getattr(sample, "_rar_by_t", {}))
-                res = self.run(day, cuts_override=cuts, first_only=True, active_only=True)
-                res.meta["cuts_used"] = {"L{}".format(t): c for c, t in cuts}
-            except Exception as exc:
-                logger.warning("[replay] 采样分档失败，回退两遍: %s", exc)
-                res = self.run_day(day)
-        else:
-            res = self.run_day(day)
+        res = self.run(day, first_only=True)
         if res.meta.get("error"):
             return {"day": day, "error": res.meta["error"]}
 
@@ -1515,17 +1598,11 @@ class DayReplay:
         day: str,
         progress: Optional[Any] = None,
         focus: Iterable[str] = (),
+        carry_codes: Iterable[str] = (),
     ) -> ReplayResult:
-        """按日回放入口：percentile 模式下先采样当日 RAR 分布，再按分位重跑一遍。"""
-        if self.cfg.cuts_mode != "percentile":
-            return self.run(day, progress=progress, focus=focus)
-
-        warm = self.run(day, focus=focus, collect_only=True)
-        if warm.meta.get("error"):
-            return warm
-        cuts = cross_section_cuts(getattr(self, "_rar_by_t", {}))
-        result = self.run(day, progress=progress, focus=focus, cuts_override=cuts)
-        result.meta["cuts_used"] = {"L{}".format(t): c for c, t in cuts}
+        """按时间顺序回放；自适应档位只使用此前已见的横截面。"""
+        result = self.run(day, progress=progress, focus=focus, carry_codes=carry_codes)
+        result.meta["cuts_used"] = {"L{}".format(t): c for c, t in self.engine.cuts}
         return result
 
 

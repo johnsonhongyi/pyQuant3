@@ -19,6 +19,11 @@ _NOW = time.mktime((2026, 10, 23, 10, 30, 0, 0, 0, -1))
 
 
 class TestBuildEvent(unittest.TestCase):
+    def test_daily_vwap_periods_are_not_interchanged(self):
+        ev = build_event({"trade": 10, "vwap": 10, "vwap5": 9.8}, {}, now=_NOW)
+        self.assertEqual(ev.vwap_5d, 9.8)
+        self.assertEqual(ev.vwap_10d, 0.0)
+
     def test_full_row_mapping(self):
         row = pd.Series(
             {

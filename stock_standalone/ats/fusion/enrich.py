@@ -265,9 +265,7 @@ def intraday_fields(
     prior_vol = _mean(vols[-25:-5]) if n >= 10 else 0.0
     segment_vol_inc = (recent_vol / prior_vol) if prior_vol > 0 else 0.0
 
-    minutes_above_vwap = 0
-    if vwap > 0:
-        minutes_above_vwap = sum(1 for c in closes if c > vwap)
+    minutes_above_vwap = sum(1 for c, vw in zip(closes, vwap_series) if vw > 0 and c > vw)
 
     up_vol = 0.0
     total_vol = 0.0

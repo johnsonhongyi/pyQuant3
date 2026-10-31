@@ -25,7 +25,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional
 
 from ats.fusion.adapter import LaunchTracker, build_event, in_trading_session, is_today, today_str
-from ats.fusion.anomaly import PATTERN_BOX10_VWAP_HOVER, PATTERN_LATENT_BREAK, PATTERN_STRUCTURE_CONFIRM, detect_patterns, pattern_score
+from ats.fusion.anomaly import PATTERN_BOX10_VWAP_HOVER, PATTERN_COUNTER_HOLD, PATTERN_COUNTER_RECLAIM, PATTERN_LATENT_BREAK, PATTERN_STRUCTURE_CONFIRM, counter_reclaim, detect_patterns, pattern_score, rolling_vwaps
 from ats.fusion.config import engine_params, load_config
 from ats.fusion.engine import FusionBus, FusionEngine
 from ats.fusion.regime import MarketRegime, MarketRegimeTracker, RegimeSample
@@ -138,6 +138,7 @@ class FusionShadow:
         self.sector_clock = SectorClock()
         self._prime_leader_by_sector: Dict[str, str] = {}  # sector -> code 板块总龙头唯一性
         self._latent_pool: Dict[str, float] = {}
+        self._counter_reclaim_first: Dict[str, float] = {}
         self._regime_provider = regime_provider
 
         # 结构机会时间轴：让"结构验证"成为可成立/可失守/可恢复的状态，而不是开盘一次性盖章
@@ -351,6 +352,7 @@ class FusionShadow:
                         self.sector_clock = SectorClock()
                         self._prime_leader_by_sector.clear()
                         self._latent_pool.clear()
+                        self._counter_reclaim_first.clear()
                         self._struct_timeline.reset(day)
                         self._last_sample.clear()
                         self._rar_samples.clear()
@@ -391,16 +393,18 @@ class FusionShadow:
             except Exception:
                 reset_wave = False
 
-            launch_ts = self.launch.note(code, now, pct, price, vwap, reset_wave=reset_wave)
             event = build_event(
                 row=row,
                 snap=snap,
                 code=code,
                 source=source,
                 now=now,
-                launch_ts=launch_ts,
+                launch_ts=0.0,
                 trade_date=day,
             )
+            pct = event.pct
+            launch_ts = self.launch.note(code, now, pct, event.price, event.vwap, reset_wave=reset_wave) if "pct" not in event.extra.get("missing", ()) else 0.0
+            event.launch_ts = launch_ts
 
             # ---- 异动形态识别与板块排头兵时钟（对齐回放 DayReplay）----
             mkt_ret5 = float(event.extra.get("mkt_ret5") or 0.0)
@@ -535,6 +539,27 @@ class FusionShadow:
             )
             if reset_wave and PATTERN_LATENT_BREAK not in patterns:
                 patterns.append(PATTERN_LATENT_BREAK)
+
+            _amount = _pick_float(row.get("amount"), (snap or {}).get("amount"))
+            _volume = _pick_float(row.get("volume"), row.get("vol"), (snap or {}).get("volume"))
+            _valid_amount = (event.vwap > 0 and _amount > 0 and _volume > 0 and
+                             any(0.95 <= _amount / (_volume * factor * event.vwap) <= 1.05 for factor in (1, 100)))
+            _v3, _v5 = rolling_vwaps(event.extra, event.vwap, _amount / event.vwap if _valid_amount else 0)
+            if event.extra.get("vwap_observed_days", 0) >= 5 and counter_reclaim(event.price, event.vwap, _v3,
+                               _v5, _close_pre1, event.pct,
+                               event.extra.get("market_pct"), event.sector_resonance,
+                               _pick_float(row.get("ratio"), row.get("vol_ratio"), (snap or {}).get("vol_ratio")),
+                               event.velocity_pct, float(event.extra.get("vwap_hold_ratio") or 0), event.extra.get("sector_pct")):
+                patterns.append(PATTERN_COUNTER_RECLAIM)
+                with self._lock:
+                    self._counter_reclaim_first.setdefault(code, now)
+            elif (code in self._counter_reclaim_first and event.velocity_pct >= -0.3
+                  and float(event.extra.get("vwap_hold_ratio") or 0) >= 0.7
+                  and counter_reclaim(event.price, event.vwap, _v3, _v5, _close_pre1, event.pct,
+                                      event.extra.get("market_pct"), event.sector_resonance,
+                                      _pick_float(row.get("ratio"), row.get("vol_ratio"), (snap or {}).get("vol_ratio")),
+                                      0.001, float(event.extra.get("vwap_hold_ratio") or 0), event.extra.get("sector_pct"))):
+                patterns.append(PATTERN_COUNTER_HOLD)
 
             with self._lock:
                 if mkt_ret5 < -0.3 and event.rs5 >= 1.0 and event.pct < 3.0:
@@ -715,12 +740,28 @@ class FusionShadow:
                 # 行情快照：界面"现价/涨幅/更新时间"直接读这三个字段。
                 # 旧实现只落 fusion 结论，不落行情，导致监视器全部显示 "-" 与 +0.00%。
                 "price": round(float(price or 0.0), 3),
-                "pct": round(float(pct or 0.0), 3),
+                "pct": round(float(pct), 3) if "pct" not in event.extra.get("missing", ()) else None,
+                "pct_source": event.extra.get("pct_source"),
+                "reported_pct": event.extra.get("reported_pct"),
+                "quote_prev_close": event.extra.get("quote_prev_close"),
                 "vwap": round(float(vwap or 0.0), 3),
                 "trade_date": day,
                 "hit": bool(fusion.tier >= 2),
                 "coverage": round(float(getattr(fusion, "coverage", 0.0) or 0.0), 3),
                 "patterns": patterns,
+                "counter_reclaim_first_ts": self._counter_reclaim_first.get(code),
+                "reclaim_vwap3": round(_v3, 3),
+                "reclaim_vwap5": round(_v5, 3),
+                "reclaim_detail": {
+                    "vwap3": round(_v3, 3), "vwap5": round(_v5, 3),
+                    "market_pct": event.extra.get("market_pct"),
+                    "sector_pct": event.extra.get("sector_pct"),
+                    "sector_resonance": event.sector_resonance,
+                    "vol_ratio": _pick_float(row.get("ratio"), row.get("vol_ratio"), (snap or {}).get("vol_ratio")),
+                    "velocity": event.velocity_pct,
+                    "hold_ratio": event.extra.get("vwap_hold_ratio"),
+                },
+                "quote_timestamp": _pick_float((snap or {}).get("server_ts"), (snap or {}).get("ts"), row.get("server_ts")) or None,
                 "sector": sector,
                 "lead_label": lead_label,
                 "lead_score": round(lead_score, 1),

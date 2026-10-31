@@ -6,10 +6,12 @@ from pathlib import Path
 import shutil
 import tarfile
 
-import yaml
+try:
+    import yaml
+except ImportError:  # production host has no PyYAML
+    yaml = None
 
 ROOT = Path(__file__).resolve().parent
-
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -22,12 +24,22 @@ def main():
     target.mkdir(parents=True, exist_ok=False)
     service = target / "source" / "easy-stock-service"
     service.mkdir(parents=True)
-    for name in ("auto_follow.py", "follow_research.py", "follow_ai.py", "auto_research_policy.py", "test_auto_follow.py", "test_follow_research.py", "test_follow_ai.py", "test_auto_research_policy.py", "stockstrategy-auto-follow.service"):
+    for name in ("auto_follow.py", "follow_research.py", "follow_ai.py", "auto_research_policy.py",
+                 "signal_engine.py", "loop_state.py", "strong_scan.py", "attribution.py", "optimizer.py",
+                 "simple_config.py",
+                 "test_auto_follow.py", "test_follow_research.py", "test_follow_ai.py",
+                 "test_auto_research_policy.py", "test_signal_engine.py", "test_attribution.py",
+                 "test_optimizer.py", "test_loop_cycle.py", "stockstrategy-auto-follow.service"):
         shutil.copyfile(ROOT / name, target / name)
     for name in ("daily_review.py", "market_cache.py", "market_network.py", "data_store.py", "trading_calendar.py"):
         shutil.copyfile(ROOT / "source" / "easy-stock-service" / name, service / name)
-    cfg = yaml.safe_load((ROOT / "source" / "easy-stock-service" / "strategy.yaml").read_text(encoding="utf-8"))
-    snapshot = {key: cfg[key] for key in ("version", "buy", "sell", "decision_gate")}
+    strategy_path = ROOT / "source" / "easy-stock-service" / "strategy.yaml"
+    if yaml is not None:
+        cfg = yaml.safe_load(strategy_path.read_text(encoding="utf-8"))
+    else:
+        import simple_config
+        cfg = simple_config.load(strategy_path)
+    snapshot = {key: cfg[key] for key in ("version", "buy", "sell", "decision_gate", "execution")}
     (target / "config.json").write_bytes(json.dumps(snapshot, ensure_ascii=False).encode("utf-8"))
     files = sorted(p for p in target.rglob("*") if p.is_file())
     manifest = "".join(hashlib.sha256(p.read_bytes()).hexdigest() + "  " + p.relative_to(target).as_posix() + "\n" for p in files)

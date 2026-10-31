@@ -580,6 +580,8 @@ def veto_of(
 
     if event.price <= 0 or event.vwap <= 0:
         return "行情缺失(price/vwap无效)"
+    if "pct" in (event.extra.get("missing") or ()):
+        return "行情缺失(涨幅及昨收无效)"
     if event.freshness_s > v_cfg["stale_seconds"]:
         return "数据过期{:.0f}s".format(event.freshness_s)
     if today and event.trade_date and event.trade_date != today:

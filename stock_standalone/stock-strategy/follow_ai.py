@@ -42,8 +42,23 @@ def evidence_context(state, now):
         rotation[dim] = {"meta": snap.get("meta"), "error": snap.get("error"), "coverage": snap.get("coverage"),
                          "rows": rows[:8] + rows[-8:] if len(rows) > 16 else rows}
     closed = state.get("closed", [])
+    loop = state.get("loop") or {}
+    optimizer_state = state.get("optimizer") or {}
+    attribution_state = state.get("attribution") or {}
+    scan = state.get("strong_scan") or {}
     return {"schema_version": 1, "trade_date": now.date().isoformat(), "as_of": now.isoformat(),
-            "mode": "paper", "market": state.get("market", {}), "rotation": rotation, "stocks": stocks,
+            "mode": "paper", "market": state.get("market", {}), "regime": state.get("regime", {}),
+            "rotation": rotation, "stocks": stocks,
+            "loop": {"funnel": loop.get("funnel"), "blockers": (loop.get("blockers") or [])[:6],
+                     "stages": loop.get("stages"), "next": loop.get("next")},
+            "strong_scan": [{k: row[k] for k in ("symbol", "name", "score", "change_percent", "theme", "sources")
+                             if k in row} for row in (scan.get("rows") or [])[:10]],
+            "attribution": {"samples": attribution_state.get("samples"), "settled": attribution_state.get("settled"),
+                            "blockers": (attribution_state.get("blockers") or [])[:5],
+                            "buckets": attribution_state.get("buckets"),
+                            "trades": attribution_state.get("trades")},
+            "optimizer": {"status": optimizer_state.get("status"), "version": optimizer_state.get("version"),
+                          "proposal": optimizer_state.get("proposal"), "reason": optimizer_state.get("reason")},
             "account": {"cash": state["cash"], "positions": [{k: p[k] for k in
                 ("symbol", "name", "theme", "shares", "buy_price", "buy_date", "last_price", "last_price_at") if k in p}
                 for p in state["positions"]], "closed_count": len(closed),
@@ -92,6 +107,14 @@ def enqueue(db, state, now, question="", force=False, stage=None):
     if input_size() > 24000:
         context['account']['recent_closed'] = []
         omitted.append('account.recent_closed')
+    if input_size() > 24000:
+        context['loop']['stages'] = []
+        context['strong_scan'] = []
+        omitted.append('loop.stages,strong_scan')
+    if input_size() > 24000:
+        context['attribution'] = {}
+        context['optimizer']['history'] = []
+        omitted.append('attribution,optimizer.history')
     if omitted:
         context['omitted_evidence'] = omitted
     if input_size() > 24000:
@@ -231,12 +254,65 @@ def ai_entry_gate(state, code, price, now):
             "thread_id": result.get("thread_id"), "action": plan["action"]}
 
 
+def ai_overlay(state, code, price, now, cfg):
+    """AI as a weighted evidence layer, not a hard 5-minute switch.
+
+    ``veto`` is reserved for an explicit ``avoid`` plan (or a configured hard
+    fallback).  A missing/expired proposal degrades to neutral in paper mode so
+    the deterministic structure gates keep working while the desktop is away.
+    """
+    import auto_follow as af
+    execution = (cfg or {}).get("execution") or {}
+    gate = {"mode": "overlay", "weight": 12, "ttl_seconds": 900, "veto_on_avoid": True, "fallback": "neutral",
+            **(execution.get("ai_gate") or {})}
+    policy = state.get("ai_settings", DEFAULT_AI)
+    if not policy.get("enabled") or gate.get("mode") == "off":
+        return {"mode": "off", "status": "off", "delta": 0, "veto": False, "reason": "AI_disabled"}
+    latest = state.get("ai_latest") or {}
+    try:
+        age = (now - af.stamp(latest["as_of"])).total_seconds()
+    except (KeyError, ValueError, TypeError):
+        age = None
+    fresh = (latest.get("trade_date") == now.date().isoformat() and age is not None
+             and 0 <= age <= float(gate.get("ttl_seconds", 900)))
+    if not fresh:
+        fallback = gate.get("fallback", "neutral")
+        return {"mode": gate.get("mode", "overlay"), "status": "neutral" if fallback != "block" else "blocked",
+                "delta": 0, "veto": fallback == "block", "reason": "AI proposal missing or expired",
+                "job_id": latest.get("id"), "evidence_hash": latest.get("evidence_hash"),
+                "age_seconds": int(age) if age is not None else None}
+    plans = ((latest.get("result") or {}).get("proposal") or {}).get("plans") or []
+    plan = next((item for item in plans if item.get("symbol") == code), None)
+    base = {"mode": gate.get("mode", "overlay"), "job_id": latest.get("id"),
+            "evidence_hash": latest.get("evidence_hash"), "age_seconds": int(age)}
+    if not plan:
+        return {**base, "status": "neutral", "delta": 0, "veto": False, "reason": "AI has no plan for symbol"}
+    action = plan.get("action")
+    if action == "avoid" and gate.get("veto_on_avoid", True):
+        return {**base, "status": "veto", "delta": 0, "veto": True, "reason": "AI avoid"}
+    if action == "follow" and not plan.get("missing_data") and plan.get("evidence_refs"):
+        low, high = plan.get("entry_low"), plan.get("entry_high")
+        if low is None or low <= price <= high:
+            return {**base, "status": "admit", "delta": int(gate.get("weight", 12)), "veto": False,
+                    "reason": "AI follow within range"}
+        return {**base, "status": "neutral", "delta": 0, "veto": False, "reason": "AI conditional range not reached"}
+    return {**base, "status": "neutral", "delta": 0, "veto": False, "reason": "AI observe"}
+
+
 def schedule_workflow(db, state, now, calendar):
     """Existing worker owns scheduling; no feed-pulse/heartbeat cron is cloned."""
     if not calendar.is_trading_day(now.date().isoformat(), "CN"):
         return
     if not "08:30" <= now.strftime("%H:%M") <= "17:30":
         return
+    today = now.date().isoformat()
+    if now.strftime("%H:%M") >= "15:35" and state.get("ai_review_day") != today:
+        job = enqueue(db, state, now,
+                      question="盘后闭环复盘：核对当日市场状态、漏斗拦截、AI提案与实际成交/退出，指出最大的闭环瓶颈与下一交易日观察重点；不直接修改参数。",
+                      stage="post_close_review", force=True)
+        if job:
+            state["ai_review_day"] = today
+            return
     closed_count = len(state.get("closed", []))
     if closed_count > state.get("ai_review_requested_closed_count", 0):
         job = enqueue(db, state, now, question="复盘已实际发生的模拟成交、拒绝和退出，核对AI提案与风控执行差异，提出下一轮观察重点，不修改参数。",

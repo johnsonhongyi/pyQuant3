@@ -38,8 +38,9 @@ class Calendar:
 class FollowTests(unittest.TestCase):
     def test_utf8_runtime_config_loads_without_windows_default_codec(self):
         cfg = af.load_config()
-        self.assertEqual(cfg["version"], "v1.9")
+        self.assertEqual(cfg["version"], "v1.11")
         self.assertEqual(cfg["buy"]["max_positions"], 5)
+        self.assertIn("regime_policy", cfg["execution"])
 
     def test_stale_cross_day_nan_quotes_fail_closed(self):
         for mutate in (lambda q: q["meta"].update(stale=True),
@@ -63,6 +64,21 @@ class FollowTests(unittest.TestCase):
         af.cycle(state, CFG, api, NOW, Calendar, {}, True)
         self.assertEqual(state["positions"], [])
         self.assertEqual(state["closed"][0]["reason"], "stop_loss")
+
+    def test_partial_take_profit_and_trailing_stop(self):
+        state = af.initial()
+        cfg = {**CFG, "sell": {**CFG["sell"], "partial_take_profit": .06, "partial_ratio": .5,
+                               "trailing_arm": .04, "trailing_giveback": .03}}
+        state["positions"] = [{"symbol": "600001.SH", "buy_date": "2026-10-13", "buy_price": 10,
+                               "shares": 1000, "buy_vwap": 10, "buy_vwap10": 10, "peak": 10}]
+        af.cycle(state, cfg, lambda path: {"data": [quote(10.7)]}, NOW, Calendar, {}, True)
+        self.assertEqual(state["positions"][0]["shares"], 500)
+        self.assertTrue(state["positions"][0]["partial_done"])
+        self.assertEqual(state["events"][0]["action"], "PARTIAL_SELL")
+        af.cycle(state, cfg, lambda path: {"data": [quote(10.2)]}, NOW, Calendar, {}, True)
+        self.assertEqual(state["positions"], [])
+        self.assertEqual(state["closed"][0]["reason"], "trailing_stop")
+        self.assertGreater(state["closed"][0]["pnl"], 0)
 
     def test_limit_down_does_not_assume_fill(self):
         state = af.initial()

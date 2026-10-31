@@ -3,7 +3,7 @@
 
 三个页签对应三种"看得见"：
     1. 实时梯度：直接读 `logs/fusion_shadow/<day>.jsonl`，按选择日期加载，支持实盘与回补数据呈现；
-    2. 按日回放：选历史交易日运行全天，不仅完成回测，更自动将有效信号回补持久化为影子流与上下文快照；
+    2. 按日回放：历史结果写入独立迭代档案；
     3. 验收与复盘：填几只"走出来的答案"（如 688787,300296），看系统哪一天、几点、几级抓到。
 
 设计约束（对齐 ATS 专业看板体系）：
@@ -17,7 +17,7 @@
     - 双击任意行秒开通达信同款 SBC 分时走势图 (open_sbc_chart_dialog)；
     - 标准 ATS 右键菜单（📈 查看分时图 / 🔍 个股详情 / ⭐ 关注 / 📋 复制）；
     - 全 Tab 极窄列模式 (Narrow Mode) 支持与列宽自动防抖持久化；
-    - 回测即回补数据：选定日期跑完回放自动落盘 logs/fusion_shadow/{day}.jsonl 与 session_ctx/{day}.json。
+    - 迭代档案与生产影子流、会话快照分开保存。
 """
 
 from __future__ import annotations
@@ -906,13 +906,17 @@ def _in_trading_session(ts: float, allow_premarket: bool = False) -> bool:
 
 
 def _row_is_hit(rec: Dict[str, Any]) -> bool:
-    """是否命中：L2 及以上，或旧策略给出买入。梯度层只对"命中"负责，不重复播报异动。"""
+    """梯度命中以融合结果为准；仅旧格式缺少融合结果时兼容旧策略。"""
     try:
         tier = int((rec.get("fusion") or {}).get("tier") or 0)
     except Exception:
         tier = 0
+    if isinstance(rec.get("fusion"), dict) and "tier" in rec["fusion"]:
+        return tier >= 2
+    if "hit" in rec:
+        return bool(rec["hit"])
     action = str((rec.get("legacy") or {}).get("action") or "")
-    return bool(rec.get("hit")) or tier >= 2 or action in ("买入", "加仓", "BUY", "ADD")
+    return action in ("买入", "加仓", "BUY", "ADD")
 
 
 def _row_is_structure_opportunity(rec: Dict[str, Any]) -> bool:
@@ -966,14 +970,14 @@ _LIVE_ROWS_CACHE: Dict[Tuple[str, int, float, int, str], List[Dict[str, Any]]] =
 _LIVE_SERIES_CACHE: Dict[Tuple[str, int, float, int], Dict[str, List[Dict[str, Any]]]] = {}
 
 
-def load_live_series(day: str = "", max_lines: int = 20000) -> Dict[str, List[Dict[str, Any]]]:
+def load_live_series(day: str = "", max_lines: int = 20000, allow_fallback: bool = True) -> Dict[str, List[Dict[str, Any]]]:
     """按 code 返回当日全部影子记录（时间升序），供赛马跟踪等"过程类"视图使用。
 
     与 `load_live_rows` 的区别：那个只保留每只票最新一条（看板用），
     这个保留整条时间序列，才能算出入局时间、入局后 MFE/MAE、持续分。
     内置文件指纹 (path, size, mtime) 缓存，文件未变时 0 磁盘 IO 直接返回。
     """
-    path, _src_day = _resolve_shadow_file(day)
+    path = _resolve_shadow_file(day)[0] if allow_fallback else _resolve_day_file(day)
     if not path or not os.path.exists(path):
         return {}
     try:
@@ -1185,13 +1189,14 @@ class ReplayWorker(QThread):
     failed = pyqtSignal(str)
 
     def __init__(self, day: str, focus: List[str], top_n: int = 300, step: int = 1,
-                 cuts_mode: str = "percentile", parent=None):
+                 cuts_mode: str = "percentile", parent=None, iterate=False):
         super().__init__(parent)
         self.day = day
         self.focus = focus
         self.top_n = top_n
         self.step = step
         self.cuts_mode = cuts_mode
+        self.iterate = iterate
 
     def _on_progress(self, cur: int, total: int) -> None:
         # 进度回调是唯一贯穿全程的钩子：在这里响应取消，退出时才能及时收敛线程
@@ -1204,13 +1209,28 @@ class ReplayWorker(QThread):
             rp = DayReplay(config=ReplayConfig(
                 top_n=self.top_n, step=self.step,
                 focus_codes=tuple(self.focus), cuts_mode=self.cuts_mode,
+                persist_context=False, market_path=os.devnull, max_records=100000,
             ))
             if not rp.cache:
                 self.failed.emit("找不到分钟线缓存（cct ramdisk: minute_kline_cache.pkl）")
                 return
             day = self.day or (rp.days()[-1] if rp.days() else today_str())
-            result = rp.run_day(day, progress=self._on_progress, focus=self.focus)
-            self.done.emit(result)
+            days = [d for d in rp.days() if d <= day]
+            if day not in days:
+                self.failed.emit("{} 不在分钟缓存中".format(day))
+                return
+            from ats.fusion.iteration import run_iterations
+            selected = days[-5:] if self.iterate else [day]
+            def on_iteration_progress(index, count, cur, total):
+                self._on_progress(index * 100 + int(cur * 100 / max(1, total)), count * 100)
+            output = run_iterations(days=selected, focus=self.focus, replay=rp, progress=on_iteration_progress)
+            if self.iterate:
+                self.done.emit(output)
+            else:
+                output["last_result"].meta["iteration_dir"] = output["run_dir"]
+                from ats.fusion.iteration import render_iteration
+                output["last_result"].meta["iteration_report"] = render_iteration(output)
+                self.done.emit(output["last_result"])
         except _ReplayCancelled:
             logger.info("[FusionLadder] 回放已按请求中断")
         except Exception as exc:  # 线程内异常必须自己吞，否则整个窗口崩
@@ -1337,7 +1357,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
         # 文字里不带 ✅（勾号会和复选框状态混淆），改用颜色表达选中态。
         self.chk_hit_only = QCheckBox("只看命中")
         self.chk_hit_only.setToolTip(
-            "只显示 L2 及以上（或旧策略给出买入）的命中标的。\n"
+            "显示融合梯度 L2 及以上，以及逆势收复观察信号；观察信号不代表可执行梯度。\n"
             "关掉可看全池梯度分布，用于观察 L0/L1 的边缘标的。"
         )
         try:
@@ -1382,10 +1402,15 @@ class FusionLadderDialog(QWidget, WindowMixin):
             self.cmb_step.addItem("每{}根".format(s), s)
         bar.addWidget(self.cmb_step)
 
-        self.btn_run = QPushButton("▶ 跑回放(回补)")
-        self.btn_run.setToolTip("执行所选日期的全市场回放，并自动将有效决策回补持久化为影子流与上下文快照")
+        self.btn_run = QPushButton("▶ 跑回放")
+        self.btn_run.setToolTip("按所选日期回放并保存独立档案，不覆盖生产梯度或会话快照")
         self.btn_run.clicked.connect(self.run_replay)
         bar.addWidget(self.btn_run)
+
+        self.btn_iteration = QPushButton("📊 逐日迭代")
+        self.btn_iteration.setToolTip("按时间顺序回放所选日期及之前最多五个缓存交易日，生成跨日比较和独立档案")
+        self.btn_iteration.clicked.connect(self.run_iteration)
+        bar.addWidget(self.btn_iteration)
 
         self.btn_refresh = QPushButton("🔄 刷新影子")
         self.btn_refresh.setToolTip("加载当前所选交易日已持久化的影子记录")
@@ -3016,7 +3041,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 return
 
         if hit_only and rows:
-            rows = [r for r in rows if _row_is_hit(r)]
+            rows = [r for r in rows if _row_is_hit(r) or {"逆势收复启动", "逆势收复持稳"} & set(r.get("patterns") or [])]
             if not rows:
                 tbl.setSortingEnabled(False)
                 tbl.setRowCount(0)
@@ -3126,7 +3151,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 coverage_n += 1
 
             legacy_action = str((r.get("legacy") or {}).get("action") or "")
-            hit = bool(r.get("hit")) or tier >= 2 or legacy_action in ("买入", "加仓", "BUY", "ADD")
+            hit = _row_is_hit(r)
             if hit:
                 hit_count += 1
 
@@ -3148,7 +3173,15 @@ class FusionLadderDialog(QWidget, WindowMixin):
             tbl.setItem(i, 11, self._num_item(band, band))
             tbl.setItem(i, 12, self._num_item(stop.get("price", "-"), float(stop.get("price") or 0) if stop.get("price") not in ("-", None) else 0.0))
             tbl.setItem(i, 13, self._num_item(fusion.get("age_min", 0), float(fusion.get("age_min", 0) or 0)))
-            tbl.setItem(i, 14, self._num_item(",".join(fusion.get("sources") or []), ",".join(fusion.get("sources") or [])))
+            sources = ",".join(fusion.get("sources") or [])
+            pats = r.get("patterns") or []
+            observing = "逆势收复启动" in pats or "逆势收复持稳" in pats
+            source_item = self._num_item(("逆势收复持稳" if "逆势收复持稳" in pats else "逆势收复观察") if observing else sources, sources)
+            first_ts = r.get("counter_reclaim_first_ts")
+            if observing and first_ts:
+                source_item.setToolTip("首次发现：{}；仅为观察信号，梯度及否决原因以本行为准".format(
+                    datetime.datetime.fromtimestamp(float(first_ts)).strftime("%H:%M:%S")))
+            tbl.setItem(i, 14, source_item)
             tbl.setItem(i, 15, self._num_item(time_txt, ts))
             tbl.setItem(i, 16, self._num_item("✅" if hit else "", 1 if hit else 0,
                                              color=QColor("#ffd24d") if hit else None, bold=hit))
@@ -3223,7 +3256,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
         """
         series = load_live_series(day)
         # 1. 批量获取权威行情快照，实现通达信全口径对齐
-        quotes_map = self._get_batch_quotes_snapshot(list(series.keys()))
+        # 历史日期不能使用当前行情，否则会把其他交易日的价格写成当日收盘。
+        quotes_map = {}
 
         out: List[Dict[str, Any]] = []
         for code, recs in series.items():
@@ -3301,7 +3335,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 day_close_pct = float(q_day_pct)
             elif q_price > 0 and q_last_close > 0 and abs(q_price - q_last_close) > 1e-4:
                 day_close_pct = (q_price - q_last_close) / q_last_close * 100.0
-            elif recs and recs[-1].get("pct") is not None and abs(float(recs[-1].get("pct") or 0.0)) > 1e-4:
+            elif recs and recs[-1].get("pct") is not None:
                 day_close_pct = float(recs[-1].get("pct"))
             elif entry_rec.get("pct") is not None and abs(float(entry_rec.get("pct") or 0.0)) > 1e-4:
                 day_close_pct = float(entry_rec.get("pct"))
@@ -3495,7 +3529,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
     # ------------------------------------------------------------------
     # 回放与回补持久化
     # ------------------------------------------------------------------
-    def _start_worker(self, focus: List[str]) -> None:
+    def _start_worker(self, focus: List[str], iterate: bool = False) -> None:
         if self._worker is not None and self._worker.isRunning():
             self.lbl_status.setText("状态：回放进行中，请稍候…")
             return
@@ -3503,16 +3537,17 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self.progress.setValue(0)
         self.btn_run.setEnabled(False)
         self.btn_focus.setEnabled(False)
+        self.btn_iteration.setEnabled(False)
         self.lbl_status.setText("状态：回放 {} 中…".format(day))
         self.lbl_status.setStyleSheet("color:#ffd75e; font-weight:bold;")
 
         self._worker = ReplayWorker(
             day=day, focus=focus, top_n=self.spin_top.value(),
             step=int(self.cmb_step.currentData() or 1),
-            parent=self,
+            parent=self, iterate=iterate,
         )
         self._worker.progress.connect(self._on_progress)
-        self._worker.done.connect(self._on_replay_done)
+        self._worker.done.connect(self._on_iteration_done if iterate else self._on_replay_done)
         self._worker.failed.connect(self._on_replay_failed)
         self._worker.start()
         # 进程退出时若回放线程仍在跑，QThread 被销毁会触发 Qt Fatal；退出前做一次有界等待
@@ -3539,6 +3574,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
     def _on_replay_failed(self, msg: str) -> None:
         self.btn_run.setEnabled(True)
         self.btn_focus.setEnabled(True)
+        self.btn_iteration.setEnabled(True)
         self.lbl_status.setText("状态：回放失败 — {}".format(msg))
         self.lbl_status.setStyleSheet("color:#ff5c5c; font-weight:bold;")
 
@@ -3559,6 +3595,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
                         entry_by_code[ec] = e_item
 
             by_code: Dict[str, Dict[str, Any]] = {}
+            first_reclaim: Dict[str, Dict[str, Any]] = {}
             for r in result.records:
                 cd = str(r.get("code") or "").split(".")[0].zfill(6)
                 if not cd:
@@ -3588,6 +3625,9 @@ class FusionLadderDialog(QWidget, WindowMixin):
                     "pct": pct_val,
                     "trade_date": day,
                     "hit": bool(tier >= 2),
+                    "patterns": list(r.get("patterns") or []),
+                    "counter_reclaim_first_ts": r.get("counter_reclaim_first_ts"),
+                    "reclaim_detail": dict(r.get("reclaim_detail") or {}),
                     "coverage": 1.0,
                     "mfe": round(float(r.get("mfe") or 0.0), 2),
                     "mae": round(float(r.get("mae") or 0.0), 2),
@@ -3630,13 +3670,17 @@ class FusionLadderDialog(QWidget, WindowMixin):
                         "sources": ["REPLAY_BACKFILL"],
                     },
                 }
+                if "逆势收复启动" in row["patterns"]:
+                    prev_first = first_reclaim.get(cd)
+                    if prev_first is None or row["ts"] < prev_first["ts"]:
+                        first_reclaim[cd] = row
                 prev = by_code.get(cd)
                 if (prev is None or
                         row["fusion"]["tier"] > prev["fusion"]["tier"] or
                         (row["fusion"]["tier"] == prev["fusion"]["tier"] and row["fusion"]["rar"] > prev["fusion"]["rar"])):
                     by_code[cd] = row
 
-            persist_shadow_records(list(by_code.values()), day)
+            persist_shadow_records(list(by_code.values()) + list(first_reclaim.values()), day)
 
             # 2. 回补沉淀 logs/fusion_state/session_ctx/{day}.json 上下文快照
             store = default_store()
@@ -3655,15 +3699,17 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self._result = result
         self.btn_run.setEnabled(True)
         self.btn_focus.setEnabled(True)
+        self.btn_iteration.setEnabled(True)
         self.progress.setValue(100)
-
-        # 🚀 自动持久化回补 (回测即回补)
-        backfilled_count = self._persist_replay_shadow_and_context(result)
 
         # Tab 1: 按日回放表格渲染
         # 表头: [时间(0), 代码(1), 名称(2), 现价(3), 涨幅%(4), 终收%(5), 级别(6), RAR(7), 仓位%(8), MFE%(9), MAE%(10), 收盘%(11), 温度℃(12)] + 自定义列
         df_strat = self._resolve_ats_strategy_df()
-        rows = sorted(result.records, key=lambda r: (r["tier"], r["rar"]), reverse=True)[:1000]
+        # 展示首次发现优先，避免最高分帧淹没早期观察。
+        first_by_code = {}
+        for record in sorted(result.records, key=lambda r: float(r.get("ts") or 0)):
+            first_by_code.setdefault(record.get("code"), record)
+        rows = list(first_by_code.values())[:1000]
         tbl = self.tbl_replay
         tbl.setSortingEnabled(False)
         tbl.setRowCount(0)
@@ -3803,15 +3849,15 @@ class FusionLadderDialog(QWidget, WindowMixin):
         except Exception as exc:
             self.txt_panel.setPlainText("信号面板生成失败：{}".format(exc))
 
-        self.txt_report.setPlainText(render_report(result))
+        self.txt_report.setPlainText(render_report(result) + "\n\n" + result.meta.get("iteration_report", ""))
 
         # 更新极窄列显示
         self._apply_all_narrow_modes()
         self._apply_search_filter()
 
         self.lbl_status.setText(
-            "状态：{} 回放完成并已回补落盘影子流({}条)｜评估 {}｜入局 {}".format(
-                result.day, backfilled_count, result.meta.get("evaluations"),
+            "状态：{} 回放完成｜独立档案 {}｜评估 {}｜入局 {}".format(
+                result.day, result.meta.get("iteration_dir", "--"), result.meta.get("evaluations"),
                 result.meta.get("entries", 0),
             )
         )
@@ -3819,6 +3865,20 @@ class FusionLadderDialog(QWidget, WindowMixin):
 
     def run_replay(self) -> None:
         self._start_worker([])
+
+    def run_iteration(self) -> None:
+        self._start_worker([], iterate=True)
+
+    def _on_iteration_done(self, output) -> None:
+        from ats.fusion.iteration import render_iteration
+        self.btn_run.setEnabled(True)
+        self.btn_focus.setEnabled(True)
+        self.btn_iteration.setEnabled(True)
+        self.progress.setValue(100)
+        self.txt_report.setPlainText(render_iteration(output))
+        self.tabs.setCurrentIndex(5)
+        self.lbl_status.setText("状态：逐日迭代完成｜档案 {}".format(output["run_dir"]))
+        self.lbl_status.setStyleSheet("color:#8fd18f; font-weight:bold;")
 
     def run_focus(self) -> None:
         codes = [c.strip() for c in self.ed_focus.text().split(",") if c.strip()]

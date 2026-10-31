@@ -88,6 +88,19 @@ except ImportError:
 # pythoncom import removed - usage localized or delegated
 
 
+def _fusion_percent_series(frame):
+    """融合层统一用同一行情行的现价/昨收计算涨幅，缺基准时保留原值。"""
+    pct = pd.to_numeric(frame["percent"], errors="coerce")
+    price_col = next((c for c in ("trade", "price") if c in frame.columns), None)
+    prev_col = next((c for c in ("lastp1d", "pre_close", "prev_close") if c in frame.columns), None)
+    if price_col and prev_col:
+        price = pd.to_numeric(frame[price_col], errors="coerce")
+        previous = pd.to_numeric(frame[prev_col], errors="coerce")
+        valid = (price > 0) & (previous > 0)
+        pct = pct.where(~valid, (price / previous - 1.0) * 100.0)
+    return pct
+
+
 def normalize_speech_text(text: str) -> str:
     """
     将数值符号转换为适合中文语音播报的表达
@@ -2915,7 +2928,7 @@ class StockLiveStrategy:
             if df_all_data is None or df_all_data.empty or "percent" not in df_all_data.columns:
                 return
 
-            pct_s = pd.to_numeric(df_all_data["percent"], errors="coerce").dropna()
+            pct_s = _fusion_percent_series(df_all_data).dropna()
             if pct_s.empty:
                 return
 
@@ -2942,6 +2955,7 @@ class StockLiveStrategy:
             # 2. 板块共振（sector_resonance）与板块第一股龙头判定（纯内存字典聚合 + 静态板块映射缓存，耗时 < 2ms）
             sec_col = "category" if "category" in df_all_data.columns else ("hangye" if "hangye" in df_all_data.columns else "")
             sec_resonance_map: Dict[str, float] = {}
+            sec_pct_map: Dict[str, float] = {}
             sec_breadth_map: Dict[str, float] = {}
             sec_top_leader: set = set()
             code_sec_map: Dict[str, str] = getattr(self, "_fusion_code_sec_cache", None) or {}
@@ -2970,6 +2984,7 @@ class StockLiveStrategy:
                     n_items = len(items)
                     if n_items < 4:
                         continue
+                    sec_pct_map[s_name] = sum(pv for pv, _ in items) / n_items
                     items.sort(key=lambda x: x[0], reverse=True)
                     t3_mean = (items[0][0] + items[1][0] + items[2][0]) / 3.0
                     up_cnt = sum(1 for pv, _ in items if pv > 0.0)
@@ -2994,7 +3009,7 @@ class StockLiveStrategy:
             s_lock = getattr(_fusion, "_lock", None)
             clock_updates = []
             for raw_code, p_val in zip(pct_idx, pct_arr):
-                if p_val < 0.5:
+                if p_val < 0:
                     continue
                 pv = float(p_val)
                 c6 = str(raw_code).split(".")[0].zfill(6)
@@ -3007,6 +3022,8 @@ class StockLiveStrategy:
                     "sector_resonance": s_res,
                     "sector": s_name,
                     "rs_day": round(pv - mkt_pct, 2),
+                    "market_pct": mkt_pct,
+                    "sector_pct": sec_pct_map.get(s_name),
                     "consensus": round(0.5 * up_ratio + 0.3 * s_brd + 0.2 * crowd, 3),
                 }
                 cross_map[c6] = entry_map
@@ -3174,15 +3191,13 @@ class StockLiveStrategy:
             cross_map = getattr(self, "_fusion_cross_map", None) or {}
 
         # 快速向量筛选：涨幅 2.2% ~ 9.6% 且先截取涨幅前 80 名，避免大表 iterrows 开销
-        pct_col = pd.to_numeric(df_all_data["percent"], errors="coerce")
+        pct_col = _fusion_percent_series(df_all_data)
         mask = (pct_col >= 2.2) & (pct_col <= 9.6)
         r_col_name = "ratio" if "ratio" in df_all_data.columns else ("volume" if "volume" in df_all_data.columns else "")
         if r_col_name:
             vol_col = pd.to_numeric(df_all_data[r_col_name], errors="coerce").fillna(0.0)
             mask = mask & (vol_col >= 1.2)
         sub = df_all_data[mask]
-        if sub.empty:
-            return
         if len(sub) > 60:
             sub = sub.loc[pct_col[mask].nlargest(60).index]
 
@@ -3195,6 +3210,54 @@ class StockLiveStrategy:
         box_pool = d_ctx.box10_pool(time.strftime("%Y-%m-%d")) if d_ctx.ok else set()
         struct_pool = d_ctx.structure_pool(time.strftime("%Y-%m-%d")) if d_ctx.ok else set()
         raw_pool = v_pool | box_pool | struct_pool
+
+        # 独立早期观察通道：不按涨幅排名，也不要求昨日上涨。
+        from ats.fusion.anomaly import counter_reclaim, rolling_vwaps
+        early = []
+        for raw_code, row_dict in df_all_data[(pct_col >= 0) & (pct_col <= 4.5)].to_dict(orient="index").items():
+            row_dict["percent"] = float(pct_col.loc[raw_code])
+            c6 = str(raw_code).split(".")[0].zfill(6)
+            cross = cross_map.get(c6) or {}
+            if (c6 in evaluated or c6.startswith(("8", "4", "92"))
+                    or "ST" in str(row_dict.get("name") or "") or "退" in str(row_dict.get("name") or "")
+                    or cross.get("market_pct", 0) > -0.5 or cross.get("sector_resonance", 0) < 58
+                    or cross.get("sector_pct") is None or cross["sector_pct"] < 0.2):
+                continue
+            px = float(row_dict.get("trade") or row_dict.get("price") or 0)
+            vw = float(row_dict.get("vwap") or 0)
+            ratio = float(row_dict.get("ratio") or row_dict.get("vol_ratio") or 0)
+            if px <= 0 or vw <= 0 or px < vw or ratio < 0.8:
+                continue
+            daily = d_ctx.asof(c6, time.strftime("%Y-%m-%d")) if d_ctx.ok else {}
+            amount = float(row_dict.get("amount") or 0)
+            volume = float(row_dict.get("volume") or row_dict.get("vol") or 0)
+            if amount <= 0 or volume <= 0 or not any(0.95 <= amount / (volume * factor * vw) <= 1.05 for factor in (1, 100)):
+                continue
+            v3, v5 = rolling_vwaps(daily, vw, amount / vw)
+            prev = float(daily.get("close_pre1") or 0)
+            if daily.get("vwap_observed_days", 0) < 5 or min(v3, v5, prev) <= 0 or px < max(v3, v5, prev):
+                continue
+            early.append((float(cross["sector_resonance"]), c6, row_dict, ratio))
+        early.sort(key=lambda x: x[0], reverse=True)
+        for _, c6, row_dict, ratio in early[:20]:
+            snap = self._fusion_enrich_snap(c6, {}, row_dict, all_klines=all_klines)
+            cross = cross_map[c6]
+            v3, v5 = rolling_vwaps(snap, float(row_dict["vwap"]), float(row_dict["amount"]) / float(row_dict["vwap"]))
+            snap["reclaim_vwap3"], snap["reclaim_vwap5"] = v3, v5
+            with _fusion._lock:
+                was_reclaim = c6 in _fusion._counter_reclaim_first
+            velocity = float(snap.get("velocity_pct") or 0)
+            hold = float(snap.get("vwap_hold_ratio") or 0)
+            candidate_velocity = 0.001 if was_reclaim and velocity >= -0.3 and hold >= 0.7 else velocity
+            if counter_reclaim(float(row_dict.get("trade") or row_dict.get("price")), float(row_dict["vwap"]),
+                               v3, v5,
+                               float(snap.get("close_pre1") or 0), float(row_dict["percent"]),
+                               cross.get("market_pct"), float(cross["sector_resonance"]), ratio,
+                               candidate_velocity, hold,
+                               cross.get("sector_pct")):
+                _fusion.observe(code=c6, row=row_dict, snap=snap, decision={"action": "HOLD"},
+                                name=str(row_dict.get("name") or ""), now=now, source="counter_reclaim")
+                evaluated.add(c6)
 
         # 一次性转字典，避免 pandas iterrows() 与逐行 .loc[].to_dict() 的 Series 构造开销
         sub_dicts = sub.to_dict(orient="index")
@@ -3244,6 +3307,7 @@ class StockLiveStrategy:
             except Exception as e_box:
                 logger.debug(f"[FUSION] box10 fast track skipped: {e_box}")
         for raw_code, row_dict in sub_dicts.items():
+            row_dict["percent"] = float(pct_col.loc[raw_code])
             c6 = str(raw_code).split(".")[0].zfill(6)
             if c6 in evaluated or c6.startswith(("8", "4", "92")):
                 continue

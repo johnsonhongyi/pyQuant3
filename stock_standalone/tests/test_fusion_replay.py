@@ -101,6 +101,12 @@ class TestReplay(unittest.TestCase):
     def test_days_detected(self):
         self.assertEqual(self.rp.days(), [_DAY1, _DAY2])
 
+    def test_vwap_time_counts_observed_bars(self):
+        aligned = self.rp._align(["300001"], _DAY2)
+        minutes = aligned["mat"]["minutes_above_vwap"][0]
+        self.assertEqual(minutes[0], 3.0)
+        self.assertEqual(minutes[4], 15.0)
+
     def test_first_day_not_blind(self):
         """缓存起始日没有前一日收盘，必须用当日首根开盘代理，而不是整天无标的。"""
         res = self.rp.run(_DAY1)
