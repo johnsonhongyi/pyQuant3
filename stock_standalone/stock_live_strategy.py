@@ -3214,9 +3214,19 @@ class StockLiveStrategy:
         # 独立早期观察通道：不按涨幅排名，也不要求昨日上涨。
         from ats.fusion.anomaly import counter_reclaim, rolling_vwaps
         early = []
-        for raw_code, row_dict in df_all_data[(pct_col >= 0) & (pct_col <= 4.5)].to_dict(orient="index").items():
+        with _fusion._lock:
+            follow_codes = set(_fusion._counter_reclaim_first)
+            follow_codes.update(st.code for st in _fusion.tracker.states() if st.enter_price > 0)
+        follow_mask = df_all_data.index.map(lambda value: str(value).split(".")[0].zfill(6) in follow_codes)
+        for raw_code, row_dict in df_all_data[((pct_col >= 0) & (pct_col <= 4.5)) | follow_mask].to_dict(orient="index").items():
             row_dict["percent"] = float(pct_col.loc[raw_code])
             c6 = str(raw_code).split(".")[0].zfill(6)
+            if c6 in follow_codes and c6 not in evaluated:
+                snap = self._fusion_enrich_snap(c6, {}, row_dict, all_klines=all_klines)
+                _fusion.observe(code=c6, row=row_dict, snap=snap, decision={"action": "HOLD"},
+                                name=str(row_dict.get("name") or ""), now=now, source="counter_reclaim")
+                evaluated.add(c6)
+                continue
             cross = cross_map.get(c6) or {}
             if (c6 in evaluated or c6.startswith(("8", "4", "92"))
                     or "ST" in str(row_dict.get("name") or "") or "退" in str(row_dict.get("name") or "")
@@ -3239,7 +3249,7 @@ class StockLiveStrategy:
                 continue
             early.append((float(cross["sector_resonance"]), c6, row_dict, ratio))
         early.sort(key=lambda x: x[0], reverse=True)
-        for _, c6, row_dict, ratio in early[:20]:
+        for _, c6, row_dict, ratio in early:
             snap = self._fusion_enrich_snap(c6, {}, row_dict, all_klines=all_klines)
             cross = cross_map[c6]
             v3, v5 = rolling_vwaps(snap, float(row_dict["vwap"]), float(row_dict["amount"]) / float(row_dict["vwap"]))
@@ -3280,6 +3290,9 @@ class StockLiveStrategy:
                         row_match = row_match.iloc[0]
                     p_pct = float(row_match.get("percent") or 0.0)
                     p_px = float(row_match.get("trade") or row_match.get("price") or 0.0)
+                    p_prev = float(row_match.get("lastp1d") or row_match.get("pre_close") or row_match.get("prev_close") or 0.0)
+                    if p_px > 0 and p_prev > 0:
+                        p_pct = (p_px / p_prev - 1.0) * 100.0
                     p_vw = float(row_match.get("vwap") or 0.0)
                     if not (2.0 <= p_pct <= 9.6 and p_px > p_vw > 0):
                         continue
@@ -3294,6 +3307,7 @@ class StockLiveStrategy:
                     hi_pre1_v = float(b_metrics.get("hi_pre1") or 0.0)
                     if (hi_10d_v > 0 and p_px >= hi_10d_v * 0.998) or (hi_pre1_v > 0 and p_px >= hi_pre1_v * 0.998):
                         p_row_dict = row_match.to_dict() if hasattr(row_match, "to_dict") else dict(row_match)
+                        p_row_dict["percent"] = p_pct
                         p_nm = str(p_row_dict.get("name") or "")
                         # 合并 10 日箱体标量进 row_dict
                         if b_metrics:

@@ -584,7 +584,8 @@ def veto_of(
         return "行情缺失(涨幅及昨收无效)"
     if event.freshness_s > v_cfg["stale_seconds"]:
         return "数据过期{:.0f}s".format(event.freshness_s)
-    if today and event.trade_date and event.trade_date != today:
+    expected_day = today or (time.strftime("%Y-%m-%d", time.localtime(event.ts)) if event.ts > 0 else "")
+    if expected_day and event.trade_date and event.trade_date != expected_day:
         return "跨交易日数据({})".format(event.trade_date)
     if event.base_support > 0 and event.price < event.base_support * 0.998:
         return "跌破底台{:.2f}".format(event.base_support)

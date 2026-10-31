@@ -19,6 +19,19 @@ _NOW = time.mktime((2026, 10, 23, 10, 30, 0, 0, 0, -1))
 
 
 class TestBuildEvent(unittest.TestCase):
+    def test_pct_does_not_mix_quote_sources(self):
+        ev = build_event({"trade": 10.5, "percent": 2},
+                         {"price": 20, "pre_close": 10, "trade_date": "2026-10-22"}, now=_NOW)
+        self.assertEqual(ev.pct, 2)
+        self.assertEqual(ev.extra["pct_source"], "reported")
+        self.assertEqual(ev.trade_date, "2026-10-23")
+
+    def test_pct_uses_matching_price_and_previous_close(self):
+        ev = build_event({"trade": 10.5, "lastp1d": 10.0, "percent": 9.5, "vwap": 10.2}, {}, now=_NOW)
+        self.assertAlmostEqual(ev.pct, 5.0)
+        self.assertEqual(ev.extra["pct_source"], "price_prev_close")
+        self.assertEqual(ev.extra["reported_pct"], 9.5)
+
     def test_daily_vwap_periods_are_not_interchanged(self):
         ev = build_event({"trade": 10, "vwap": 10, "vwap5": 9.8}, {}, now=_NOW)
         self.assertEqual(ev.vwap_5d, 9.8)

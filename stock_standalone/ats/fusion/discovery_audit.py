@@ -66,8 +66,14 @@ def summarize_result(replay, result, next_day, focus=()):
             "points": [r for r in result.meta.get("focus_trace", {}).get(code, []) if r["time"] in ("10:37", "14:30")],
         }
     changes.sort()
+    from ats.fusion.focus import audit_focus
+    focus_metrics = audit_focus(result.records, {c: x["next_close"] for c, x in outcomes.items()})
+    focus_detected = opportunities & {x["code"] for x in focus_metrics["first_selected"]}
+    focus_metrics["detected_opportunities"] = len(focus_detected)
+    focus_metrics["miss_rate"] = round(1 - len(focus_detected) / len(opportunities), 4) if opportunities else None
     return {
         "day": day, "next_day": next_day, "candidates": len(universe),
+        "focus_selection": focus_metrics,
         "market_codes": result.meta.get("market_codes"), "observations_before_1445": len(first),
         "outcome_definition": "次交易日收盘相对当日10:00上涨至少3%；观察误报为次日收盘不高于首次发现价",
         "outcome_samples": len(observed), "false_positive_count": len(false_positives),

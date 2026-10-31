@@ -50,6 +50,7 @@ from ats.fusion.vanguard import (
 logger = logging.getLogger(__name__)
 
 _BUY_ACTIONS = ("买入", "加仓", "BUY", "ADD")
+_TRACKER_SOURCES = frozenset(("live_strategy", "counter_reclaim", "vanguard_funnel"))
 
 # 自适应分档的绝对下限：防止"整段行情都很烂"时也评出 L4。
 # 与回放 percentile_cuts 的 floors 保持一致（68/60/52/45）：
@@ -114,6 +115,10 @@ def _app_root() -> str:
 class FusionShadow:
     """影子观察器。线程安全，失败静默。"""
 
+    @staticmethod
+    def _tracks_source(source: str) -> bool:
+        return source in _TRACKER_SOURCES
+
     def __init__(
         self,
         config: Optional[Dict[str, Any]] = None,
@@ -135,6 +140,10 @@ class FusionShadow:
         self.launch = LaunchTracker()
         self.regime_tracker = MarketRegimeTracker()
         self.tracker = RaceTracker()
+        self._tracker_loaded = False
+        self._tracker_dirty = False
+        self._last_tracker_save = 0.0
+        self._tracker_save_interval = max(1.0, float(self.cfg.get("tracker_save_interval_s", 15.0)))
         self.sector_clock = SectorClock()
         self._prime_leader_by_sector: Dict[str, str] = {}  # sector -> code 板块总龙头唯一性
         self._latent_pool: Dict[str, float] = {}
@@ -163,6 +172,9 @@ class FusionShadow:
 
         self._root = root or _app_root()
         self._log_dir = os.path.join(self._root, self.cfg.get("log_dir", "logs/fusion_shadow"))
+        self._tracker_state_path = os.path.join(
+            self._log_dir, "tracker_state_live_strategy_{}.json".format(os.getpid())
+        )
         self._max_per_day = int(self.cfg.get("max_records_per_day", 200000))
         self._sample_interval = float(self.cfg.get("sample_interval_s", 3.0))
         # 交易时段闸门：默认开启，盘后轮询不再污染当日流水（历史/回放不受影响）
@@ -366,6 +378,15 @@ class FusionShadow:
                     return None
                 self._last_sample[code] = now
 
+            if self._tracks_source(source) and not self._tracker_loaded:
+                with self._lock:
+                    if not self._tracker_loaded:
+                        try:
+                            self._load_tracker_states(day)
+                        except Exception as exc:
+                            logger.warning("[fusion] 跟踪状态恢复失败: %s", exc)
+                        self._tracker_loaded = True
+
             price = 0.0
             try:
                 price = float(row.get("trade") or row.get("price") or 0.0)
@@ -403,8 +424,9 @@ class FusionShadow:
                 trade_date=day,
             )
             pct = event.pct
-            launch_ts = self.launch.note(code, now, pct, event.price, event.vwap, reset_wave=reset_wave) if "pct" not in event.extra.get("missing", ()) else 0.0
+            launch_ts = self.launch.note(code, now, pct, event.price, event.vwap, reset_wave=reset_wave) if "pct" not in event.extra.get("missing", ()) and event.trade_date == day else 0.0
             event.launch_ts = launch_ts
+            price, vwap = event.price, event.vwap
 
             # ---- 异动形态识别与板块排头兵时钟（对齐回放 DayReplay）----
             mkt_ret5 = float(event.extra.get("mkt_ret5") or 0.0)
@@ -688,25 +710,21 @@ class FusionShadow:
                     except Exception:
                         pass
                 try:
-                    _st = self.tracker.update(
-                        code=code,
-                        ts=now,
-                        price=event.price,
-                        pct=event.pct,
-                        vwap10=event.vwap_10d,
-                        vwap=event.vwap,
-                        vol_ratio=event.vol_ratio,
-                        tier=fusion.tier,
-                        rar=fusion.rar,
-                        patterns=patterns,
-                        day=day,
-                        anomaly=bool(patterns) or fusion.tier >= 2,
-                        consensus=float(event.extra.get("consensus") or 0.5),
-                        temp=regime.temp if regime else 50.0,
-                        lead_label=lead_label,
-                        lead_score=lead_score,
-                    )
-                    track_dict = _st.to_dict()
+                    if (self._tracks_source(source)
+                            and "pct" not in event.extra.get("missing", ())
+                            and event.trade_date == day):
+                        _st = self.tracker.update(
+                            code=code, ts=now, price=event.price, pct=event.pct,
+                            vwap10=event.vwap_10d, vwap=event.vwap, vol_ratio=event.vol_ratio,
+                            tier=fusion.tier, rar=fusion.rar, patterns=patterns, day=day,
+                            anomaly=bool(patterns) or fusion.tier >= 2,
+                            consensus=float(event.extra.get("consensus") or 0.5),
+                            temp=regime.temp if regime else 50.0,
+                            lead_label=lead_label, lead_score=lead_score,
+                        )
+                        track_dict = _st.to_dict()
+                        self._tracker_dirty = True
+                        self._save_tracker_locked()
                 except Exception:
                     track_dict = {}
 
@@ -745,7 +763,7 @@ class FusionShadow:
                 "reported_pct": event.extra.get("reported_pct"),
                 "quote_prev_close": event.extra.get("quote_prev_close"),
                 "vwap": round(float(vwap or 0.0), 3),
-                "trade_date": day,
+                "trade_date": event.trade_date,
                 "hit": bool(fusion.tier >= 2),
                 "coverage": round(float(getattr(fusion, "coverage", 0.0) or 0.0), 3),
                 "patterns": patterns,
@@ -754,6 +772,7 @@ class FusionShadow:
                 "reclaim_vwap5": round(_v5, 3),
                 "reclaim_detail": {
                     "vwap3": round(_v3, 3), "vwap5": round(_v5, 3),
+                    "vwap": round(event.vwap, 3),
                     "market_pct": event.extra.get("market_pct"),
                     "sector_pct": event.extra.get("sector_pct"),
                     "sector_resonance": event.sector_resonance,
@@ -877,6 +896,7 @@ class FusionShadow:
                     self._buf.clear()
             except Exception:
                 pass
+            self._save_tracker_locked(force=True)
 
     def close(self) -> None:
         with self._lock:
@@ -887,6 +907,66 @@ class FusionShadow:
             except Exception:
                 pass
             self._fh = None
+            self._save_tracker_locked(force=True)
+
+    def _save_tracker_locked(self, force: bool = False) -> None:
+        if not self._tracker_loaded or not self._tracker_dirty:
+            return
+        now = time.monotonic()
+        if not force and now - self._last_tracker_save < self._tracker_save_interval:
+            return
+        try:
+            self.tracker.save(
+                self._tracker_state_path,
+                metadata={
+                    "day": self._day,
+                    "counter_reclaim_first": dict(self._counter_reclaim_first),
+                },
+            )
+            self._last_tracker_save = now
+            self._tracker_dirty = False
+        except Exception as exc:
+            self._stats["errors"] += 1
+            logger.warning("[fusion] 跟踪状态保存失败: %s", exc)
+
+    def _load_tracker_states(self, asof_day: str) -> int:
+        """合并本生产角色各进程的状态；对同一代码采用最新 last_ts。"""
+        import glob
+
+        pattern = os.path.join(self._log_dir, "tracker_state_live_strategy_*.json")
+        paths = set(glob.glob(pattern))
+        legacy = os.path.join(self._log_dir, "tracker_state_live_strategy.json")
+        if os.path.isfile(legacy):
+            paths.add(legacy)
+        merged = {}
+        for path in sorted(paths):
+            candidate = RaceTracker()
+            metadata: Dict[str, Any] = {}
+            try:
+                candidate.load(path, asof_day=asof_day, metadata=metadata)
+            except Exception as exc:
+                logger.warning("[fusion] 跟踪状态文件读取失败 %s: %s", os.path.basename(path), exc)
+                continue
+            if metadata.get("day") == asof_day:
+                first_map = metadata.get("counter_reclaim_first")
+                if isinstance(first_map, dict):
+                    for code, raw_ts in first_map.items():
+                        try:
+                            first_ts = float(raw_ts)
+                        except (TypeError, ValueError):
+                            continue
+                        if first_ts <= 0:
+                            continue
+                        key = str(code).zfill(6)
+                        current_ts = self._counter_reclaim_first.get(key)
+                        if current_ts is None or first_ts < current_ts:
+                            self._counter_reclaim_first[key] = first_ts
+            for code, state in candidate._states.items():
+                current = merged.get(code)
+                if current is None or state.last_ts > current.last_ts:
+                    merged[code] = state
+        self.tracker._states.update(merged)
+        return len(merged)
 
     # ------------------------------------------------------------------
     # 观测

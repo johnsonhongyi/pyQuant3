@@ -27,6 +27,9 @@
 from __future__ import annotations
 
 import time
+import json
+import os
+import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -430,7 +433,7 @@ class RaceTracker:
     # -- 落盘：不能每天都是新的一天 -----------------------------------------
     _PERSIST_FIELDS = (
         "code", "day", "first_ts", "first_price", "first_pct", "first_kind",
-        "last_ts", "last_price", "last_pct", "hi", "lo", "bars",
+        "last_ts", "last_price", "last_pct", "prev_price", "hi", "hi_ts", "lo", "bars",
         "vol_up_bars", "above_vwap10_bars", "up_sum", "down_sum", "stale_bars",
         "vol_recent", "vol_base", "best_tier", "best_rar",
         "stage", "persist", "enter_ts", "enter_price", "enter_pct",
@@ -438,28 +441,44 @@ class RaceTracker:
         "patterns_seen", "traps_seen", "day_summaries",
     )
 
-    def save(self, path: str, keep_days: int = 3) -> int:
+    def save(self, path: str, keep_days: int = 3, metadata: Optional[Dict[str, Any]] = None) -> int:
         """把状态落到磁盘。只保留有历史价值的字段，不存临时证据链。"""
-        import json
-        import os
-
         payload = {"version": 1, "saved_at": time.time(), "states": []}
+        if metadata is not None:
+            payload["metadata"] = metadata
         for st in self._states.values():
             d = {k: getattr(st, k) for k in self._PERSIST_FIELDS}
-            d["evidence"] = [e for e in st.evidence[-6:]]
+            d["evidence"] = list(st.evidence)
             payload["states"].append(d)
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False)
-        os.replace(tmp, path)
+        from ats.persistence_lock import directory_write_lock, replace_with_retry
+
+        directory = os.path.dirname(os.path.abspath(path))
+        fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".", suffix=".tmp", dir=directory)
+        try:
+            with directory_write_lock(directory):
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False)
+                    f.flush()
+                    os.fsync(f.fileno())
+                replace_with_retry(tmp, path)
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
         return len(payload["states"])
 
-    def load(self, path: str, keep_days: int = 3) -> int:
+    def load(
+        self, path: str, keep_days: int = 3, asof_day: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> int:
         """从磁盘恢复状态。只恢复近 keep_days 天有活动的票，避免无限膨胀。"""
-        import json
-        import os
-
         if not os.path.exists(path):
             return 0
         try:
@@ -467,11 +486,17 @@ class RaceTracker:
                 payload = json.load(f)
         except Exception:
             return 0
-        days = sorted({str(d.get("day") or "") for d in payload.get("states") or []})
+        if metadata is not None and isinstance(payload.get("metadata"), dict):
+            metadata.update(payload["metadata"])
+        days = sorted({
+            str(d.get("day") or "") for d in payload.get("states") or []
+            if not asof_day or str(d.get("day") or "") <= str(asof_day)
+        })
         alive = set(days[-keep_days:]) if days else set()
         n = 0
         for d in payload.get("states") or []:
-            if str(d.get("day") or "") not in alive:
+            state_day = str(d.get("day") or "")
+            if state_day not in alive or (asof_day and state_day > str(asof_day)):
                 continue
             try:
                 st = TrackState(**{k: d.get(k) for k in self._PERSIST_FIELDS if k in d})

@@ -128,6 +128,10 @@ def run_iterations(days=None, top_n=600, step=1, focus=(), output_root=None,
     selected = sorted(set(days or available[-5:]))
     if not selected or any(day not in available for day in selected):
         raise ValueError("所选日期不在分钟缓存中")
+    from ats.fusion.paper_follow import read_paper_account, read_shadow_days, build_paper_follow
+    from ats.fusion.cross_day import build_cross_day
+    paper_snapshot = read_paper_account(root)
+    production_series, production_bad_rows = read_shadow_days(root, selected[-1])
     out = output_root or os.path.join(_app_root(), "logs", "fusion_iterations")
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:10]
     run_dir = os.path.join(out, run_id)
@@ -137,6 +141,9 @@ def run_iterations(days=None, top_n=600, step=1, focus=(), output_root=None,
     manifest = {"schema": 1, "run_id": run_id, "status": "running", "days": selected,
                 "config": cfg, "config_fingerprint": fingerprint, "completed": [],
                 "source_policy": "生产事件按观测时刻可见；回放回补排除；数据不足不补造",
+                "paper_source": {"path": paper_snapshot.get("source_path"), "mtime": paper_snapshot.get("source_mtime"),
+                                 "snapshot_day": paper_snapshot.get("trade_date"), "read_status": paper_snapshot["read_status"],
+                                 "shadow_bad_rows": production_bad_rows},
                 "note": "结果隔离保存，不回写生产梯度、会话快照或交易配置。"}
     manifest_path = os.path.join(run_dir, "manifest.json")
     _atomic_json(manifest_path, manifest)
@@ -184,7 +191,17 @@ def run_iterations(days=None, top_n=600, step=1, focus=(), output_root=None,
             summary["prior_day_advice"] = advice
             summary["approximations"] = result.meta.get("approximations", [])
             summary["records_truncated"] = result.meta.get("records_truncated", 0)
+            paper = build_paper_follow(paper_snapshot, build_cross_day(production_series, day), day)
+            summary["paper_review"] = {
+                "read_status": paper_snapshot["read_status"],
+                "fills_on_day": sum(str(o.get("timestamp") or "")[:10] == day for o in paper_snapshot.get("orders", [])),
+                "holding_cycles": sum(row["remaining"] > 0 for row in paper["rows"]),
+                "closed_cycles": sum(row["status"] == "已平仓" for row in paper["rows"]),
+                "unresolved_cycles": sum(bool(row["issues"]) for row in paper["rows"]),
+                "note": "PAPER原账本按日期截断；历史持仓为成交投影；最新账户就绪状态不作为历史决策证据。",
+            }
             artifact = {"schema": 1, "summary": summary, "result": result.to_dict()}
+            artifact["paper_follow"] = {"rows": paper["rows"], "source": manifest["paper_source"]}
             filename = day + ".json.gz"
             _atomic_json(os.path.join(run_dir, filename), artifact, compressed=True)
             manifest["completed"].append({"day": day, "file": filename, "summary": summary})
@@ -217,8 +234,17 @@ def render_iteration(output):
             "对照 {} 只".format(prod["production_l2_codes"]) if prod["available"] else "缺少可靠文件",
             s["previous_observations"]["observed_again"], s["previous_observations"]["carried"],
             s["prior_day_advice"]["message"]))
+        focus = s.get("focus_selection") or {}
+        lines.append("  逆势重点：同时最多{} / 全天换入{}；次日误报{}；广义机会发现{}".format(
+            focus.get("max_simultaneous", 0), focus.get("daily_distinct", 0),
+            "--" if focus.get("false_positive_rate") is None else "{:.1%}".format(focus["false_positive_rate"]),
+            focus.get("detected_opportunities", 0)))
         if s.get("records_truncated"):
             lines.append("  注意：{} 条评估记录超过上限未归档，统计不完整。".format(s["records_truncated"]))
+        if s.get("paper_review"):
+            paper = s["paper_review"]
+            lines.append("  PAPER：{}；当日成交{} / 持仓周期{} / 已平仓周期{} / 待核{}".format(
+                paper["read_status"], paper["fills_on_day"], paper["holding_cycles"], paper["closed_cycles"], paper["unresolved_cycles"]))
     lines.append("\n次日评价仅在下一交易日收盘数据可用时计算；建议不自动应用。")
     return "\n".join(lines)
 

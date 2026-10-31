@@ -1234,7 +1234,7 @@ class DayReplay:
                 if collect_only:
                     continue
 
-                if (decision.tier < self.cfg.record_tier_min and not historical_context and codes[i] not in carried
+                if (decision.tier < self.cfg.record_tier_min and not historical_context and codes[i] not in carried and codes[i] not in reclaim_first
                         and not ({PATTERN_COUNTER_RECLAIM, PATTERN_COUNTER_HOLD} & set(patterns))):
                     key = decision.veto_reason.split("(")[0] if decision.veto_reason else "RAR不足"
                     veto_counts[key] = veto_counts.get(key, 0) + 1
@@ -1290,6 +1290,7 @@ class DayReplay:
                         "carried_observation": codes[i] in carried,
                         "counter_reclaim_first_ts": reclaim_first.get(codes[i]),
                         "reclaim_detail": {
+                            "vwap": round(vw, 3),
                             "vwap3": round(_rv3, 3), "vwap5": round(_rv5, 3),
                             "market_pct": round(mkt_median_pct, 2) if mkt_median_pct is not None else None,
                             "sector_pct": round(sec_strength[_sm.get(codes[i])], 2) if sec_index and _sm.get(codes[i]) in sec_strength else None,

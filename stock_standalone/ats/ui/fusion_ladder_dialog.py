@@ -71,6 +71,7 @@ from ats.fusion.panel import build_panel, render_panel
 from ats.fusion.replay import DayReplay, ReplayConfig, render_focus, render_report
 from ats.fusion.review import load_records, render_markdown, suggest_cuts, summarize
 from ats.fusion.tracker import deploy_path
+from ats.ui.fusion_focus_item import FusionFocusItem
 from ats.ui.styles import (
     NumericTableWidgetItem,
     load_config_node,
@@ -745,6 +746,9 @@ def _shadow_dir_candidates() -> List[str]:
     为什么需要多根：换构建/换部署目录后 app_root 会变，当日流水还留在旧目录，
     旧实现只读当前根 → 新版本一启动就是白板。读取时多根取最新，写入仍只写当前根。
     """
+    selected_root = str(load_config_node("fusion_trade_center_root", "") or "").strip()
+    if selected_root:
+        return [os.path.join(selected_root, "logs", "fusion_shadow")]
     roots: List[str] = []
     env_root = os.environ.get("INSTOCK_APP_ROOT")
     if env_root:
@@ -782,6 +786,9 @@ def _shadow_dir_candidates() -> List[str]:
 def _day_file_candidates(day: str) -> List[str]:
     """当日影子文件的所有候选路径（Ramdisk 优先）。"""
     d_str = day or today_str()
+    selected_root = str(load_config_node("fusion_trade_center_root", "") or "").strip()
+    if selected_root:
+        return [os.path.join(selected_root, "logs", "fusion_shadow", "{}.jsonl".format(d_str))]
     out: List[str] = []
     ramdisk_dir = _detect_ramdisk_dir()
     if ramdisk_dir:
@@ -1189,7 +1196,7 @@ class ReplayWorker(QThread):
     failed = pyqtSignal(str)
 
     def __init__(self, day: str, focus: List[str], top_n: int = 300, step: int = 1,
-                 cuts_mode: str = "percentile", parent=None, iterate=False):
+                 cuts_mode: str = "percentile", parent=None, iterate=False, history_root=""):
         super().__init__(parent)
         self.day = day
         self.focus = focus
@@ -1197,6 +1204,7 @@ class ReplayWorker(QThread):
         self.step = step
         self.cuts_mode = cuts_mode
         self.iterate = iterate
+        self.history_root = history_root
 
     def _on_progress(self, cur: int, total: int) -> None:
         # 进度回调是唯一贯穿全程的钩子：在这里响应取消，退出时才能及时收敛线程
@@ -1210,6 +1218,7 @@ class ReplayWorker(QThread):
                 top_n=self.top_n, step=self.step,
                 focus_codes=tuple(self.focus), cuts_mode=self.cuts_mode,
                 persist_context=False, market_path=os.devnull, max_records=100000,
+                history_root=self.history_root,
             ))
             if not rp.cache:
                 self.failed.emit("找不到分钟线缓存（cct ramdisk: minute_kline_cache.pkl）")
@@ -1223,7 +1232,7 @@ class ReplayWorker(QThread):
             selected = days[-5:] if self.iterate else [day]
             def on_iteration_progress(index, count, cur, total):
                 self._on_progress(index * 100 + int(cur * 100 / max(1, total)), count * 100)
-            output = run_iterations(days=selected, focus=self.focus, replay=rp, progress=on_iteration_progress)
+            output = run_iterations(days=selected, focus=self.focus, replay=rp, history_root=self.history_root or None, progress=on_iteration_progress)
             if self.iterate:
                 self.done.emit(output)
             else:
@@ -1235,6 +1244,30 @@ class ReplayWorker(QThread):
             logger.info("[FusionLadder] 回放已按请求中断")
         except Exception as exc:  # 线程内异常必须自己吞，否则整个窗口崩
             self.failed.emit("{}: {}".format(type(exc).__name__, exc))
+
+
+class CrossDayWorker(QThread):
+    done = pyqtSignal(object, str)
+    failed = pyqtSignal(str)
+
+    def __init__(self, days, day, parent=None, root=""):
+        super().__init__(parent)
+        self.days, self.day = days, day
+        self.root = root
+
+    def run(self):
+        from ats.fusion.cross_day import build_cross_day
+        from ats.fusion.paper_follow import read_paper_account, read_shadow_days, build_paper_follow
+        try:
+            series, errors = read_shadow_days(self.root, self.day)
+            if self.isInterruptionRequested():
+                return
+            signals = build_cross_day(series, self.day)
+            paper = build_paper_follow(read_paper_account(self.root), signals, self.day)
+            self.done.emit({"signals": signals, "paper": paper, "root": self.root,
+                            "shadow_errors": errors}, self.day)
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            self.failed.emit("跨日/PAPER读取失败：{}".format(exc))
 
 
 class FusionLadderDialog(QWidget, WindowMixin):
@@ -1291,6 +1324,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self.fav_manager = GlobalFavoriteManager()
         self.is_narrow_mode = bool(load_config_node("fusion_ladder_narrow_mode", False))
         self._worker: Optional[ReplayWorker] = None
+        self._follow_worker = None
         self._result = None
         self._replay_days: List[str] = []
 
@@ -1317,6 +1351,9 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self._load_saved_geometry()
         self._init_days()
         self.refresh_live()
+        self._follow_timer = QTimer(self)
+        self._follow_timer.timeout.connect(self._refresh_cross_day_if_visible)
+        self._follow_timer.start(30000)
 
     def _init_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -1367,6 +1404,12 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self.chk_hit_only.toggled.connect(self._on_hit_only_toggled)
         self._style_hit_only(self.chk_hit_only.isChecked())
         bar.addWidget(self.chk_hit_only)
+
+        self.chk_focus_only = QCheckBox("高亮重点≤10")
+        self.chk_focus_only.setChecked(True)
+        self.chk_focus_only.setToolTip("标记最多10只当前逆势重点，其中最多2个新发现席位，同板块最多2只，其余按承接与低追高距离排序；保留其他候选。代码和名称排序均将重点置前。不代表买入。")
+        self.chk_focus_only.toggled.connect(lambda _: self._render_live(force=True))
+        bar.addWidget(self.chk_focus_only)
 
         # 🎯 只看结构机会：操盘手核心过滤，过滤95%无结构脉冲杂音，聚焦真正具备主升浪潜力的黄金机会
         self.chk_structure_only = QCheckBox("🎯 只看结构机会")
@@ -1436,6 +1479,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
 
         # Tab 0: 实时梯度 [级别, 代码, 名称, 现价, 涨幅%, RAR, 位, 接, 意, 环, 仓位%, 进场, 止损, 先手min, 来源, 更新时间, 命中, 覆盖%] + 自定义列
         self.tbl_live = self._create_interactive_table(self._LIVE_BASE_HEADERS + extra_headers, "tbl_live")
+        self.tbl_live.sortItems(1, Qt.SortOrder.AscendingOrder)
         self.tabs.addTab(self.tbl_live, "实时梯度（影子流）")
 
         # Tab 1: 按日回放 [时间, 代码, 名称, 现价, 涨幅%, 终收%, 级别, RAR, 仓位%, MFE%, MAE%, 收盘%, 温度℃] + 自定义列
@@ -1476,6 +1520,34 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self.txt_report.setOpenExternalLinks(False)
         v3.addWidget(self.txt_report, 1)
         self.tabs.addTab(page3, "验收与复盘")
+
+        self.tbl_cross_day = self._create_interactive_table(
+            ["代码", "名称", "首次信号日", "首次时间", "参考价", "最新记录日", "最新时间", "最新记录价", "相对参考%", "记录天数", "数据状态", "采样MFE%", "采样MAE%", "信号状态", "逐日轨迹", "PAPER交易状态"],
+            "tbl_cross_day")
+        self.tabs.addTab(self.tbl_cross_day, "跨日信号跟踪")
+        self.tbl_cross_day.setToolTip("持续展示历次信号后的逐日采样轨迹；缺失日期不填零，不把影子入局或PAPER当作实盘成交。")
+
+        from sys_utils import get_app_root
+        paper_page = QWidget()
+        paper_layout = QVBoxLayout(paper_page)
+        source_bar = QHBoxLayout()
+        source_bar.addWidget(QLabel("交易中心目录"))
+        self.ed_trade_root = QLineEdit(str(load_config_node("fusion_trade_center_root", "") or get_app_root()))
+        source_bar.addWidget(self.ed_trade_root, 1)
+        self.btn_paper_refresh = QPushButton("刷新 PAPER 全程")
+        self.btn_paper_refresh.clicked.connect(self._refresh_paper_source)
+        self.ed_trade_root.returnPressed.connect(self._refresh_paper_source)
+        source_bar.addWidget(self.btn_paper_refresh)
+        paper_layout.addLayout(source_bar)
+        self.lbl_paper_status = QLabel("PAPER 成交按账户原账本读取；不下单、不回写账户。")
+        self.lbl_paper_status.setWordWrap(True)
+        paper_layout.addWidget(self.lbl_paper_status)
+        self.tbl_paper_follow = self._create_interactive_table(
+            ["代码", "名称", "观察日", "观察参考价", "买入时间", "买入均价", "买入股数", "卖出股数",
+             "持仓股数", "可卖股数", "末成交/快照价", "浮盈%", "已实现盈亏", "已实现%", "平仓时间",
+             "生命周期", "关联依据", "逐笔链路", "价格/数量口径"], "tbl_paper_follow")
+        paper_layout.addWidget(self.tbl_paper_follow)
+        self.tabs.addTab(paper_page, "交易中心 PAPER 全程")
 
         # ---- 选项卡右上角搜索栏 (代码/名称模糊查询 + 右键黏贴) ----
         search_box = QWidget(self.tabs)
@@ -1639,6 +1711,10 @@ class FusionLadderDialog(QWidget, WindowMixin):
             return self.tbl_trades
         elif idx == 3:
             return self.tbl_track
+        elif idx == 6:
+            return self.tbl_cross_day
+        elif idx == 7:
+            return self.tbl_paper_follow
         return None
 
     def _apply_search_filter(self, target_tbl: Optional[QTableWidget] = None) -> None:
@@ -2104,6 +2180,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
         days_set = {today_str()}
         try:
             cand_dirs = list(_shadow_dir_candidates())
+            cand_dirs.insert(0, os.path.join(self.ed_trade_root.text().strip(), "logs", "fusion_shadow"))
             ram_d = _detect_ramdisk_dir()
             if ram_d:
                 cand_dirs.append(ram_d)
@@ -2137,6 +2214,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
         day = text.strip()
         if day:
             self.refresh_live()
+            if self.tabs.currentIndex() in (6, 7):
+                self._start_cross_day(day)
 
     def _on_hit_only_toggled(self, checked: bool) -> None:
         try:
@@ -2882,6 +2961,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
             return
         day = self.cmb_day.currentText().strip() or today_str()
         sig = self._live_source_signature(day)
+        if self.chk_focus_only.isChecked() and day == today_str() and self._is_trading_window():
+            sig = (sig, int(time.time() // 30))
         tab_sig_map = getattr(self, "_tab_signatures", None)
         if tab_sig_map is None:
             tab_sig_map = self._tab_signatures = {}
@@ -2891,7 +2972,6 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 self._maybe_ensure_data()
             return
         tab_sig_map[idx] = sig
-        self._live_sig = sig
         if idx == 3:
             self._render_track_from_shadow(day)
             return
@@ -3013,16 +3093,23 @@ class FusionLadderDialog(QWidget, WindowMixin):
     def _render_live(self, force: bool = True) -> None:
         day = self.cmb_day.currentText().strip() or today_str()
         sig = self._live_source_signature(day)
+        if self.chk_focus_only.isChecked() and day == today_str() and self._is_trading_window():
+            sig = (sig, int(time.time() // 30))
         if not force and sig == getattr(self, "_live_sig", None):
             return
-        rows = load_live_rows(day)
+        rows = load_live_rows(day, allow_fallback=False)
         tbl = self.tbl_live
         total_rows = len(rows)
+        if self.chk_focus_only.isChecked():
+            from ats.fusion.focus import select_focus
+            asof_ts = time.time() if day == today_str() and self._is_trading_window() else max([float(r.get("ts") or 0) for r in rows] or [0])
+            focus_ranks = {r["code"]: r["focus_rank"] for r in select_focus(rows, asof_ts)}
+            rows = [dict(r, focus_rank=focus_ranks.get(r.get("code"), 0)) for r in rows]
         hit_only = bool(getattr(self, "chk_hit_only", None) is not None and self.chk_hit_only.isChecked())
         structure_only = bool(getattr(self, "chk_structure_only", None) is not None and self.chk_structure_only.isChecked())
 
         if structure_only and rows:
-            rows = [r for r in rows if _row_is_structure_opportunity(r)]
+            rows = [r for r in rows if r.get("focus_rank") or _row_is_structure_opportunity(r)]
             if not rows:
                 tbl.setSortingEnabled(False)
                 tbl.setRowCount(0)
@@ -3041,7 +3128,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 return
 
         if hit_only and rows:
-            rows = [r for r in rows if _row_is_hit(r) or {"逆势收复启动", "逆势收复持稳"} & set(r.get("patterns") or [])]
+            rows = [r for r in rows if r.get("focus_rank") or _row_is_hit(r) or {"逆势收复启动", "逆势收复持稳"} & set(r.get("patterns") or [])]
             if not rows:
                 tbl.setSortingEnabled(False)
                 tbl.setRowCount(0)
@@ -3073,6 +3160,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
         tbl.setSortingEnabled(False)
         tbl.setRowCount(0)
         self._live_sig = sig
+        tbl.clearSpans()
         if not rows:
             # 永不白板：放一行占位说明，并按交易时段自动拉起初始化
             tbl.insertRow(0)
@@ -3160,10 +3248,26 @@ class FusionLadderDialog(QWidget, WindowMixin):
             # 各列严格接入 NumericTableWidgetItem 保证高精度数值排序
             # 表头: [级别, 代码, 名称, 现价, 涨幅%, RAR, 位, 接, 意, 环, 仓位%, 进场, 止损, 先手min, 来源, 更新时间, 命中, 覆盖%]
             tbl.setItem(i, 0, self._num_item(f"L{tier}", tier, _TIER_COLORS.get(tier), bold=True))
-            tbl.setItem(i, 1, self._num_item(code, code))
-            tbl.setItem(i, 2, self._num_item(name, name))
+            for col, text in ((1, code), (2, name)):
+                item = FusionFocusItem(text, r.get("focus_rank"))
+                if r.get("focus_rank"):
+                    item.setForeground(QColor("#ffd166"))
+                    item.setBackground(QColor("#3c321c"))
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                    item.setToolTip("当前逆势重点 #{}；承接站稳优先、低追高距离优先。\n观察不等于可执行；否决：{}".format(r["focus_rank"], fusion.get("veto_reason") or "无"))
+                tbl.setItem(i, col, item)
             tbl.setItem(i, 3, self._num_item(price_txt, price))
-            tbl.setItem(i, 4, self._num_item(pct_txt, pct if pct is not None else 0.0, color=pct_color, bold=True))
+            pct_item = self._num_item(pct_txt, pct if pct is not None else 0.0, color=pct_color, bold=True)
+            pct_source = r.get("pct_source")
+            if pct_source == "price_prev_close":
+                pct_item.setToolTip("按该记录的现价和昨收计算；原始上报涨幅：{}".format(r.get("reported_pct")))
+            elif pct_source == "reported":
+                pct_item.setToolTip("缺少同源昨收，显示上报值，尚未校验。")
+            else:
+                pct_item.setToolTip("旧记录或缺少可信涨幅，不能确认口径。")
+            tbl.setItem(i, 4, pct_item)
             tbl.setItem(i, 5, self._num_item(fusion.get("rar", 0), float(fusion.get("rar", 0) or 0)))
             tbl.setItem(i, 6, self._num_item(axes.get("position", 0), float(axes.get("position", 0) or 0)))
             tbl.setItem(i, 7, self._num_item(axes.get("support", 0), float(axes.get("support", 0) or 0)))
@@ -3176,7 +3280,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
             sources = ",".join(fusion.get("sources") or [])
             pats = r.get("patterns") or []
             observing = "逆势收复启动" in pats or "逆势收复持稳" in pats
-            source_item = self._num_item(("逆势收复持稳" if "逆势收复持稳" in pats else "逆势收复观察") if observing else sources, sources)
+            source_item = self._num_item(("重点{} · ".format(r["focus_rank"]) if r.get("focus_rank") else "") + (("逆势收复持稳" if "逆势收复持稳" in pats else "逆势收复观察") if observing else sources), sources)
             first_ts = r.get("counter_reclaim_first_ts")
             if observing and first_ts:
                 source_item.setToolTip("首次发现：{}；仅为观察信号，梯度及否决原因以本行为准".format(
@@ -3228,7 +3332,9 @@ class FusionLadderDialog(QWidget, WindowMixin):
         day_note = ""
         if source_day and source_day != day:
             day_note = "｜⚠ 今日暂无记录，展示 {} 数据".format(source_day)
-        if structure_only:
+        if self.chk_focus_only.isChecked():
+            count_txt = "重点 {} / 上限10｜展示{} / 原始{}条".format(sum(bool(r.get("focus_rank")) for r in rows), len(rows), total_rows)
+        elif structure_only:
             count_txt = "🎯 结构机会 {} / 共 {} 条 (已过滤脉冲杂音)".format(len(rows), total_rows)
         elif hit_only:
             count_txt = "命中 {} / 共 {} 条".format(len(rows), total_rows)
@@ -3254,7 +3360,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
         彻底排除 09:15~09:29 集合竞价撮合前的虚拟未成交报价，杜绝假价格污染。
         入局后 MFE/MAE/收盘% 接入通达信权威行情（日内最高、最低与最新收盘价），实现点对点精准对齐。
         """
-        series = load_live_series(day)
+        series = load_live_series(day, allow_fallback=False)
         # 1. 批量获取权威行情快照，实现通达信全口径对齐
         # 历史日期不能使用当前行情，否则会把其他交易日的价格写成当日收盘。
         quotes_map = {}
@@ -3514,6 +3620,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 self._render_track_from_shadow(day)
             except Exception as exc:
                 logger.debug("[FusionLadder] 赛马跟踪渲染失败: %s", exc)
+        elif index in (6, 7):
+            self._start_cross_day(day)
         elif index == 2 and self.tbl_trades.rowCount() == 0:
             self._fill_table_hint(
                 self.tbl_trades,
@@ -3544,7 +3652,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self._worker = ReplayWorker(
             day=day, focus=focus, top_n=self.spin_top.value(),
             step=int(self.cmb_step.currentData() or 1),
-            parent=self, iterate=iterate,
+            parent=self, iterate=iterate, history_root=os.path.abspath(self.ed_trade_root.text().strip()),
         )
         self._worker.progress.connect(self._on_progress)
         self._worker.done.connect(self._on_iteration_done if iterate else self._on_replay_done)
@@ -3866,11 +3974,109 @@ class FusionLadderDialog(QWidget, WindowMixin):
     def run_replay(self) -> None:
         self._start_worker([])
 
+    def _start_cross_day(self, day: str) -> None:
+        if self._follow_worker is not None and self._follow_worker.isRunning():
+            self._follow_pending_day = day
+            return
+        days = [d for d in self._replay_days if d <= day]
+        self._follow_pending_day = None
+        root = os.path.abspath(self.ed_trade_root.text().strip())
+        self._follow_worker = CrossDayWorker(days, day, self, root=root)
+        self._follow_worker.done.connect(self._render_cross_day)
+        self._follow_worker.failed.connect(self.lbl_paper_status.setText)
+        self._follow_worker.start()
+
+    def _refresh_cross_day_if_visible(self) -> None:
+        if self.isVisible() and self.tabs.currentIndex() in (6, 7):
+            self._start_cross_day(self.cmb_day.currentText().strip() or today_str())
+
+    def _refresh_paper_source(self) -> None:
+        root = os.path.abspath(self.ed_trade_root.text().strip())
+        save_config_node("fusion_trade_center_root", root)
+        day = self.cmb_day.currentText().strip() or today_str()
+        self._init_days()
+        if self.cmb_day.findText(day) >= 0:
+            self.cmb_day.setCurrentText(day)
+        self._start_cross_day(day)
+
+    def _render_cross_day(self, output, day: str) -> None:
+        if (os.path.normcase(output["root"]) != os.path.normcase(os.path.abspath(self.ed_trade_root.text().strip()))
+                or day != self.cmb_day.currentText().strip()):
+            QTimer.singleShot(0, lambda: self._start_cross_day(self.cmb_day.currentText().strip() or today_str()))
+            return
+        rows = output["signals"]
+        self._render_paper_follow(output["paper"], output["shadow_errors"])
+        paper_by_code = {}
+        for cycle in output["paper"]["rows"]:
+            if cycle["remaining"] > 0 or cycle["code"] not in paper_by_code:
+                paper_by_code[cycle["code"]] = cycle
+        table = self.tbl_cross_day
+        table.setSortingEnabled(False)
+        table.setRowCount(0)
+        for row in rows:
+            i = table.rowCount()
+            table.insertRow(i)
+            values = [row["code"], row["name"], row["first_day"], _fmt_hms(row["first_ts"]),
+                      "{:.2f}".format(row["reference"]), row["last_day"], _fmt_hms(row["last_ts"]),
+                      "{:.2f}".format(row["last_price"]), "{:+.2f}%".format(row["return_pct"]),
+                      len(row["days"]), row["status"], "{:+.2f}%".format(row["mfe_pct"]),
+                      "{:+.2f}%".format(row["mae_pct"]), row["signal_status"],
+                      " → ".join("{} {:+.2f}%".format(d["day"][5:], d["return_pct"]) for d in row["timeline"]),
+                      (paper_by_code[row["code"]]["status"] if row["code"] in paper_by_code else
+                       "无PAPER成交" if output["paper"]["account"].get("read_status") == "READY" else "PAPER源不可用")]
+            for col, value in enumerate(values):
+                item = self._num_item(str(value), value)
+                item.setToolTip("影子参考价；MFE/MAE仅含信号后采样价格，非完整行情极值；最新记录不等于收盘价。\n" + "\n".join("{}：{}条，末价{:.2f}".format(d["day"], d["records"], d["last_price"]) for d in row["timeline"]))
+                table.setItem(i, col, item)
+        table.setSortingEnabled(True)
+        if not rows:
+            self._fill_table_hint(table, "所选交易中心目录没有可用生产观察记录；PAPER成交另见[交易中心 PAPER 全程]。")
+        self._apply_search_filter(table)
+        pending = getattr(self, "_follow_pending_day", None)
+        if pending and pending != day:
+            QTimer.singleShot(0, lambda: self._start_cross_day(pending))
+
+    def _render_paper_follow(self, output, shadow_errors=0) -> None:
+        account, rows = output["account"], output["rows"]
+        reconciliation = account.get("reconciliation") or {}
+        self.lbl_paper_status.setText(
+            "PAPER｜{}｜快照日 {}｜订单 {} / 持仓 {}｜{}｜影子坏行 {}｜{}".format(
+                account.get("source_path", ""), account.get("trade_date") or "未知",
+                len(account.get("orders") or []), len(account.get("positions") or {}),
+                "账户可执行" if reconciliation.get("paper_execution_ready") is True else "账户未就绪/待对账",
+                shadow_errors, account.get("error") or reconciliation.get("block_reason") or ""))
+        table = self.tbl_paper_follow
+        table.setSortingEnabled(False)
+        table.clearSpans()
+        table.setRowCount(len(rows))
+        for i, row in enumerate(rows):
+            chain = " → ".join("{} {} {}@{} #{}".format(e.get("timestamp"), e.get("action"), e.get("volume"), e.get("price"), e.get("order_id")) for e in row["events"])
+            values = [row["code"], row["name"] or row["code"], row["signal_day"], row["signal_price"],
+                      row["entry_time"], row["buy_price"], row["bought"], row["sold"], row["remaining"],
+                      row.get("sellable"), row["last_price"], row["floating_pct"], row["realized"], row["realized_pct"],
+                      row["exit_time"], row["status"], row["association"], chain, row["data_status"]]
+            tooltip = chain + "\n" + "；".join(row["issues"]) + "\n指令ID：" + row["directive"]
+            for col, value in enumerate(values):
+                text = "--" if value is None else "{:.2f}".format(value) if isinstance(value, float) else str(value)
+                item = self._num_item(text, value)
+                item.setToolTip(tooltip)
+                if row["issues"]:
+                    item.setForeground(QColor("#ffd166"))
+                table.setItem(i, col, item)
+        table.setSortingEnabled(True)
+        if not rows:
+            self._fill_table_hint(table, "所选日之前没有可用PAPER成交；" + str(account.get("error") or "请核对交易中心目录与快照日期。"))
+        self._apply_search_filter(table)
+
     def run_iteration(self) -> None:
         self._start_worker([], iterate=True)
 
     def _on_iteration_done(self, output) -> None:
         from ats.fusion.iteration import render_iteration
+        result = output.get("last_result")
+        if result is not None:
+            result.meta["iteration_dir"] = output["run_dir"]
+            self._on_replay_done(result)
         self.btn_run.setEnabled(True)
         self.btn_focus.setEnabled(True)
         self.btn_iteration.setEnabled(True)
@@ -3909,6 +4115,9 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 self._worker.wait(2000)
             except Exception:
                 pass
+        if self._follow_worker is not None and self._follow_worker.isRunning():
+            self._follow_worker.requestInterruption()
+            self._follow_worker.wait(2000)
         self._save_window_states(is_open=False)
         super().closeEvent(event)
 

@@ -170,7 +170,8 @@ def build_event(
     now = float(now if now is not None else time.time())
     missing: List[str] = []
 
-    price = _first_num([(row, "trade"), (row, "price"), (row, "close"), (snap, "trade"), (snap, "price")])
+    quote = row if _first_num([(row, "trade"), (row, "price"), (row, "close")]) > 0 else snap
+    price = _first_num([(quote, "trade"), (quote, "price"), (quote, "close")])
     vwap = _first_num([(row, "vwap"), (snap, "vwap")])
     if vwap <= 0:
         amount = _first_num([(row, "amount"), (snap, "amount")])
@@ -180,9 +181,8 @@ def build_event(
     if vwap <= 0:
         missing.append("vwap")
 
-    raw_pct = _num(_first_raw([(row, "percent"), (row, "change_pct"), (row, "pct"), (snap, "percent")]), float("nan"))
-    prev_close = _first_num([(row, "lastp1d"), (row, "pre_close"), (row, "prev_close"),
-                             (snap, "pre_close"), (snap, "prev_close"), (snap, "last_close")])
+    raw_pct = _num(_first_raw([(quote, "percent"), (quote, "change_pct"), (quote, "pct")]), float("nan"))
+    prev_close = _first_num([(quote, "lastp1d"), (quote, "pre_close"), (quote, "prev_close"), (quote, "last_close")])
     if price > 0 and prev_close > 0:
         pct = (price / prev_close - 1.0) * 100.0
         pct_source = "price_prev_close"
@@ -336,6 +336,11 @@ def build_event(
         if val is not None:
             extra[k] = val
 
+    quote_day = _first_raw([(quote, "trade_date")])
+    quote_day = str(quote_day)[:10] if quote_day is not None else ""
+    if len(quote_day) == 8 and quote_day.isdigit():
+        quote_day = "{}-{}-{}".format(quote_day[:4], quote_day[4:6], quote_day[6:])
+
     return SignalEvent(
         code=str(code or _first_raw([(row, "code"), (snap, "code")]) or ""),
         ts=now,
@@ -376,7 +381,7 @@ def build_event(
         dist_ma20_pct=dist_ma20_pct,
         launch_ts=float(launch_ts or 0.0),
         freshness_s=freshness,
-        trade_date=trade_date or today_str(now),
+        trade_date=quote_day or trade_date or today_str(now),
         rs5=rs5,
         rs_day=rs_day,
         extra=extra,
