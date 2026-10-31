@@ -12492,6 +12492,8 @@ def check_monitor_break_high4(monitor_windows: dict, df: pd.DataFrame, logger, f
     if df is None or df.empty:
         return
 
+    created_count = 0
+
     # 1. 加载重排自定义策略
     policy = load_rearrange_policy()
     filter_expr = policy.get("filter_expr", "close > high4")
@@ -12709,16 +12711,16 @@ def check_monitor_break_high4(monitor_windows: dict, df: pd.DataFrame, logger, f
                     except Exception:
                         pass
 
-    # [🚀 自动排列至特定区域] 本轮若有新自动弹出的窗口，利用事件循环空闲帧 (after_idle) 平滑重排至右下角分流区，杜绝掉帧假死
-    if created_count > 0:
-        try:
-            logger.info(f"🚀 [AUTO_POPUP] 本轮新增自动弹出 {created_count} 个报警监控窗口，分帧自动触发重排并定位至特定报警区域(右下角)")
-            if 'root' in globals() and root and hasattr(root, "after_idle"):
-                root.after_idle(rearrange_monitors_per_screen)
-            else:
-                rearrange_monitors_per_screen()
-        except Exception as e_arr:
-            logger.error(f"自动弹出后重排失败: {e_arr}")
+        # [🚀 自动排列至特定区域] 本轮若有新自动弹出的窗口，利用事件循环空闲帧 (after_idle) 平滑重排至右下角分流区，杜绝掉帧假死
+        if created_count > 0:
+            try:
+                logger.info(f"🚀 [AUTO_POPUP] 本轮新增自动弹出 {created_count} 个报警监控窗口，分帧自动触发重排并定位至特定报警区域(右下角)")
+                if 'root' in globals() and root and hasattr(root, "after_idle"):
+                    root.after_idle(rearrange_monitors_per_screen)
+                else:
+                    rearrange_monitors_per_screen()
+            except Exception as e_arr:
+                logger.error(f"自动弹出后重排失败: {e_arr}")
 
 
 def refresh_all_stock_data():

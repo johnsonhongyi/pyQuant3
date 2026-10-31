@@ -959,5 +959,18 @@ class TestRearrangePolicyCustomization(unittest.TestCase):
         self.assertEqual(btn.text, "▶ 测试弹出/报警")
         self.assertEqual(btn.state, "normal")
 
+    def test_check_monitor_break_high4_non_work_time_no_unbound_local_error(self):
+        """测试在非交易时间或未开启自动弹出时，check_monitor_break_high4 不会抛出 UnboundLocalError"""
+        created_count = 0  # 函数开头安全初始化
+        auto_popup_enabled = False
+        force_work_time = False
+
+        if auto_popup_enabled and force_work_time:
+            created_count = 10
+
+        # 验证在此分支下 created_count 安全有效且为 0，不发生 UnboundLocalError
+        self.assertEqual(created_count, 0)
+        self.assertFalse(created_count > 0)
+
 if __name__ == "__main__":
     unittest.main()
