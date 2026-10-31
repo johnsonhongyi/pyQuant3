@@ -84,11 +84,12 @@ def _forward_returns(bars, trade_date):
     return result
 
 
-def settle(db, api, now, calendar=None, max_symbols=40):
+def settle(db, api, now, calendar=None, max_symbols=80):
     """Fill forward returns for decisions old enough to have later bars."""
     rows = db.execute("""SELECT trade_date,symbol FROM decisions
                          WHERE settled_at IS NULL AND trade_date < ?
-                         GROUP BY trade_date,symbol ORDER BY trade_date LIMIT ?""",
+                         GROUP BY trade_date,symbol
+                         ORDER BY (outcome_3d IS NULL) DESC, trade_date LIMIT ?""",
                       (now.date().isoformat(), max_symbols)).fetchall()
     if not rows:
         return 0

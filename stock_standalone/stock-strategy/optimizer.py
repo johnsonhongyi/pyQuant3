@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 SPEC = {
-    "execution.signal.entry_threshold": {"min": 58, "max": 76, "step": 2, "kind": "score"},
+    "execution.regime_policy.cautious.min_score": {"min": 62, "max": 78, "step": 2, "kind": "score"},
     "execution.signal.vwap_band.high": {"min": 1.025, "max": 1.040, "step": 0.005, "kind": "loosen"},
     "buy.max_day_chg": {"min": 7.0, "max": 9.0, "step": 0.5, "kind": "loosen"},
     "sell.stop_loss": {"min": -0.08, "max": -0.04, "step": 0.005, "kind": "tighten"},
@@ -88,7 +88,7 @@ def apply_overrides(cfg, params):
         value = float(value)
         if not rule["min"] <= value <= rule["max"]:
             continue
-        if key == "execution.signal.entry_threshold":
+        if key in ("execution.signal.entry_threshold", "execution.regime_policy.cautious.min_score"):
             value = int(round(value))
         _set(merged, key, value)
     if params.get("version"):
@@ -100,7 +100,7 @@ def apply_overrides(cfg, params):
 def _clamp(key, value):
     rule = SPEC[key]
     value = max(rule["min"], min(rule["max"], value))
-    if key == "execution.signal.entry_threshold":
+    if key in ("execution.signal.entry_threshold", "execution.regime_policy.cautious.min_score"):
         return int(round(value))
     return round(value, 4)
 
@@ -168,10 +168,10 @@ def _pick(summary, trades, cfg, params):
     low = buckets.get("60-69")
     if top and top.get("n", 0) >= min_samples and (_num(top.get("win")) or 0) >= 0.60 and (_num(top.get("avg")) or 0) > 0:
         if low and low.get("n", 0) >= min_samples and (_num(low.get("avg")) or 0) < 0:
-            old = _num(current["execution.signal.entry_threshold"], 62)
-            new = _clamp("execution.signal.entry_threshold", old + SPEC["execution.signal.entry_threshold"]["step"])
+            old = _num(current["execution.regime_policy.cautious.min_score"], 70)
+            new = _clamp("execution.regime_policy.cautious.min_score", old + SPEC["execution.regime_policy.cautious.min_score"]["step"])
             if new > old:
-                return ("execution.signal.entry_threshold", new, "高分桶显著优于低分桶，提高入场阈值",
+                return ("execution.regime_policy.cautious.min_score", new, "高分桶显著优于低分桶，提高谨慎状态入场阈值",
                         evidence("score_bucket", top["n"], top.get("win"), top.get("avg")))
     if trade_n >= min_samples and (_num((trades or {}).get("profit_factor")) or 0) >= 1.2:
         exits = (trades or {}).get("exits") or {}

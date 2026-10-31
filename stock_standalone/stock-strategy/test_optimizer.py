@@ -47,6 +47,21 @@ class OptimizerTests(unittest.TestCase):
             finally:
                 db.close()
 
+    def test_regime_threshold_tightens_when_high_bucket_wins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            account = str(Path(tmp) / "account.db")
+            db = sqlite3.connect(str(Path(tmp) / "loop.db"))
+            try:
+                state = {"initial_cash": 500000}
+                result = optimizer.run(db, state, CFG, NOW, account, summary(
+                    buckets=[{"bucket": "80+", "n": 10, "win": .70, "avg": .03},
+                             {"bucket": "60-69", "n": 10, "win": .30, "avg": -.02}]))
+                self.assertEqual(result["status"], "applied")
+                self.assertEqual(result["proposal"]["key"], "execution.regime_policy.cautious.min_score")
+                self.assertEqual(result["proposal"]["new"], 72)
+            finally:
+                db.close()
+
     def test_stop_only_tightens(self):
         with tempfile.TemporaryDirectory() as tmp:
             account = str(Path(tmp) / "account.db")

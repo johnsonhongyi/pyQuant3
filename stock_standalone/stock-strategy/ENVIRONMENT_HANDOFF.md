@@ -1,3 +1,27 @@
+## 2026-10-31 23:45 自动跟单/AI投研闭环 v1.11 上线（分层降仓 + 多层信号 + 归因优化）
+
+- 目标：修复 `#auto-follow` 长期零成交、AI 投研与执行脱节、强势股分析不入池、无参数优化四个断点。
+- 策略版本：`source/easy-stock-service/strategy.yaml` 升至 `v1.11`，新增 `execution.regime_policy / signal / ai_gate / strong_scan / optimizer` 与 `sell.partial_take_profit / trailing_*`；`config.json` 已同步。
+- Worker 发布：`20261031234708`，路径 `/mnt/4TB/dockerf/stockstrategy/auto-follow/releases/20261031234708`，`paper_release=20261031234708`；`stockstrategy-auto-follow.service` active/running，`NRestarts=0`，心跳正常。
+- Web 静态资源发布：`20261031235000`，原子替换 `app/web-dist/20261031211302/index.html`，内容哈希资源向后兼容；API 镜像未重建（`/api/v1/auto-follow` 原样透传 state）。
+- 关键实现：
+  1. 市场状态四档：进攻/均衡/谨慎/防守；`分歧` 由“整轮停摆”改为 0.5 暴露、阈值 70、最多 2 只；`强分歧/高位退潮/高位样本不足` 仅管理退出。
+  2. 多层评分：趋势 25 + 日内 VWAP 结构 25 + 相对强度 20 + 题材 15 + 流动性 15；硬否决保留（ST、封板、数据不新鲜、跌幅≤-3%、VWAP 偏离、整手超预算）。
+  3. AI 由硬门改加权叠加：follow +12、avoid 否决、缺失/过期中性降级；TTL 900s；盘后 15:35 必触发一次复盘（零成交也复盘）。
+  4. 强势股扫描：热榜/梯队/题材龙头/手动合并，批量日线评分，最多 24 只、8 只并入执行候选；`#stock-ai` 顶部同步展示并支持“加入跟单”。
+  5. 决策账本 `data/auto-follow/loop.db`：decisions/trades/runs，结算 1/3/5 日远期收益；盘后生成归因。
+  6. 有界自动调参：只允许 6 个键，单步上限/冷却/每日一次/只收紧止损；写 `params.json` 叠加层，连续 5 笔亏损超 2% 自动回滚并冷却 5 日。
+- 验证：
+  - 服务器单测 63 项全绿（新增 `test_signal_engine / test_attribution / test_optimizer / test_loop_cycle`）。
+  - 真实周五（2026-10-30）数据全链路回放：`分歧/risk 50.9` 下 2 笔模拟买入（002129 评分 60、002724 评分 81），现金 500000→401054，决策账本 `filled=2`；证明市场门禁不再一刀切。
+  - 实机 AI 任务 `f1bb24da8cca40d28179626fefce0b46` 完成（7.1KB），结果已进入 `ai_latest`，上下文含 `loop/strong_scan/optimizer`，AI 正确指出“候选到信号阶段为 0”的瓶颈。
+  - 实盘 state：`engine_revision=paper-follow-loop-v5`、`regime=cautious(0.5/70/2)`、`strong_scan.rows=24`、`optimizer=collecting`、`loop.stages` 11 阶段齐全。
+- 回滚：
+  - Worker：`ln -sfn /mnt/4TB/dockerf/stockstrategy/auto-follow/releases/20261031234406 /mnt/4TB/dockerf/stockstrategy/auto-follow/current && systemctl restart stockstrategy-auto-follow.service`（上一可用 release）。
+  - Web：`bash <ROLLBACK_DIR>/web-loop-20261031235000/rollback.sh`。
+  - 参数：删除 `/mnt/4TB/dockerf/stockstrategy/data/auto-follow/params.json` 即回到 v1.11 基线。
+- 下一交易日（2026-11-02）重点：09:45 后确认 `loop.funnel.scored>0`；若仍为 0，查 `blockers` 与 `strong_scan.errors`；15:05 后确认 `attribution.samples>0`；15:35 后确认 `ai_review` 当日更新。
+
 ## 2026-10-23 00:55 用户管理加固与普通用户Safari刷屏死循环根除部署上线
 
 - 按 `build-and-deploy.ps1 -AllowLayeredImageBuild` 发布 Web/API，发布号 `20261023005301`；部署状态 `Deployment healthy: release=20261023005301, url=http://192.168.50.60:20073`。回滚命令：`bash <DEPLOY_DIR>/docker/rollback-prebuilt.sh 20261023005301`。
