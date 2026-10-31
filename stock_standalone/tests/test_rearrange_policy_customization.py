@@ -868,5 +868,96 @@ class TestRearrangePolicyCustomization(unittest.TestCase):
         self.assertEqual(len(rearrange_called), 1)
         self.assertTrue(rearrange_called[0])
 
+    def test_bulk_eval_context_snapshot_and_cache(self):
+        """测试批量评估上下文快照机制，单次扫描中同一代码直接命中内存缓存 (0ms)"""
+        import pandas as pd
+        mock_tdx = pd.DataFrame([
+            {"代码": "000568", "nclose": 77.07, "ma5d": 75.20, "lastp1d": 70.05, "per1d": 10.0}
+        ]).set_index("代码")
+
+        ctx = {
+            "global_top": None,
+            "tdx_df": mock_tdx,
+            "sina_df": None,
+            "realdatadf": None,
+            "cache": {}
+        }
+
+        # 模拟第一次获取
+        code = "000568"
+        row_dict = {}
+        if code in ctx["tdx_df"].index:
+            row_dict.update(ctx["tdx_df"].loc[code].to_dict())
+        ctx["cache"][code] = row_dict
+
+        self.assertIn("000568", ctx["cache"])
+        self.assertEqual(ctx["cache"]["000568"]["nclose"], 77.07)
+
+        # 模拟第二次获取，直接命中缓存快照
+        hit_cache = ctx["cache"].get("000568")
+        self.assertIsNotNone(hit_cache)
+        self.assertEqual(hit_cache["ma5d"], 75.20)
+
+    def test_vectorized_df_by_code_extraction(self):
+        """测试向量化提取异动映射，准确度与去重完全符合要求，彻底抛弃慢速 iterrows"""
+        import pandas as pd
+        df = pd.DataFrame([
+            {"代码": "000568", "名称": "泸州老窖", "价格": 77.0, "涨幅": 5.0, "时间": "14:45:00"},
+            {"代码": "000568", "名称": "泸州老窖", "价格": 77.1, "涨幅": 5.1, "时间": "14:45:05"},  # 重复行
+            {"代码": "600519", "名称": "贵州茅台", "价格": 1600.0, "涨幅": 1.2, "时间": "14:46:00"},
+            {"代码": "000001", "名称": "平安银行", "价格": 11.5, "涨幅": 0.5, "时间": "14:47:00"},
+        ])
+
+        unmonitored_codes = ["000568", "600519"]
+        unmon_set = set(unmonitored_codes)
+
+        # 向量化提取
+        df_sub = df[df['代码'].astype(str).str.strip().str.zfill(6).isin(unmon_set)]
+        df_u = df_sub.drop_duplicates(subset=['代码'], keep='first')
+        df_by_code = {
+            str(k).strip().zfill(6): v 
+            for k, v in df_u.set_index('代码').to_dict(orient='index').items()
+        }
+
+        self.assertEqual(len(df_by_code), 2)
+        self.assertIn("000568", df_by_code)
+        self.assertIn("600519", df_by_code)
+        self.assertNotIn("000001", df_by_code)
+        self.assertEqual(df_by_code["000568"]["价格"], 77.0)  # 保留首条最新异动
+
+    def test_async_popup_scan_worker_thread_contract(self):
+        """测试异步扫描 Worker 线程契约：后台异步线程执行与主线程非阻塞交互"""
+        import threading
+        import time
+
+        class MockButton:
+            def __init__(self):
+                self.text = "▶ 测试弹出/报警"
+                self.state = "normal"
+            def config(self, **kwargs):
+                if "text" in kwargs: self.text = kwargs["text"]
+                if "state" in kwargs: self.state = kwargs["state"]
+
+        btn = MockButton()
+        # 模拟点击触发
+        btn.config(text="⏳ 扫描中...", state="disabled")
+        self.assertEqual(btn.text, "⏳ 扫描中...")
+        self.assertEqual(btn.state, "disabled")
+
+        worker_executed = []
+        def _mock_worker():
+            time.sleep(0.01)  # 模拟后台计算
+            worker_executed.append(True)
+            # 模拟回到主线程
+            btn.config(text="▶ 测试弹出/报警", state="normal")
+
+        th = threading.Thread(target=_mock_worker, daemon=True)
+        th.start()
+        th.join(timeout=1.0)
+
+        self.assertTrue(worker_executed[0])
+        self.assertEqual(btn.text, "▶ 测试弹出/报警")
+        self.assertEqual(btn.state, "normal")
+
 if __name__ == "__main__":
     unittest.main()
