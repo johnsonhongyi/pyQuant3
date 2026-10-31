@@ -56,6 +56,10 @@ class BridgeStartupManagerDialog(QtWidgets.QDialog):
             legacy_window_name="BridgeStartupManagerDialog",
         )
         self.refresh_settings()
+        self._status_timer=QtCore.QTimer(self)
+        self._status_timer.setInterval(3000)
+        self._status_timer.timeout.connect(self.refresh_settings)
+        self._status_timer.start()
 
     def _build_ui(self):
         root = QtWidgets.QVBoxLayout(self)
@@ -162,6 +166,10 @@ class BridgeStartupManagerDialog(QtWidgets.QDialog):
                 active_text = ("重启成功：" if success else "重启失败：") + result
             elif mode_mismatch:
                 active_text = "待重启切换模式"
+            elif task.get('status',{}).get('orphan_agent'):
+                active_text='代理仍运行，父桥已退出'
+            elif not task.get('running') and task.get('status',{}).get('error_code'):
+                active_text='启动失败：'+str(task['status']['error_code'])
             else:
                 active_text = f"当前：{current}" if task.get("running") else "桥未运行"
             active_mode.setText(active_text)

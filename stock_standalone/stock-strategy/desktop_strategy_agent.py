@@ -253,6 +253,31 @@ def ats_evidence(root, symbols, ipc_db=None):
     return result
 
 
+def discover_models(app):
+    """Read the complete catalog under one deadline; reject broken pagination."""
+    rows, cursor, seen = [], None, set()
+    deadline = time.monotonic() + 30
+    for _ in range(100):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('model catalog timeout')
+        params = {'limit':100, 'includeHidden':False}
+        if cursor is not None:
+            params['cursor'] = cursor
+        page = app.request('model/list', params, timeout=remaining)
+        if not isinstance(page.get('data'), list):
+            raise ValueError('invalid model catalog')
+        rows.extend(page['data'])
+        cursor = page.get('nextCursor')
+        if cursor is None:
+            from desktop_model_policy import latest_models
+            return latest_models(rows)
+        if not isinstance(cursor, str) or not cursor or cursor in seen:
+            raise ValueError('invalid model catalog cursor')
+        seen.add(cursor)
+    raise ValueError('model catalog page limit exceeded')
+
+
 class AppServer:
     def __init__(self, cli, scratch, transport="local", tool=None):
         self.scratch = os.path.abspath(os.fspath(scratch))
@@ -299,10 +324,10 @@ class AppServer:
         try:
             self.request("initialize", {"clientInfo": {"name": "stock_strategy_desktop", "title": "Muse strategy desktop bridge", "version": "1.0"},
                 "capabilities": {"experimentalApi": True}}, timeout=15)
+            self.send({"method": "initialized", "params": {}})
         except (OSError, ValueError, queue.Empty, TimeoutError):
             self.close()
             raise
-        self.send({"method": "initialized", "params": {}})
 
     def send(self, value):
         with self.send_lock:
@@ -492,14 +517,14 @@ def main(argv=None):
         import msvcrt
         try:msvcrt.locking(runtime_lock.fileno(),msvcrt.LK_NBLCK,1)
         except OSError:raise SystemExit('desktop agent already owns this runtime')
-    from desktop_model_policy import latest_models, resolve_selection
+    from desktop_model_policy import resolve_selection
     from desktop_runtime import DesktopRuntimeProbe
     from desktop_engine_policy import EngineCatalog
     models, catalog_at, desktop = [], 0, {}
     agent_status_path = runtime / "agent-status.json"
     def persist_agent_status(status, detail):
         value = {"status":status, "detail":detail, "updated_at":datetime.now(timezone.utc).isoformat(),
-                 "updated_epoch":time.time(), "node_id":peer.node, "workspace_id":peer.workspace}
+                 "updated_epoch":time.time(), "agent_pid":os.getpid(), "node_id":peer.node, "workspace_id":peer.workspace}
         pending = agent_status_path.with_suffix(".pending")
         try:
             pending.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
@@ -537,11 +562,11 @@ def main(argv=None):
     deliveries=ResultOutbox(peer,runtime/'agent.db')
     sessions=AppServerPool(AppServer,runtime/'scratch',args.transport)
     def probe_catalog(candidate):
-        probe=sessions.acquire(candidate)
-        try:return latest_models(probe.request("model/list",{"limit":100,"includeHidden":False},timeout=30)["data"])
-        except (OSError,ValueError,KeyError,TypeError,TimeoutError,queue.Empty):
-            sessions.release(False)
-            raise
+        # A fresh local process also refreshes Codex's in-process catalog cache.
+        # Never reconfigure or restart the shared desktop daemon for discovery.
+        probe=AppServer(candidate,runtime/'catalog-scratch','local')
+        try:return discover_models(probe)
+        finally:probe.close()
     catalog=EngineCatalog(ledger,cli,desktop_cli,probe_catalog)
     desktop_probe=DesktopRuntimeProbe()
     peer_error_streak=0
@@ -567,7 +592,11 @@ def main(argv=None):
                 persist_agent_status("stopping", {"reason":"manager_request"})
                 break
             stage = "model_catalog_refresh"
-            catalog.refresh_idle(time.time())
+            refresh_request=runtime/'catalog-refresh.request'
+            force_refresh=refresh_request.is_file()
+            if force_refresh:refresh_request.unlink()
+            if catalog.refresh_idle(time.time(),force=force_refresh):
+                sessions.close()
             cli,models,catalog_at=catalog.engine,catalog.models,catalog.fetched_at
             if not models or not Path(cli).is_file():
                 heartbeat("degraded", {"error_code":"model_catalog_unavailable" if not models else "engine_unavailable", "retry_after_seconds":max(0,int(catalog.retry_at-time.time()))})

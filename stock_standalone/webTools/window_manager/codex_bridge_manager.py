@@ -551,6 +551,31 @@ def _bridge_owner_is_alive(pid: int, runtime_root: Path, status_at: float, launc
         return False
 
 
+def _source_agent_owner(runtime: Path, project_root: Path, agent: dict) -> int:
+    """Recover a detached source agent only after validating its exact arguments."""
+    try:
+        import psutil
+        normalize=lambda value:os.path.normcase(os.path.abspath(os.fspath(value)))
+        expected_runtime=normalize(runtime/'agent')
+        expected_script=normalize(project_root/'stock-strategy'/'desktop_strategy_agent.py')
+        for process in psutil.process_iter(['pid','cmdline']):
+            try:
+                arguments=process.info.get('cmdline') or []
+                if not any(normalize(arg)==expected_script for arg in arguments):continue
+                if '--runtime-root' not in arguments:continue
+                index=arguments.index('--runtime-root')+1
+                if index>=len(arguments) or normalize(arguments[index])!=expected_runtime:continue
+                if process.create_time()>float(agent.get('updated_epoch') or 0)+5:continue
+                return process.pid
+            except psutil.Error:
+                continue
+    except (ImportError,OSError,ValueError,TypeError):
+        return 0
+    except psutil.Error:
+        return 0
+    return 0
+
+
 def _token_counts(root: Path, days: int = 7) -> dict:
     now = datetime.now().astimezone()
     cutoff = now - timedelta(days=days)
@@ -687,6 +712,12 @@ class BridgeController:
             if process_alive:
                 running = True
                 status = {**status, "status": agent.get("status"), "agent_pid": pid}
+        if not running and not getattr(sys,'frozen',False) and launch_mode=='process' and agent_fresh and agent.get('status') in ('ready','analyzing','degraded','stopping'):
+            owner=_source_agent_owner(self.runtime_path(),self.project_root,agent)
+            if owner:
+                pid=owner
+                running=True
+                status={**status,'agent_pid':owner,'status':agent['status'],'orphan_agent':True}
         if launch_mode == "thread" and status_pid == os.getpid():
             with self._thread_registry_lock:
                 thread = self._thread_registry.get(str(self.runtime_root).casefold())
@@ -1372,7 +1403,7 @@ class CodexBridgeManagerDialog(QtWidgets.QDialog):
         self.status_label = QtWidgets.QLabel("正在读取桥接状态…")
         header.addWidget(self.status_label)
         self.btn_refresh = QtWidgets.QPushButton("刷新")
-        self.btn_refresh.clicked.connect(self.refresh_data)
+        self.btn_refresh.clicked.connect(self._request_catalog_refresh)
         header.addWidget(self.btn_refresh)
         root.addLayout(header)
 
@@ -1525,6 +1556,14 @@ class CodexBridgeManagerDialog(QtWidgets.QDialog):
         except (OSError, TypeError, ValueError) as exc:
             logger.warning("Codex bridge task column widths could not be saved: %s", type(exc).__name__)
 
+    def _request_catalog_refresh(self):
+        try:
+            self.controller.runtime_root.mkdir(parents=True,exist_ok=True)
+            (self.controller.runtime_root/'catalog-refresh.request').touch()
+        except OSError as exc:
+            logger.warning("Codex catalog refresh request failed: %s",type(exc).__name__)
+        self.refresh_data()
+
     def refresh_data(self):
         if self._snapshot_worker and self._snapshot_worker.isRunning():
             return
@@ -1614,6 +1653,11 @@ class CodexBridgeManagerDialog(QtWidgets.QDialog):
         names = [str(item.get("id", "")) for item in models if isinstance(item, dict) and item.get("id")]
         self.info["engine"].setText(detail.get("engine_path") or "—")
         self.info["models"].setText("、".join(names) if names else "目录尚未加载")
+        self.info["models"].setToolTip(
+            f"目录更新策略：{detail.get('catalog_refresh', '未知')}；"
+            f"状态：{'缓存待验证或刷新失败' if detail.get('catalog_stale') else '已验证'}；"
+            f"错误：{detail.get('engine_update_error') or '无'}。手动刷新会请求桥在空闲时重新发现模型。"
+        )
         self._render_backend_inventory(snapshot.get("backend_targets") or {}, config)
         self._render_tokens(snapshot.get("tokens"))
         task_status = agent.get("status", "") if running else "stopped"

@@ -3,26 +3,32 @@ import re
 
 
 def latest_models(rows):
-    visible={r.get('model',r.get('id')):r for r in rows if not r.get('hidden')}
+    visible={}
+    for row in rows:
+        if not isinstance(row,dict) or row.get('hidden'):continue
+        model=row.get('model') or row.get('id')
+        if isinstance(model,str) and model:visible[model]=row
     parsed=[]
+    unversioned=[]
     for model,row in visible.items():
         match=re.fullmatch(r'gpt-(\d+(?:\.\d+)*?)-([a-z]+)(?:-(\d{4}-\d{2}-\d{2}))?',model or '')
         if match:
             parsed.append((tuple(map(int,match[1].split('.'))),match[2],match[3] or '',model,row))
-    if not parsed:return []
-    major=max(r[0][0] for r in parsed)
+        elif isinstance(model,str) and model:
+            unversioned.append((None,None,model,row))
     selected={}
     for version,family,date,model,row in parsed:
-        if version[0]!=major:continue
         if family not in selected or (version,date) > selected[family][:2]:selected[family]=(version,date,model,row)
     result=[]
-    for _,_,model,row in selected.values():
-        upgrade=row.get('upgrade')
-        if isinstance(upgrade,str) and upgrade in visible:continue
-        efforts=[v['reasoningEffort'] for v in row.get('supportedReasoningEfforts',[]) if v.get('reasoningEffort')]
+    for _,_,model,row in list(selected.values())+unversioned:
+        levels=row.get('supportedReasoningEfforts') or []
+        if not isinstance(levels,list):continue
+        efforts=[v['reasoningEffort'] for v in levels if isinstance(v,dict) and isinstance(v.get('reasoningEffort'),str) and v['reasoningEffort']]
+        if not efforts and isinstance(row.get('defaultReasoningEffort'),str) and row['defaultReasoningEffort']:
+            efforts=[row['defaultReasoningEffort']]
         if not efforts:continue
         result.append({'id':model,'name':row.get('displayName',model),'efforts':efforts,
-                       'default_effort':row.get('defaultReasoningEffort',efforts[0])})
+                       'default_effort':row.get('defaultReasoningEffort') if row.get('defaultReasoningEffort') in efforts else efforts[0]})
     return sorted(result,key=lambda r:r['id'])
 
 

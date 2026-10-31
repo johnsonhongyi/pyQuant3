@@ -53,6 +53,8 @@ class BridgeWatchdog:
         info = self.controller.task_info()
         if not info.get("exists"):
             return ""
+        if (info.get('status') or {}).get('orphan_agent'):
+            return '代理仍运行但父桥已退出'
         if not info.get("running"):
             return "进程未运行"
         agent = info.get("agent_status") or {}

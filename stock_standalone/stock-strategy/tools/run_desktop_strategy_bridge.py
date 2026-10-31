@@ -145,7 +145,21 @@ def main(argv=None):
     parser.add_argument('--launch-mode',choices=('process','thread'),default='process')
     parser.add_argument('--prepare-only',action='store_true')
     parser.add_argument('--once',action='store_true')
+    parser.add_argument('--catalog-check',type=Path,help='write local engine/catalog diagnostics; no backend registration or model inference')
     args=parser.parse_args(argv)
+    if args.catalog_check:
+        import tempfile
+        from desktop_runtime import desktop_cli
+        from desktop_strategy_agent import AppServer,discover_models
+        engine=desktop_cli()
+        if not engine:raise ValueError('Codex CLI not found')
+        with tempfile.TemporaryDirectory(prefix='codex-catalog-check-') as scratch:
+            app=AppServer(engine,scratch,'local')
+            try:models=discover_models(app)
+            finally:app.close()
+        if not models:raise ValueError('empty model catalog')
+        args.catalog_check.write_text(json.dumps({'status':'ok','engine':engine,'models':models},ensure_ascii=False),encoding='utf-8')
+        return
     runtime=_absolute_path(args.runtime);desktop_root=_absolute_path(args.desktop_root)
     stage='bridge_lock'
     try:
@@ -178,7 +192,6 @@ def main(argv=None):
         ipc_workspace_id=peer.workspace,ipc_key_file=str(runtime/'peer.key'),stock_strategy_base_url=args.backend,
         ipc_bind_host='auto_lan',ipc_advertise_host='auto',ipc_linkage_port=26776,ipc_peer_allowlist=[urlsplit(args.backend).hostname])
     gateway=None
-    child=None
     try:
         stage='local_gateway_init'
         gateway=SystemLinkageGateway(config,database_path=str(runtime/'gateway.db'))
@@ -198,21 +211,14 @@ def main(argv=None):
         if args.once:agent_arguments.append('--once')
         with (runtime/'agent-output.txt').open('ab') as output:
             (runtime/'bridge.pid').write_text(str(os.getpid()),encoding='ascii')
-            if getattr(sys,'frozen',False) or args.launch_mode=='thread':
-                from desktop_strategy_agent import main as run_agent
-                stage='agent_start'
-                status({'status':'agent_starting','agent_pid':os.getpid(),'port':registration['port']})
-                with routed_thread_output(output,'stock-codex-'):
-                    run_agent(agent_arguments)
-                status({'status':'stopped','agent_pid':os.getpid()})
-            else:
-                stage='agent_start'
-                command=[sys.executable,str(ROOT/'desktop_strategy_agent.py'),*agent_arguments]
-                child=subprocess.Popen(command,cwd=ROOT,stdout=output,stderr=subprocess.STDOUT,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
-                status({'status':'agent_starting','agent_pid':child.pid,'port':registration['port']})
-                code=child.wait()
-                if code:raise RuntimeError('desktop agent exited')
-                status({'status':'stopped','agent_pid':child.pid})
+            # The independent runner is already a separate process. Match the
+            # packaged/thread lifecycle so gateway and agent share one owner.
+            from desktop_strategy_agent import main as run_agent
+            stage='agent_start'
+            status({'status':'agent_starting','agent_pid':os.getpid(),'port':registration['port']})
+            with routed_thread_output(output,'stock-codex-'):
+                run_agent(agent_arguments)
+            status({'status':'stopped','agent_pid':os.getpid()})
     except (OSError,ValueError,RuntimeError,SystemExit) as exc:
         _record_bridge_failure(runtime,stage,exc)
         status({'status':'degraded','error_code':_peer_error_code(exc),'stage':stage,'error_detail':_error_details(exc)})
@@ -222,9 +228,6 @@ def main(argv=None):
         status({'status':'degraded','error_code':_peer_error_code(exc),'stage':stage,'error_detail':_error_details(exc)})
         raise
     finally:
-        if child and child.poll() is None:
-            from ats.llm.cli_process import _terminate_process_tree
-            _terminate_process_tree(child)
         if gateway:gateway.stop()
         bridge_lock.close()
         try:

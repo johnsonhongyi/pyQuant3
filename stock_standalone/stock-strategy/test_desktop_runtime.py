@@ -4,11 +4,40 @@ import sys
 import threading
 import time
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
-from desktop_runtime import DesktopRuntimeProbe, _discovery_output
+from desktop_runtime import DesktopRuntimeProbe, _discovery_output, desktop_cli
 
 
 class DesktopRuntimeTests(unittest.TestCase):
+    def test_managed_current_engine_precedes_old_installs_but_respects_override(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home=Path(directory)
+            managed=home/'packages/app-server-daemon/current/bin/codex.exe'
+            managed.parent.mkdir(parents=True)
+            managed.touch()
+            explicit=home/'custom.exe';explicit.touch()
+            fallback=home/'fallback.exe';fallback.touch()
+            with patch.dict('os.environ',{'CODEX_HOME':str(home),'LOCALAPPDATA':str(home),'CODEX_CLI_PATH':''}), \
+                 patch('ats.llm.cli_paths.shutil.which',return_value=str(fallback)) as lookup:
+                self.assertEqual(desktop_cli(),str(managed.absolute()))
+                lookup.assert_not_called()
+                with patch.dict('os.environ',{'CODEX_CLI_PATH':str(explicit)}):
+                    self.assertEqual(desktop_cli(),str(explicit.resolve()))
+                managed.unlink()
+                self.assertEqual(desktop_cli(),str(fallback.resolve()))
+
+    def test_desktop_exported_versioned_path_does_not_pin_old_engine(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            legacy=root/'OpenAI/Codex/bin/old-version/codex.exe'
+            managed=root/'packages/app-server-daemon/current/bin/codex.exe'
+            for path in (legacy,managed):path.parent.mkdir(parents=True);path.touch()
+            with patch.dict('os.environ',{'LOCALAPPDATA':str(root),'CODEX_HOME':str(root),
+                                          'CODEX_CLI_PATH':str(legacy)}):
+                self.assertEqual(desktop_cli(),str(managed.absolute()))
+
     def test_slow_probe_never_blocks_snapshot_or_shutdown(self):
         entered=threading.Event()
         def blocked(stop):

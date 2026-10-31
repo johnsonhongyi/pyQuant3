@@ -51,6 +51,7 @@ a = Analysis(
         'ats.storage_archive',
         'ats.bounded_evaluation_store',
         'ats.llm.cli_paths',
+        'ats.llm.path_utils',
         'ats.llm.cli_process',
         'ats.llm.windows_cli_desktop',
         'ats.llm.codex_cli_backend',

@@ -108,6 +108,7 @@ def test_desktop_codex_detected_when_not_on_path(tmp_path, monkeypatch):
     executable.parent.mkdir(parents=True)
     executable.write_bytes(b"fixture; never execute")
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
     monkeypatch.setattr(cli_paths.shutil, "which", lambda name: None)
     assert cli_paths.resolve_cli_path("codex", "codex") == str(executable)
 

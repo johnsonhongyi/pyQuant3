@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from sys_utils import safe_resolve_path
+from ats.llm.path_utils import safe_resolve_path
 
 import os
 import signal

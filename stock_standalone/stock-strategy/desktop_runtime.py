@@ -13,13 +13,17 @@ from contextlib import closing
 
 
 def desktop_cli():
-    """Prefer an already-installed desktop engine over the standalone CLI shim."""
+    """Use the shared resolver so new install layouts supersede legacy bundles."""
     configured = os.environ.get('CODEX_CLI_PATH', '').strip()
-    if configured and Path(configured).is_file():
+    legacy_base=Path(os.environ.get('LOCALAPPDATA',''))/'OpenAI'/'Codex'/'bin'
+    # The desktop app exports a versioned bundle in CODEX_CLI_PATH. Treat this
+    # as a discovery hint, while preserving explicitly configured custom tools.
+    codex_home=Path(os.environ.get('CODEX_HOME') or Path.home()/'.codex')
+    bundled=bool(configured) and (Path(configured).parent.parent==legacy_base or any(
+        Path(configured).is_relative_to(codex_home/'packages'/package)
+        for package in ('app-server-daemon','standalone')))
+    if configured and not bundled and Path(configured).is_file():
         return str(Path(configured).resolve())
-    base=Path(os.environ.get('LOCALAPPDATA',''))/'OpenAI'/'Codex'/'bin'
-    candidates=[p for p in base.glob('*/codex.exe') if p.is_file()]
-    if candidates:return str(max(candidates,key=lambda p:p.stat().st_mtime_ns))
     from ats.llm.cli_paths import resolve_cli_path
     return resolve_cli_path('','codex')
 

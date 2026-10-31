@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from sys_utils import safe_resolve_path
+from ats.llm.path_utils import safe_resolve_path
 
 import os
 import shutil
+import re
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,20 @@ def resolve_cli_path(value: Any, executable_name: str) -> str:
                 if candidate.is_file():
                     return str(safe_resolve_path(candidate))
     if executable_name == "codex":
+        codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+        candidates = [codex_home / "packages" / package / "current" / "bin" / "codex.exe"
+                      for package in ("app-server-daemon", "standalone")]
+        available = []
+        for candidate in candidates:
+            try:
+                if not candidate.is_file():continue
+                resolved = safe_resolve_path(candidate)
+                version = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)-x86_64-pc-windows-msvc", resolved.parent.parent.name)
+                available.append((tuple(map(int, version.groups())) if version else (0,0,0), str(resolved)))
+            except OSError:
+                continue  # An updater may replace a junction during discovery.
+        if available:
+            return max(available, key=lambda item:item[0])[1]
         local_app_data = os.environ.get("LOCALAPPDATA")
         if local_app_data:
             installed = Path(local_app_data) / "Programs" / "OpenAI" / "Codex" / "bin" / "codex.exe"

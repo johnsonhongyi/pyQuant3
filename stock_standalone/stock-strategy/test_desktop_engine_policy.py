@@ -23,14 +23,17 @@ class EngineCatalogTests(unittest.TestCase):
         return EngineCatalog(self.db,'old',lambda:self.candidate,probe,
                              identity=lambda path:{'path':path,'revision':self.revision})
 
-    def test_once_per_hong_kong_day_and_survives_restart(self):
+    def test_periodic_refresh_and_restart_revalidates_saved_catalog(self):
         self.assertTrue(self.catalog.refresh_idle(self.now))
-        self.assertFalse(self.catalog.refresh_idle(self.now+3600))
+        self.assertFalse(self.catalog.refresh_idle(self.now+61))
+        self.models=self.models+[{'id':'new-family','efforts':['high'],'default_effort':'high'}]
+        self.assertTrue(self.catalog.refresh_idle(self.now+301))
+        self.assertEqual(len(self.catalog.models),2)
         restarted=self.make()
-        self.assertFalse(restarted.refresh_idle(self.now+7200))
-        self.assertEqual(self.calls,['old'])
-        self.assertTrue(restarted.refresh_idle(self.now+86400))
-        self.assertEqual(self.calls,['old','old'])
+        self.assertTrue(restarted.status()['catalog_stale'])
+        self.assertTrue(restarted.refresh_idle(self.now+302))
+        self.assertFalse(restarted.status()['catalog_stale'])
+        self.assertEqual(self.calls,['old','old','old'])
 
     def test_midnight_is_hong_kong_not_utc(self):
         self.catalog.refresh_idle(self.now)
@@ -70,6 +73,15 @@ class EngineCatalogTests(unittest.TestCase):
         self.assertFalse(self.catalog.refresh_idle(self.now+61))
         self.assertEqual(self.catalog.models,[])
         self.assertEqual(self.calls,['old'])
+
+    def test_manual_refresh_bypasses_cache_and_error_backoff(self):
+        self.catalog.refresh_idle(self.now)
+        self.broken=True
+        self.assertFalse(self.catalog.refresh_idle(self.now+1,force=True))
+        self.assertTrue(self.catalog.status()['catalog_stale'])
+        self.broken=False
+        self.assertTrue(self.catalog.refresh_idle(self.now+2,force=True))
+        self.assertFalse(self.catalog.status()['catalog_stale'])
 
 
 if __name__=='__main__':unittest.main()

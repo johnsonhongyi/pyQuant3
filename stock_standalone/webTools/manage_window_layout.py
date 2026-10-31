@@ -102,11 +102,24 @@ def attach_to_parent_console() -> bool:
     return False
 
 
+def _run_codex_bridge_worker(worker_args):
+    try:
+        from run_desktop_strategy_bridge import main as run_codex_bridge
+        run_codex_bridge(worker_args)
+    except Exception:
+        if '--catalog-check' not in worker_args:
+            raise
+        import traceback
+        output = worker_args[worker_args.index('--catalog-check') + 1]
+        with open(output, 'w', encoding='utf-8') as report:
+            json.dump({'status':'failed','error':traceback.format_exc()}, report, ensure_ascii=False)
+        raise SystemExit(1)
+
+
 if os.environ.pop('PYQUANT3_CODEX_BRIDGE_WORKER', '') == '1':
     get_app_root()
-    from run_desktop_strategy_bridge import main as run_codex_bridge
     worker_args = os.environ.pop('PYQUANT3_CODEX_BRIDGE_ARGS', '')
-    run_codex_bridge(json.loads(worker_args) if worker_args else sys.argv[1:])
+    _run_codex_bridge_worker(json.loads(worker_args) if worker_args else sys.argv[1:])
     raise SystemExit(0)
 
 if os.environ.pop('PYQUANT3_ANTIGRAVITY_BRIDGE_WORKER', '') == '1':
@@ -134,8 +147,7 @@ if __name__ == '__main__':
             strategy_root = os.path.join(app_root, 'stock-strategy')
             if strategy_root not in sys.path:
                 sys.path.insert(0, strategy_root)
-        from run_desktop_strategy_bridge import main as run_codex_bridge
-        run_codex_bridge(worker_args)
+        _run_codex_bridge_worker(worker_args)
         sys.exit(0)
 
     if '--antigravity-bridge-worker' in sys.argv[1:]:

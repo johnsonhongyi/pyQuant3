@@ -16,6 +16,43 @@ from follow_ai import RESPONSE_SCHEMA
 
 
 class DesktopAgentTests(unittest.TestCase):
+    def test_source_process_runs_agent_with_gateway_owner_without_extra_child(self):
+        from unittest.mock import Mock
+        import os
+        spec=importlib.util.spec_from_file_location('source_owner_runner',Path(__file__).parent/'tools/run_desktop_strategy_bridge.py')
+        runner=importlib.util.module_from_spec(spec);spec.loader.exec_module(runner)
+        gateway=Mock();gateway.start.return_value={'port':1234}
+        response=Mock();response.__enter__=Mock(return_value=__import__('io').BytesIO(b'{"target_registered":true}'));response.__exit__=Mock(return_value=False)
+        opener=Mock();opener.open.return_value=response
+        with tempfile.TemporaryDirectory() as directory:
+            runtime=Path(directory)
+            with patch('system_linkage_gateway.SystemLinkageGateway',return_value=gateway), \
+                 patch('system_linkage_gateway.build_setup_package',return_value={}), \
+                 patch.object(runner,'build_opener',return_value=opener), \
+                 patch('desktop_strategy_agent.main') as agent, \
+                 patch.object(runner.subprocess,'Popen',side_effect=AssertionError('extra child')):
+                runner.main(['--runtime',str(runtime),'--launch-mode','process','--once'])
+            agent.assert_called_once()
+            status=json.loads((runtime/'status.json').read_text(encoding='utf-8'))
+            self.assertEqual(status['agent_pid'],os.getpid())
+            self.assertEqual(status['status'],'stopped')
+            gateway.stop.assert_called_once()
+
+    def test_catalog_check_does_not_prepare_or_register_backend(self):
+        from unittest.mock import Mock
+        spec=importlib.util.spec_from_file_location('catalog_check_runner',Path(__file__).parent/'tools/run_desktop_strategy_bridge.py')
+        runner=importlib.util.module_from_spec(spec);spec.loader.exec_module(runner)
+        app=Mock()
+        with tempfile.TemporaryDirectory() as directory:
+            output=Path(directory)/'catalog.json'
+            with patch.object(runner,'prepare',side_effect=AssertionError('backend preparation')), \
+                 patch('desktop_runtime.desktop_cli',return_value='fixture'), \
+                 patch('desktop_strategy_agent.AppServer',return_value=app), \
+                 patch('desktop_strategy_agent.discover_models',return_value=[{'id':'new-family'}]):
+                runner.main(['--catalog-check',str(output)])
+            self.assertEqual(json.loads(output.read_text(encoding='utf-8'))['models'],[{'id':'new-family'}])
+            app.close.assert_called_once_with()
+
     def test_strategy_usage_is_recorded_and_budget_interrupts_without_model_call(self):
         from desktop_strategy_agent import AppServer
         from follow_ai import digest
