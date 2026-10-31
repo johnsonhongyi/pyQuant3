@@ -440,5 +440,20 @@ class TestRearrangePolicyCustomization(unittest.TestCase):
         self.assertIn('text="🔗 联动"', test_func_code)
         self.assertIn('send_to_tdx(code)', test_func_code)
 
+    def test_popup_shake_button_and_trigger_integration(self):
+        """测试策略测试窗口中嵌入了【🔔 弹出震动】按钮并调用 trigger_stock_popup_and_shake"""
+        script_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "stock", "testpy", "tdxgui", "异动联动.py"))
+        with open(script_path, "r", encoding="utf-8") as f:
+            code = f.read()
+
+        test_func_start = code.find("def open_rearrange_test_dialog")
+        test_func_end = code.find("def open_rearrange_policy_dialog", test_func_start)
+        test_func_code = code[test_func_start:test_func_end]
+
+        self.assertIn('text="🔔 弹出震动"', test_func_code)
+        self.assertIn('trigger_stock_popup_and_shake(code, test_win)', test_func_code)
+        self.assertIn('def shake_window(', code)
+        self.assertIn('def trigger_stock_popup_and_shake(', code)
+
 if __name__ == "__main__":
     unittest.main()

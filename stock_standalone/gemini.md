@@ -1,5 +1,18 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-31 14:05 【测试弹窗新增指定股票一键弹出与震动测试按钮、实盘震动动画闭环】(`stock/testpy/tdxgui/异动联动.py`, `tests/test_rearrange_policy_customization.py`)
+- [x] **【测试弹窗新增【🔔 弹出震动】测试按钮】**：
+  - 在【重排策略过滤测试与字段数据查看】弹窗（`open_rearrange_test_dialog`）顶部【🔗 联动】右侧嵌入【🔔 弹出震动】按钮；
+  - 点击精准提取当前选中的股票标的（如 `300680 隆盛科技`）或手动输入的代码，直接触发 `trigger_stock_popup_and_shake` 测试链路；
+- [x] **【窗口微抖震动引擎 (`shake_window`) 与实盘联动】**：
+  - **灵动视觉微抖**：实现 `shake_window(win, shakes=8, distance=8, delay=30)`，采用安全坐标相对位移（`x += 8, x -= 8`）并自动精准复位；
+  - **智能生命周期处理**：
+    - 若该股票已打开监控窗口：将其平稳从后台带到最前，置顶唤醒，触发微抖震动动画并进入红色闪烁报警（`_alter_tdx = True`）；
+    - 若该股票尚未打开监控窗口：自动创建新监控小窗口，打上 `_auto_popup = True` 临时标记并前置弹出，执行微抖震动与闪红报警；
+  - **实盘自动报警同步赋能**：将 `shake_window` 同步注入至盘中策略报警引擎 `check_monitor_break_high4`，盘中命中的已有窗口或新自动弹出窗口均具备微抖震动提醒；
+- [x] **【自动化测试全绿通过（16 项专项测试 100% PASS）】**：
+  - 新增 `test_popup_shake_button_and_trigger_integration`，16 项专项测试全部通过。
+
 ## 2026-10-31 13:50 【测试弹窗新增股票直接联动按钮、彻底根治_get_stock_changes代码merge类型冲突崩溃】(`stock/testpy/tdxgui/异动联动.py`, `tests/test_rearrange_policy_customization.py`)
 - [x] **【测试弹窗新增【🔗 联动】快捷按钮】**：
   - 在【重排策略过滤测试与字段数据查看】弹窗（`open_rearrange_test_dialog`）顶部【🔄 载入数据】按钮右侧新增【🔗 联动】按钮；

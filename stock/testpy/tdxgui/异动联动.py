@@ -3886,6 +3886,80 @@ def evaluate_condition_detail(expr, row_dict):
 _rearrange_policy_dialog_win = None
 _rearrange_test_dialog_win = None
 
+def shake_window(win, shakes=8, distance=8, delay=30):
+    """窗口左右微抖震动效果，增强视觉提示感"""
+    if not win or not hasattr(win, "winfo_exists") or not win.winfo_exists():
+        return
+    try:
+        orig_x = win.winfo_x()
+        orig_y = win.winfo_y()
+        w = win.winfo_width()
+        h = win.winfo_height()
+
+        def _do_shake(step=0):
+            if not win.winfo_exists() or step >= shakes * 2:
+                try:
+                    win.geometry(f"{w}x{h}+{orig_x}+{orig_y}")
+                except Exception:
+                    pass
+                return
+            dx = distance if (step % 2 == 0) else -distance
+            try:
+                win.geometry(f"{w}x{h}+{orig_x + dx}+{orig_y}")
+            except Exception:
+                pass
+            win.after(delay, _do_shake, step + 1)
+
+        _do_shake(0)
+    except Exception:
+        pass
+
+def trigger_stock_popup_and_shake(code_str, parent_win=None):
+    """针对指定股票代码触发监控窗口弹出、置顶、闪红与震动测试"""
+    global monitor_windows
+    code_str = str(code_str).strip().zfill(6)
+    if not code_str:
+        return
+
+    r_dict = get_stock_eval_dict(code_str)
+    name_str = r_dict.get('name', r_dict.get('名称', code_str))
+    pct_val = float(r_dict.get('percent', r_dict.get('涨幅', 0.0)))
+    close_val = float(r_dict.get('close', r_dict.get('现价', 0.0)))
+    vol_val = float(r_dict.get('vol', r_dict.get('量', 0.0)))
+    c_time_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+    win_info = monitor_windows.get(code_str) if monitor_windows else None
+    is_new = False
+
+    if not win_info or "toplevel" not in win_info or not win_info["toplevel"].winfo_exists():
+        # 未打开窗口：创建并弹出
+        new_s_info = [code_str, name_str, 1, 1.0, pct_val, close_val, vol_val, c_time_str]
+        try:
+            create_monitor_window(new_s_info)
+            win_info = monitor_windows.get(code_str) if monitor_windows else None
+            is_new = True
+        except Exception as e:
+            logger.error(f"创建监控窗口失败 ({code_str}): {e}")
+
+    if win_info and "toplevel" in win_info:
+        win = win_info["toplevel"]
+        if win and win.winfo_exists():
+            win._auto_popup = True
+            win._alter_tdx = True
+            win.deiconify()
+            win.lift()
+            win.attributes("-topmost", True)
+            win.after(300, lambda: win.attributes("-topmost", False) if win.winfo_exists() else None)
+            
+            # 触发震动与高亮变红
+            shake_window(win)
+            highlight_window(win, alter_tdx=True)
+
+            status_text = "新创建并自动弹出" if is_new else "已有窗口前置唤醒"
+            msg = f"🔔 已对 [{code_str} {name_str}] {status_text}，已触发震动与闪红报警！"
+            toast_message(parent_win or root, msg)
+            logger.info(f"🎯 [SHAKE_TEST] {msg}")
+
 def open_rearrange_test_dialog(parent_win=None, var_parent_expr=None):
     """
     [🚀 新增] 重排策略过滤测试与可用字段数据查看弹窗 (独立无模态窗口，支持窗口位置持久化)
@@ -3983,6 +4057,15 @@ def open_rearrange_test_dialog(parent_win=None, var_parent_expr=None):
 
     btn_link = ttk.Button(top_frame, text="🔗 联动", width=8, command=do_link_current_stock)
     btn_link.pack(side=tk.LEFT, padx=(4, 2))
+
+    # [🚀 增强] 弹出震动测试按钮 (针对指定股票代码触发弹出与窗口震动测试)
+    def do_popup_shake_test():
+        code = get_selected_code()
+        if code:
+            trigger_stock_popup_and_shake(code, test_win)
+
+    btn_shake = ttk.Button(top_frame, text="🔔 弹出震动", width=11, command=do_popup_shake_test)
+    btn_shake.pack(side=tk.LEFT, padx=(4, 2))
 
     # 测试表达式输入与控制
     expr_frame = ttk.Frame(test_win, padding=(10, 4, 10, 6))
@@ -12130,6 +12213,7 @@ def check_monitor_break_high4(monitor_windows: dict, df: pd.DataFrame, logger, f
                     win._alter_tdx = True
                     logger.info(f"🎯 [POLICY_ALERT] 监控窗口 {stock_code} 命中策略 '{filter_expr}'，触发闪红报警")
                     trigger_monitor_flash(win_info)
+                    shake_window(win)
 
     # 3. 检查未打开的小窗口：自动弹出新标的 (分组限额最多 10 只，交易期自动运行)
     if auto_popup_enabled and (force_work_time or get_work_time()):
@@ -12191,6 +12275,7 @@ def check_monitor_break_high4(monitor_windows: dict, df: pd.DataFrame, logger, f
                             pop_win._auto_popup = True   # 打上自动弹出分组标记
                             pop_win._alter_tdx = True    # 打上红底标记
                             trigger_monitor_flash(new_win_info)
+                            shake_window(pop_win)
                             alive_auto_popups.append(code_str)
                             logger.info(f"🚀 [AUTO_POPUP] 未监控标的 {code_str} {name_str} 命中策略 '{filter_expr}'，自动弹出新监控小窗口 ({len(alive_auto_popups)}/{auto_popup_limit})")
                     except Exception as e_create:
