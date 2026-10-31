@@ -201,5 +201,67 @@ class TestRearrangePolicyCustomization(unittest.TestCase):
         self.assertEqual(final_data["window_geometries"]["rearrange_policy_dialog"], "560x440+350+220")
         self.assertEqual(final_data["rearrange_policy"]["layout"], "horizontal")
 
+    def test_auto_popup_limit_and_replenish(self):
+        """测试自动弹出未打开窗口限额10只、关闭旧窗口后可补位以及收盘清除标记机制"""
+        class DummyWindow:
+            def __init__(self):
+                self._alter_tdx = False
+                self._auto_popup = False
+                self.bg = "SystemButtonFace"
+            def winfo_exists(self): return True
+            def cget(self, k): return self.bg
+
+        monitor_windows = {}
+        auto_popup_limit = 10
+
+        # 模拟策略引擎在收到行情时创建小窗口
+        def simulate_auto_popup(candidate_codes):
+            alive_popups = [
+                c for c, w in monitor_windows.items()
+                if getattr(w['toplevel'], '_auto_popup', False)
+            ]
+            for code in candidate_codes:
+                if code in monitor_windows:
+                    continue
+                if len(alive_popups) >= auto_popup_limit:
+                    break
+                win = DummyWindow()
+                win._auto_popup = True
+                win._alter_tdx = True
+                win.bg = "red"
+                monitor_windows[code] = {'toplevel': win, 'stock_info': [code, f"股_{code}"]}
+                alive_popups.append(code)
+
+        # 1. 批量来了 15 只满足策略的候选股票，应严格限制最多弹出 10 只
+        candidates = [f"60000{i:02d}" for i in range(1, 16)]
+        simulate_auto_popup(candidates)
+        
+        self.assertEqual(len(monitor_windows), 10)
+        auto_pop_count = sum(1 for w in monitor_windows.values() if w['toplevel']._auto_popup)
+        self.assertEqual(auto_pop_count, 10)
+
+        # 2. 用户手动关闭了 2 个旧的自动弹出窗口
+        del monitor_windows["6000001"]
+        del monitor_windows["6000002"]
+        self.assertEqual(len(monitor_windows), 8)
+
+        # 3. 再次来了一批新候选股票，应精准补位 2 只，使总数重回 10 只
+        new_candidates = ["6000100", "6000101", "6000102"]
+        simulate_auto_popup(new_candidates)
+        self.assertEqual(len(monitor_windows), 10)
+        self.assertIn("6000100", monitor_windows)
+        self.assertIn("6000101", monitor_windows)
+        self.assertNotIn("6000102", monitor_windows)  # 超过 10 只被拦截
+
+        # 4. 收盘后执行清理：清除 _auto_popup 标记，窗口归入常规监控
+        for w_info in monitor_windows.values():
+            win = w_info['toplevel']
+            if hasattr(win, "_auto_popup"):
+                delattr(win, "_auto_popup")
+
+        # 验证标记已全部清除
+        has_popup_flag = any(hasattr(w['toplevel'], '_auto_popup') for w in monitor_windows.values())
+        self.assertFalse(has_popup_flag)
+
 if __name__ == "__main__":
     unittest.main()

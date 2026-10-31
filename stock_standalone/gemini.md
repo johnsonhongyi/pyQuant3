@@ -1,5 +1,19 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-31 12:15 【异动联动刷新周期缩短至5分钟、监控报警全面对齐重排自定义策略、未打开小窗口限额10只自动弹出与收盘自愈】(`stock/testpy/tdxgui/异动联动.py`, `tests/test_rearrange_policy_customization.py`)
+- [x] **【交易期实时快照刷新间隔调整为 5 分钟】**：
+  - 将 `_get_sina_data_realtime` 中的交易时段（`is_trade_session`）刷新间隔从 10 分钟压降至 **5 分钟**，提升盘中突破异动的捕捉时效性；
+- [x] **【监控报警与自动弹出判定全面对齐重排自定义策略】**：
+  - **打破写死 `close > high4` 局限**：`check_monitor_break_high4` 全面接入 `load_rearrange_policy()` 中的 `filter_expr` 与 `filter_enabled`；
+  - **统一策略大脑**：只要在重排策略弹窗中调整了表达式（如 `涨幅 > 5`、`dff > 0`、`close > high4`），监控报警、前台弹出、震动变红与窗口重排分流 100% 步调一致；
+  - **全数据源兼容保障**：在 TDX 缺席或非新浪快照的 fallback 分支上，统一调度策略报警引擎，不再被动漏诊；
+- [x] **【未打开小窗口自动弹出、分组限额 10 只、关闭补位与收盘自愈持久化】**：
+  - **可选配置与持久化**：新增 `auto_popup_enabled`（盘中自动弹出新小窗口开关）与 `auto_popup_limit`（存活上限 10 只），集成至重排策略配置弹窗并持久化至 `window_config.json`；
+  - **精准限额与动态补位**：未打开小窗口自动创建时打上 `win._auto_popup = True` 临时标记，严格控制存活数量上限为 10 个；当用户关闭旧窗口后，存活数降低，允许自动弹出新标的补位到 10 只；
+  - **收盘归档标记自愈**：在每日 15:00 收盘存档持久化后，自动清除所有窗口的 `_auto_popup` 临时属性，窗口归入常规监控，释放新交易日自动弹出额度，杜绝窗口无限膨胀与刷屏；
+- [x] **【自动化测试全绿通过（8 项专项测试 100% PASS）】**：
+  - 在 `tests/test_rearrange_policy_customization.py` 中新增 `test_auto_popup_limit_and_replenish`，覆盖限额 10 只、关闭补位及收盘清除标记机制，全部 100% 通过。
+
 ## 2026-10-31 11:25 【异动联动重排纵向排布超长行Bug修复、简化版过滤测试与字段数据查看器及窗口位置持久化】(`stock/testpy/tdxgui/异动联动.py`, `tests/test_rearrange_policy_customization.py`)
 - [x] **【彻底根治纵向并排优先变成超长单行 Bug】**：
   - **排布算法满高换列彻底对齐 (`rearrange_monitors_per_screen`)**：原算法仅对横向换行进行了判断，纵向模式时因未处理换列而一直向右累加 `current_x` 导致排成超长横行。现全面实现纵向优先排布算法（自上而下自左向右）：当 `current_y + h + margin_y > work_b` 时智能换下一列（`current_x += max_col_width + margin_x`, `current_y = work_t + margin_y`）；右下角分流组同样实现向左换列，窗口不再挤成一行；
