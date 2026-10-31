@@ -4074,9 +4074,13 @@ def open_rearrange_policy_dialog(parent_win=None):
     chk_enable = ttk.Checkbutton(lbl_group, text="启用重排过滤策略 (命中条件的窗口在右下角排列)", variable=var_enabled)
     chk_enable.pack(anchor="w", pady=(0, 2))
 
+    frame_popup = ttk.Frame(lbl_group)
+    frame_popup.pack(fill=tk.X, pady=(0, 5))
     var_auto_popup = tk.BooleanVar(value=policy.get("auto_popup_enabled", True))
-    chk_auto_popup = ttk.Checkbutton(lbl_group, text="🔔 盘中命中时自动弹出新监控小窗口 (分组限额10只，收盘自动归档)", variable=var_auto_popup)
-    chk_auto_popup.pack(anchor="w", pady=(0, 5))
+    chk_auto_popup = ttk.Checkbutton(frame_popup, text="🔔 盘中命中时自动弹出新监控小窗口 (限额10只，收盘归档)", variable=var_auto_popup)
+    chk_auto_popup.pack(side=tk.LEFT)
+    btn_test_popup = ttk.Button(frame_popup, text="▶ 测试弹出/报警", width=14, command=lambda: test_realtime_popup_scan(win))
+    btn_test_popup.pack(side=tk.LEFT, padx=(8, 0))
 
     frame_expr = ttk.Frame(lbl_group)
     frame_expr.pack(fill=tk.X, pady=3)
@@ -4204,6 +4208,7 @@ def show_rearrange_context_menu(event):
     menu = tk.Menu(root, tearoff=0)
     menu.add_command(label="⚙️ 编辑重排过滤策略 (自定义)...", command=lambda: open_rearrange_policy_dialog(root))
     menu.add_command(label="🚀 立即执行重排 (F6)", command=lambda: rearrange_monitors_per_screen())
+    menu.add_command(label="🔔 测试实时弹出与报警 (模拟扫描)", command=lambda: test_realtime_popup_scan(root))
     menu.add_separator()
 
     # 快捷切换过滤开关
@@ -11821,7 +11826,59 @@ def trigger_monitor_flash(win_dict, flash_times=6, interval=300):
     # _flash()
 
 
-def check_monitor_break_high4(monitor_windows: dict, df: pd.DataFrame, logger):
+def test_realtime_popup_scan(parent_win=None):
+    """
+    [🚀 新增] 测试实时弹出与报警功能入口：
+    豁免交易时间限制，立即使用当前已有的行情数据执行一次策略扫描，
+    测试已有窗口闪红报警与未打开新标的自动弹出功能
+    """
+    global realdatadf, loaded_df, GLOBAL_TOP_ALL, monitor_windows
+    data = None
+    if 'GLOBAL_TOP_ALL' in globals() and GLOBAL_TOP_ALL is not None and not GLOBAL_TOP_ALL.empty:
+        data = GLOBAL_TOP_ALL
+    elif realdatadf is not None and not realdatadf.empty:
+        data = realdatadf
+    elif loaded_df is not None and not loaded_df.empty:
+        data = loaded_df
+    else:
+        try:
+            df_sina = _get_sina_data_realtime()
+            if df_sina is not None and not df_sina.empty:
+                data = df_sina
+        except Exception:
+            pass
+
+    if data is None or data.empty:
+        data = pd.DataFrame([
+            {"代码": "600688", "名称": "上海石化", "close": 3.25, "high4": 3.10, "percent": 4.8, "涨幅": 4.8, "vol": 1500},
+            {"代码": "002526", "名称": "山东矿机", "close": 5.60, "high4": 5.20, "percent": 7.7, "涨幅": 7.7, "vol": 3200},
+            {"代码": "000001", "名称": "平安银行", "close": 11.80, "high4": 11.20, "percent": 5.4, "涨幅": 5.4, "vol": 5000},
+        ]).set_index("代码")
+
+    policy = load_rearrange_policy()
+    filter_expr = policy.get("filter_expr", "close > high4")
+    limit = policy.get("auto_popup_limit", 10)
+
+    before_popups = len([
+        c for c, w_item in monitor_windows.items()
+        if hasattr(w_item.get("toplevel"), "_auto_popup") and getattr(w_item.get("toplevel"), "_auto_popup")
+    ])
+
+    check_monitor_break_high4(monitor_windows, data, logger, force_work_time=True)
+
+    after_popups = len([
+        c for c, w_item in monitor_windows.items()
+        if hasattr(w_item.get("toplevel"), "_auto_popup") and getattr(w_item.get("toplevel"), "_auto_popup")
+    ])
+
+    new_created = after_popups - before_popups
+    msg = f"🔔 测试执行完成！\n策略: {filter_expr}\n本次新弹出窗口: {new_created} 只\n当前存活自动弹出窗口: {after_popups}/{limit} 只"
+    if parent_win and hasattr(parent_win, "winfo_exists") and parent_win.winfo_exists():
+        toast_message(parent_win, msg)
+    else:
+        toast_message(root, msg)
+
+def check_monitor_break_high4(monitor_windows: dict, df: pd.DataFrame, logger, force_work_time=False):
     """
     [🚀 升级] 全面与重排自定义策略对齐的监控报警与自动弹出引擎：
     1. 动态加载自定义重排策略 (filter_expr, filter_enabled)
@@ -11887,7 +11944,7 @@ def check_monitor_break_high4(monitor_windows: dict, df: pd.DataFrame, logger):
                     trigger_monitor_flash(win_info)
 
     # 3. 检查未打开的小窗口：自动弹出新标的 (分组限额最多 10 只，交易期自动运行)
-    if auto_popup_enabled and get_work_time():
+    if auto_popup_enabled and (force_work_time or get_work_time()):
         # 统计当前存活的带 _auto_popup 标记的小窗口数量
         alive_auto_popups = [
             c for c, w_item in monitor_windows.items()

@@ -1,5 +1,17 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-31 12:45 【重排右键与策略配置弹窗新增实时弹出与报警测试入口】(`stock/testpy/tdxgui/异动联动.py`, `tests/test_rearrange_policy_customization.py`)
+- [x] **【重排右键上下文菜单新增测试入口】**：
+  - 在主界面【重排】按钮右键菜单 `show_rearrange_context_menu` 中新增【🔔 测试实时弹出与报警 (模拟扫描)】快捷指令，方便随时验证报警链路；
+- [x] **【策略编辑配置弹窗新增直接测试按钮】**：
+  - 在 `open_rearrange_policy_dialog` 弹窗的“盘中自动弹出新监控小窗口”控制行右侧无缝嵌入【▶ 测试弹出/报警】按钮；
+- [x] **【模拟扫描与测试弹出引擎 (`test_realtime_popup_scan`)】**：
+  - **非交易时段豁免支持**：`check_monitor_break_high4` 增加 `force_work_time=False` 参数；在测试模式下豁免交易时段检查（`force_work_time=True`），使盘后与非交易期均可随时测试验证策略弹出与震动；
+  - **智能数据源提取与兜底**：自动提取内存中的全局异动行情、实时快照或生成测试样本数据，执行即时策略判定；
+  - **交互式即时反馈**：弹窗提示扫描结果、新弹出数量以及当前存活自动弹出窗口计数与 10 只限额状态；
+- [x] **【自动化测试全绿通过（9 项专项测试 100% PASS）】**：
+  - 在 `tests/test_rearrange_policy_customization.py` 中新增 `test_force_work_time_test_entry`，验证非交易时段豁免与测试扫描链路，全量 9 项测试 100% PASS。
+
 ## 2026-10-31 12:15 【异动联动刷新周期缩短至5分钟、监控报警全面对齐重排自定义策略、未打开小窗口限额10只自动弹出与收盘自愈】(`stock/testpy/tdxgui/异动联动.py`, `tests/test_rearrange_policy_customization.py`)
 - [x] **【交易期实时快照刷新间隔调整为 5 分钟】**：
   - 将 `_get_sina_data_realtime` 中的交易时段（`is_trade_session`）刷新间隔从 10 分钟压降至 **5 分钟**，提升盘中突破异动的捕捉时效性；

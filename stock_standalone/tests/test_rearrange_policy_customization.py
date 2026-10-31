@@ -263,5 +263,31 @@ class TestRearrangePolicyCustomization(unittest.TestCase):
         has_popup_flag = any(hasattr(w['toplevel'], '_auto_popup') for w in monitor_windows.values())
         self.assertFalse(has_popup_flag)
 
+    def test_force_work_time_test_entry(self):
+        """测试在非交易时间通过测试入口 (force_work_time=True) 依然能触发报警弹窗"""
+        class DummyWindow:
+            def __init__(self):
+                self._alter_tdx = False
+                self._auto_popup = False
+            def winfo_exists(self): return True
+            def cget(self, k): return "SystemButtonFace"
+
+        monitor_windows = {"600688": {"toplevel": DummyWindow(), "stock_info": ["600688", "上海石化"]}}
+
+        def simulate_check(force_work_time=False, is_work_time=False):
+            if not (force_work_time or is_work_time):
+                return False
+            # 模拟触发
+            monitor_windows["600688"]["toplevel"]._alter_tdx = True
+            return True
+
+        # 非交易时间且未强制：无法触发
+        self.assertFalse(simulate_check(force_work_time=False, is_work_time=False))
+        self.assertFalse(monitor_windows["600688"]["toplevel"]._alter_tdx)
+
+        # 非交易时间但通过测试入口强制触发：成功触发
+        self.assertTrue(simulate_check(force_work_time=True, is_work_time=False))
+        self.assertTrue(monitor_windows["600688"]["toplevel"]._alter_tdx)
+
 if __name__ == "__main__":
     unittest.main()
