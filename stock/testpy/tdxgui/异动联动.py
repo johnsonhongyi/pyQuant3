@@ -3653,6 +3653,304 @@ def record_filter_expr_history(expr):
     save_rearrange_policy(policy)
     return history
 
+# =========================================================================
+# 🚫 自动弹出黑名单 (持久化) 与 当日淘汰记忆池 (Daily Dismissed) 管理体系
+# =========================================================================
+_daily_dismissed_stocks = set()
+_last_dismissed_date = ""
+
+def get_daily_dismissed_stocks():
+    """获取今日用户手动关闭淘汰的股票代码集合 (跨日自动清空重置)"""
+    global _daily_dismissed_stocks, _last_dismissed_date
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    if _last_dismissed_date != today_str:
+        _daily_dismissed_stocks = set()
+        _last_dismissed_date = today_str
+    return _daily_dismissed_stocks
+
+def record_daily_dismissed(code):
+    """记录今日被手动关闭淘汰的股票，当日内后续后台挖掘和测试弹出绝不重复弹出"""
+    global _daily_dismissed_stocks, _last_dismissed_date
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    if _last_dismissed_date != today_str:
+        _daily_dismissed_stocks = set()
+        _last_dismissed_date = today_str
+    c_str = str(code).strip().zfill(6)
+    if c_str:
+        _daily_dismissed_stocks.add(c_str)
+
+def load_popup_blacklist():
+    """从 CONFIG_FILE 中读取用户持久化的自动弹出黑名单 (永久不弹出)"""
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if "popup_blacklist" in data and isinstance(data["popup_blacklist"], dict):
+                return data["popup_blacklist"]
+        except Exception as e:
+            logger.debug(f"load_popup_blacklist failed: {e}")
+    return {}
+
+def save_popup_blacklist(bl_dict):
+    """保存用户自动弹出黑名单到 CONFIG_FILE"""
+    data = {}
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+    data["popup_blacklist"] = bl_dict
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+        logger.info(f"✅ 自动弹出黑名单已持久化保存，共 {len(bl_dict)} 只股票")
+        return True
+    except Exception as e:
+        logger.error(f"保存自动弹出黑名单失败: {e}")
+        return False
+
+def add_to_popup_blacklist(code, name="", reason="手动加入黑名单"):
+    """将指定股票加入自动弹出黑名单并自动持久化写盘"""
+    code_str = str(code).strip().zfill(6)
+    if not code_str:
+        return False
+    bl = load_popup_blacklist()
+    if not name:
+        try:
+            r_eval = get_stock_eval_dict(code_str)
+            name = r_eval.get("name", r_eval.get("名称", code_str))
+        except Exception:
+            name = code_str
+    bl[code_str] = {
+        "code": code_str,
+        "name": name,
+        "add_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "reason": reason
+    }
+    return save_popup_blacklist(bl)
+
+def remove_from_popup_blacklist(code):
+    """将指定股票移出自动弹出黑名单并写盘"""
+    code_str = str(code).strip().zfill(6)
+    bl = load_popup_blacklist()
+    if code_str in bl:
+        del bl[code_str]
+        return save_popup_blacklist(bl)
+    return False
+
+def is_in_popup_blacklist(code):
+    """判断指定股票是否处于自动弹出黑名单中"""
+    code_str = str(code).strip().zfill(6)
+    bl = load_popup_blacklist()
+    return code_str in bl
+
+_blacklist_manager_dialog_win = None
+
+def open_blacklist_manager_dialog(parent_win=None):
+    """
+    [🚀 新增] 自动弹出与挖掘黑名单集中管理弹窗：
+    - 独立无模态顶层窗口，支持多屏幕与窗口位置记忆
+    - 集中查看、实时搜索、手动添加、一键批量移出
+    - 支持双击行或按钮向通达信发送联动广播
+    - 按 Esc 键一键安全退出并保存位置
+    """
+    global _blacklist_manager_dialog_win, WINDOW_GEOMETRIES
+    if _blacklist_manager_dialog_win and hasattr(_blacklist_manager_dialog_win, "winfo_exists") and _blacklist_manager_dialog_win.winfo_exists():
+        try:
+            _blacklist_manager_dialog_win.deiconify()
+            _blacklist_manager_dialog_win.lift()
+            _blacklist_manager_dialog_win.focus_force()
+            return
+        except Exception:
+            pass
+
+    win = tk.Toplevel(parent_win if parent_win else root)
+    _blacklist_manager_dialog_win = win
+    win.title("🚫 自动弹出与挖掘黑名单集中管理")
+    win.geometry("660x480")
+    win.minsize(520, 360)
+
+    # 尝试恢复历史窗口几何位置
+    win_key = "blacklist_manager_dialog"
+    if win_key in WINDOW_GEOMETRIES:
+        try:
+            win.geometry(WINDOW_GEOMETRIES[win_key])
+        except Exception:
+            pass
+
+    def on_close_bl_dialog(event=None):
+        global _blacklist_manager_dialog_win
+        try:
+            if win.winfo_exists():
+                WINDOW_GEOMETRIES[win_key] = win.geometry()
+                schedule_save_positions()
+        except Exception:
+            pass
+        _blacklist_manager_dialog_win = None
+        win.destroy()
+
+    win.protocol("WM_DELETE_WINDOW", on_close_bl_dialog)
+    win.bind("<Escape>", on_close_bl_dialog)
+    win.bind("<Key-Escape>", on_close_bl_dialog)
+
+    main_frame = ttk.Frame(win, padding=10)
+    main_frame.pack(fill=tk.BOTH, expand=True)
+
+    # 1. 顶部操作栏（添加 + 搜索过滤）
+    top_bar = ttk.Frame(main_frame)
+    top_bar.pack(fill=tk.X, pady=(0, 8))
+
+    ttk.Label(top_bar, text="股票代码:").pack(side=tk.LEFT)
+    var_add_code = tk.StringVar()
+    entry_add = ttk.Entry(top_bar, textvariable=var_add_code, width=10)
+    entry_add.pack(side=tk.LEFT, padx=(4, 8))
+
+    def do_add_from_entry():
+        code = var_add_code.get().strip().zfill(6)
+        if not code or len(code) != 6:
+            toast_message(win, "请输入正确的 6 位股票代码")
+            return
+        add_to_popup_blacklist(code)
+        var_add_code.set("")
+        refresh_tree()
+        toast_message(win, f"已将 {code} 加入自动弹出黑名单")
+
+    btn_add = ttk.Button(top_bar, text="➕ 加入黑名单", command=do_add_from_entry)
+    btn_add.pack(side=tk.LEFT, padx=(0, 15))
+    entry_add.bind("<Return>", lambda e: do_add_from_entry())
+
+    ttk.Label(top_bar, text="🔍 搜索:").pack(side=tk.LEFT)
+    var_filter = tk.StringVar()
+    entry_filter = ttk.Entry(top_bar, textvariable=var_filter, width=12)
+    entry_filter.pack(side=tk.LEFT, padx=(4, 8))
+
+    def on_filter_change(event=None):
+        refresh_tree()
+    entry_filter.bind("<KeyRelease>", on_filter_change)
+
+    btn_refresh = ttk.Button(top_bar, text="🔄 刷新", command=lambda: refresh_tree())
+    btn_refresh.pack(side=tk.RIGHT)
+
+    # 2. 中部表格
+    tree_frame = ttk.Frame(main_frame)
+    tree_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+
+    cols = ("code", "name", "add_time", "reason")
+    tree = ttk.Treeview(tree_frame, columns=cols, show="headings", selectmode="extended")
+    tree.heading("code", text="股票代码", anchor=tk.CENTER)
+    tree.heading("name", text="股票名称", anchor=tk.W)
+    tree.heading("add_time", text="添加时间", anchor=tk.CENTER)
+    tree.heading("reason", text="备注/原因", anchor=tk.W)
+
+    tree.column("code", width=80, anchor=tk.CENTER)
+    tree.column("name", width=100, anchor=tk.W)
+    tree.column("add_time", width=160, anchor=tk.CENTER)
+    tree.column("reason", width=200, anchor=tk.W)
+
+    vsb = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=tree.yview)
+    tree.configure(yscrollcommand=vsb.set)
+    tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+    vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+    # 双击行联动 TDX
+    def on_tree_double_click(event=None):
+        sel = tree.selection()
+        if not sel:
+            return
+        item_vals = tree.item(sel[0], "values")
+        if item_vals:
+            c = item_vals[0]
+            send_to_tdx(c)
+            toast_message(win, f"已向行情终端联动: {c} {item_vals[1]}")
+
+    tree.bind("<Double-1>", on_tree_double_click)
+
+    # 刷新表格内容
+    def refresh_tree():
+        for it in tree.get_children():
+            tree.delete(it)
+        bl_data = load_popup_blacklist()
+        q = var_filter.get().strip().lower()
+        count = 0
+        for code_str, info in sorted(bl_data.items(), key=lambda x: x[1].get("add_time", ""), reverse=True):
+            name = info.get("name", code_str)
+            t_str = info.get("add_time", "")
+            r_str = info.get("reason", "手动加入")
+            if q and (q not in code_str.lower() and q not in name.lower()):
+                continue
+            tree.insert("", tk.END, values=(code_str, name, t_str, r_str))
+            count += 1
+        lbl_status.config(text=f"当前黑名单共 {len(bl_data)} 只股票（当前展示 {count} 只）")
+
+    # 移出选中项
+    def do_remove_selected():
+        sel = tree.selection()
+        if not sel:
+            toast_message(win, "请先在列表中选中要移出的股票")
+            return
+        del_codes = []
+        for s in sel:
+            vals = tree.item(s, "values")
+            if vals:
+                del_codes.append(vals[0])
+        bl = load_popup_blacklist()
+        removed = 0
+        for c in del_codes:
+            if c in bl:
+                del bl[c]
+                removed += 1
+        save_popup_blacklist(bl)
+        refresh_tree()
+        toast_message(win, f"已移出 {removed} 只黑名单股票")
+
+    def on_tree_delete_key(event=None):
+        do_remove_selected()
+    tree.bind("<Delete>", on_tree_delete_key)
+
+    def do_link_selected():
+        sel = tree.selection()
+        if not sel:
+            toast_message(win, "请先在列表中选中股票")
+            return
+        item_vals = tree.item(sel[0], "values")
+        if item_vals:
+            c = item_vals[0]
+            send_to_tdx(c)
+            toast_message(win, f"已向行情终端联动: {c} {item_vals[1]}")
+
+    def do_clear_all():
+        bl = load_popup_blacklist()
+        if not bl:
+            toast_message(win, "当前黑名单为空")
+            return
+        if messagebox.askyesno("清空确认", f"确定要清空全部 {len(bl)} 只黑名单股票吗？\n清空后系统将恢复对这些股票的自动弹出挖掘。"):
+            save_popup_blacklist({})
+            refresh_tree()
+            toast_message(win, "已清空全部自动弹出黑名单")
+
+    # 3. 底部操作栏
+    bottom_bar = ttk.Frame(main_frame)
+    bottom_bar.pack(fill=tk.X)
+
+    lbl_status = ttk.Label(bottom_bar, text="当前黑名单共 0 只股票", foreground="#555555")
+    lbl_status.pack(side=tk.LEFT)
+
+    btn_close = ttk.Button(bottom_bar, text="关闭 (Esc)", command=on_close_bl_dialog)
+    btn_close.pack(side=tk.RIGHT, padx=(4, 0))
+
+    btn_clear = ttk.Button(bottom_bar, text="🗑 清空全部", command=do_clear_all)
+    btn_clear.pack(side=tk.RIGHT, padx=(4, 0))
+
+    btn_del = ttk.Button(bottom_bar, text="❌ 移出黑名单", command=do_remove_selected)
+    btn_del.pack(side=tk.RIGHT, padx=(4, 0))
+
+    btn_link = ttk.Button(bottom_bar, text="🔗 联动所选", command=do_link_selected)
+    btn_link.pack(side=tk.RIGHT, padx=(4, 0))
+
+    # 初始载入
+    refresh_tree()
+
 def eval_rearrange_condition(expr, row_dict):
     """安全评估重排过滤策略表达式"""
     if not expr or not expr.strip():
@@ -4492,6 +4790,9 @@ def open_rearrange_policy_dialog(parent_win=None):
 
     btn_test_popup = ttk.Button(frame_popup, text="▶ 测试弹出/报警", width=14, command=on_click_test_popup)
     btn_test_popup.pack(side=tk.LEFT, padx=(8, 0))
+
+    btn_bl_mgr = ttk.Button(frame_popup, text="📋 黑名单管理", width=12, command=lambda: open_blacklist_manager_dialog(win))
+    btn_bl_mgr.pack(side=tk.LEFT, padx=(6, 0))
 
     frame_expr = ttk.Frame(lbl_group)
     frame_expr.pack(fill=tk.X, pady=3)
@@ -7939,6 +8240,30 @@ def show_context_menu(event):
                 x_root=event.x_root,
                 y_root=event.y_root))
         context_menu.add_command(label="添加异常Code", command=add_code_to_file_tree)
+        context_menu.add_separator()
+
+        # [🚀 新增] 自动弹出黑名单管理功能
+        if sel_count == 1:
+            in_bl = is_in_popup_blacklist(stock_code)
+            bl_label = "✅ 从自动弹出黑名单移出" if in_bl else "🚫 加入自动弹出黑名单 (不再弹出)"
+            def make_toggle_single_bl(c=stock_code, n=stock_name, already_in=in_bl):
+                def _do():
+                    if already_in:
+                        remove_from_popup_blacklist(c)
+                        toast_message(root, f"已将 {c} {n} 从黑名单移出")
+                    else:
+                        add_to_popup_blacklist(c, n)
+                        toast_message(root, f"已将 {c} {n} 加入自动弹出黑名单")
+                return _do
+            context_menu.add_command(label=bl_label, command=make_toggle_single_bl())
+        else:
+            def batch_add_bl():
+                for s in selected_stocks:
+                    add_to_popup_blacklist(s["code"], s["name"])
+                toast_message(root, f"已将选中的 {sel_count} 只股票加入自动弹出黑名单")
+            context_menu.add_command(label=f"🚫 批量加入自动弹出黑名单 ({sel_count}只)", command=batch_add_bl)
+
+        context_menu.add_command(label="📋 管理自动弹出黑名单...", command=lambda: open_blacklist_manager_dialog(root))
 
         context_menu.post(event.x_root, event.y_root)
     except Exception as e:
@@ -8647,6 +8972,13 @@ def on_close_monitor(window_info):
     stock_info = window_info['stock_info']
     stock_code = stock_info[0] # 使用 stock_info 中的第一个元素作为股票代码
     window = window_info['toplevel']
+
+    # [🚀 挖掘与淘汰闭环] 若该窗口为自动弹出窗口（带 _auto_popup），手动关闭代表用户淘汰了该标的
+    # 当日内自动挖掘和测试弹出绝对不再重复弹出该股票，从而能够持续挖掘后排未发现的标的！
+    if hasattr(window, "_auto_popup") and getattr(window, "_auto_popup"):
+        record_daily_dismissed(stock_code)
+        logger.info(f"🚫 [DAILY_DISMISSED] 用户手动关闭淘汰了自动弹出标的 {stock_code}，今日内不再重复弹出")
+
     if stock_code in monitor_windows.keys():
         del monitor_windows[stock_code]
 
@@ -9471,6 +9803,18 @@ def create_monitor_window(stock_info):
                                  parent_win=parent_win,
                                  x_root=event.x_root,
                                  y_root=event.y_root))
+            menu.add_separator()
+            in_bl = is_in_popup_blacklist(stock_code)
+            bl_label = "✅ 从自动弹出黑名单移出" if in_bl else "🚫 加入自动弹出黑名单 (不再弹出)"
+            def do_toggle_monitor_bl(c=stock_code, n=stock_name, already_in=in_bl):
+                if already_in:
+                    remove_from_popup_blacklist(c)
+                    toast_message(parent_win, f"已将 {c} 从黑名单移出")
+                else:
+                    add_to_popup_blacklist(c, n)
+                    toast_message(parent_win, f"已将 {c} {n} 加入自动弹出黑名单")
+            menu.add_command(label=bl_label, command=do_toggle_monitor_bl)
+            menu.add_command(label="📋 管理自动弹出黑名单...", command=lambda: open_blacklist_manager_dialog(parent_win))
             menu.post(event.x_root, event.y_root)
         else:
             menu = tk.Menu(monitor_win, tearoff=0)
@@ -9479,6 +9823,18 @@ def create_monitor_window(stock_info):
                                  parent_win=parent_win,
                                  x_root=event.x_root,
                                  y_root=event.y_root))
+            menu.add_separator()
+            in_bl = is_in_popup_blacklist(stock_code)
+            bl_label = "✅ 从自动弹出黑名单移出" if in_bl else "🚫 加入自动弹出黑名单 (不再弹出)"
+            def do_toggle_monitor_bl_bg(c=stock_code, n=stock_name, already_in=in_bl):
+                if already_in:
+                    remove_from_popup_blacklist(c)
+                    toast_message(parent_win, f"已将 {c} 从黑名单移出")
+                else:
+                    add_to_popup_blacklist(c, n)
+                    toast_message(parent_win, f"已将 {c} {n} 加入自动弹出黑名单")
+            menu.add_command(label=bl_label, command=do_toggle_monitor_bl_bg)
+            menu.add_command(label="📋 管理自动弹出黑名单...", command=lambda: open_blacklist_manager_dialog(parent_win))
             menu.post(event.x_root, event.y_root)
 
     # === 保存窗口信息 ===
@@ -12597,8 +12953,13 @@ def check_monitor_break_high4(monitor_windows: dict, df: pd.DataFrame, logger, f
         else:
             candidate_codes = [str(idx).strip().zfill(6) for idx in df.index if str(idx).strip().isdigit()]
 
-        # 过滤掉已经打开监控窗口的标的
-        unmonitored_codes = [c for c in candidate_codes if c not in monitor_windows]
+        # 过滤掉已经打开监控窗口的标的、永久黑名单标的以及今日被手动关闭淘汰的标的
+        popup_bl_map = load_popup_blacklist()
+        daily_dismissed_set = get_daily_dismissed_stocks()
+        unmonitored_codes = [
+            c for c in candidate_codes 
+            if c not in monitor_windows and c not in popup_bl_map and c not in daily_dismissed_set
+        ]
 
         # [🚀 极限性能保护] 盘中实盘模式下，候选池优先检查最新 100 只活跃标的，杜绝数千条全天历史扫描阻塞主线程
         if not force_work_time and len(unmonitored_codes) > 100:

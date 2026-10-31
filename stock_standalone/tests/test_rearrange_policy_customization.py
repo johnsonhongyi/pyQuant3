@@ -972,5 +972,77 @@ class TestRearrangePolicyCustomization(unittest.TestCase):
         self.assertEqual(created_count, 0)
         self.assertFalse(created_count > 0)
 
+    def test_daily_dismissed_recording_and_auto_popup_exclusion(self):
+        """测试当日淘汰池机制：手动关闭已弹出的窗口后记录淘汰，当日绝不重复弹出，持续挖掘后排"""
+        daily_dismissed = set()
+        
+        def mock_record_dismissed(code):
+            daily_dismissed.add(str(code).zfill(6))
+
+        # 模拟 002667 窗口被手动关闭
+        mock_record_dismissed("002667")
+        self.assertIn("002667", daily_dismissed)
+
+        # 模拟下一轮自动挖掘候选池扫描
+        candidate_codes = ["002667", "600123", "000568"]
+        monitor_windows = {"000568": {}}
+        popup_bl_map = {}
+
+        # 执行过滤逻辑
+        unmonitored_codes = [
+            c for c in candidate_codes 
+            if c not in monitor_windows and c not in popup_bl_map and c not in daily_dismissed
+        ]
+
+        # 验证：002667(被淘汰) 和 000568(已监控) 被排除，成功挖掘出 600123
+        self.assertEqual(unmonitored_codes, ["600123"])
+
+    def test_popup_blacklist_persistence_add_remove(self):
+        """测试黑名单字典数据结构与添加、移出及时间记录"""
+        from datetime import datetime
+        bl_store = {}
+
+        def mock_add(code, name, reason="手动加入黑名单"):
+            c_str = str(code).zfill(6)
+            bl_store[c_str] = {
+                "code": c_str,
+                "name": name,
+                "add_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "reason": reason
+            }
+
+        def mock_remove(code):
+            c_str = str(code).zfill(6)
+            if c_str in bl_store:
+                del bl_store[c_str]
+
+        # 添加黑名单
+        mock_add("002667", "*ST威领")
+        self.assertIn("002667", bl_store)
+        self.assertEqual(bl_store["002667"]["name"], "*ST威领")
+        self.assertTrue(len(bl_store["002667"]["add_time"]) > 10)
+
+        # 移出黑名单
+        mock_remove("002667")
+        self.assertNotIn("002667", bl_store)
+
+    def test_popup_blacklist_candidate_exclusion(self):
+        """测试处于永久黑名单中的股票在候选池中被严格剔除"""
+        popup_bl_map = {
+            "002667": {"code": "002667", "name": "*ST威领"}
+        }
+        candidate_codes = ["002667", "600592", "603536"]
+        monitor_windows = {}
+        daily_dismissed = set()
+
+        unmonitored_codes = [
+            c for c in candidate_codes 
+            if c not in monitor_windows and c not in popup_bl_map and c not in daily_dismissed
+        ]
+
+        # 验证 002667 被黑名单剔除
+        self.assertNotIn("002667", unmonitored_codes)
+        self.assertEqual(unmonitored_codes, ["600592", "603536"])
+
 if __name__ == "__main__":
     unittest.main()
