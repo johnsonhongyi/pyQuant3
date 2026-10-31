@@ -3746,12 +3746,26 @@ def evaluate_condition_detail(expr, row_dict):
     except Exception as e:
         return False, str(e), involved_vars, sub_conditions
 
+# 全局重排独立窗口句柄 (防重激活与非模态支持)
+_rearrange_policy_dialog_win = None
+_rearrange_test_dialog_win = None
+
 def open_rearrange_test_dialog(parent_win=None, var_parent_expr=None):
     """
-    [🚀 新增] 重排策略过滤测试与可用字段数据查看弹窗 (简化版，支持窗口位置持久化)
+    [🚀 新增] 重排策略过滤测试与可用字段数据查看弹窗 (独立无模态窗口，支持窗口位置持久化)
     """
-    global WINDOW_GEOMETRIES
-    test_win = tk.Toplevel(parent_win or root)
+    global WINDOW_GEOMETRIES, _rearrange_test_dialog_win
+    if _rearrange_test_dialog_win and hasattr(_rearrange_test_dialog_win, "winfo_exists") and _rearrange_test_dialog_win.winfo_exists():
+        try:
+            _rearrange_test_dialog_win.deiconify()
+            _rearrange_test_dialog_win.lift()
+            _rearrange_test_dialog_win.focus_force()
+            return _rearrange_test_dialog_win
+        except Exception:
+            pass
+
+    test_win = tk.Toplevel(root)
+    _rearrange_test_dialog_win = test_win
     test_win.title("🧪 重排策略过滤测试与字段数据查看")
     
     # 窗口位置恢复与持久化
@@ -3765,22 +3779,23 @@ def open_rearrange_test_dialog(parent_win=None, var_parent_expr=None):
         test_win.geometry("700x560")
         try:
             test_win.update_idletasks()
-            pw = parent_win or root
+            pw = root
             x = pw.winfo_x() + (pw.winfo_width() - 700) // 2
             y = pw.winfo_y() + (pw.winfo_height() - 560) // 2
             test_win.geometry(f"+{max(0, x)}+{max(0, y)}")
         except Exception:
             pass
 
-    if hasattr(test_win, "transient"):
-        test_win.transient(parent_win or root)
+    # [彻底独立无模态] 不调用 transient，不设置 grab_set，用户可自由切换操作主窗口和其他监控小窗口
 
     def on_close_test_win(event=None):
+        global _rearrange_test_dialog_win
         try:
             WINDOW_GEOMETRIES["rearrange_test_dialog"] = test_win.geometry()
             schedule_save_positions()
         except Exception:
             pass
+        _rearrange_test_dialog_win = None
         test_win.destroy()
 
     test_win.protocol("WM_DELETE_WINDOW", on_close_test_win)
@@ -4022,11 +4037,21 @@ def open_rearrange_test_dialog(parent_win=None, var_parent_expr=None):
     refresh_data_and_test()
 
 def open_rearrange_policy_dialog(parent_win=None):
-    """打开重排策略与过滤规则编辑配置弹窗 (支持窗口位置记忆与测试功能)"""
-    global WINDOW_GEOMETRIES
+    """打开重排策略与过滤规则编辑配置弹窗 (独立无模态窗口，支持窗口位置记忆与测试功能)"""
+    global WINDOW_GEOMETRIES, _rearrange_policy_dialog_win
+    if _rearrange_policy_dialog_win and hasattr(_rearrange_policy_dialog_win, "winfo_exists") and _rearrange_policy_dialog_win.winfo_exists():
+        try:
+            _rearrange_policy_dialog_win.deiconify()
+            _rearrange_policy_dialog_win.lift()
+            _rearrange_policy_dialog_win.focus_force()
+            return _rearrange_policy_dialog_win
+        except Exception:
+            pass
+
     policy = load_rearrange_policy()
     
-    win = tk.Toplevel(parent_win or root)
+    win = tk.Toplevel(root)
+    _rearrange_policy_dialog_win = win
     win.title("⚙️ 重排策略与过滤规则配置")
     
     # [🚀 修复] 窗口位置恢复与持久化支持
@@ -4040,7 +4065,7 @@ def open_rearrange_policy_dialog(parent_win=None):
         win.geometry("560x440")
         try:
             win.update_idletasks()
-            pw = parent_win or root
+            pw = root
             x = pw.winfo_x() + (pw.winfo_width() - 560) // 2
             y = pw.winfo_y() + (pw.winfo_height() - 440) // 2
             win.geometry(f"+{max(0, x)}+{max(0, y)}")
@@ -4048,16 +4073,16 @@ def open_rearrange_policy_dialog(parent_win=None):
             pass
 
     win.resizable(False, False)
-    if hasattr(win, "transient"):
-        win.transient(parent_win or root)
-    win.grab_set()
+    # [彻底独立无模态] 不调用 transient，不设置 grab_set，避免锁定主界面与监控小窗口，用户可并行操作
 
     def on_close_policy_dialog(event=None):
+        global _rearrange_policy_dialog_win
         try:
             WINDOW_GEOMETRIES["rearrange_policy_dialog"] = win.geometry()
             schedule_save_positions()
         except Exception:
             pass
+        _rearrange_policy_dialog_win = None
         win.destroy()
 
     win.protocol("WM_DELETE_WINDOW", on_close_policy_dialog)
@@ -4178,10 +4203,10 @@ def open_rearrange_policy_dialog(parent_win=None):
             pass
         try:
             rearrange_monitors_per_screen()
-            toast_message(win, "✅ 策略已保存并完成重新排列！")
+            toast_message(root, "✅ 策略已保存并完成重新排列！")
         except Exception as e:
             logger.error(f"重排执行异常: {e}")
-        win.destroy()
+        on_close_policy_dialog()
 
     def reset_default():
         save_rearrange_policy(DEFAULT_REARRANGE_POLICY)

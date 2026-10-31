@@ -289,5 +289,30 @@ class TestRearrangePolicyCustomization(unittest.TestCase):
         self.assertTrue(simulate_check(force_work_time=True, is_work_time=False))
         self.assertTrue(monitor_windows["600688"]["toplevel"]._alter_tdx)
 
+    def test_non_modal_independent_dialog_contract(self):
+        """测试策略配置窗口与测试窗口为独立顶层窗口，绝不使用 grab_set 和 transient 阻断主流程"""
+        # 读取 异动联动.py 源码静态契约
+        script_path = os.path.join(os.path.dirname(__file__), "..", "..", "stock", "testpy", "tdxgui", "异动联动.py")
+        if os.path.exists(script_path):
+            with open(script_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            # 定位 open_rearrange_policy_dialog 实现段
+            policy_func_start = content.find("def open_rearrange_policy_dialog")
+            self.assertGreater(policy_func_start, 0)
+            policy_func_end = content.find("def show_rearrange_context_menu", policy_func_start)
+            policy_func_code = content[policy_func_start:policy_func_end]
+
+            # 验证绝无 win.grab_set()
+            self.assertNotIn("win.grab_set()", policy_func_code)
+            # 验证绝无 win.transient
+            self.assertNotIn("win.transient(", policy_func_code)
+
+            # 定位 open_rearrange_test_dialog 实现段
+            test_func_start = content.find("def open_rearrange_test_dialog")
+            self.assertGreater(test_func_start, 0)
+            test_func_code = content[test_func_start:policy_func_start]
+            self.assertNotIn("test_win.grab_set()", test_func_code)
+            self.assertNotIn("test_win.transient(", test_func_code)
+
 if __name__ == "__main__":
     unittest.main()

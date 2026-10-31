@@ -1,5 +1,15 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-31 13:00 【重排策略配置与测试弹窗改为独立无模态顶层窗口、解除主窗口与监控锁定】(`stock/testpy/tdxgui/异动联动.py`, `tests/test_rearrange_policy_customization.py`)
+- [x] **【彻底根除模态阻塞与主窗口锁定】**：
+  - **移除 `grab_set()`**：彻底清除 `open_rearrange_policy_dialog` 中的 `win.grab_set()`，解脱主界面、其他所有监控小窗口的事件独占阻塞，用户可边开着配置窗口边自由看盘、点击联动、重排；
+  - **移除 `transient()` 依附**：移除配置窗口与测试窗口的 `win.transient(...)`，升级为完全独立的平级顶层窗口（Independent Toplevel Window），不被主窗口强占层级，任务栏与桌面管理器原生支持独立并存；
+- [x] **【窗口单例激活与并发防重】**：
+  - 新增 `_rearrange_policy_dialog_win` 与 `_rearrange_test_dialog_win` 单例句柄；
+  - 若配置或测试窗口已处于打开状态，用户再次点击右键或详情按钮时，自动调用 `deiconify()`、`lift()`、`focus_force()` 将已有窗口带到前台，避免产生重叠无序的垃圾子窗口；
+- [x] **【自动化测试全绿通过（10 项专项测试 100% PASS）】**：
+  - 在 `tests/test_rearrange_policy_customization.py` 中新增 `test_non_modal_independent_dialog_contract` 静态契约测试，全量 10 项测试 100% 纯绿通过。
+
 ## 2026-10-31 12:45 【重排右键与策略配置弹窗新增实时弹出与报警测试入口】(`stock/testpy/tdxgui/异动联动.py`, `tests/test_rearrange_policy_customization.py`)
 - [x] **【重排右键上下文菜单新增测试入口】**：
   - 在主界面【重排】按钮右键菜单 `show_rearrange_context_menu` 中新增【🔔 测试实时弹出与报警 (模拟扫描)】快捷指令，方便随时验证报警链路；
