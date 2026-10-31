@@ -211,28 +211,18 @@ class ColumnSetManager(tk.Toplevel):
     # 鼠标滚轮支持（只在 canvas 区生效）
     # ---------------------------
     def _bind_mousewheel(self, bind: bool):
-        # Windows: <MouseWheel> with event.delta; Linux: Button-4/5
+        # 统一使用原生 <MouseWheel>，彻底解除对鼠标侧键 4/5 (XButton) 的劫持
         if bind:
             self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
-            self.canvas.bind_all("<Button-4>", self._on_mousewheel)
-            self.canvas.bind_all("<Button-5>", self._on_mousewheel)
         else:
             try:
                 self.canvas.unbind_all("<MouseWheel>")
-                self.canvas.unbind_all("<Button-4>")
-                self.canvas.unbind_all("<Button-5>")
             except Exception:
                 pass
 
     def _on_mousewheel(self, event):
-        # cross-platform wheel handling
-        if event.num == 4:  # Linux scroll up
-            self.canvas.yview_scroll(-1, "units")
-        elif event.num == 5:  # Linux scroll down
-            self.canvas.yview_scroll(1, "units")
-        else:
-            # Windows / Mac
-            delta = int(-1*(event.delta/120))
+        delta = int(-1 * (getattr(event, "delta", 0) / 120)) if getattr(event, "delta", 0) else 0
+        if delta:
             self.canvas.yview_scroll(delta, "units")
 
     def _debounced_update(self):

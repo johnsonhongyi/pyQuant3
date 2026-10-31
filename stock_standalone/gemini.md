@@ -1,5 +1,14 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-30 22:30 【TK彻底移除鼠标Button-4/Button-5侧键滚轮绑定、释放XButton硬件侧键工程治理】(`instock_MonitorTK.py`, `column_manager.py`, `popularity_resonance_gui.py`, `temp_historical_monitor.py`, `tests/test_tk_mouse_button4_5_unbind.py`, `docs/tasks/2026-10-30_2225_TK彻底移除鼠标Button4和Button5侧键滚轮绑定治理.md`)
+- [x] **【彻底根除误将物理鼠标侧键 4/5 绑定为滚轮的历史隐患】**：
+  - **Linux 与 Windows 事件映射历史大坑**：在 Linux/X11 下滚轮对应 `<Button-4>` / `<Button-5>`，但在 Windows 下滚轮为 `<MouseWheel>`，`<Button-4>` 和 `<Button-5>` 对应物理鼠标前进/后退侧键（XButton1 / XButton2）；
+  - **全局 bind_all 劫持全面清理**：彻底清除了 `instock_MonitorTK.py`（概念前10小窗口、历史汇总等 3 处）、`column_manager.py`、`popularity_resonance_gui.py`、`temp_historical_monitor.py` 中所有的 `bind_all("<Button-4>")` / `bind_all("<Button-5>")` 及 `unbind_all`；
+  - **杜绝低级鼠标钩子（WH_MOUSE_LL）竞争与 Key Manager 崩溃超时**：Windows 下全量收敛至原生 `<MouseWheel>`（按 `event.delta` 科学滚动），彻底不再劫持用户的物理鼠标第 4、5 键，确保映射为 F5 / Esc / Enter 时 100% 畅通无阻，不再发生 Windows 钩子超时被拔除；
+- [x] **【自动化测试全绿通过】**：
+  - 新增 `tests/test_tk_mouse_button4_5_unbind.py` 覆盖全代码库零 Button-4/5 劫持静态契约与 ColumnSetManager 原生 `<MouseWheel>` 滚动动态契约，2 项专项测试 100% PASS；
+  - 关联的 `tests/test_top10_sort_and_rearrange_grid.py`（3项）、`tests/test_tk_bidding_responsiveness.py`（25项）、`tests/test_tk_volume_ratio_data_consistency.py`（5项）全绿通过。
+
 ## 2026-10-30 13:10 【TK概念前10小窗口排序联动滚动置顶与Q键自动网格重排置顶工程治理】(	k_gui_modules/treeview_mixin.py, gui_utils.py, instock_MonitorTK.py, 	ests/test_top10_sort_and_rearrange_grid.py)
 - [x] **【点击排序后自动滚动到顶部并选中首行联动】**：
   - **后置动作彻底闭环 (_on_mixin_sort_post_action)**：无论是单级排序、多级排序还是跨概念窗口同步广播，排序完成后统一调用 	ree.yview_moveto(0) 自动回滚到顶部第一屏；

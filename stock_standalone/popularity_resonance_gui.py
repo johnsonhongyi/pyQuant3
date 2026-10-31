@@ -5133,14 +5133,10 @@ class PRServiceGUI:
 
         def bind_mousewheel(event):
             canvas.bind_all("<MouseWheel>", on_mousewheel)
-            canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
-            canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
 
         def unbind_mousewheel(event=None):
             try:
                 canvas.unbind_all("<MouseWheel>")
-                canvas.unbind_all("<Button-4>")
-                canvas.unbind_all("<Button-5>")
             except Exception:
                 pass
 

@@ -7785,14 +7785,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         def bind_mousewheel(event):
             canvas.bind_all("<MouseWheel>", on_mousewheel)
-            canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
-            canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
 
         def unbind_mousewheel(event=None):
             try:
                 canvas.unbind_all("<MouseWheel>")
-                canvas.unbind_all("<Button-4>")
-                canvas.unbind_all("<Button-5>")
             except Exception:
                 pass
 
@@ -8299,12 +8295,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             tree.yview_scroll(int(-1*(event.delta/120)), "units")
         def bind_mousewheel(event):
             tree.bind_all("<MouseWheel>", on_mousewheel)
-            tree.bind_all("<Button-4>", lambda e: tree.yview_scroll(-1,"units"))
-            tree.bind_all("<Button-5>", lambda e: tree.yview_scroll(1,"units"))
         def unbind_mousewheel(event=None):
-            tree.unbind_all("<MouseWheel>")
-            tree.unbind_all("<Button-4>")
-            tree.unbind_all("<Button-5>")
+            try:
+                tree.unbind_all("<MouseWheel>")
+            except Exception:
+                pass
 
         tree.bind("<Enter>", bind_mousewheel)
         tree.bind("<Leave>", unbind_mousewheel)
@@ -8627,12 +8622,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             tree.yview_scroll(int(-1*(event.delta/120)), "units")
         def bind_mousewheel(event):
             tree.bind_all("<MouseWheel>", on_mousewheel)
-            tree.bind_all("<Button-4>", lambda e: tree.yview_scroll(-1,"units"))
-            tree.bind_all("<Button-5>", lambda e: tree.yview_scroll(1,"units"))
         def unbind_mousewheel(event=None):
-            tree.unbind_all("<MouseWheel>")
-            tree.unbind_all("<Button-4>")
-            tree.unbind_all("<Button-5>")
+            try:
+                tree.unbind_all("<MouseWheel>")
+            except Exception:
+                pass
 
         tree.bind("<Enter>", bind_mousewheel)
         tree.bind("<Leave>", unbind_mousewheel)
