@@ -1756,7 +1756,11 @@ def schedule_daily_archive(root, hour=15, minute=5, archive_file=None):
     def archive_func():
         logger.info(f'archive_func datetime.now() : {datetime.now()}')
         start_async_save()
-        # start_async_save_dataframe()
+        # [🚀 修复] 自动归档监控数据与报警配置，确保每日历史监控备份不中断
+        try:
+            save_monitor_list()
+        except Exception as e:
+            logger.error(f"archive_func save_monitor_list failed: {e}")
 
     def next_archive_time():
         """计算下一次存档时间，跳过周末"""
@@ -2677,7 +2681,11 @@ def daily_task():
             logger.info('worksaveday_task is running ,return')
             return
     start_async_save()
-    # start_async_save_dataframe()
+    # [🚀 修复] 每日定时任务同步保存并归档监控数据
+    try:
+        save_monitor_list()
+    except Exception as e:
+        logger.error(f"daily_task save_monitor_list failed: {e}")
     # 在这里添加你的具体任务，例如：
 
 
@@ -3344,6 +3352,40 @@ def schedule_workday_task(root, target_hour, target_minute, immediate=False):
 
 
 
+def bring_all_monitors_to_front(event=None):
+    """
+    [🚀 新增] 按 Q 键把所有监控带到最前显示，不用置顶，不用重排
+    """
+    # 如果焦点在文本输入控件，放行按键输入，不触发窗口提升
+    if event and getattr(event, "widget", None):
+        try:
+            cls_name = event.widget.winfo_class()
+            if cls_name in ("Entry", "TEntry", "Text", "Combobox", "TCombobox"):
+                return
+        except Exception:
+            pass
+
+    global monitor_windows
+    if not monitor_windows:
+        return
+
+    count = 0
+    for code, info in list(monitor_windows.items()):
+        try:
+            win = info.get("toplevel") if isinstance(info, dict) else info
+            if win and win.winfo_exists():
+                if win.state() == "iconic":
+                    win.deiconify()
+                # 仅将窗口提升至最前，不加 attributes("-topmost", True)，不重排位置
+                win.lift()
+                count += 1
+        except Exception as e:
+            logger.debug(f"bring monitor {code} to front failed: {e}")
+
+    if count > 0:
+        logger.info(f"已将 {count} 个监控窗口带到最前显示 (无置顶/无重排)")
+
+
 def rearrange_monitor_windows_grid():
     """一键自动网格排列所有监控窗口"""
     global monitor_windows
@@ -3502,13 +3544,289 @@ def get_bottom_taskbar_height():
     logger.info(f"⚠ taskbar_height: {taskbar_height} screen_height:{screen_height} rect.bottom:{rect.bottom}")
     return max(taskbar_height, 0)
 
-def rearrange_monitors_per_screen(align="left", sort_by="create_time", layout="horizontal"):
+***REMOVED***
+# 🪟 重排策略与过滤规则管理 (支持自定义、右键配置与自动持久化)
+***REMOVED***
+DEFAULT_REARRANGE_POLICY = {
+    "filter_expr": "close > high4",
+    "filter_enabled": True,
+    "sort_by": "create_time",
+    "sort_reverse": True,
+    "align": "left",
+    "layout": "horizontal",
+    "action_alter": "bottom_right_red"
+}
+
+def load_rearrange_policy():
+    """从 window_config.json 读取持久化的重排策略"""
+    policy = DEFAULT_REARRANGE_POLICY.copy()
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if "rearrange_policy" in data and isinstance(data["rearrange_policy"], dict):
+                policy.update(data["rearrange_policy"])
+        except Exception as e:
+            logger.debug(f"load_rearrange_policy failed: {e}")
+    return policy
+
+def save_rearrange_policy(policy):
+    """保存重排策略到 window_config.json"""
+    data = {}
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+    data["rearrange_policy"] = policy
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+        logger.info(f"✅ 重排策略已持久化保存: {policy}")
+        return True
+    except Exception as e:
+        logger.error(f"保存重排策略失败: {e}")
+        return False
+
+def eval_rearrange_condition(expr, row_dict):
+    """安全评估重排过滤策略表达式"""
+    if not expr or not expr.strip():
+        return False
+    expr = expr.strip()
+    aliases = {
+        '涨幅': ['percent', 'pct_chg'],
+        'percent': ['涨幅'],
+        '现价': ['close', 'price'],
+        '价格': ['close', 'price'],
+        'close': ['现价', '价格', 'price'],
+        'price': ['现价', '价格', 'close'],
+        '量': ['vol', 'volume'],
+        '成交量': ['vol', 'volume'],
+        'vol': ['量', '成交量', 'volume'],
+        'volume': ['量', '成交量', 'vol'],
+        'high4': ['前高4', 'h4'],
+    }
+    eval_scope = {}
+    for k, v in row_dict.items():
+        if v is not None and not (isinstance(v, float) and np.isnan(v)):
+            eval_scope[str(k)] = v
+            if k in aliases:
+                for target_alias in aliases[k]:
+                    if target_alias not in eval_scope:
+                        eval_scope[target_alias] = v
+    for default_key in ('close', 'high4', 'percent', 'price', 'vol', 'dff', 'dff2', 'rank', '涨幅', '现价', '价格', '量', '成交量'):
+        if default_key not in eval_scope:
+            eval_scope[default_key] = 0.0
+
+    try:
+        return bool(eval(expr, {"__builtins__": {}}, eval_scope))
+    except Exception as e:
+        return False
+
+def open_rearrange_policy_dialog(parent_win=None):
+    """打开重排策略与过滤规则编辑配置弹窗"""
+    policy = load_rearrange_policy()
+    
+    win = tk.Toplevel(parent_win or root)
+    win.title("⚙️ 重排策略与过滤规则配置")
+    win.geometry("500x420")
+    win.resizable(False, False)
+    if hasattr(win, "transient"):
+        win.transient(parent_win or root)
+    win.grab_set()
+
+    # 居中显示
+    try:
+        win.update_idletasks()
+        pw = parent_win or root
+        x = pw.winfo_x() + (pw.winfo_width() - 500) // 2
+        y = pw.winfo_y() + (pw.winfo_height() - 420) // 2
+        win.geometry(f"+{max(0, x)}+{max(0, y)}")
+    except Exception:
+        pass
+
+    main_frame = ttk.Frame(win, padding=12)
+    main_frame.pack(fill=tk.BOTH, expand=True)
+
+    # 1. 过滤策略
+    lbl_group = ttk.LabelFrame(main_frame, text="🎯 策略过滤规则 (分流至右下角高亮)", padding=8)
+    lbl_group.pack(fill=tk.X, pady=(0, 10))
+
+    var_enabled = tk.BooleanVar(value=policy.get("filter_enabled", True))
+    chk_enable = ttk.Checkbutton(lbl_group, text="启用重排过滤策略 (命中条件的窗口在右下角排列)", variable=var_enabled)
+    chk_enable.pack(anchor="w", pady=(0, 5))
+
+    frame_expr = ttk.Frame(lbl_group)
+    frame_expr.pack(fill=tk.X, pady=3)
+    ttk.Label(frame_expr, text="过滤表达式:").pack(side=tk.LEFT)
+
+    var_expr = tk.StringVar(value=policy.get("filter_expr", "close > high4"))
+    entry_expr = ttk.Entry(frame_expr, textvariable=var_expr, width=32)
+    entry_expr.pack(side=tk.LEFT, padx=6, fill=tk.X, expand=True)
+
+    # 常用预设下拉
+    presets = [
+        "close > high4",
+        "close > high4 and 涨幅 > 3",
+        "涨幅 > 5",
+        "涨幅 > 0",
+        "dff > 0",
+        "close > 10"
+    ]
+    def on_select_preset(event=None):
+        val = combo_preset.get()
+        if val:
+            var_expr.set(val)
+
+    combo_preset = ttk.Combobox(lbl_group, values=presets, state="readonly", width=30)
+    combo_preset.set("常用预设规则 ▾")
+    combo_preset.bind("<<ComboboxSelected>>", on_select_preset)
+    combo_preset.pack(anchor="w", pady=3)
+
+    ttk.Label(lbl_group, text="💡 提示: 支持 close, high4, 涨幅(percent), 价格, 量(vol), dff 等字段与 >,<,==,and,or",
+              foreground="#666666", font=("Microsoft YaHei", 8)).pack(anchor="w", pady=(2, 0))
+
+    # 2. 排序规则
+    sort_group = ttk.LabelFrame(main_frame, text="📊 窗口排序规则", padding=8)
+    sort_group.pack(fill=tk.X, pady=(0, 10))
+
+    frame_sort = ttk.Frame(sort_group)
+    frame_sort.pack(fill=tk.X, pady=3)
+
+    ttk.Label(frame_sort, text="排序字段:").pack(side=tk.LEFT)
+    sort_map = {
+        "按创建时间": "create_time",
+        "按涨幅排序": "percent",
+        "按现价排序": "price",
+        "按成交量排序": "vol",
+        "按股票代码": "code"
+    }
+    sort_rev_map = {v: k for k, v in sort_map.items()}
+    current_sort_name = sort_rev_map.get(policy.get("sort_by", "create_time"), "按创建时间")
+    
+    var_sort = tk.StringVar(value=current_sort_name)
+    combo_sort = ttk.Combobox(frame_sort, values=list(sort_map.keys()), textvariable=var_sort, state="readonly", width=14)
+    combo_sort.pack(side=tk.LEFT, padx=6)
+
+    var_reverse = tk.BooleanVar(value=policy.get("sort_reverse", True))
+    chk_rev = ttk.Checkbutton(frame_sort, text="倒序/从大到小", variable=var_reverse)
+    chk_rev.pack(side=tk.LEFT, padx=10)
+
+    # 3. 排列布局
+    layout_group = ttk.LabelFrame(main_frame, text="📐 排列模式与对齐", padding=8)
+    layout_group.pack(fill=tk.X, pady=(0, 10))
+
+    frame_layout = ttk.Frame(layout_group)
+    frame_layout.pack(fill=tk.X, pady=3)
+
+    var_layout = tk.StringVar(value=policy.get("layout", "horizontal"))
+    ttk.Radiobutton(frame_layout, text="↔ 横向并排 (满宽自动换行)", variable=var_layout, value="horizontal").pack(side=tk.LEFT, padx=(0, 15))
+    ttk.Radiobutton(frame_layout, text="↕ 纵向并排 (满高自动换列)", variable=var_layout, value="vertical").pack(side=tk.LEFT)
+
+    # 4. 底部按钮
+    btn_frame = ttk.Frame(main_frame)
+    btn_frame.pack(fill=tk.X, pady=(10, 0))
+
+    def apply_and_save():
+        new_policy = {
+            "filter_expr": var_expr.get().strip() or "close > high4",
+            "filter_enabled": var_enabled.get(),
+            "sort_by": sort_map.get(var_sort.get(), "create_time"),
+            "sort_reverse": var_reverse.get(),
+            "align": "left",
+            "layout": var_layout.get(),
+            "action_alter": "bottom_right_red"
+        }
+        save_rearrange_policy(new_policy)
+        try:
+            rearrange_monitors_per_screen()
+            toast_message(win, "✅ 策略已保存并完成重新排列！")
+        except Exception as e:
+            logger.error(f"重排执行异常: {e}")
+        win.destroy()
+
+    def reset_default():
+        save_rearrange_policy(DEFAULT_REARRANGE_POLICY)
+        var_expr.set(DEFAULT_REARRANGE_POLICY["filter_expr"])
+        var_enabled.set(DEFAULT_REARRANGE_POLICY["filter_enabled"])
+        var_sort.set("按创建时间")
+        var_reverse.set(True)
+        var_layout.set(DEFAULT_REARRANGE_POLICY["layout"])
+        toast_message(win, "已恢复默认重排策略！")
+
+    btn_save = ttk.Button(btn_frame, text="💾 保存并立即重排", command=apply_and_save)
+    btn_save.pack(side=tk.RIGHT, padx=4)
+
+    btn_reset = ttk.Button(btn_frame, text="🔄 恢复默认", command=reset_default)
+    btn_reset.pack(side=tk.RIGHT, padx=4)
+
+    btn_cancel = ttk.Button(btn_frame, text="关闭", command=win.destroy)
+    btn_cancel.pack(side=tk.LEFT, padx=4)
+
+def show_rearrange_context_menu(event):
+    """右键点击【重排】按钮弹出策略管理菜单"""
+    policy = load_rearrange_policy()
+    menu = tk.Menu(root, tearoff=0)
+    menu.add_command(label="⚙️ 编辑重排过滤策略 (自定义)...", command=lambda: open_rearrange_policy_dialog(root))
+    menu.add_command(label="🚀 立即执行重排 (F6)", command=lambda: rearrange_monitors_per_screen())
+    menu.add_separator()
+
+    # 快捷切换过滤开关
+    curr_enabled = policy.get("filter_enabled", True)
+    curr_expr = policy.get("filter_expr", "close > high4")
+    toggle_label = f"🎯 过滤分流: {'[✔ 开启]' if curr_enabled else '[ 禁用]'} ({curr_expr})"
+    def toggle_filter():
+        policy["filter_enabled"] = not curr_enabled
+        save_rearrange_policy(policy)
+        rearrange_monitors_per_screen()
+        toast_message(root, f"重排分流策略已{'开启' if policy['filter_enabled'] else '禁用'}")
+
+    menu.add_command(label=toggle_label, command=toggle_filter)
+
+    # 快捷切换排序方式
+    curr_sort = policy.get("sort_by", "create_time")
+    sort_sub = tk.Menu(menu, tearoff=0)
+    for title, s_key in [("按创建时间", "create_time"), ("按涨幅高低", "percent"), ("按现价高低", "price"), ("按股票代码", "code")]:
+        prefix = "✔ " if curr_sort == s_key else "   "
+        def make_sort_cmd(k):
+            return lambda: [policy.update({"sort_by": k}), save_rearrange_policy(policy), rearrange_monitors_per_screen()]
+        sort_sub.add_command(label=f"{prefix}{title}", command=make_sort_cmd(s_key))
+    menu.add_cascade(label="📊 排序方式切换", menu=sort_sub)
+
+    # 快捷切换布局方向
+    curr_layout = policy.get("layout", "horizontal")
+    layout_sub = tk.Menu(menu, tearoff=0)
+    for l_title, l_key in [("↔ 横向并排优先", "horizontal"), ("↕ 纵向并排优先", "vertical")]:
+        prefix = "✔ " if curr_layout == l_key else "   "
+        def make_layout_cmd(k):
+            return lambda: [policy.update({"layout": k}), save_rearrange_policy(policy), rearrange_monitors_per_screen()]
+        layout_sub.add_command(label=f"{prefix}{l_title}", command=make_layout_cmd(l_key))
+    menu.add_cascade(label="📐 排列方向切换", menu=layout_sub)
+
+    try:
+        menu.tk_popup(event.x_root, event.y_root)
+    finally:
+        menu.grab_release()
+
+def rearrange_monitors_per_screen(align=None, sort_by=None, layout=None):
     """
-    多屏幕窗口重排（自动换行 + 屏幕内排序）
+    多屏幕窗口重排（支持自定义策略、动态过滤分流与自动持久化）
 
     - 无 _alter_tdx：左上角排列（使用工作区）
     - 有 _alter_tdx：右下角反向排列（使用工作区，避开任务栏）
     """
+    # 加载持久化策略
+    policy = load_rearrange_policy()
+    if align is None:
+        align = policy.get("align", "left")
+    if sort_by is None:
+        sort_by = policy.get("sort_by", "create_time")
+    if layout is None:
+        layout = policy.get("layout", "horizontal")
+    filter_enabled = policy.get("filter_enabled", True)
+    filter_expr = policy.get("filter_expr", "close > high4")
+    sort_reverse = policy.get("sort_reverse", True)
 
     if not MONITORS:
         init_monitors()
@@ -3519,23 +3837,58 @@ def rearrange_monitors_per_screen(align="left", sort_by="create_time", layout="h
         if "toplevel" in info
     ]
 
-    # 自动根据最新的全局数据刷新所有窗口的 _alter_tdx 属性，避免由于窗口刚新建未打上标记导致重排失效
+    # [🚀 增强] 依据自定义策略过滤规则评估所有窗口并动态标记 _alter_tdx
     global GLOBAL_TOP_ALL, filterclose, filterhigh4
-    if 'GLOBAL_TOP_ALL' in globals() and GLOBAL_TOP_ALL is not None and not GLOBAL_TOP_ALL.empty:
-        for info in windows:
-            win = info["toplevel"]
+    for info in windows:
+        win = info["toplevel"]
+        # 先清除旧标记，确保策略实时响应
+        if hasattr(win, "_alter_tdx"):
+            delattr(win, "_alter_tdx")
+
+        if filter_enabled and filter_expr:
+            stock_code = ""
             if "stock_info" in info and info["stock_info"]:
-                stock_code = info["stock_info"][0].zfill(6)
+                stock_code = str(info["stock_info"][0]).zfill(6)
+            
+            row_dict = {}
+            if 'GLOBAL_TOP_ALL' in globals() and GLOBAL_TOP_ALL is not None and not GLOBAL_TOP_ALL.empty:
                 if stock_code in GLOBAL_TOP_ALL.index:
-                    row = GLOBAL_TOP_ALL.loc[stock_code]
-                    close_val = row.get(filterclose)
-                    high4_val = row.get(filterhigh4)
-                    if close_val is not None and high4_val is not None:
-                        try:
-                            if float(close_val) > float(high4_val):
-                                win._alter_tdx = True
-                        except Exception:
-                            pass
+                    try:
+                        row_dict = GLOBAL_TOP_ALL.loc[stock_code].to_dict()
+                    except Exception:
+                        row_dict = {}
+
+            # 补充来自 stock_info 的基础字段
+            if "stock_info" in info and len(info["stock_info"]) >= 5:
+                si = info["stock_info"]
+                row_dict.setdefault("code", stock_code)
+                row_dict.setdefault("name", si[1] if len(si) > 1 else "")
+                pct_val = si[4] if len(si) > 4 else 0.0
+                try: pct_val = float(pct_val)
+                except Exception: pct_val = 0.0
+                row_dict.setdefault("percent", pct_val)
+                row_dict.setdefault("涨幅", pct_val)
+                pr_val = si[5] if len(si) > 5 else 0.0
+                try: pr_val = float(pr_val)
+                except Exception: pr_val = 0.0
+                row_dict.setdefault("price", pr_val)
+                row_dict.setdefault("close", pr_val)
+                v_val = si[6] if len(si) > 6 else 0.0
+                try: v_val = float(v_val)
+                except Exception: v_val = 0.0
+                row_dict.setdefault("vol", v_val)
+
+            # 兜底支持 filterclose > filterhigh4
+            if filter_expr == "close > high4" and "high4" not in row_dict:
+                c_v = row_dict.get(filterclose, row_dict.get("close", 0))
+                h_v = row_dict.get(filterhigh4, 0)
+                try:
+                    if float(c_v) > float(h_v) and float(h_v) > 0:
+                        win._alter_tdx = True
+                except Exception:
+                    pass
+            elif eval_rearrange_condition(filter_expr, row_dict):
+                win._alter_tdx = True
 
     # 分组
     group_alter = []
@@ -3547,14 +3900,29 @@ def rearrange_monitors_per_screen(align="left", sort_by="create_time", layout="h
         else:
             group_normal.append(info)
 
-    # 排序
-    if sort_by == "create_time":
-        key_func = lambda w: w["stock_info"][-1]
-    else:
-        key_func = lambda w: w.get("title", "")
+    # 自定义多维排序
+    if sort_by == "percent":
+        def key_func(w):
+            try: return float(w["stock_info"][4])
+            except Exception: return -999.0
+    elif sort_by == "price":
+        def key_func(w):
+            try: return float(w["stock_info"][5])
+            except Exception: return -999.0
+    elif sort_by == "vol":
+        def key_func(w):
+            try: return float(w["stock_info"][6])
+            except Exception: return -999.0
+    elif sort_by == "code":
+        def key_func(w):
+            return str(w["stock_info"][0]) if w.get("stock_info") else ""
+        sort_reverse = not sort_reverse
+    else:  # create_time
+        def key_func(w):
+            return str(w["stock_info"][-1]) if w.get("stock_info") else ""
 
-    group_normal.sort(key=key_func, reverse=True)
-    group_alter.sort(key=key_func, reverse=True)
+    group_normal.sort(key=key_func, reverse=sort_reverse)
+    group_alter.sort(key=key_func, reverse=sort_reverse)
 
     # 按物理屏幕分组
     screen_groups = {i: [] for i in range(len(MONITORS))}
@@ -4070,7 +4438,7 @@ def rearrange_monitors_per_screen_vertical(align="left", sort_by="id"):
 #             except Exception as e:
 #                 logger.info(f"⚠ 窗口排列失败: {e}")
 
-MAX_KEEP = 15  # 每个前缀只保留最近 15 个文件
+MAX_KEEP = 60  # 每个前缀保留最近 60 个交易日文件（支持按日回溯）
 
 def archive_file(src_file, prefix):
     """
@@ -4078,6 +4446,9 @@ def archive_file(src_file, prefix):
     src_file: 需要备份的文件路径，如 "alerts.json"
     prefix  : 文件名前缀，如 "alerts", "monitor_list"
     """
+    # [🚀 修复] 相对路径转换为绝对路径，避免 CWD 偏移导致找不到文件跳过存档
+    if not os.path.isabs(src_file):
+        src_file = os.path.join(BASE_DIR, src_file)
 
     if not os.path.exists(src_file):
         logger.info(f"⚠ {src_file} 不存在，跳过存档")
@@ -4097,9 +4468,16 @@ def archive_file(src_file, prefix):
     # 确保存档目录存在
     os.makedirs(ARCHIVE_DIR, exist_ok=True)
 
-    # 检查最近一个存档是否相同
+    # --- 生成今日存档文件名 ---
+    today = datetime.now().strftime("%Y-%m-%d")
+    filename = f"{prefix}_{today}.json"
+    dest = os.path.join(ARCHIVE_DIR, filename)
+
+    # 检查最近一个存档：
+    # [🚀 修复] 仅当今日存档 dest 已经存在且内容完全相同时才跳过；
+    # 若今日尚未归档（跨天新交易日），即使内容与上一日相同，也必须生成当天的独立历史快照
     files = sorted(
-        [f for f in os.listdir(ARCHIVE_DIR) if f.startswith(prefix + "_")],
+        [f for f in os.listdir(ARCHIVE_DIR) if f.startswith(prefix + "_") and not f.endswith(".tmp")],
         reverse=True
     )
 
@@ -4108,35 +4486,23 @@ def archive_file(src_file, prefix):
         try:
             with open(last_file, "r", encoding="utf-8") as f:
                 last_content = f.read().strip()
-            if content == last_content:
-                logger.info(f"⚠ {src_file} 与上一次 {prefix} 存档相同，跳过存档")
+            if os.path.exists(dest) and content == last_content:
+                logger.info(f"⚠ {src_file} 今日已有相同 {prefix} 存档，跳过重复写入")
                 return
         except Exception as e:
             logger.info(f"⚠ 无法读取最近存档: {e}")
-
-    # --- 生成存档文件名 ---
-    today = datetime.now().strftime("%Y-%m-%d")
-    filename = f"{prefix}_{today}.json"
-    dest = os.path.join(ARCHIVE_DIR, filename)
-
-    # 如果同一天已有 → 加时间戳避免覆盖
-    # if os.path.exists(dest):
-    #     timestamp = datetime.now().strftime("%H%M%S")
-    #     filename = f"{prefix}_{today}_{timestamp}.json"
-    #     dest = os.path.join(ARCHIVE_DIR, filename)
 
     # 复制文件
     shutil.copy2(src_file, dest)
     rel_path = os.path.relpath(dest)
     logger.info(f"✅ 已归档：{rel_path}")
 
-    # --- 清理旧备份，只保留最近 MAX_KEEP 个 ---
+    # --- 清理旧备份，保留最近 MAX_KEEP 个 ---
     files = sorted(
-        [os.path.join(ARCHIVE_DIR, f) for f in os.listdir(ARCHIVE_DIR) if f.startswith(prefix + "_")],
+        [os.path.join(ARCHIVE_DIR, f) for f in os.listdir(ARCHIVE_DIR) if f.startswith(prefix + "_") and not f.endswith(".tmp")],
         key=os.path.getmtime,
         reverse=True
     )
-    logger.info(f'files:{len(files)} : {files}')
     for old_file in files[MAX_KEEP:]:
         try:
             os.remove(old_file)
@@ -4307,9 +4673,10 @@ def archive_monitor_list_single():
 
 def archive_monitor_list():
     logger.info(f'monitor_list.json archive')
-    archive_file("monitor_list.json", "monitor_list")
+    # [🚀 修复] 传绝对路径 MONITOR_LIST_FILE 与 ALERTS_FILE，根除相对路径工作目录漂移
+    archive_file(MONITOR_LIST_FILE, "monitor_list")
     logger.info(f'alerts.json archive')
-    archive_file("alerts.json", "alerts")
+    archive_file(ALERTS_FILE, "alerts")
     # archive_file("rules.json", "rules")
 
 
@@ -4407,6 +4774,19 @@ def open_archive_loader(prefix="monitor_list_"):
     combo = ttk.Combobox(win, textvariable=selected_file, values=files, state="readonly")
     combo.pack(pady=10, fill="x", padx=20)
 
+    # [🚀 修复] 增加立即存档当前监控按钮
+    def save_current_monitor_now():
+        try:
+            save_monitor_list()
+            new_files = list_archives()
+            combo["values"] = new_files
+            if new_files:
+                selected_file.set(new_files[0])
+            toast_message(win, "已成功备份当前监控数据！")
+        except Exception as e:
+            messagebox.showerror("错误", f"备份失败: {e}")
+
+    ttk.Button(win, text="💾 立即存档当前监控", command=save_current_monitor_now).pack(pady=5)
     # 加载按钮
     ttk.Button(win, text="加载", command=lambda: load_archive(selected_file.get())).pack(pady=5)
     ttk.Button(win, text="显示选中", command=lambda: open_archive_view_window(selected_file.get())).pack(pady=5)
@@ -7183,9 +7563,20 @@ def schedule_save_positions():
     global save_timer
     if save_timer:
         save_timer.cancel()
-    logger.info(f'save_monitor_list,schedule_save_positions save')
-    save_timer = threading.Timer(0, save_monitor_list) # 延迟1秒保存
-    save_timer = threading.Timer(1, save_window_positions) # 延迟1秒保存
+    
+    # [🚀 修复] 彻底解决 save_timer 变量同名二次赋值覆盖导致 save_monitor_list 从未运行的致命 Bug
+    def _delayed_save_both():
+        try:
+            save_monitor_list()
+        except Exception as e:
+            logger.error(f"delayed save_monitor_list failed: {e}")
+        try:
+            save_window_positions()
+        except Exception as e:
+            logger.error(f"delayed save_window_positions failed: {e}")
+
+    logger.info(f'schedule_save_positions: 调度监控与位置延迟持久化')
+    save_timer = threading.Timer(1, _delayed_save_both)
     save_timer.start()
 
 def update_window_position(window_id):
@@ -7239,6 +7630,8 @@ def on_close_monitor(window_info):
         if stock_code in WINDOW_GEOMETRIES.keys():
             del WINDOW_GEOMETRIES[stock_code]
         window.destroy()
+    # [🚀 修复] 关闭监控后触发延迟保存
+    schedule_save_positions()
 
 def on_closing(window, window_id):
     """在窗口关闭时调用。"""
@@ -8061,6 +8454,15 @@ def create_monitor_window(stock_info):
     monitor_tree.bind("<Button-1>", lambda event: update_code_entry(stock_code, date_str))
     monitor_tree.bind("<Double-1>", lambda event, code=stock_code: on_monitor_double_click(event, stock_code))
     monitor_win.bind("<Button-3>", lambda event: show_menu(event, stock_info))
+
+    # [🚀 新增] 监控子窗口与表格绑定 Q 键：把所有监控带到最前显示（不用置顶，不用重排）
+    monitor_win.bind("<Key-q>", bring_all_monitors_to_front)
+    monitor_win.bind("<Key-Q>", bring_all_monitors_to_front)
+    monitor_tree.bind("<Key-q>", bring_all_monitors_to_front)
+    monitor_tree.bind("<Key-Q>", bring_all_monitors_to_front)
+
+    # [🚀 修复] 成功创建监控窗口后触发延迟保存
+    schedule_save_positions()
 
     return window_info
 
@@ -12246,6 +12648,8 @@ if __name__ == "__main__":
     btn_rearrange = tk.Button(search_frame, text="重排", command=rearrange_monitors_per_screen,
                              font=('Microsoft YaHei', 9), padx=5, pady=2)
     btn_rearrange.pack(side=tk.RIGHT, padx=2)
+    # [🚀 新增] 重排按钮绑定右键：弹出重排过滤策略菜单与自定义配置对话框
+    btn_rearrange.bind("<Button-3>", show_rearrange_context_menu)
 
     analysi = tk.Button(search_frame, text="分析", 
                          command=lambda r=root: open_detailed_analysis(r),
@@ -12324,6 +12728,12 @@ if __name__ == "__main__":
     # 添加键盘快捷键
     root.bind("<F5>", lambda event: refresh_data())
     root.bind("<Control-r>", lambda event: refresh_data())
+
+    # [🚀 新增] 主窗口与主表绑定 Q 键：把所有监控带到最前显示（不用置顶，不用重排）
+    root.bind("<Key-q>", bring_all_monitors_to_front)
+    root.bind("<Key-Q>", bring_all_monitors_to_front)
+    tree.bind("<Key-q>", bring_all_monitors_to_front)
+    tree.bind("<Key-Q>", bring_all_monitors_to_front)
 
     # 设置你希望任务每天执行的时间（例如：每天 23:00）
     target_hour = 15

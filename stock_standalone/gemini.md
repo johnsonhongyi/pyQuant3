@@ -1,5 +1,34 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-10-31 11:00 【异动联动重排功能右键自定义过滤策略与自动持久化工程治理】(`stock/testpy/tdxgui/异动联动.py`, `tests/test_rearrange_policy_customization.py`)
+- [x] **【重排功能右键自定义策略与配置弹窗落地】**：
+  - **右键快捷菜单集成**：主界面【重排】按钮绑定 `<Button-3>` 右键事件 `show_rearrange_context_menu`，弹出快捷操作菜单（【⚙️ 编辑重排策略与过滤规则】、【▶ 立即执行重排】、【🔄 恢复默认策略】）；
+  - **可视化配置弹窗 (`open_rearrange_policy_dialog`)**：支持可视化编辑过滤表达式（如 `close > high4`、`涨幅 > 5`、`percent > 3 and close > high4`）、是否开启分流过滤复选框、排序字段（创建时间/涨幅/现价/成交量/代码）、升序/降序、常规组排布方向（水平/垂直/网格）、分流组动作（右下角红底提示/左上角/无动作）等；
+- [x] **【重排过滤表达式双向别名与安全求值 (`eval_rearrange_condition`)】**：
+  - **中英文无缝双向互通**：支持字段名双向映射（`涨幅` ↔ `percent`/`pct_chg`、`现价`/`价格` ↔ `close`/`price`、`量`/`成交量` ↔ `vol`/`volume`、`high4` ↔ `前高4`），用户无论输入中文表达式还是英文表达式，无论底层数据源传递的是 DataFrame 中文列名还是字典英文键，均能 100% 准确求值；
+  - **安全沙箱环境**：禁用 `__builtins__`，提供安全的空值与 NaN 过滤及默认兜底键；
+- [x] **【策略自动持久化与重排算法动态联动 (`rearrange_monitors_per_screen`)】**：
+  - **配置物理持久化**：与 `window_config.json` 的 `rearrange_policy` 节点无缝结合，修改后即时自动持久化；支持缺省自动补齐与一键重置；
+  - **重排动态分流与排序**：重排执行时动态读取最新持久化策略，对满足过滤表达式的监控窗口自动分流并突出显示（右下角红底），其余窗口按指定维度（涨幅/时间等）与方向规范排布；
+- [x] **【自动化测试全绿通过】**：
+  - 新增 `tests/test_rearrange_policy_customization.py`（2 项专项测试覆盖表达式求值、中英文别名、策略持久化读写与热加载，100% PASS）。
+
+## 2026-10-31 10:15 【异动联动自0921后无监控备份Bug根治与Q键一键带前(无置顶无重排)工程治理】(`stock/testpy/tdxgui/异动联动.py`, `tests/test_monitor_archive_and_q_front.py`)
+- [x] **【自 09-21 之后无监控数据备份的 4 大致病 Bug 彻底根除】**：
+  - **Bug 1（相对路径漂移导致静默跳过）**：`archive_monitor_list()` 原硬编码传相对路径 `"monitor_list.json"` 与 `"alerts.json"`。当 CWD 偏离脚本目录时 `os.path.exists()` 永远为 False 直接 return。现强制传入绝对路径 `MONITOR_LIST_FILE` / `ALERTS_FILE`，并在 `archive_file()` 内置绝对路径智能兜底校准；
+  - **Bug 2（定时器同名变量覆盖扼杀写盘）**：`schedule_save_positions()` 连续两次对全局 `save_timer` 赋值，导致首个调度 `save_monitor_list()`（内部触发归档）的 Timer 从未被 `.start()` 即被覆盖吞噬。现重构为单 Timer 延迟聚合持久化，监控与窗口配置 100% 确保落盘；
+  - **Bug 3（定时收盘归档漏调监控归档）**：每日 15:05 自动任务 `schedule_daily_archive()` 及 `daily_task()` 仅调用了 `start_async_save()` 保存异动历史大表，未调度监控列表归档。现补齐收盘自动写入并归档当日 `monitor_list_YYYY-MM-DD.json`；
+  - **Bug 4（跨天内容相同被误杀拦截）**：`archive_file()` 原代码若内容与上一次存档完全相同则无条件跳过。若用户监控自选股未频繁增删，新交易日会被错误跳过导致归档日期永远停留在多天以前。现纠偏为：仅当**今日已有当天的归档文件且内容未变**时才跳过，跨天新交易日哪怕自选相同也必须生成当日快照；
+  - **交互增强（手动一键存档）**：在“加载历史监控数据”弹窗新增【💾 立即存档当前监控】按钮，支持随时手动给当前监控打快照；监控增删时自动触发持久化；保留归档数量上限提升至 60 个交易日；
+- [x] **【Q 键一键将所有监控带到最前显示（严格不用置顶、不用重排）】**：
+  - **智能焦点判定放行**：实现 `bring_all_monitors_to_front(event)`，若当前焦点在文本输入控件（`Entry`, `Text`, `Combobox` 等）自动放行正常打字；
+  - **纯净前台唤醒**：遍历 `monitor_windows`，最小化窗口调用 `deiconify()`，全部监控调用 `lift()` 瞬时浮至前台；
+  - **严格遵守边界约束**：绝对不开启 `-topmost` 常驻置顶、绝对不修改几何位置坐标 `geometry`（保持用户原有布局）；
+  - **双向事件无缝绑定**：在所有监控子窗口、监控表格、主窗口及主表格均绑定 `<Key-q>` 与 `<Key-Q>`；修正主表格 `tree` 绑定时序，确保在组件初始化后统一注册，杜绝启动时 `NameError: name 'tree' is not defined`；
+- [x] **【自动化测试全绿通过】**：
+  - 新增 `tests/test_monitor_archive_and_q_front.py`（3 项专项测试覆盖跨日快照生成、同日防重、Q 键带前不置顶不重排、输入框放行与双任务持久化，100% PASS）；
+  - 关联的 `tests/test_top10_sort_and_rearrange_grid.py`、`tests/test_tk_mouse_button4_5_unbind.py` 等测试全部纯绿通过。
+
 ## 2026-10-30 22:30 【TK彻底移除鼠标Button-4/Button-5侧键滚轮绑定、释放XButton硬件侧键工程治理】(`instock_MonitorTK.py`, `column_manager.py`, `popularity_resonance_gui.py`, `temp_historical_monitor.py`, `tests/test_tk_mouse_button4_5_unbind.py`, `docs/tasks/2026-10-30_2225_TK彻底移除鼠标Button4和Button5侧键滚轮绑定治理.md`)
 - [x] **【彻底根除误将物理鼠标侧键 4/5 绑定为滚轮的历史隐患】**：
   - **Linux 与 Windows 事件映射历史大坑**：在 Linux/X11 下滚轮对应 `<Button-4>` / `<Button-5>`，但在 Windows 下滚轮为 `<MouseWheel>`，`<Button-4>` 和 `<Button-5>` 对应物理鼠标前进/后退侧键（XButton1 / XButton2）；
