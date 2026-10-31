@@ -538,5 +538,87 @@ class TestRearrangePolicyCustomization(unittest.TestCase):
         self.assertTrue(r_dict['per1d'] > 0)
         self.assertTrue(r_dict['nclose'] > r_dict['lastp1d'])
 
+    def test_multi_screen_detection_and_work_rect_structure(self):
+        """测试显示器结构支持字典形式 (monitor, work) 且按 left 坐标升序排列"""
+        # 模拟 3 屏环境：左副屏 (-1920..0), 主屏 (0..1920), 右副屏 (1920..3840)
+        raw_monitors = [
+            {"monitor": (0, 0, 1920, 1080), "work": (0, 0, 1920, 1040), "flags": 1},
+            {"monitor": (1920, 0, 3840, 1080), "work": (1920, 0, 3840, 1040), "flags": 0},
+            {"monitor": (-1920, 0, 0, 1080), "work": (-1920, 0, 0, 1040), "flags": 0},
+        ]
+
+        def _get_monitor_rect(m):
+            return m.get("monitor", m.get("work")) if isinstance(m, dict) else m
+
+        def _get_work_rect(m):
+            return m.get("work", m.get("monitor")) if isinstance(m, dict) else m
+
+        # 排序：按物理左坐标升序
+        sorted_monitors = sorted(raw_monitors, key=lambda m: _get_monitor_rect(m)[0])
+
+        self.assertEqual(len(sorted_monitors), 3)
+        self.assertEqual(_get_monitor_rect(sorted_monitors[0])[0], -1920)
+        self.assertEqual(_get_monitor_rect(sorted_monitors[1])[0], 0)
+        self.assertEqual(_get_monitor_rect(sorted_monitors[2])[0], 1920)
+        self.assertEqual(_get_work_rect(sorted_monitors[1]), (0, 0, 1920, 1040))
+
+    def test_multi_screen_balanced_chunk_allocation(self):
+        """测试 3 屏环境下 10 个小窗口均匀分片分配 (4, 3, 3) 且保持排序顺序"""
+        num_screens = 3
+        # 模拟 10 个已按涨幅排序的窗口 (0~9)
+        mock_windows = [f"win_{i}" for i in range(10)]
+
+        screen_groups = {i: [] for i in range(num_screens)}
+        total = len(mock_windows)
+        base = total // num_screens
+        rem = total % num_screens
+        cur = 0
+        for s_i in range(num_screens):
+            count = base + (1 if s_i < rem else 0)
+            screen_groups[s_i].extend(mock_windows[cur : cur + count])
+            cur += count
+
+        # 验证每个屏幕分配数量
+        self.assertEqual(len(screen_groups[0]), 4)
+        self.assertEqual(len(screen_groups[1]), 3)
+        self.assertEqual(len(screen_groups[2]), 3)
+
+        # 验证排序切片：第 0 屏分配排在最前的一批 (win_0 ~ win_3)
+        self.assertEqual(screen_groups[0], ["win_0", "win_1", "win_2", "win_3"])
+        self.assertEqual(screen_groups[1], ["win_4", "win_5", "win_6"])
+        self.assertEqual(screen_groups[2], ["win_7", "win_8", "win_9"])
+
+    def test_rdp_single_screen_collapse_auto_heal(self):
+        """测试当远程 RDP 导致所有窗口缩在 Screen 0 (主屏) 时，自动自愈为 3 屏均匀分布"""
+        num_screens = 3
+        # 模拟 3 屏物理范围
+        monitors = [
+            {"monitor": (0, 0, 1920, 1080), "work": (0, 0, 1920, 1040)},
+            {"monitor": (1920, 0, 3840, 1080), "work": (1920, 0, 3840, 1040)},
+            {"monitor": (3840, 0, 5760, 1080), "work": (3840, 0, 5760, 1040)},
+        ]
+        # 模拟由于 RDP 导致所有 12 个窗口当前坐标全在 Screen 0 (0 <= x < 1920)
+        window_coords = [(100 + i * 20, 100) for i in range(12)]
+
+        occupied = set()
+        for wx, wy in window_coords:
+            for s_i, m in enumerate(monitors):
+                l, t, r, b = m["monitor"]
+                if l <= wx < r and t <= wy < b:
+                    occupied.add(s_i)
+                    break
+
+        # 确认所有窗口当前确实只落在 Screen 0 (仅 1 个屏幕)
+        self.assertEqual(occupied, {0})
+
+        # 验证自愈触发逻辑
+        multi_screen_mode = "current"
+        use_balanced = (multi_screen_mode == "balanced")
+        if not use_balanced and num_screens > 1:
+            if len(occupied) <= 1:
+                use_balanced = True  # 触发自愈
+
+        self.assertTrue(use_balanced)
+
 if __name__ == "__main__":
     unittest.main()

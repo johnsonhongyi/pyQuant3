@@ -3557,6 +3557,7 @@ DEFAULT_REARRANGE_POLICY = {
     "action_alter": "bottom_right_red",
     "auto_popup_enabled": True,
     "auto_popup_limit": 10,
+    "multi_screen_mode": "balanced",
     "expr_history": [
         "close > high4",
         "close > high4 and 涨幅 > 3",
@@ -4496,6 +4497,17 @@ def open_rearrange_policy_dialog(parent_win=None):
     ttk.Radiobutton(frame_layout, text="↔ 横向并排 (满宽自动换行)", variable=var_layout, value="horizontal").pack(side=tk.LEFT, padx=(0, 15))
     ttk.Radiobutton(frame_layout, text="↕ 纵向并排 (满高自动换列)", variable=var_layout, value="vertical").pack(side=tk.LEFT)
 
+    # 多显示器均匀分布控制 (完美解决远程 RDP 缩回单屏问题)
+    init_monitors()
+    cur_m_count = len(MONITORS) if MONITORS else 1
+    var_multi_screen = tk.BooleanVar(value=policy.get("multi_screen_mode", "balanced") == "balanced")
+    chk_multi_screen = ttk.Checkbutton(
+        layout_group,
+        text=f"🖥️ 自动识别多显示器并均匀分布 (当前识别到 {cur_m_count} 屏，解决RDP单屏问题)",
+        variable=var_multi_screen
+    )
+    chk_multi_screen.pack(anchor="w", pady=(4, 0))
+
     # 4. 底部按钮
     btn_frame = ttk.Frame(main_frame)
     btn_frame.pack(fill=tk.X, pady=(10, 0))
@@ -4515,6 +4527,7 @@ def open_rearrange_policy_dialog(parent_win=None):
             "action_alter": "bottom_right_red",
             "auto_popup_enabled": var_auto_popup.get(),
             "auto_popup_limit": policy.get("auto_popup_limit", 10),
+            "multi_screen_mode": "balanced" if var_multi_screen.get() else "current",
             "expr_history": updated_history
         }
         save_rearrange_policy(new_policy)
@@ -4538,6 +4551,7 @@ def open_rearrange_policy_dialog(parent_win=None):
         var_expr.set(DEFAULT_REARRANGE_POLICY["filter_expr"])
         var_enabled.set(DEFAULT_REARRANGE_POLICY["filter_enabled"])
         var_auto_popup.set(DEFAULT_REARRANGE_POLICY.get("auto_popup_enabled", True))
+        var_multi_screen.set(DEFAULT_REARRANGE_POLICY.get("multi_screen_mode", "balanced") == "balanced")
         var_sort.set("按创建时间")
         var_reverse.set(True)
         var_layout.set(DEFAULT_REARRANGE_POLICY["layout"])
@@ -4556,10 +4570,12 @@ def open_rearrange_policy_dialog(parent_win=None):
 
 def show_rearrange_context_menu(event):
     """右键点击【重排】按钮弹出策略管理菜单"""
+    init_monitors()
     policy = load_rearrange_policy()
     menu = tk.Menu(root, tearoff=0)
     menu.add_command(label="⚙️ 编辑重排过滤策略 (自定义)...", command=lambda: open_rearrange_policy_dialog(root))
-    menu.add_command(label="🚀 立即执行重排 (F6)", command=lambda: rearrange_monitors_per_screen())
+    m_count_str = f" [已识别 {len(MONITORS)} 屏均匀分布]" if len(MONITORS) > 1 else ""
+    menu.add_command(label=f"🚀 立即执行重排 (F6){m_count_str}", command=lambda: rearrange_monitors_per_screen())
     menu.add_command(label="🔔 测试实时弹出与报警 (模拟扫描)", command=lambda: test_realtime_popup_scan(root))
     menu.add_separator()
 
@@ -4602,11 +4618,17 @@ def show_rearrange_context_menu(event):
 
 def rearrange_monitors_per_screen(align=None, sort_by=None, layout=None):
     """
-    多屏幕窗口重排（支持自定义策略、动态过滤分流与自动持久化）
+    多屏幕窗口重排（支持自定义策略、动态过滤分流、多屏幕自动识别与均匀分布）
 
-    - 无 _alter_tdx：左上角排列（使用工作区）
-    - 有 _alter_tdx：右下角反向排列（使用工作区，避开任务栏）
+    - 自动实时重新枚举显示器（完美自适应远程 RDP 缩回单屏与本地 3 屏切换）
+    - 多屏幕均匀分布模式 (balanced)：将窗口均匀平分到所有检测到的可用屏幕上
+    - 无 _alter_tdx：左上角排列（使用对应屏幕的工作区）
+    - 有 _alter_tdx：右下角反向排列（使用对应屏幕的工作区，避开任务栏）
     """
+    # 1. 每次重排前实时检测显示器（确保从远程 RDP 切回多屏时立即识别出所有屏幕）
+    init_monitors()
+    num_screens = len(MONITORS) if MONITORS else 1
+
     # 加载持久化策略
     policy = load_rearrange_policy()
     if align is None:
@@ -4618,15 +4640,15 @@ def rearrange_monitors_per_screen(align=None, sort_by=None, layout=None):
     filter_enabled = policy.get("filter_enabled", True)
     filter_expr = policy.get("filter_expr", "close > high4")
     sort_reverse = policy.get("sort_reverse", True)
+    multi_screen_mode = policy.get("multi_screen_mode", "balanced")
 
-    if not MONITORS:
-        init_monitors()
-
-    # 取监控窗口
+    # 取有效监控窗口
     windows = [
         info for info in monitor_windows.values()
-        if "toplevel" in info
+        if "toplevel" in info and hasattr(info["toplevel"], "winfo_exists") and info["toplevel"].winfo_exists()
     ]
+    if not windows:
+        return
 
     # [🚀 增强] 依据自定义策略过滤规则评估所有窗口并动态标记 _alter_tdx
     global GLOBAL_TOP_ALL, filterclose, filterhigh4
@@ -4715,29 +4737,73 @@ def rearrange_monitors_per_screen(align=None, sort_by=None, layout=None):
     group_normal.sort(key=key_func, reverse=sort_reverse)
     group_alter.sort(key=key_func, reverse=sort_reverse)
 
-    # 按物理屏幕分组
-    screen_groups = {i: [] for i in range(len(MONITORS))}
+    # 2. 分配窗口到各个屏幕
+    screen_groups = {i: [] for i in range(num_screens)}
 
-    for win_info in group_normal + group_alter:
-        win = win_info["toplevel"]
-        try:
-            win.update_idletasks()
-            x, y = win.winfo_x(), win.winfo_y()
+    # 判定是否启用多屏幕均匀分布 (解决远程 RDP 缩回单屏后全部堆在一个屏幕的问题)
+    use_balanced = (multi_screen_mode == "balanced")
+    if not use_balanced and num_screens > 1:
+        # 若所有窗口均落在同一个屏幕内（典型 RDP 现象），自动自愈为均匀分布
+        occupied = set()
+        for win_info in windows:
+            try:
+                wx, wy = win_info["toplevel"].winfo_x(), win_info["toplevel"].winfo_y()
+                for s_i, m in enumerate(MONITORS):
+                    l, t, r, b = _get_monitor_rect(m)
+                    if l <= wx < r and t <= wy < b:
+                        occupied.add(s_i)
+                        break
+            except Exception:
+                pass
+        if len(occupied) <= 1:
+            use_balanced = True
+            logger.info("🖥️ [RDP_HEAL] 检测到窗口全部堆积在单屏，已自动自愈为多屏幕均匀分布！")
 
-            assigned = False
-            for idx, m in enumerate(MONITORS):
-                l, t, r, b = _get_monitor_rect(m)
-                if l <= x < r and t <= y < b:
-                    screen_groups[idx].append(win_info)
-                    assigned = True
-                    break
-            if not assigned:
-                screen_groups[0].append(win_info)
+    if use_balanced and num_screens > 1:
+        # 多屏幕均匀切片分配 (Chunk Slicing)
+        # 1. 常规窗口均匀平分到各个屏幕
+        total_normal = len(group_normal)
+        if total_normal > 0:
+            base = total_normal // num_screens
+            rem = total_normal % num_screens
+            cur = 0
+            for s_i in range(num_screens):
+                count = base + (1 if s_i < rem else 0)
+                screen_groups[s_i].extend(group_normal[cur : cur + count])
+                cur += count
 
-        except Exception as e:
-            logger.info(f"⚠ 获取窗口位置失败: {e}")
+        # 2. 策略报警窗口均匀平分到各个屏幕
+        total_alter = len(group_alter)
+        if total_alter > 0:
+            base = total_alter // num_screens
+            rem = total_alter % num_screens
+            cur = 0
+            for s_i in range(num_screens):
+                count = base + (1 if s_i < rem else 0)
+                screen_groups[s_i].extend(group_alter[cur : cur + count])
+                cur += count
+    else:
+        # 按窗口当前物理坐标归属分配
+        for win_info in group_normal + group_alter:
+            win = win_info["toplevel"]
+            try:
+                win.update_idletasks()
+                x, y = win.winfo_x(), win.winfo_y()
 
-    # 遍历每个屏幕
+                assigned = False
+                for idx, m in enumerate(MONITORS):
+                    l, t, r, b = _get_monitor_rect(m)
+                    if l <= x < r and t <= y < b:
+                        screen_groups[idx].append(win_info)
+                        assigned = True
+                        break
+                if not assigned:
+                    screen_groups[0].append(win_info)
+
+            except Exception as e:
+                logger.info(f"⚠ 获取窗口位置失败: {e}")
+
+    # 3. 遍历每个屏幕执行排列
     for idx, group in screen_groups.items():
         if not group:
             continue
@@ -4876,6 +4942,18 @@ def rearrange_monitors_per_screen(align=None, sort_by=None, layout=None):
 
                 except Exception as e:
                     logger.info(f"⚠ 窗口排列失败: {e}")
+
+    # 4. 持久化多屏幕排列后的所有窗口几何位置
+    try:
+        schedule_save_positions()
+    except Exception:
+        pass
+
+    try:
+        dist_info = f"已均匀分布到 {num_screens} 个显示器" if (use_balanced and num_screens > 1) else f"当前使用 {num_screens} 个显示器"
+        toast_message(root, f"✅ 重排完成！{dist_info}，共重排 {len(windows)} 个窗口")
+    except Exception:
+        pass
 
 
 def rearrange_monitors_per_screen_no_bar(align="left", sort_by="create_time", layout="horizontal"):
@@ -8632,55 +8710,71 @@ def update_position_window(window, window_id, is_main=False):
     return window
 
 # -----------------------------
-# 初始化显示器信息（程序启动时调用一次）
+# 初始化显示器信息（支持多屏幕热检测与远程 RDP 动态自适应）
 # -----------------------------
 MONITORS = []  # 全局缓存
 
 def get_all_monitors():
-    """返回所有显示器的边界列表 [(left, top, right, bottom), ...]"""
+    """
+    [🚀 升级] 动态扫描所有显示器并返回包含物理区域 (monitor) 与工作区 (work) 的字典列表
+    按物理 left 坐标升序排列（从左到右：Screen 0, Screen 1, Screen 2），精准适配任务栏
+    """
     monitors = []
-    for handle_tuple in win32api.EnumDisplayMonitors():
-        info = win32api.GetMonitorInfo(handle_tuple[0])
-        monitors.append(info["Monitor"])  # (left, top, right, bottom)
+    try:
+        import win32api
+        for handle_tuple in win32api.EnumDisplayMonitors():
+            info = win32api.GetMonitorInfo(handle_tuple[0])
+            m_rect = info.get("Monitor")
+            w_rect = info.get("Work", m_rect)
+            monitors.append({
+                "monitor": m_rect,
+                "work": w_rect,
+                "flags": info.get("Flags", 0)
+            })
+    except Exception as e:
+        logger.debug(f"win32api.EnumDisplayMonitors 获取显示器失败: {e}")
+
+    if not monitors:
+        try:
+            SPI_GETWORKAREA = 48
+            rect = ctypes.wintypes.RECT()
+            ctypes.windll.user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(rect), 0)
+            sw = ctypes.windll.user32.GetSystemMetrics(0)
+            sh = ctypes.windll.user32.GetSystemMetrics(1)
+            monitors.append({
+                "monitor": (0, 0, sw, sh),
+                "work": (rect.left, rect.top, rect.right, rect.bottom),
+                "flags": 1
+            })
+        except Exception:
+            monitors.append({
+                "monitor": (0, 0, 1920, 1080),
+                "work": (0, 0, 1920, 1040),
+                "flags": 1
+            })
+
+    # 按物理左坐标从左向右排列显示器，确保多屏分布顺序清晰
+    monitors.sort(key=lambda m: _get_monitor_rect(m)[0])
     return monitors
 
-# # 双屏幕,上屏新建
-# def init_monitors():
-#     """扫描所有显示器并缓存信息（使用可用区域，避开任务栏）"""
-#     global MONITORS
-#     monitors = get_all_monitors()  # 原来的函数
-#     if not monitors:
-#         left, top, right, bottom = get_monitor_workarea()
-#         MONITORS = [(left, top, right, bottom)]
-#     else:
-#         # 对每个 monitor 也可计算可用区域
-#         MONITORS = []
-#         for mon in monitors:
-#             # mon = (x, y, width, height)
-#             mx, my, mw, mh = mon
-#             MONITORS.append((mx, my, mx+mw, my+mh))
-#     logger.info(f"✅ Detected {len(MONITORS)} monitor(s).")
-
 def init_monitors():
-    """扫描所有显示器并缓存信息"""
+    """扫描所有显示器并缓存信息（支持多屏热插拔与远程 RDP 切换动态感知）"""
     global MONITORS
     MONITORS = get_all_monitors()
-    if not MONITORS:
-        # 至少保留主屏幕
-        screen_width = win32api.GetSystemMetrics(0)
-        screen_height = win32api.GetSystemMetrics(1)
-        MONITORS = [(0, 0, screen_width, screen_height)]
-    logger.info(f"✅ Detected {len(MONITORS)} monitor(s).")
+    logger.info(f"🖥️ [MONITOR_DETECT] 实时识别到 {len(MONITORS)} 个显示器: {[m.get('work', m.get('monitor')) if isinstance(m, dict) else m for m in MONITORS]}")
+    return MONITORS
 
 def clamp_window_to_screens(x, y, w, h, monitors):
     """保证窗口在可见显示器范围内"""
-    for left, top, right, bottom in monitors:
+    for mon in monitors:
+        left, top, right, bottom = _get_monitor_rect(mon)
         if left <= x < right and top <= y < bottom:
             x = max(left, min(x, right - w))
             y = max(top, min(y, bottom - h))
             return x, y
     # 如果完全不在任何显示器内，放到主屏幕左上角
-    x, y = monitors[0][0], monitors[0][1]
+    first_m = _get_monitor_rect(monitors[0]) if monitors else (0, 0, 1920, 1080)
+    x, y = first_m[0], first_m[1]
     return x, y
 
 # -----------------------------
