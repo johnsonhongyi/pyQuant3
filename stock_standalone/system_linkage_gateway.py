@@ -586,7 +586,11 @@ class SystemLinkageGateway:
                         return False
                     nonce_key = f"{node}:{workspace}:{nonce}"
                     with gateway._db() as connection:
-                        connection.execute("DELETE FROM linkage_nonces WHERE timestamp < ?", (int(time.time()) - 600,))
+                        now_ts = int(time.time())
+                        last_clean = getattr(gateway, "_last_nonce_cleanup", 0)
+                        if now_ts - last_clean >= 300:
+                            gateway._last_nonce_cleanup = now_ts
+                            connection.execute("DELETE FROM linkage_nonces WHERE timestamp < ?", (now_ts - 600,))
                         connection.execute("INSERT INTO linkage_nonces(nonce_key,timestamp) VALUES(?,?)",
                                            (nonce_key, timestamp))
                     return True

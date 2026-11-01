@@ -16949,9 +16949,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         import threading
         import time
 
-        cache = getattr(self, '_win_cache', {"visualizer": 0, "stock_monitor": 0})
+        cache = getattr(self, '_win_cache', {"visualizer": 0, "stock_monitor": 0, "fusion_ladder": 0, "ipo_detector": 0})
         now = time.monotonic()
-        if not force and now - getattr(self, '_win_scan_requested_t', -1) < getattr(self, '_win_scan_interval', 5.0):
+        if not force and now - getattr(self, '_win_scan_requested_t', -1) < getattr(self, '_win_scan_interval', 10.0):
             return cache
         gate = self.__dict__.setdefault('_win_scan_gate', threading.Lock())
         if not gate.acquire(blocking=False):
@@ -16962,17 +16962,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             started = time.monotonic()
             try:
                 # Force one fresh scan, including negative results when either app is closed.
-                self._scan_external_windows(force=force)
-                from ats.ui.ipo_detector_ipc import find_ipo_detector_window
-                snapshot = dict(self._win_cache)
-                snapshot['ipo_detector'] = find_ipo_detector_window()
+                res = self._scan_external_windows(force=force)
+                snapshot = dict(res)
+                # 若未在主枚举中捕获 ipo_detector，尝试轻量 fallback
+                if snapshot.get("ipo_detector", 0) == 0:
+                    try:
+                        from ats.ui.ipo_detector_ipc import find_ipo_detector_window
+                        snapshot['ipo_detector'] = find_ipo_detector_window() or 0
+                    except Exception:
+                        snapshot['ipo_detector'] = 0
                 self._win_cache = snapshot
             except Exception:
                 logger.exception("[WINDOW-SCAN-FAIL] 外部窗口后台扫描失败，保留已有缓存")
             finally:
                 gate.release()
                 elapsed = time.monotonic() - started
-                self._win_scan_interval = max(5.0, min(30.0, elapsed * 3))
+                self._win_scan_interval = max(10.0, min(30.0, elapsed * 5))
                 completed = time.monotonic()
                 if elapsed > 0.5 and completed - getattr(self, '_last_win_scan_slow_log', 0) >= 60:
                     self._last_win_scan_slow_log = completed
@@ -16986,7 +16991,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         return cache
 
     def _scan_external_windows(self, force=False):
-        """利用 EnumWindows 扫描并定位外部窗口，提供 500ms 缓存、活性校验与 Soft Invalid 机制保护 (生产级封顶版)"""
+        """利用 EnumWindows 扫描并定位外部窗口，提供可见性极速过滤、负向缓存与活性复用保护 (极速防假死版)"""
         import time
         import ctypes
 
@@ -16994,20 +16999,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         now = time.time()
 
         if not hasattr(self, "_win_cache"):
-            self._win_cache = {"visualizer": 0, "stock_monitor": 0}
+            self._win_cache = {"visualizer": 0, "stock_monitor": 0, "fusion_ladder": 0, "ipo_detector": 0}
             self._win_cache_t = 0
             self._win_cache_valid = False
 
         # -----------------------------
-        # 1. TTL + valid 双重控制过滤 (全命中缓存才享受 TTL 保护，防脏状态漂移)
+        # 1. 负向缓存与 TTL 双重保护 (3.0 秒内非 force 直接复用，避免频繁全量枚举)
         # -----------------------------
-        if not force and (now - self._win_cache_t < 0.5) and self._win_cache_valid:
+        if not force and (now - self._win_cache_t < 3.0):
             return self._win_cache
-
-        result = {
-            "visualizer": 0,
-            "stock_monitor": 0
-        }
 
         def is_valid_hwnd(hwnd):
             try:
@@ -17016,25 +17016,40 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 return False
 
         # -----------------------------
-        # 2. 活性复用（如果上一次全命中的句柄在 OS 层依然有效，则无需耗时扫描）
+        # 2. 活性复用（如果已记录的有效句柄在 OS 层依然有效且可见，则无需重复枚举）
         # -----------------------------
-        if not force:
-            if is_valid_hwnd(self._win_cache.get("visualizer", 0)) and \
-               is_valid_hwnd(self._win_cache.get("stock_monitor", 0)):
+        if not force and self._win_cache_t > 0:
+            active_vis = self._win_cache.get("visualizer", 0)
+            active_mon = self._win_cache.get("stock_monitor", 0)
+            if active_vis and active_mon and is_valid_hwnd(active_vis) and is_valid_hwnd(active_mon):
                 self._win_cache_valid = True
+                self._win_cache_t = now
                 return self._win_cache
 
+        result = {
+            "visualizer": 0,
+            "stock_monitor": 0,
+            "fusion_ladder": 0,
+            "ipo_detector": 0
+        }
+
         # -----------------------------
-        # 3. EnumWindows Callback 扫描
+        # 3. EnumWindows Callback 极速扫描 (严格过滤非可见窗口)
         # -----------------------------
         WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
 
         buf = ctypes.create_unicode_buffer(512)
         def enum_callback(hwnd, lParam):
             try:
+                # 🚀 极速过滤：非可见窗口直接短路跳过，过滤 95% 无关系统句柄
+                if not user32.IsWindowVisible(hwnd):
+                    return True
+
                 if not user32.GetWindowTextW(hwnd, buf, len(buf)):
                     return True
                 title = buf.value
+                if not title:
+                    return True
 
                 if result["visualizer"] == 0 and any(k in title for k in (
                     "分时可视化", "TradeVisualizer", "K线可视化",
@@ -17045,10 +17060,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if result["stock_monitor"] == 0 and ("股票异动数据监控" in title or "股票异动" in title):
                     result["stock_monitor"] = hwnd
 
-                if result.get("fusion_ladder", 0) == 0 and any(k in title for k in ["融合信号梯度", "Signal Fusion Ladder", "融合梯度"]):
+                if result.get("fusion_ladder", 0) == 0 and any(k in title for k in ("融合信号梯度", "Signal Fusion Ladder", "融合梯度")):
                     result["fusion_ladder"] = hwnd
 
-                if result["visualizer"] != 0 and result["stock_monitor"] != 0:
+                if result.get("ipo_detector", 0) == 0 and any(k in title for k in ("新股次新", "次新超短", "IPO Detector")):
+                    result["ipo_detector"] = hwnd
+
+                # 全部命中时提前终止枚举
+                if (result["visualizer"] != 0 and result["stock_monitor"] != 0
+                        and result["fusion_ladder"] != 0 and result["ipo_detector"] != 0):
                     return False
 
             except Exception:
@@ -25193,14 +25213,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 text_area.delete("1.0", tk.END)
                 text_area.insert("1.0", msg)
 
-                # 同步更新右侧监控池 Treeview 数据，展现最灵动的交互
-                try:
-                    refresh_pool_data()
-                except Exception as e:
-                    logger.error(f"Auto refresh pool data failed: {e}")
-
+                # ✅ 彻底移除每 5 秒在 UI 主线程自动刷新潜伏池的无谓开销；
+                # 潜伏池右上方配备【🔄 刷新】按钮供手动按需刷新，用户操作（剔除/强设潜伏/关注）时也会自愈刷新；
+                # update_status 专注于极速更新 Realtime Service 状态与日志（耗时 < 1ms），不再阻塞 UI 消息泵。
                 log_win.after(5000, update_status) 
                 
+            # 首次打开窗口时初始加载一次潜伏池数据，后续由手动点击【🔄 刷新】或用户交互触发
+            try:
+                log_win.after(50, refresh_pool_data)
+            except Exception:
+                pass
             update_status()
             
         except Exception as e:

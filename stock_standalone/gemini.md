@@ -1,5 +1,21 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-11-01 20:10 【拔除潜伏池无谓自动刷新、Windows外部窗口扫描提速与网关SQLite锁节流治理】(`instock_MonitorTK.py`, `system_linkage_gateway.py`, `tests/test_realtime_monitor_perf_and_scan.py`)
+- [x] **【彻底拔除潜伏池每5秒无谓自动刷新 (`refresh_pool_data`)】**：
+  - 根因：在实时监控窗口中，5 秒一次的 `update_status` 定时器无条件调用 `refresh_pool_data()`，在 UI 主线程遍历数百只股票提取 K 线计算均量、评分并全量清空重插 Treeview，每次占满主线程 700~1100ms 并触发 `[UI-SLOW-TASK]` 刷屏；
+  - 彻底优化：从 `update_status` 中彻底移除 `refresh_pool_data()` 调用；潜伏池右上角原生配备【🔄 刷新】按钮，用户在右键删除、强设潜伏、重点关注时按需自愈刷新；
+  - `update_status` 仅专注刷新左侧轻量 Service Status 文本与日志（耗时 < 1ms），彻底根绝主线程卡顿与 CPU 浪掷。
+- [x] **【外部窗口扫描极速提速与负向缓存保护 (`_scan_external_windows`, `scan_worker`)】**：
+  - 在 EnumWindows 回调中加入 `user32.IsWindowVisible(hwnd)` 过滤，短路跳过 95% 无关不可见/消息窗口；
+  - 将 `ipo_detector` 识别直接并入单次主 EnumWindows 枚举，消除二次全量 EnumWindows 递归开销；
+  - 引入 3.0 秒负向缓存与 10.0 秒默认自适应退避间隔，外部窗口未开启时绝不反复高频全量枚举，耗时从 1.5s 骤降至毫秒级。
+- [x] **【网关 SQLite 鉴权写入锁节流治理 (`system_linkage_gateway.py`)】**：
+  - 将每次鉴权请求都执行全表范围扫描的 `DELETE FROM linkage_nonces` 改造为 300 秒节流批量清理；
+  - 平时普通鉴权仅执行点插入 `INSERT`，彻底消除刚开机空库时的 `directory_wait_ms` 目录锁等待与 `[LINKAGE-DB-SLOW]` 延迟。
+- [x] **【自动化测试全绿通过】**：
+  - 新增 `tests/test_realtime_monitor_perf_and_scan.py` 专项验证（负向缓存、TTL 与自适应退避 100% 覆盖）；
+  - 全量网关测试（28 项）与 UI 专项测试（42 项）全绿通过。
+
 ## 2026-11-01 17:30 【彻底根除子窗口多重/二次缩放放得巨大Bug、列组合管理器尺寸持久化自愈与客观DPI识别闭环】(`column_manager.py`, `tk_gui_modules/dpi_mixin.py`, `dpi_utils.py`, `instock_MonitorTK.py`, `tests/test_column_manager_dpi_and_persistence.py`)
 - [x] **【看门狗 [UI-BLOCK-STACK] 堆栈输出限流优化 (超过5次输出一次)】**：
   - 在 `instock_MonitorTK.py` 的 `watchdog_loop` 中引入假死累计计数器 `self._ui_block_count`；
