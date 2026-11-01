@@ -2422,6 +2422,14 @@ def calc_trend_channel(df, ur=6, lr=6):
     except Exception:
         pass
 
+    # 预处理慢字段使用独立生成时间，不能被后续实时价格更新“刷新”。
+    last_index = df.index[-1]
+    if isinstance(last_index, tuple):
+        last_index = last_index[-1]
+    asof_text = str(last_index)[:10]
+    asof_value = pd.to_datetime(asof_text, errors='coerce') if len(asof_text) == 10 else pd.NaT
+    new_cols['_observation_preprocess_ts'] = np.full(n, time.time())
+    new_cols['_observation_preprocess_asof'] = '' if pd.isna(asof_value) else asof_value.strftime('%Y-%m-%d')
     df = df.assign(**new_cols)
     return df
 

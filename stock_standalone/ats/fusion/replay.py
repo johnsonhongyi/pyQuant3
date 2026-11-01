@@ -50,6 +50,7 @@ from ats.fusion.names import name_of
 from ats.fusion.trade_sim import T1Simulator, render_trades, summarize_trades
 from ats.fusion.context import get_daily_context
 from ats.fusion.anomaly import counter_reclaim, detect_patterns, pattern_score, rolling_vwaps, PATTERN_COUNTER_HOLD, PATTERN_COUNTER_RECLAIM, PATTERN_LATENT_BREAK
+from ats.fusion.observation import build_observation_evidence, observation_reason
 from ats.fusion.premarket import get_premarket
 from ats.fusion.structure import classify as classify_structure
 from ats.fusion.tracker import RaceTracker, TrackConfig, render_entries, STAGE_ENTER, STAGE_EVICT
@@ -1242,8 +1243,13 @@ class DayReplay:
                 if collect_only:
                     continue
 
+                strategy_evidence = build_observation_evidence(
+                    {"ts": float(clock[t])}, {"_observation_daily_context": {"asof_day": day, "values": _dc}},
+                    float(clock[t]), day, "replay_minute_proxy", today_vwap=vw,
+                    today_volume=float(mat["cum_vol"][i, t]))
                 if (decision.tier < self.cfg.record_tier_min and not historical_context and codes[i] not in carried and codes[i] not in reclaim_first
-                        and not ({PATTERN_COUNTER_RECLAIM, PATTERN_COUNTER_HOLD} & set(patterns))):
+                        and not ({PATTERN_COUNTER_RECLAIM, PATTERN_COUNTER_HOLD} & set(patterns))
+                        and not observation_reason(strategy_evidence)):
                     key = decision.veto_reason.split("(")[0] if decision.veto_reason else "RAR不足"
                     veto_counts[key] = veto_counts.get(key, 0) + 1
                     continue
@@ -1296,6 +1302,7 @@ class DayReplay:
                         "patterns": patterns,
                         "production_history": historical_context,
                         "carried_observation": codes[i] in carried,
+                        "observation_evidence": strategy_evidence,
                         "counter_reclaim_first_ts": reclaim_first.get(codes[i]),
                         "reclaim_detail": {
                             "vwap": round(vw, 3),

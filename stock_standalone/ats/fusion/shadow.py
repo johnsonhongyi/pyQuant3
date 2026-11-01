@@ -50,7 +50,7 @@ from ats.fusion.vanguard import (
 logger = logging.getLogger(__name__)
 
 _BUY_ACTIONS = ("买入", "加仓", "BUY", "ADD")
-_TRACKER_SOURCES = frozenset(("live_strategy", "counter_reclaim", "vanguard_funnel"))
+_TRACKER_SOURCES = frozenset(("live_strategy", "counter_reclaim", "vanguard_funnel", "strategy_observation"))
 
 # 自适应分档的绝对下限：防止"整段行情都很烂"时也评出 L4。
 # 与回放 percentile_cuts 的 floors 保持一致（68/60/52/45）：
@@ -141,6 +141,7 @@ class FusionShadow:
         self.regime_tracker = MarketRegimeTracker()
         self.tracker = RaceTracker()
         self._tracker_loaded = False
+        self._strategy_observation_days = {}
         self._tracker_dirty = False
         self._last_tracker_save = 0.0
         self._tracker_save_interval = max(1.0, float(self.cfg.get("tracker_save_interval_s", 15.0)))
@@ -769,6 +770,7 @@ class FusionShadow:
                 "hit": bool(fusion.tier >= 2),
                 "coverage": round(float(getattr(fusion, "coverage", 0.0) or 0.0), 3),
                 "patterns": patterns,
+                "observation_evidence": event.extra.get("observation_evidence"),
                 "counter_reclaim_first_ts": self._counter_reclaim_first.get(code),
                 "reclaim_vwap3": round(_v3, 3),
                 "reclaim_vwap5": round(_v5, 3),
@@ -828,6 +830,11 @@ class FusionShadow:
             }
 
             with self._lock:
+                from ats.fusion.observation import observation_reason
+                if observation_reason(record.get("observation_evidence")):
+                    self._strategy_observation_days[code] = day
+                    self._tracker_dirty = True
+                    self._save_tracker_locked()
                 self._stats["records"] += 1
                 self._stats["tier_counts"][fusion.tier] = (
                     self._stats["tier_counts"].get(fusion.tier, 0) + 1
@@ -926,6 +933,7 @@ class FusionShadow:
                 metadata={
                     "day": self._day,
                     "counter_reclaim_first": dict(self._counter_reclaim_first),
+                    "strategy_observation_days": dict(self._strategy_observation_days),
                 },
             )
             self._last_tracker_save = now
@@ -944,6 +952,8 @@ class FusionShadow:
         if os.path.isfile(legacy):
             paths.add(legacy)
         merged = {}
+        if not hasattr(self, "_strategy_observation_days"):
+            self._strategy_observation_days = {}
         for path in sorted(paths):
             candidate = RaceTracker()
             metadata: Dict[str, Any] = {}
@@ -952,6 +962,17 @@ class FusionShadow:
             except Exception as exc:
                 logger.warning("[fusion] 跟踪状态文件读取失败 %s: %s", os.path.basename(path), exc)
                 continue
+            observation_days = metadata.get("strategy_observation_days")
+            if isinstance(observation_days, dict) and str(metadata.get("day") or "") <= asof_day:
+                from datetime import date
+                for code, observed_day in observation_days.items():
+                    try:
+                        age = (date.fromisoformat(asof_day) - date.fromisoformat(observed_day)).days
+                        if 0 <= age <= 9 and len(code) == 6 and code.isdigit():
+                            self._strategy_observation_days[code] = max(
+                                observed_day, self._strategy_observation_days.get(code, observed_day))
+                    except (TypeError, ValueError):
+                        continue
             if metadata.get("day") == asof_day:
                 first_map = metadata.get("counter_reclaim_first")
                 if isinstance(first_map, dict):
@@ -972,6 +993,16 @@ class FusionShadow:
                     merged[code] = state
         self.tracker._states.update(merged)
         return len(merged)
+
+    def observation_codes(self, asof_day):
+        """恢复最近九个日历日的观察名单，独立于是否曾经入局。"""
+        from datetime import date
+        with self._lock:
+            if not self._tracker_loaded:
+                self._load_tracker_states(asof_day)
+                self._tracker_loaded = True
+            return {code for code, observed_day in self._strategy_observation_days.items()
+                    if 0 <= (date.fromisoformat(asof_day) - date.fromisoformat(observed_day)).days <= 9}
 
     # ------------------------------------------------------------------
     # 观测

@@ -47,6 +47,7 @@ def _find_daily_path() -> Optional[str]:
 STRUCTURE_FIELDS = (
     "vwap3", "vwap5", "vwap10", "vwap_observed_days",
     "vwap_prev2_value", "vwap_prev2_volume", "vwap_prev4_value", "vwap_prev4_volume",
+    "vwap_prev9_value", "vwap_prev9_volume", "vwap1_prev_session",
     "hi_10d", "lo_10d", "hi_pre1", "lo_pre1", "close_pre1",
     "amp_10d", "vwap_disp", "is_box10_ready",
     "vwap10_touch_count", "vwap10_hold_days",
@@ -230,7 +231,9 @@ class DailyContext:
             vols_arr = np.array(vols_10)
 
             # 跨日锚点只含历史日；盘中再合并当日累计成交。
-            for count in (2, 4):
+            out["vwap1_prev_session"] = (float(vwaps_arr[-1]) if amt[n - 1] > 0 and vol[n - 1] > 0
+                                         and lows_arr[n - 1] * .95 <= amt[n - 1] / vol[n - 1] <= h[n - 1] * 1.05 else None)
+            for count in (2, 4, 9):
                 if win_10 >= count and all(
                     amt[k] > 0 and vol[k] > 0
                     and lows_arr[k] * 0.95 <= amt[k] / vol[k] <= h[k] * 1.05

@@ -3858,6 +3858,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
             if observing and first_ts:
                 source_item.setToolTip("首次发现：{}；仅为观察信号，梯度及否决原因以本行为准".format(
                     datetime.datetime.fromtimestamp(float(first_ts)).strftime("%H:%M:%S")))
+            from ats.fusion.observation import observation_summary
+            source_item.setToolTip(source_item.toolTip() + "\n" + observation_summary(r.get("observation_evidence")))
             tbl.setItem(i, 14, source_item)
             tbl.setItem(i, 15, self._num_item(time_txt, ts))
             tbl.setItem(i, 16, self._num_item("✅" if hit else "", 1 if hit else 0,
@@ -4581,6 +4583,10 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 note = "回放记录" if source != "生产影子" else "生产影子"
                 paths = "\n".join("{}：{}".format(d["day"], replay["sources"].get(d["day"], "仅分钟行情，无回放档案")) for d in row["timeline"]) if source != "生产影子" else ""
                 item.setToolTip("{}参考价；MFE/MAE仅含信号后采样价格，非完整行情极值；最新记录不等于收盘价。\n".format(note) + "\n".join("{}：{}条决策记录，状态{}，末价{:.2f}{}".format(d["day"], d.get("signal_records", d["records"]), d.get("signal_status", "未知"), d["last_price"], "（分钟缓存采样）" if d.get("price_source") else "") for d in row["timeline"]) + ("\n" + paths if paths else ""))
+                if col == 15:
+                    from ats.fusion.observation import observation_summary
+                    item.setToolTip(item.toolTip() + "\n" + "\n".join(
+                        d["day"] + "：" + observation_summary(d.get("observation_evidence")) for d in row["timeline"]))
                 if col == len(values) - 1:
                     item.setToolTip("逐日比较同代码共同记录日的首条决策记录；时间差=回放时间−生产时间。相差不超过3分钟才显示参考价差，不代表成交或两套决策完全一致。\n" + comparison.get(row["code"], "来源不足").replace("｜", "\n"))
                 table.setItem(i, col, item)

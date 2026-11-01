@@ -338,6 +338,9 @@ def build_event(
 
     quote_day = _first_raw([(quote, "trade_date")])
     quote_day = str(quote_day)[:10] if quote_day is not None else ""
+    from ats.fusion.observation import build_observation_evidence
+    extra["observation_evidence"] = build_observation_evidence(
+        row, snap or {}, now, today_str(now), source, today_vwap=vwap)
     if len(quote_day) == 8 and quote_day.isdigit():
         quote_day = "{}-{}-{}".format(quote_day[:4], quote_day[4:6], quote_day[6:])
 

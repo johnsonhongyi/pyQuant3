@@ -3155,6 +3155,8 @@ class StockLiveStrategy:
             if d_ctx.ok:
                 m10 = d_ctx.asof(c6, time.strftime("%Y-%m-%d"))
                 if m10:
+                    base["_observation_daily_context"] = {
+                        "asof_day": time.strftime("%Y-%m-%d"), "values": dict(m10)}
                     for k_box in STRUCTURE_FIELDS:
                         if k_box in m10:
                             base[k_box] = m10[k_box]
@@ -3184,11 +3186,29 @@ class StockLiveStrategy:
         if _fusion is None or not _fusion.enabled:
             return
 
-        evaluated = {str(k).split("_")[0].zfill(6) for k in (fetch_list or [])}
         cross_map = getattr(self, "_fusion_cross_map", None) or {}
         if not cross_map:
             self._fusion_update_cross_section(df_all_data, now)
             cross_map = getattr(self, "_fusion_cross_map", None) or {}
+
+        evaluated = {str(k).split("_")[0].zfill(6) for k in (fetch_list or [])}
+        # 独立策略观察通道：大周期 DF 信号不再被旧涨幅/量比漏斗挡住。
+        from ats.fusion.observation import strategy_observation_rows
+        observation_day = time.strftime("%Y-%m-%d", time.localtime(now))
+        for raw_code, observation_row in strategy_observation_rows(
+                df_all_data, _fusion.observation_codes(observation_day)).to_dict(orient="index").items():
+            c6 = str(raw_code).split(".")[0].zfill(6)
+            if c6 in evaluated or len(c6) != 6 or not c6.isdigit():
+                continue
+            try:
+                observation_snap = self._fusion_enrich_snap(c6, {}, observation_row, all_klines=all_klines)
+                record = _fusion.observe(code=c6, row=observation_row, snap=observation_snap,
+                                         decision={"action": "HOLD", "reason": "策略观察，不触发下单"},
+                                         now=now, source="strategy_observation")
+                if record is not None:
+                    evaluated.add(c6)
+            except Exception as exc:
+                logger.warning("[FUSION] 策略观察采集失败 %s: %s", c6, exc)
 
         # 快速向量筛选：涨幅 2.2% ~ 9.6% 且先截取涨幅前 80 名，避免大表 iterrows 开销
         pct_col = _fusion_percent_series(df_all_data)

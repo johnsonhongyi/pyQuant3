@@ -112,6 +112,7 @@ def read_replay_follow(roots, asof_day, preferred_run="", price_days=(), minute_
                 grouped[code].append({"code": code, "name": row.get("name") or "", "ts": ts,
                     "price": price, "trade_date": day, "source": "replay_archive",
                     "patterns": row.get("patterns") or [], "track": {"stage": row.get("track_stage") or ""},
+                    "observation_evidence": row.get("observation_evidence"),
                     "fusion": {"tier": row.get("tier"), "veto_reason": row.get("veto") or ""}})
             if bad_rows:
                 errors.append("{}：{}条回放记录无效".format(day, bad_rows))

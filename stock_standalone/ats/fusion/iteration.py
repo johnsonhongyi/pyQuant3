@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from ats.fusion.anomaly import PATTERN_COUNTER_HOLD, PATTERN_COUNTER_RECLAIM
 from ats.fusion.discovery_audit import summarize_result
 from ats.fusion.history_events import HistoricalEvents
+from ats.fusion.observation import observation_reason
 from ats.fusion.replay import DayReplay, ReplayConfig, _app_root, day_bounds
 
 
@@ -205,6 +206,10 @@ def run_iterations(days=None, top_n=600, step=1, focus=(), output_root=None,
                                                 "note": "仅截至前日的归档证据；逐行写入时点未知，不参与评分"}
             result.meta["liquidity_history"] = {code: liquidity.asof(code, day) for code in codes}
             first = _first_reclaims(result)
+            first_observations = dict(first)
+            for row in result.records:
+                if observation_reason(row.get("observation_evidence")):
+                    first_observations.setdefault(row["code"], row)
             latest_carried = {}
             for row in result.records:
                 if row.get("carried_observation"):
@@ -214,7 +219,8 @@ def run_iterations(days=None, top_n=600, step=1, focus=(), output_root=None,
                 row = latest_carried.get(code)
                 if result.meta.get("records_truncated") or row is None or row.get("time", "") < "14:50":
                     carry_states[code] = "数据不足"
-                elif {PATTERN_COUNTER_RECLAIM, PATTERN_COUNTER_HOLD} & set(row.get("patterns") or []):
+                elif (observation_reason(row.get("observation_evidence")) or
+                      {PATTERN_COUNTER_RECLAIM, PATTERN_COUNTER_HOLD} & set(row.get("patterns") or [])):
                     carry_states[code] = "收盘前仍满足观察"
                 else:
                     carry_states[code] = "收盘前不再满足观察"
@@ -224,8 +230,8 @@ def run_iterations(days=None, top_n=600, step=1, focus=(), output_root=None,
             summary["production_compare"] = _compare_production(root, result, first)
             summary["previous_observations"] = {
                 "day": selected[index - 1] if index else None,
-                "carried": len(previous), "observed_again": len(set(previous) & set(first)),
-                "not_reobserved": sorted(set(previous) - set(first)),
+                "carried": len(previous), "observed_again": len(set(previous) & set(first_observations)),
+                "not_reobserved": sorted(set(previous) - set(first_observations)),
                 "close_states": carry_states,
                 "gap": "中间交易日未连续回放，赛马状态已重置" if gap else "",
             }
@@ -249,7 +255,7 @@ def run_iterations(days=None, top_n=600, step=1, focus=(), output_root=None,
             _atomic_json(manifest_path, manifest)
             settled.append(summary)
             # 已发现的观察继续跨日跟踪；当日没有新信号不等于历史观察应被遗忘。
-            previous.update(first)
+            previous.update(first_observations)
         manifest["status"] = "complete"
         _atomic_json(manifest_path, manifest)
     except Exception as exc:

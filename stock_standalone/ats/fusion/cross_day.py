@@ -3,6 +3,7 @@
 from datetime import datetime
 import math
 from ats.fusion.source_identity import is_replay_record
+from ats.fusion.observation import observation_reason
 
 
 def build_cross_day(series_by_day, asof_day, allow_replay=False):
@@ -38,10 +39,11 @@ def build_cross_day(series_by_day, asof_day, allow_replay=False):
                 if not math.isfinite(price) or price <= 0:
                     continue
                 state = states.get(code)
+                strategy_observation = observation_reason(row.get("observation_evidence"))
                 if state is None:
                     if row.get("price_only"):
                         continue
-                    observing = {"逆势收复启动", "逆势收复持稳"} & set(row.get("patterns") or [])
+                    observing = strategy_observation or ({"逆势收复启动", "逆势收复持稳"} & set(row.get("patterns") or []))
                     if not observing and (tier < 2 or (row.get("fusion") or {}).get("veto_reason")):
                         continue
                     state = {"code": code, "name": str(row.get("name") or ""),
@@ -60,6 +62,8 @@ def build_cross_day(series_by_day, asof_day, allow_replay=False):
                     daily["price_source"] = "分钟缓存采样"
                 else:
                     daily["signal_records"] += 1
+                    if isinstance(row.get("observation_evidence"), dict):
+                        daily["observation_evidence"] = row["observation_evidence"]
                 state["high"], state["low"] = max(state["high"], price), min(state["low"], price)
                 tracking = row.get("track") or row.get("tracker") or {}
                 if row.get("price_only"):
@@ -69,6 +73,9 @@ def build_cross_day(series_by_day, asof_day, allow_replay=False):
                     state["signal_status"] = tracking.get("stage") or ("信号被否决" if (row.get("fusion") or {}).get("veto_reason") else
                                                "仍有观察证据" if {"逆势收复启动", "逆势收复持稳"} & set(row.get("patterns") or []) else "无收复证据")
                     daily["signal_status"] = state["signal_status"]
+                    if strategy_observation and tier < 2:
+                        state["signal_status"] = strategy_observation + ("（梯度仍否决）" if (row.get("fusion") or {}).get("veto_reason") else "（非执行）")
+                        daily["signal_status"] = state["signal_status"]
                     daily["tier"] = tier
                 visible_tier = (state.get("tier") if daily["signal_records"] else None) if row.get("price_only") else tier
                 state.update(last_day=day, last_ts=ts, last_price=price, tier=visible_tier,
