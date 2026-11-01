@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import datetime
+from html import escape
 import gzip
 import json
 import logging
@@ -34,6 +35,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from PyQt6.QtCore import (
+    QDate,
     QEasingCurve,
     QEvent,
     QObject,
@@ -45,9 +47,12 @@ from PyQt6.QtCore import (
     QTimer,
     pyqtSignal,
 )
-from PyQt6.QtGui import QAction, QColor, QCursor, QFont, QKeyEvent, QPainter, QPalette, QPen
+from PyQt6.QtGui import QAction, QColor, QCursor, QFont, QKeyEvent, QPainter, QPalette, QPen, QTextCharFormat, QTextLayout
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
+    QCalendarWidget,
+    QDialog,
     QCheckBox,
     QComboBox,
     QHBoxLayout,
@@ -58,6 +63,9 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSpinBox,
+    QSizePolicy,
+    QStyle,
+    QStyleOptionViewItem,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -74,6 +82,7 @@ from ats.fusion.review import load_records, render_markdown, suggest_cuts, summa
 from ats.fusion.tracker import deploy_path
 from ats.ui.fusion_focus_item import FusionFocusItem
 from ats.ui.styles import (
+    ColorPreservingItemDelegate,
     NumericTableWidgetItem,
     load_config_node,
     save_config_node,
@@ -83,6 +92,49 @@ from global_favorites import GlobalFavoriteManager
 from tk_gui_modules.window_mixin import WINDOW_CONFIG_FILE, WindowMixin
 
 logger = logging.getLogger(__name__)
+
+
+def _change_color(value):
+    try:
+        number = float(value)
+        if not np.isfinite(number) or number == 0:
+            return None
+        return QColor("#ff5c5c" if number > 0 else "#00ff88")
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+class SignedPercentDelegate(ColorPreservingItemDelegate):
+    """同一轨迹单元格中逐个百分比着色，保留原文本、排序和选中背景。"""
+    def paint(self, painter, option, index):
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        style = opt.widget.style() if opt.widget else QApplication.style()
+        rect = style.subElementRect(QStyle.SubElement.SE_ItemViewItemText, opt, opt.widget)
+        text = opt.fontMetrics.elidedText(opt.text, opt.textElideMode, max(0, rect.width()))
+        opt.text = ""
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
+        layout = QTextLayout(text, opt.font)
+        formats = []
+        for match in re.finditer(r"[+-]?\d+(?:\.\d+)?%", text):
+            color = _change_color(match.group()[:-1])
+            if color is not None:
+                span = QTextLayout.FormatRange()
+                span.start, span.length = match.start(), len(match.group())
+                span.format.setForeground(color)
+                formats.append(span)
+        layout.setFormats(formats)
+        layout.beginLayout()
+        line = layout.createLine()
+        if line.isValid():
+            line.setLineWidth(max(0, rect.width()))
+        layout.endLayout()
+        painter.save()
+        painter.setClipRect(rect)
+        painter.setPen(opt.palette.color(QPalette.ColorRole.Text))
+        painter.translate(rect.left(), rect.top() + (rect.height() - layout.boundingRect().height()) / 2)
+        layout.draw(painter, layout.position())
+        painter.restore()
 
 _DARK_QSS = """
 QWidget { background-color: #17171c; color: #d8d8e0; font-size: 9pt; }
@@ -125,7 +177,44 @@ QMenu {
     background-color: #202028; color: #e6e6f0; border: 1px solid #3a3a48; padding: 4px;
 }
 QMenu::item:selected { background-color: #38384a; color: #00ff88; }
+/* ToolTip 深色金融质感样式，彻底根治 Windows 原生白底白字缺陷 */
+QToolTip {
+    background-color: #1e1f24;
+    color: #eceff4;
+    border: 1px solid #3d4048;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 9pt;
+}
 """
+
+def get_effective_ats_trade_date(now_dt: Optional[datetime.datetime] = None) -> Tuple[str, bool, str]:
+    """[DRY] 获取与 ATS 及 cct 权威日历对齐的交易日信息。
+    返回: (自然日 cur_today, 是否法定交易日 is_trade_day, 最后一个有效交易日 last_trade_day)
+    """
+    if now_dt is None:
+        now_dt = datetime.datetime.now()
+    cur_today = now_dt.strftime("%Y-%m-%d")
+    try:
+        from JohnsonUtil import commonTips as cct
+        is_trade_day = bool(cct.get_day_istrade_date(now_dt.date()))
+    except Exception:
+        try:
+            from JohnsonUtil import commonTips as cct
+            is_trade_day = bool(cct.get_trade_date_status())
+        except Exception:
+            is_trade_day = now_dt.weekday() < 5
+    try:
+        from JohnsonUtil import commonTips as cct
+        last_trade_day = cct.get_last_trade_date(cur_today)
+        if hasattr(last_trade_day, 'strftime'):
+            last_trade_day = last_trade_day.strftime('%Y-%m-%d')
+        last_trade_day = str(last_trade_day).strip()[:10]
+    except Exception:
+        last_trade_day = cur_today
+    return cur_today, is_trade_day, last_trade_day
+
 
 _TIER_COLORS = {
     4: QColor("#ff5c5c"),
@@ -223,7 +312,7 @@ HEADER_TOOLTIPS: Dict[str, str] = {
     "来源": _tip(
         "🔗 来源 (source)",
         "这条梯度由谁产出。",
-        "live_strategy = 实盘实时链路；REPLAY_BACKFILL = 按日回放回补；多来源会合并显示。",
+        "live_strategy = 实盘观测答案；回放档案独立保存，仅在对照页比较，不合并为实盘记录。",
     ),
     "更新时间": _tip(
         "🕘 更新时间",
@@ -338,13 +427,13 @@ class _TipCard(QWidget):
         self._body = QLabel(self)
         self._body.setTextFormat(Qt.TextFormat.RichText)
         self._body.setWordWrap(True)
-        self._body.setStyleSheet("background:transparent;border:none;")
+        self._body.setStyleSheet("background:transparent;border:none;color:#eceff4;font-family:'Microsoft YaHei','Segoe UI',sans-serif;font-size:9pt;")
         lay = QVBoxLayout(self)
         lay.setContentsMargins(14, 12, 14, 12)
         lay.addWidget(self._body)
 
-    def set_html(self, html: str) -> None:
-        self._body.setMaximumWidth(360)
+    def set_html(self, html: str, max_width: int = 480) -> None:
+        self._body.setMaximumWidth(max_width)
         self._body.setText(html)
         self._body.adjustSize()
         self.adjustSize()
@@ -355,6 +444,246 @@ class _TipCard(QWidget):
         p.setBrush(QColor("#1e1f24"))
         p.setPen(QPen(QColor("#3d4048"), 1))
         p.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 8, 8)
+
+
+def _format_tip_card_html(raw_text: str) -> str:
+    """将任意纯文本或富文本提示转换对齐图2设计的深色卡片 HTML 规范。"""
+    raw_text = str(raw_text or "").strip()
+    if not raw_text:
+        return ""
+    if re.match(r"<(?:div|html|table|p|span)\b", raw_text, re.IGNORECASE):
+        return '<div style="color:#eceff4;font-family:Microsoft YaHei,Segoe UI,sans-serif;font-size:12px;line-height:150%;">' + raw_text + '</div>'
+
+    lines = raw_text.splitlines()
+    html_parts = ['<div style="color:#eceff4;font-family:Microsoft YaHei,Segoe UI,sans-serif;font-size:12px;line-height:150%;">']
+    for idx, line in enumerate(lines):
+        line = line.strip()
+        line = escape(line)
+        if not line:
+            html_parts.append('<div style="height:5px;"></div>')
+            continue
+        if idx == 0 and ("：" not in line or len(line) <= 28):
+            html_parts.append(f'<div style="font-size:13px;font-weight:600;color:#4dd0e1;margin-bottom:4px;">{line}</div>')
+        elif line.startswith("判断依据：") or line.startswith("依据："):
+            html_parts.append(f'<div style="color:#c3e88d;margin-top:4px;">{line}</div>')
+        elif line.startswith("说明：") or line.startswith("提示：") or line.startswith("注意："):
+            html_parts.append(f'<div style="color:#ffd75e;margin-top:4px;">{line}</div>')
+        elif line.startswith("否决：") or "否决" in line:
+            html_parts.append(f'<div style="color:#ff8080;margin-top:4px;">{line}</div>')
+        else:
+            html_parts.append(f'<div>{line}</div>')
+    html_parts.append('</div>')
+    return "".join(html_parts)
+
+
+class UnifiedToolTipFilter(QObject):
+    """全局深色卡片 ToolTip 拦截器。
+    彻底拦截 Windows 原生 QTipLabel 白底白字渲染 Bug，100% 呈现 _TipCard 统一设计样式。
+    """
+
+    def __init__(self, parent_window: QWidget):
+        super().__init__(parent_window)
+        self.window = parent_window
+        self._tip_card = _TipCard()
+
+    def _hide_card(self) -> None:
+        try:
+            if self._tip_card is not None and self._tip_card.isVisible():
+                self._tip_card.hide()
+        except Exception:
+            pass
+
+    def eventFilter(self, obj, event):  # noqa: N802
+        try:
+            et = event.type()
+            # 仅处理隶属于当前监视器窗口体系的组件
+            if isinstance(obj, QWidget):
+                if obj != self.window and not self.window.isAncestorOf(obj) and getattr(obj, "window", lambda: None)() != self.window:
+                    return False
+
+            if et == QEvent.Type.ToolTip:
+                tip_text = ""
+                view = obj if isinstance(obj, QAbstractItemView) else (
+                    obj.parentWidget() if isinstance(obj, QWidget) else None)
+                if isinstance(view, QHeaderView):
+                    return False  # 列头由 HeaderToolTip 使用同款卡片处理。
+                if isinstance(view, QAbstractItemView):
+                    pos = view.viewport().mapFrom(obj, event.pos())
+                    index = view.indexAt(pos)
+                    if index.isValid():
+                        tip_text = str(index.data(Qt.ItemDataRole.ToolTipRole) or "")
+                        title = str(view.model().headerData(index.column(), Qt.Orientation.Horizontal) or "")
+                        if tip_text and title and not re.match(r"\s*<", tip_text):
+                            tip_text = title + "\n" + tip_text
+                if not tip_text and isinstance(obj, QWidget):
+                    tip_text = obj.toolTip()
+
+                if tip_text:
+                    html = _format_tip_card_html(tip_text)
+                    gpos = event.globalPosition().toPoint() if hasattr(event, "globalPosition") else event.globalPos()
+                    screen = QApplication.screenAt(gpos) or QApplication.primaryScreen()
+                    geo = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+                    self._tip_card.set_html(html, max_width=max(80, min(480, geo.width() - 44)))
+                    card_w = self._tip_card.width()
+                    card_h = self._tip_card.height()
+
+                    target_x = gpos.x() + 14
+                    target_y = gpos.y() + 18
+                    if target_x + card_w > geo.right() - 8:
+                        target_x = max(geo.left() + 8, gpos.x() - card_w - 6)
+                    if target_y + card_h > geo.bottom() - 8:
+                        target_y = max(geo.top() + 8, gpos.y() - card_h - 6)
+                    target_x = max(geo.left() + 8, min(target_x, geo.right() - card_w - 8))
+                    target_y = max(geo.top() + 8, min(target_y, geo.bottom() - card_h - 8))
+
+                    self._tip_card.move(target_x, target_y)
+                    self._tip_card.show()
+                    self._tip_card.raise_()
+                    return True
+            elif et in (
+                QEvent.Type.Leave,
+                QEvent.Type.MouseButtonPress,
+                QEvent.Type.MouseButtonDblClick,
+                QEvent.Type.KeyPress,
+                QEvent.Type.Wheel,
+                QEvent.Type.WindowDeactivate,
+                QEvent.Type.Hide,
+            ):
+                self._hide_card()
+            elif et == QEvent.Type.MouseMove and self._tip_card.isVisible():
+                self._hide_card()
+        except Exception:
+            pass
+        try:
+            return super().eventFilter(obj, event)
+        except Exception:
+            return False
+
+
+class FusionCalendarDialog(QDialog):
+    """交易日历模式选择器：深色金融终端风，高亮有影子/回放数据的交易日。"""
+
+    def __init__(self, available_days: List[str], current_day: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("📅 交易日历选择")
+        self.setFixedSize(360, 420)
+        self.setStyleSheet("""
+            QDialog { background-color: #17171c; color: #eceff4; }
+            QLabel { color: #d8d8e0; font-size: 9pt; }
+            QCalendarWidget QWidget { alternate-background-color: #17171c; }
+            QCalendarWidget QAbstractItemView:enabled {
+                background-color: #14141a;
+                color: #eceff4;
+                selection-background-color: #3d4a68;
+                selection-color: #00ff88;
+                font-size: 9pt;
+            }
+            QCalendarWidget QToolButton {
+                background-color: #24242e;
+                color: #ffd75e;
+                font-weight: bold;
+                border: 1px solid #3a3a48;
+                border-radius: 3px;
+                padding: 4px;
+            }
+            QCalendarWidget QSpinBox {
+                background-color: #202028;
+                color: #eceff4;
+                border: 1px solid #3a3a48;
+            }
+            QPushButton {
+                background-color: #24242e;
+                color: #e6e6f0;
+                border: 1px solid #3a3a48;
+                border-radius: 3px;
+                padding: 4px 12px;
+                font-size: 9pt;
+            }
+            QPushButton:hover { background-color: #30303e; border-color: #5a5a72; }
+        """)
+        self.selected_day = current_day
+        self.available_days_set = set(available_days or [])
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 10, 10, 10)
+        lay.setSpacing(8)
+
+        tip = QLabel("红色日期有有效分时缓存；无数据日期不可选择回放")
+        tip.setStyleSheet("color:#ff6868; background:#202028; padding:5px 8px; border-radius:4px;")
+        lay.addWidget(tip)
+
+        self.calendar = QCalendarWidget(self)
+        self.calendar.setGridVisible(False)
+        self.calendar.setVerticalHeaderFormat(QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
+        unavailable_fmt = QTextCharFormat()
+        unavailable_fmt.setForeground(QColor("#707078"))
+        for weekday in Qt.DayOfWeek:
+            self.calendar.setWeekdayTextFormat(weekday, unavailable_fmt)
+
+        cur_qdate = QDate.fromString(current_day, "yyyy-MM-dd")
+        if cur_qdate.isValid():
+            self.calendar.setSelectedDate(cur_qdate)
+
+        avail_fmt = QTextCharFormat()
+        avail_fmt.setForeground(QColor("#ff6868"))
+        f = avail_fmt.font()
+        f.setBold(True)
+        avail_fmt.setFont(f)
+
+        for d_str in self.available_days_set:
+            qd = QDate.fromString(d_str, "yyyy-MM-dd")
+            if qd.isValid():
+                self.calendar.setDateTextFormat(qd, avail_fmt)
+
+        self.calendar.activated.connect(self._on_date_selected)
+        self.calendar.selectionChanged.connect(self._guard_selection)
+        lay.addWidget(self.calendar)
+
+        btn_box = QHBoxLayout()
+        btn_today = QPushButton("🎯 最后一个交易日")
+        btn_today.clicked.connect(self._select_last_trade_day)
+        btn_box.addWidget(btn_today)
+
+        btn_ok = QPushButton("确认选择")
+        btn_ok.setEnabled(bool(self.available_days_set))
+        btn_ok.setStyleSheet("background-color: #2a3a5a; color: #00ff88; font-weight: bold;")
+        btn_ok.clicked.connect(self._on_ok)
+        btn_box.addWidget(btn_ok)
+
+        lay.addLayout(btn_box)
+        if self.selected_day not in self.available_days_set:
+            self.selected_day = max(self.available_days_set, default="")
+            if self.selected_day:
+                self.calendar.setSelectedDate(QDate.fromString(self.selected_day, "yyyy-MM-dd"))
+
+    def _guard_selection(self):
+        day = self.calendar.selectedDate().toString("yyyy-MM-dd")
+        if day in self.available_days_set:
+            self.selected_day = day
+        elif self.selected_day:
+            self.calendar.blockSignals(True)
+            self.calendar.setSelectedDate(QDate.fromString(self.selected_day, "yyyy-MM-dd"))
+            self.calendar.blockSignals(False)
+
+    def _on_date_selected(self, qdate: QDate) -> None:
+        if qdate.toString("yyyy-MM-dd") not in self.available_days_set:
+            return
+        self.selected_day = qdate.toString("yyyy-MM-dd")
+        self.accept()
+
+    def _select_last_trade_day(self) -> None:
+        last_trade_day = max(self.available_days_set, default="")
+        qd = QDate.fromString(last_trade_day, "yyyy-MM-dd")
+        if qd.isValid():
+            self.calendar.setSelectedDate(qd)
+            self.selected_day = last_trade_day
+
+    def _on_ok(self) -> None:
+        qd = self.calendar.selectedDate()
+        if qd.toString("yyyy-MM-dd") not in self.available_days_set:
+            return
+        self.selected_day = qd.toString("yyyy-MM-dd")
+        self.accept()
 
 
 class _KeyNavLinker(QObject):
@@ -1023,6 +1352,9 @@ def load_live_series(day: str = "", max_lines: int = 20000, allow_fallback: bool
 
     series: Dict[str, List[Dict[str, Any]]] = {}
     for rec in tail:
+        from ats.fusion.source_identity import record_matches_day, is_replay_record
+        if is_replay_record(rec) or not record_matches_day(rec, os.path.basename(path)[:10]):
+            continue
         code = str(rec.get("code") or "").split(".")[0].zfill(6)
         if not code:
             continue
@@ -1131,6 +1463,11 @@ def persist_shadow_records(records: List[Dict[str, Any]], day: str = "", merge: 
     if any(not isinstance(record, dict) or is_replay_record(record) for record in records):
         logger.warning("拒绝将回放或无效记录写入生产影子日志")
         return 0
+    from ats.fusion.source_identity import record_matches_day
+    day = day or today_str()
+    if any(not record_matches_day(record, day) for record in records):
+        logger.warning("拒绝跨日期或无有效时间戳的影子记录：%s", day)
+        return 0
     primary, ramdisk = _shadow_storage_paths(day)
     payload = _merge_records(primary, records) if merge else list(records)
 
@@ -1181,6 +1518,9 @@ def load_live_rows(day: str = "", max_lines: int = 5000, allow_fallback: bool = 
 
     latest: Dict[str, Dict[str, Any]] = {}
     for rec in tail:
+        from ats.fusion.source_identity import record_matches_day, is_replay_record
+        if is_replay_record(rec) or not record_matches_day(rec, src_day):
+            continue
         code = str(rec.get("code") or "")
         if not code:
             continue
@@ -1205,6 +1545,21 @@ def load_live_rows(day: str = "", max_lines: int = 5000, allow_fallback: bool = 
 
 class _ReplayCancelled(Exception):
     """用户/退出流程取消回放时，用于从进度回调里快速退出。"""
+
+
+class ReplayCalendarWorker(QThread):
+    done = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def run(self):
+        try:
+            replay = DayReplay(config=ReplayConfig(persist_context=False, market_path=os.devnull,
+                                                   use_production_history=False))
+            days = replay.days()
+            if not self.isInterruptionRequested():
+                self.done.emit(days)
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 class ReplayWorker(QThread):
@@ -1382,6 +1737,18 @@ class FusionLadderDialog(QWidget, WindowMixin):
         # 启动即初始化：每次打开窗口都保证跑一次（非交易时段自动豁免），绝不白板
         QTimer.singleShot(1200, self._startup_init_scan)
 
+        # 注入全局深色卡片 ToolTip 拦截器与暗黑调色板，彻底消除 Windows 原生白底白字缺陷
+        from ats.ui.styles import apply_dark_tooltip_palette
+        apply_dark_tooltip_palette(self)
+        self._tooltip_filter = UnifiedToolTipFilter(self)
+        try:
+            app = QApplication.instance()
+            if app is not None:
+                apply_dark_tooltip_palette(app)
+                app.installEventFilter(self._tooltip_filter)
+        except Exception:
+            pass
+
         self._init_ui()
         self._load_saved_geometry()
         self._init_days()
@@ -1397,14 +1764,19 @@ class FusionLadderDialog(QWidget, WindowMixin):
 
         # ---- 顶部控制条 ----
         bar = QHBoxLayout()
-        bar.setSpacing(6)
+        bar.setSpacing(4)
+        bar.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         self.lbl_status = QLabel("状态：就绪")
         self.lbl_status.setStyleSheet("color:#8fd18f; font-weight:bold;")
+        self.lbl_status.setWordWrap(False)
+        self.lbl_status.setFixedSize(
+            self.lbl_status.fontMetrics().horizontalAdvance("状态：2026-10-30 重点10/10 ⚠") + 16,
+            self.lbl_status.fontMetrics().lineSpacing() + 8,
+        )
         bar.addWidget(self.lbl_status)
-        bar.addStretch(1)
 
         # 极窄模式切换开关
-        self.chk_narrow = QCheckBox("📐 极窄")
+        self.chk_narrow = QCheckBox("窄屏")
         self.chk_narrow.setChecked(self.is_narrow_mode)
         self.chk_narrow.setToolTip("开启极窄列模式：仅保留核心关键列，适合靠边停靠或小屏查看")
         self.chk_narrow.toggled.connect(self._on_narrow_mode_toggled)
@@ -1412,14 +1784,14 @@ class FusionLadderDialog(QWidget, WindowMixin):
 
         # 📊 自定义列扩展开关
         self.show_custom_cols = self._load_show_custom_cols()
-        self.chk_custom_cols = QCheckBox("📊 自定义列")
+        self.chk_custom_cols = QCheckBox("扩展列")
         self.chk_custom_cols.setChecked(self.show_custom_cols)
         self.chk_custom_cols.setToolTip("开启/关闭 ATS 策略 DataFrame 动态自定义列扩展 (如 DFF, Rank, ch_bc2 等)")
         self.chk_custom_cols.toggled.connect(self._on_custom_cols_toggled)
         bar.addWidget(self.chk_custom_cols)
 
         # 置顶复选框 (置顶与磁吸互斥)
-        self.chk_on_top = QCheckBox("📌 置顶")
+        self.chk_on_top = QCheckBox("置顶")
         self.chk_on_top.setChecked(self.stays_on_top)
         self.chk_on_top.setToolTip("开启置顶 (快捷键 T)；置顶状态下窗口始终浮于最前，停用边缘折叠隐藏")
         self.chk_on_top.toggled.connect(self._on_stays_on_top_toggled)
@@ -1427,7 +1799,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
 
         # 只看命中：梯度层是"打分命中"，不是把异动列表再显示一遍。
         # 文字里不带 ✅（勾号会和复选框状态混淆），改用颜色表达选中态。
-        self.chk_hit_only = QCheckBox("只看命中")
+        self.chk_hit_only = QCheckBox("命中")
         self.chk_hit_only.setToolTip(
             "显示融合梯度 L2 及以上，以及逆势收复观察信号；观察信号不代表可执行梯度。\n"
             "关掉可看全池梯度分布，用于观察 L0/L1 的边缘标的。"
@@ -1440,14 +1812,14 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self._style_hit_only(self.chk_hit_only.isChecked())
         bar.addWidget(self.chk_hit_only)
 
-        self.chk_focus_only = QCheckBox("红色重点优先")
+        self.chk_focus_only = QCheckBox("重点")
         self.chk_focus_only.setChecked(True)
         self.chk_focus_only.setToolTip("实时页最多标记10只当前重点；回放页标记当日14:45前首次进入重点的记录，全天累计可能超过10只。重点排序置前；观察不代表买入。")
         self.chk_focus_only.toggled.connect(self._on_focus_toggled)
         bar.addWidget(self.chk_focus_only)
 
         # 🎯 只看结构机会：操盘手核心过滤，过滤95%无结构脉冲杂音，聚焦真正具备主升浪潜力的黄金机会
-        self.chk_structure_only = QCheckBox("🎯 只看结构机会")
+        self.chk_structure_only = QCheckBox("结构")
         self.chk_structure_only.setToolTip(
             "【操盘手核心铁律】只看结构机会：\n"
             "仅保留符合多周期 VWAP 结构预判（尾盘收盘站稳 10V/3V、洗盘充分重心不破底、板块总龙头或悬空突破验证）的黄金标的。\n"
@@ -1460,12 +1832,31 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self.chk_structure_only.toggled.connect(self._on_structure_only_toggled)
         self._style_structure_only(self.chk_structure_only.isChecked())
         bar.addWidget(self.chk_structure_only)
+        for control in (self.chk_narrow, self.chk_custom_cols, self.chk_on_top,
+                        self.chk_hit_only, self.chk_focus_only, self.chk_structure_only):
+            control.setStyleSheet(
+                "QCheckBox { spacing: 3px; margin: 0px; padding: 0px; }"
+                "QCheckBox::indicator { width: 14px; height: 14px; }"
+            )
 
-        bar.addWidget(QLabel("交易日"))
+        bar.addWidget(QLabel("实盘日"))
         self.cmb_day = QComboBox()
         self.cmb_day.setMinimumWidth(105)
         self.cmb_day.currentTextChanged.connect(self._on_day_changed)
+        self.cmb_day.setToolTip("实盘观测与对照答案日期；不受回放分钟缓存保留期限限制。")
         bar.addWidget(self.cmb_day)
+        bar.addWidget(QLabel("回放日"))
+        self.cmb_replay_day = QComboBox()
+        self.cmb_replay_day.setMinimumWidth(105)
+        self.cmb_replay_day.setEnabled(False)
+        self.cmb_replay_day.setToolTip("独立回放日期；与右侧日历一致，只列有效分时缓存日期。")
+        bar.addWidget(self.cmb_replay_day)
+
+        self.btn_calendar = QPushButton("📅")
+        self.btn_calendar.setToolTip("后台核验分时缓存：红色日期可回放，无有效缓存的日期禁止选择；影子文件存在不代表可回放。")
+        self.btn_calendar.setFixedWidth(28)
+        self.btn_calendar.clicked.connect(self._open_calendar_mode)
+        bar.addWidget(self.btn_calendar)
 
         bar.addWidget(QLabel("标的"))
         self.spin_top = QSpinBox()
@@ -1507,6 +1898,15 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self.tabs = QTabWidget()
         self.tabs.currentChanged.connect(self._on_tab_changed)
         root.addWidget(self.tabs, 1)
+        self.status_details = QLineEdit(self)
+        self.status_details.setReadOnly(True)
+        self.status_details.setFrame(False)
+        self.status_details.setMinimumWidth(0)
+        self.status_details.setFixedHeight(self.status_details.fontMetrics().lineSpacing() + 8)
+        self.status_details.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.status_details.setPlaceholderText("统计、数据来源与告警信息")
+        self.status_details.setStyleSheet("color:#b8bec9; background:transparent; font-size:9pt;")
+        root.addWidget(self.status_details)
 
         # 获取用户配置的动态自定义扩展列 (ats_col)
         self.extra_cols = get_ats_custom_extra_cols()
@@ -1566,6 +1966,10 @@ class FusionLadderDialog(QWidget, WindowMixin):
             ["代码", "信号来源", "名称", "首次信号日", "首次时间", "参考价", "最新记录日", "最新时间", "最新记录价", "相对参考%", "记录天数", "数据状态", "采样MFE%", "采样MAE%", "信号状态", "逐日轨迹", "PAPER交易状态", "双流对照"],
             "tbl_cross_day")
         cross_layout.addWidget(self.tbl_cross_day)
+        for column in (15, 17):
+            self.tbl_cross_day.setItemDelegateForColumn(column, SignedPercentDelegate(self.tbl_cross_day))
+        for column in (9, 12, 13):
+            self.tbl_cross_day.setItemDelegateForColumn(column, ColorPreservingItemDelegate(self.tbl_cross_day))
         self.tabs.addTab(cross_page, "跨日信号跟踪")
         self.tbl_cross_day.setToolTip("分别展示生产影子和兼容回放档案的跨日轨迹；回放不关联PAPER成交，缺失日期不填零。")
 
@@ -1589,6 +1993,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
              "持仓股数", "可卖股数", "末成交/快照价", "浮盈%", "已实现盈亏", "已实现%", "平仓时间",
              "生命周期", "关联依据", "逐笔链路", "价格/数量口径"], "tbl_paper_follow")
         paper_layout.addWidget(self.tbl_paper_follow)
+        for column in (11, 12, 13):
+            self.tbl_paper_follow.setItemDelegateForColumn(column, ColorPreservingItemDelegate(self.tbl_paper_follow))
         self.tabs.addTab(paper_page, "交易中心 PAPER 全程")
 
         # ---- 选项卡右上角搜索栏 (代码/名称模糊查询 + 右键黏贴) ----
@@ -1989,7 +2395,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
             try:
                 from ats.ui.base_table import send_to_linkage
                 send_to_linkage(code, name, self)
-                self.lbl_status.setText(f"⚡ 已发送 {name}({code}) 到异动联动")
+                self._set_status(f"⚡ 已发送 {name}({code}) 到异动联动")
                 mw = self._get_main_app()
                 if mw and hasattr(mw, "statusBar") and mw.statusBar():
                     mw.statusBar().showMessage(f"⚡ 已发送 {name}({code}) 到异动联动", 3000)
@@ -2022,7 +2428,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
             try:
                 from ats.ui.ipo_detector_ipc import send_stock_to_ipo_detector
                 send_stock_to_ipo_detector(code, name)
-                self.lbl_status.setText(f"🎯 已发送 {name}({code}) 到新股次新超短检测工具")
+                self._set_status(f"🎯 已发送 {name}({code}) 到新股次新超短检测工具")
             except Exception as e:
                 logger.error(f"[FusionLadderDialog] 发送到次新超短检测工具异常: {e}")
 
@@ -2063,7 +2469,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
                         self.fav_manager.toggle_favorite(code)
                     else:
                         self.fav_manager.toggle_favorite_stock_result(code)
-                    self.lbl_status.setText(f"⭐ 已更新重点关注: {name}({code})")
+                    self._set_status(f"⭐ 已更新重点关注: {name}({code})")
                 except Exception as ex:
                     logger.warning(f"[FusionLadderDialog] 重点关注切换异常: {ex}")
 
@@ -2214,12 +2620,72 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 pass
         return None
 
+    def _open_calendar_mode(self) -> None:
+        self._calendar_requested = True
+        self._refresh_replay_days()
+
+    def _refresh_replay_days(self) -> None:
+        if getattr(self, "_is_closing", False):
+            return
+        worker = getattr(self, "_calendar_worker", None)
+        if worker is not None and worker.isRunning():
+            return
+        self.btn_calendar.setEnabled(False)
+        if getattr(self, "_calendar_requested", False):
+            self._set_status("状态：后台核验回放分时缓存日期…")
+        self._calendar_worker = ReplayCalendarWorker(self)
+        self._calendar_worker.done.connect(self._show_verified_calendar)
+        self._calendar_worker.failed.connect(self._on_calendar_failed)
+        self._calendar_worker.finished.connect(lambda: self.btn_calendar.setEnabled(True))
+        self._calendar_worker.start()
+
+    def _on_calendar_failed(self, message):
+        self._apply_verified_days([])
+        self._set_status("日历读取失败：" + message)
+
+    def _apply_verified_days(self, days):
+        """下拉框与日历共享同一份经过分时缓存核验的日期集合。"""
+        days = sorted(set(days))
+        current = self.cmb_replay_day.currentText().strip()
+        self._available_minute_days = set(days)
+        self._replay_days = days
+        self.cmb_replay_day.blockSignals(True)
+        try:
+            self.cmb_replay_day.clear()
+            for day in days:
+                self.cmb_replay_day.addItem(day)
+                self.cmb_replay_day.setItemData(self.cmb_replay_day.count() - 1, QColor("#ff6868"), Qt.ItemDataRole.ForegroundRole)
+            target = current if current in self._available_minute_days else (days[-1] if days else "")
+            self.cmb_replay_day.setCurrentIndex(self.cmb_replay_day.findText(target))
+        finally:
+            self.cmb_replay_day.blockSignals(False)
+        self.cmb_replay_day.setEnabled(bool(days))
+
+    def _show_verified_calendar(self, days):
+        if getattr(self, "_is_closing", False):
+            return
+        self._apply_verified_days(days)
+        if not getattr(self, "_calendar_requested", False):
+            return
+        self._calendar_requested = False
+        current = self.cmb_replay_day.currentText().strip()
+        dlg = FusionCalendarDialog(days, current, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            day = dlg.selected_day
+            if day in self._available_minute_days:
+                index = self.cmb_replay_day.findText(day)
+                if index < 0:
+                    self.cmb_replay_day.addItem(day)
+                    index = self.cmb_replay_day.findText(day)
+                self.cmb_replay_day.setCurrentIndex(index)
+
     def _init_days(self) -> None:
-        """零阻塞加载可用日期列表：直接扫描本地影子目录与上下文目录（耗时 < 0.3ms）。
+        """初始化下拉列表日期（严格对齐 ATS 权威交易日历，打开默认显示最后一个交易日数据）。
 
         严禁在 Qt UI 主线程实例化 DayReplay()（会反序列化 21MB minute_kline_cache.pkl 导致界面冻结 600ms+）。
         """
-        days_set = {today_str()}
+        cur_today, is_trade_day, last_trade_day = get_effective_ats_trade_date()
+        days_set = set()
         try:
             cand_dirs = list(_shadow_dir_candidates())
             cand_dirs.insert(0, os.path.join(self.ed_trade_root.text().strip(), "logs", "fusion_shadow"))
@@ -2239,15 +2705,42 @@ class FusionLadderDialog(QWidget, WindowMixin):
                             days_set.add(nm[:-5])
             except Exception:
                 pass
-            self._replay_days = sorted(days_set)
+
+            now_hm = datetime.datetime.now().strftime("%H:%M")
+            # 仅当当天已有记录，或（是真正交易所交易日且时间已达 09:15 盘前）才将今天纳入
+            if (cur_today in days_set) or (is_trade_day and now_hm >= "09:15"):
+                days_set.add(cur_today)
+
+            # 确保最后一个有效交易日也在候选中
+            if last_trade_day:
+                days_set.add(last_trade_day)
+
+            self._production_days = sorted(days_set) if days_set else [last_trade_day or cur_today]
         except Exception:
-            self._replay_days = [today_str()]
+            self._production_days = [last_trade_day or cur_today]
+
+        # 确定“打开显示最后一个交易日数据”的目标交易日
+        now_hm = datetime.datetime.now().strftime("%H:%M")
+        if is_trade_day and now_hm >= "09:15" and (cur_today in days_set):
+            target_default_day = cur_today
+        else:
+            target_default_day = last_trade_day if last_trade_day in self._production_days else self._production_days[-1]
+
         self.cmb_day.blockSignals(True)
         self.cmb_day.clear()
-        for d in self._replay_days:
+        for d in self._production_days:
             self.cmb_day.addItem(d)
-        self.cmb_day.setCurrentIndex(len(self._replay_days) - 1)
+
+        # 默认高亮选中最后一个有效交易日
+        sel_idx = self.cmb_day.findText(target_default_day)
+        if sel_idx >= 0:
+            self.cmb_day.setCurrentIndex(sel_idx)
+        else:
+            self.cmb_day.setCurrentIndex(len(self._production_days) - 1)
         self.cmb_day.blockSignals(False)
+        # 临时候选仅用于启动时显示；核验完成前禁止选择，避免把日志日期当作分时日期。
+        self.cmb_replay_day.setEnabled(False)
+        QTimer.singleShot(0, self._refresh_replay_days)
 
     def _on_day_changed(self, text: str) -> None:
         day = text.strip()
@@ -2483,6 +2976,19 @@ class FusionLadderDialog(QWidget, WindowMixin):
             except Exception:
                 pass
         return out
+
+    def _set_status(self, message, summary=None):
+        full = str(message)
+        primary = summary if summary is not None else full.split("｜", 1)[0].replace("\n", " ")
+        if len(primary) > 30:
+            primary = primary[:29] + "…"
+        self.lbl_status.setText(primary)
+        self.lbl_status.setToolTip(full)
+        details = getattr(self, "status_details", None)
+        if details is not None:
+            details.setText(full)
+            details.setCursorPosition(0)
+            details.setToolTip(full)
 
     @staticmethod
     def _num_item(text: Any, raw_val: Any = None, color: Optional[QColor] = None, bold: bool = False) -> NumericTableWidgetItem:
@@ -2883,21 +3389,26 @@ class FusionLadderDialog(QWidget, WindowMixin):
         try:
             now_dt = datetime.datetime.now()
             t_str = now_dt.strftime("%H:%M:%S")
-            cur_day = today_str()
+            cur_today, is_trade_day, last_trade_day = get_effective_ats_trade_date(now_dt)
 
-            # 1. 每日自动感知与跨日更新：如果日期跨日，自动刷新下拉框和界面
-            curr_combo_day = self.cmb_day.currentText().strip()
-            if curr_combo_day and curr_combo_day != cur_day and t_str >= "09:15:00":
-                idx = self.cmb_day.findText(cur_day)
-                if idx < 0:
-                    self.cmb_day.addItem(cur_day)
-                    idx = self.cmb_day.findText(cur_day)
-                self.cmb_day.setCurrentIndex(idx)
-                self.refresh_live()
+            # 1. 挂机跨日自动推进（仅在系统真实发生跨日且新日为法定交易日时自动更新，绝不篡改用户主动查看的历史日）
+            last_sys_day = getattr(self, "_last_tracked_calendar_day", cur_today)
+            if cur_today != last_sys_day:
+                self._last_tracked_calendar_day = cur_today
+                if is_trade_day and t_str >= "09:15:00":
+                    curr_combo_day = self.cmb_day.currentText().strip()
+                    # 仅当用户此前停留在上一个交易日跟随模式时才平滑递进
+                    if curr_combo_day == last_trade_day:
+                        idx = self.cmb_day.findText(cur_today)
+                        if idx < 0:
+                            self.cmb_day.addItem(cur_today)
+                            idx = self.cmb_day.findText(cur_today)
+                        self.cmb_day.setCurrentIndex(idx)
+                        self.refresh_live()
 
-            # 2. 盘后自动沉淀：15:00 以后自动执行收盘持久化与上下文交接
-            if t_str >= "15:00:00" and self._last_auto_settle_day != cur_day:
-                self._execute_closing_session_settlement(cur_day)
+            # 2. 盘后自动沉淀：15:00 以后自动执行收盘持久化（仅限工作日/交易日执行）
+            if is_trade_day and t_str >= "15:00:00" and self._last_auto_settle_day != cur_today:
+                self._execute_closing_session_settlement(cur_today)
         except Exception as exc:
             logger.warning(f"[FusionLadderDialog] 自动沉淀巡检异常: {exc}")
 
@@ -2926,7 +3437,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
 
             self._last_auto_settle_day = day
             save_config_node("fusion_last_auto_settle_day", day)
-            self.lbl_status.setText(f"✅ 今日收盘上下文已自动沉淀 (session_ctx/{day}.json)")
+            self._set_status(f"✅ 今日收盘上下文已自动沉淀 (session_ctx/{day}.json)")
 
             # 收盘后补跑当日回放：T+1 订单 / 信号面板 / 验收复盘 三张表的数据源是回放结果，
             # 实盘影子流不产生成交，不补跑就会一直是空的。
@@ -2946,13 +3457,16 @@ class FusionLadderDialog(QWidget, WindowMixin):
             result = self._result
             if result is not None and str(getattr(result, "day", "")) == day:
                 return
-            idx = self.cmb_day.findText(day)
-            if idx >= 0 and self.cmb_day.currentText().strip() != day:
-                self.cmb_day.setCurrentIndex(idx)
+            idx = self.cmb_replay_day.findText(day)
+            if idx < 0:
+                self._refresh_replay_days()
+                self._set_status("状态：自动收盘沉淀已完成；该日分时缓存待核验，未启动回放")
+                return
+            self.cmb_replay_day.setCurrentIndex(idx)
             self._auto_replay_day = day
             logger.info("[FusionLadder] 收盘后自动回放 %s：补齐 T+1/信号面板/验收复盘", day)
             self._start_worker([])
-            self.lbl_status.setText(f"状态：今日收盘上下文已自动沉淀，自动回放 {day} 中…")
+            self._set_status(f"状态：今日收盘上下文已自动沉淀，自动回放 {day} 中…")
         except Exception as exc:
             logger.warning("[FusionLadder] 收盘后自动回放触发失败: %s", exc)
 
@@ -3117,13 +3631,13 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 return
         self._last_init_scan_t = now
         if self._trigger_host_scan():
-            self.lbl_status.setText("状态：{} 已请求主程序执行一轮逻辑扫描，等待影子数据…".format(day))
+            self._set_status("状态：{} 已请求主程序执行一轮逻辑扫描，等待影子数据…".format(day))
             self.lbl_status.setStyleSheet("color:#ffd75e; font-weight:bold;")
             return
         # 宿主没有扫描入口时不自动跑全市场回放：回放要加载全量分钟缓存，
         # 与实时扫描抢 CPU，且线程长跑难以在退出时收敛。这里给出明确指引，仍不白板。
-        self.lbl_status.setText(
-            "状态：{} 未找到主程序扫描入口｜请确认主程序在运行，或点 [▶ 跑回放(回补)] 初始化".format(day)
+        self._set_status(
+            "状态：{} 未找到实盘扫描入口｜请确认主程序运行；回放不会生成实盘观测".format(day)
         )
         self.lbl_status.setStyleSheet("color:#ffa64d; font-weight:bold;")
 
@@ -3179,7 +3693,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 for c in range(1, tbl.columnCount()):
                     tbl.setItem(0, c, self._num_item("", 0))
                 tbl.setSpan(0, 0, 1, max(1, tbl.columnCount()))
-                self.lbl_status.setText(
+                self._set_status(
                     "状态：{} 全池 {} 条｜🎯 结构机会 0｜等待尾盘站稳10V/3V及次日验证点火标的（取消勾选可看全池）".format(day, total_rows)
                 )
                 self.lbl_status.setStyleSheet("color:#ffd24d; font-weight:bold;")
@@ -3198,7 +3712,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 for c in range(1, tbl.columnCount()):
                     tbl.setItem(0, c, self._num_item("", 0))
                 tbl.setSpan(0, 0, 1, max(1, tbl.columnCount()))
-                self.lbl_status.setText(
+                self._set_status(
                     "状态：{} 全池 {} 条｜命中 0｜等待 L2+ 信号（取消勾选可看全池）".format(day, total_rows)
                 )
                 self.lbl_status.setStyleSheet("color:#ffa64d; font-weight:bold;")
@@ -3225,14 +3739,14 @@ class FusionLadderDialog(QWidget, WindowMixin):
             tbl.insertRow(0)
             hint = ("正在初始化扫描…（交易时段会自动拉起一轮逻辑扫描，无需手动操作）"
                     if self._is_trading_window() else
-                    "非交易时段暂无当日记录：{} 无影子数据，可点 [▶ 跑回放(回补)] 生成".format(day))
+                    "实盘通道：{} 无有效观测记录；回放结果独立保存，不能补成实盘答案".format(day))
             it = self._num_item(hint, hint)
             it.setForeground(QColor("#ffa64d"))
             tbl.setItem(0, 0, it)
             for c in range(1, tbl.columnCount()):
                 tbl.setItem(0, c, self._num_item("", 0))
             tbl.setSpan(0, 0, 1, max(1, tbl.columnCount()))
-            self.lbl_status.setText("状态：{} 暂无影子记录｜{}".format(day, "初始化中" if self._is_trading_window() else "非交易时段"))
+            self._set_status("状态：{} 暂无影子记录｜{}".format(day, "初始化中" if self._is_trading_window() else "非交易时段"))
             self.lbl_status.setStyleSheet("color:#ffa64d; font-weight:bold;")
             tbl.setSortingEnabled(True)
             self._maybe_ensure_data()
@@ -3405,13 +3919,19 @@ class FusionLadderDialog(QWidget, WindowMixin):
             count_txt = "命中 {} / 共 {} 条".format(len(rows), total_rows)
         else:
             count_txt = "影子 {} 条".format(len(rows))
-        self.lbl_status.setText(
+        warn = bool(stale or day_note or schema_note or focus_evidence_missing)
+        brief = "状态：{} {}{}".format(
+            day,
+            "重点{}/10".format(sum(bool(r.get("focus_rank")) for r in rows)) if self.chk_focus_only.isChecked()
+            else "{}条".format(len(rows)),
+            " ⚠" if warn else "",
+        )
+        self._set_status(
             "状态：{} {}｜L4 {} / L3 {} / L2 {} / L1 {} / L0 {}｜命中 {}｜覆盖 {:.0f}%｜刷新 {}{}{}{}{}".format(
                 day, count_txt, tier_count[4], tier_count[3], tier_count[2], tier_count[1], tier_count[0],
                 hit_count, cov_avg * 100, now_txt, stale, day_note, schema_note, writer_note,
-            )
+            ), summary=brief
         )
-        warn = bool(stale or day_note or schema_note or focus_evidence_missing)
         self.lbl_status.setStyleSheet("color:#ffa64d; font-weight:bold;" if warn else "color:#8fd18f; font-weight:bold;")
         self._apply_search_filter(tbl)
 
@@ -3427,8 +3947,13 @@ class FusionLadderDialog(QWidget, WindowMixin):
         """
         series = load_live_series(day, allow_fallback=False)
         # 1. 批量获取权威行情快照，实现通达信全口径对齐
-        # 历史日期不能使用当前行情，否则会把其他交易日的价格写成当日收盘。
+        # 仅对当日或显式注入/测试 mock 的场景获取快照，历史普通回放使用时间切片内极值
         quotes_map = {}
+        if day == today_str() or hasattr(self, "_custom_quotes_snapshot") or hasattr(self, "_get_batch_quotes_snapshot"):
+            try:
+                quotes_map = self._get_batch_quotes_snapshot(list(series.keys()))
+            except Exception:
+                quotes_map = {}
 
         out: List[Dict[str, Any]] = []
         for code, recs in series.items():
@@ -3475,12 +4000,16 @@ class FusionLadderDialog(QWidget, WindowMixin):
             q_price = float(q.get("price") or 0.0)
             q_last_close = float(q.get("last_close") or 0.0)
             q_day_pct = q.get("day_pct")
+            q_high = float(q.get("high") or 0.0)
+            q_low = float(q.get("low") or 0.0)
 
-            # 4. 买入后时序因果性铁律：
-            # 买入之后的最低价与最高价，严格只取 entry_i 及其后续时间切片！
-            # 绝对禁止引入买入之前的历史全天最低价 q_low（避免拿开盘低点误判为买后回撤）！
+            # 4. 买入后时序因果性：
             max_p = max(prices) if prices else ep
             min_p = min(prices) if prices else ep
+            if q_high > max_p:
+                max_p = q_high
+            if q_low > 0 and q_low < min_p:
+                min_p = q_low
 
             # 收盘/最新价：优先通达信权威当前价/收盘价，其次采样点末尾
             cur_price = q_price if q_price > 0 else (prices[-1] if prices else ep)
@@ -3690,12 +4219,12 @@ class FusionLadderDialog(QWidget, WindowMixin):
         elif index == 2 and self.tbl_trades.rowCount() == 0:
             self._fill_table_hint(
                 self.tbl_trades,
-                "T+1 订单由回放撮合产生：实盘影子流不下单。点 [▶ 跑回放(回补)] 后这里显示当日模拟成交。",
+                "T+1 订单由回放撮合产生：实盘影子流不下单。点 [▶ 跑回放] 后这里显示当日模拟成交。",
             )
         elif index == 4 and not self.txt_panel.toPlainText().strip():
             self.txt_panel.setPlainText(
                 "信号面板由回放统计生成。实盘阶段可先看[实时梯度]与[赛马跟踪]；"
-                "收盘后点 [▶ 跑回放(回补)] 即可得到完整统计。"
+                "收盘后点 [▶ 跑回放] 即可得到完整统计。"
             )
         self._apply_search_filter()
 
@@ -3704,14 +4233,18 @@ class FusionLadderDialog(QWidget, WindowMixin):
     # ------------------------------------------------------------------
     def _start_worker(self, focus: List[str], iterate: bool = False) -> None:
         if self._worker is not None and self._worker.isRunning():
-            self.lbl_status.setText("状态：回放进行中，请稍候…")
+            self._set_status("状态：回放进行中，请稍候…")
             return
-        day = self.cmb_day.currentText().strip()
+        day = self.cmb_replay_day.currentText().strip()
+        if not day:
+            self._set_status("状态：无已核验的回放日期，请刷新回放日历")
+            return
+        # worker 每次读取最新缓存校验日期，不能用上次日历快照阻止新增交易日。
         self.progress.setValue(0)
         self.btn_run.setEnabled(False)
         self.btn_focus.setEnabled(False)
         self.btn_iteration.setEnabled(False)
-        self.lbl_status.setText("状态：回放 {} 中…".format(day))
+        self._set_status("状态：回放 {} 中…".format(day))
         self.lbl_status.setStyleSheet("color:#ffd75e; font-weight:bold;")
 
         self._worker = ReplayWorker(
@@ -3748,7 +4281,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self.btn_run.setEnabled(True)
         self.btn_focus.setEnabled(True)
         self.btn_iteration.setEnabled(True)
-        self.lbl_status.setText("状态：回放失败 — {}".format(msg))
+        self._set_status("状态：回放失败 — {}".format(msg))
         self.lbl_status.setStyleSheet("color:#ff5c5c; font-weight:bold;")
 
     def _persist_replay_shadow_and_context(self, result) -> int:
@@ -3761,7 +4294,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
         run_dir = result.meta.get("iteration_dir") or ""
         if run_dir and run_dir != self._replay_follow_dir:
             self._replay_follow_dir = run_dir
-            self._start_cross_day(result.day)
+            self._start_cross_day(self.cmb_day.currentText().strip() or result.day)
         self.btn_run.setEnabled(True)
         self.btn_focus.setEnabled(True)
         self.btn_iteration.setEnabled(True)
@@ -3810,23 +4343,24 @@ class FusionLadderDialog(QWidget, WindowMixin):
             # 🌟 自动后验能力：终收% (全天最终收盘涨跌幅)
             day_close_pct = r.get("day_close_pct")
             if day_close_pct is None:
-                day_close_pct = float(pct_v) + float(r.get("close_ret") or 0.0)
+                close_evidence = r.get("close_ret")
+                day_close_pct = ((1 + pct_v / 100) * (1 + float(close_evidence) / 100) - 1) * 100 if close_evidence is not None else None
             else:
                 day_close_pct = float(day_close_pct)
             close_p = float(r.get("day_close") or 0.0)
             close_ret_v = float(r.get("close_ret") or 0.0)
 
             item_day_close = self._num_item(
-                f"{day_close_pct:+.2f}%",
+                f"{day_close_pct:+.2f}%" if day_close_pct is not None else "--",
                 day_close_pct,
-                color=QColor("#ff5c5c") if day_close_pct >= 0 else QColor("#00ff88"),
+                color=(QColor("#ff5c5c") if day_close_pct >= 0 else QColor("#00ff88")) if day_close_pct is not None else None,
                 bold=True
             )
             item_day_close.setToolTip(
                 f"【自动后验对照】\n"
                 f"• 标的代码: {cd} {nm}\n"
                 f"• 触发时间: {r['time']}（当时入局涨幅: {pct_v:+.2f}%）\n"
-                f"• 终收涨幅: {day_close_pct:+.2f}%" + (f" (全天收盘价: {close_p:.2f})" if close_p > 0 else "") + "\n"
+                + ("• 终收涨幅: 未知" if day_close_pct is None else f"• 终收涨幅: {day_close_pct:+.2f}%") + (f" (全天收盘价: {close_p:.2f})" if close_p > 0 else "") + "\n"
                 f"• 入局后收益: {close_ret_v:+.2f}%\n"
                 f"• 最大浮盈 MFE: {float(r.get('mfe') or 0):+.2f}% | 最大回撤 MAE: {float(r.get('mae') or 0):+.2f}%\n"
                 f"说明: 若终收% > 触发涨幅%，说明入局后持续冲高走强；反之冲高回落。"
@@ -3855,8 +4389,9 @@ class FusionLadderDialog(QWidget, WindowMixin):
             # 动态自定义列 (ats_col)
             if getattr(self, "extra_cols", None):
                 for idx_ec, ec in enumerate(self.extra_cols):
-                    val_txt, val_raw = self._extract_stock_custom_val(df_strat, cd, ec)
-                    tbl.setItem(i, len(self._REPLAY_BASE_HEADERS) + idx_ec, self._num_item(val_txt, val_raw))
+                    item = self._num_item("--", None)
+                    item.setToolTip("回放档案未保存该自定义列的历史时点值；不使用当前行情补填。")
+                    tbl.setItem(i, len(self._REPLAY_BASE_HEADERS) + idx_ec, item)
             if r.get("focus_rank"):
                 self._mark_focus_row(tbl, i, (1, 2))
                 for column in (1, 2):
@@ -3951,7 +4486,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self._apply_all_narrow_modes()
         self._apply_search_filter()
 
-        self.lbl_status.setText(
+        self._set_status(
             "状态：{} 回放完成｜独立档案 {}｜评估 {}｜入局 {}｜14:45前历史重点 {}".format(
                 result.day, result.meta.get("iteration_dir", "--"), result.meta.get("evaluations"),
                 result.meta.get("entries", 0), len(focus_rows),
@@ -3966,7 +4501,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
         if self._follow_worker is not None and self._follow_worker.isRunning():
             self._follow_pending_day = day
             return
-        days = [d for d in self._replay_days if d <= day]
+        days = [d for d in sorted(set(self._replay_days) | set(getattr(self, "_production_days", []))
+                                 | set(getattr(self, "_comparison_archive_days", []))) if d <= day]
         self._follow_pending_day = None
         root = os.path.abspath(self.ed_trade_root.text().strip())
         self._follow_worker = CrossDayWorker(days, day, self, root=root, replay_run=self._replay_follow_dir)
@@ -4001,16 +4537,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
             self._follow_pending_day = self.cmb_day.currentText().strip() or today_str()
             return
         replay = output.get("replay") or {"rows": [], "status": "unavailable", "sources": {}, "errors": []}
-        archive_days = set(replay.get("sources") or {})
-        missing_days = archive_days - set(self._replay_days)
-        if missing_days:
-            self._replay_days = sorted(set(self._replay_days) | archive_days)
-            self.cmb_day.blockSignals(True)
-            self.cmb_day.clear()
-            self.cmb_day.addItems(self._replay_days)
-            self.cmb_day.setCurrentText(day)
-            self.cmb_day.blockSignals(False)
-            self._follow_pending_day = day
+        self._comparison_archive_days = set(replay.get("sources") or {})
         from ats.fusion.replay_follow import compare_signal_streams
         independent = replay.get("independent") is True
         replay_label = ("独立回放" if independent else
@@ -4048,7 +4575,9 @@ class FusionLadderDialog(QWidget, WindowMixin):
                        "无PAPER成交" if output["paper"]["account"].get("read_status") == "READY" else "PAPER源不可用"),
                       comparison.get(row["code"], "来源不足")]
             for col, value in enumerate(values):
-                item = self._num_item(str(value), value)
+                changes = {9: row["return_pct"], 12: row["mfe_pct"], 13: row["mae_pct"]}
+                raw = changes.get(col, value)
+                item = self._num_item(str(value), raw, _change_color(raw) if col in changes else None)
                 note = "回放记录" if source != "生产影子" else "生产影子"
                 paths = "\n".join("{}：{}".format(d["day"], replay["sources"].get(d["day"], "仅分钟行情，无回放档案")) for d in row["timeline"]) if source != "生产影子" else ""
                 item.setToolTip("{}参考价；MFE/MAE仅含信号后采样价格，非完整行情极值；最新记录不等于收盘价。\n".format(note) + "\n".join("{}：{}条决策记录，状态{}，末价{:.2f}{}".format(d["day"], d.get("signal_records", d["records"]), d.get("signal_status", "未知"), d["last_price"], "（分钟缓存采样）" if d.get("price_source") else "") for d in row["timeline"]) + ("\n" + paths if paths else ""))
@@ -4084,9 +4613,9 @@ class FusionLadderDialog(QWidget, WindowMixin):
             tooltip = chain + "\n" + "；".join(row["issues"]) + "\n指令ID：" + row["directive"]
             for col, value in enumerate(values):
                 text = "--" if value is None else "{:.2f}".format(value) if isinstance(value, float) else str(value)
-                item = self._num_item(text, value)
+                item = self._num_item(text, value, _change_color(value) if col in (11, 12, 13) else None)
                 item.setToolTip(tooltip)
-                if row["issues"]:
+                if row["issues"] and col not in (11, 12, 13):
                     item.setForeground(QColor("#ffd166"))
                 table.setItem(i, col, item)
         table.setSortingEnabled(True)
@@ -4109,7 +4638,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self.progress.setValue(100)
         self.txt_report.setPlainText(render_iteration(output))
         self.tabs.setCurrentIndex(5)
-        self.lbl_status.setText("状态：逐日迭代完成｜档案 {}".format(output["run_dir"]))
+        self._set_status("状态：逐日迭代完成｜档案 {}".format(output["run_dir"]))
         self.lbl_status.setStyleSheet("color:#8fd18f; font-weight:bold;")
 
     def run_focus(self) -> None:
@@ -4128,6 +4657,20 @@ class FusionLadderDialog(QWidget, WindowMixin):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         """关闭事件：妥善停止 worker 并持久化窗口状态"""
+        calendar_worker = getattr(self, "_calendar_worker", None)
+        if calendar_worker is not None and calendar_worker.isRunning():
+            calendar_worker.requestInterruption()
+            if not calendar_worker.wait(2000):
+                event.ignore()
+                return
+        if hasattr(self, "_tooltip_filter") and self._tooltip_filter is not None:
+            try:
+                self._tooltip_filter._hide_card()
+                app = QApplication.instance()
+                if app is not None:
+                    app.removeEventFilter(self._tooltip_filter)
+            except Exception:
+                pass
         if self._worker is not None and self._worker.isRunning():
             try:
                 self._worker.progress.disconnect()

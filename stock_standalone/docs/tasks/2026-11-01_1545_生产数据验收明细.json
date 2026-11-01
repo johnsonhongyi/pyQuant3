@@ -1,0 +1,166 @@
+{
+  "root": "D:\\JohnsonProgram\\instockMonitorTK",
+  "accepted": false,
+  "shadow_files": [
+    {
+      "file": "D:\\JohnsonProgram\\instockMonitorTK\\logs\\fusion_shadow\\2026-10-23.jsonl",
+      "counts": {
+        "rows": 2,
+        "missing_provenance": 2,
+        "timestamp_day_mismatch": 2,
+        "not_marked_replay": 2
+      },
+      "distinct_codes": 2,
+      "first": "2024-10-23T09:35:00",
+      "last": "2024-10-23T09:42:00",
+      "volume_ratio_trust": "unverified_legacy_observation"
+    },
+    {
+      "file": "D:\\JohnsonProgram\\instockMonitorTK\\logs\\fusion_shadow\\2026-10-26.jsonl",
+      "counts": {
+        "rows": 2453,
+        "missing_provenance": 2220,
+        "invalid_price": 2220,
+        "not_marked_replay": 2453
+      },
+      "distinct_codes": 76,
+      "first": "2026-10-26T09:16:18.405000",
+      "last": "2026-10-26T21:11:40.032000",
+      "volume_ratio_trust": "unverified_legacy_observation"
+    },
+    {
+      "file": "D:\\JohnsonProgram\\instockMonitorTK\\logs\\fusion_shadow\\2026-10-27.jsonl",
+      "counts": {
+        "rows": 2867,
+        "not_marked_replay": 2867,
+        "missing_provenance": 360,
+        "invalid_price": 360
+      },
+      "distinct_codes": 148,
+      "first": "2026-10-27T09:17:07.008000",
+      "last": "2026-10-27T15:05:59.133000",
+      "volume_ratio_trust": "unverified_legacy_observation"
+    },
+    {
+      "file": "D:\\JohnsonProgram\\instockMonitorTK\\logs\\fusion_shadow\\2026-10-28.jsonl",
+      "counts": {
+        "rows": 4045,
+        "not_marked_replay": 4045
+      },
+      "distinct_codes": 286,
+      "first": "2026-10-28T09:16:46.474000",
+      "last": "2026-10-28T15:05:51.901000",
+      "volume_ratio_trust": "unverified_legacy_observation"
+    },
+    {
+      "file": "D:\\JohnsonProgram\\instockMonitorTK\\logs\\fusion_shadow\\2026-10-29.jsonl",
+      "counts": {
+        "rows": 3932,
+        "not_marked_replay": 3932
+      },
+      "distinct_codes": 171,
+      "first": "2026-10-29T09:16:54.878000",
+      "last": "2026-10-29T15:03:18.333000",
+      "volume_ratio_trust": "unverified_legacy_observation"
+    },
+    {
+      "file": "D:\\JohnsonProgram\\instockMonitorTK\\logs\\fusion_shadow\\2026-10-30.jsonl",
+      "counts": {
+        "rows": 4007,
+        "not_marked_replay": 4007
+      },
+      "distinct_codes": 168,
+      "first": "2026-10-30T09:16:22.089000",
+      "last": "2026-10-30T15:04:04.597000",
+      "volume_ratio_trust": "unverified_legacy_observation"
+    }
+  ],
+  "replay_runs": [
+    {
+      "manifest": "D:\\JohnsonProgram\\instockMonitorTK\\logs\\fusion_iterations\\20261031_225151_b146b2bfb5\\manifest.json",
+      "status": "complete",
+      "completed_days": [
+        "2026-10-26"
+      ],
+      "use_production_history": true,
+      "persist_context": false,
+      "engine_fingerprint": null
+    },
+    {
+      "manifest": "D:\\JohnsonProgram\\instockMonitorTK\\logs\\fusion_iterations\\20261101_011109_c79d4fc256\\manifest.json",
+      "status": "complete",
+      "completed_days": [
+        "2026-10-30"
+      ],
+      "use_production_history": true,
+      "persist_context": false,
+      "engine_fingerprint": null
+    },
+    {
+      "manifest": "D:\\JohnsonProgram\\instockMonitorTK\\logs\\fusion_iterations\\20261101_011312_ad2491a0bf\\manifest.json",
+      "status": "complete",
+      "completed_days": [
+        "2026-10-29"
+      ],
+      "use_production_history": true,
+      "persist_context": false,
+      "engine_fingerprint": null
+    },
+    {
+      "manifest": "D:\\JohnsonProgram\\instockMonitorTK\\logs\\fusion_iterations\\20261101_114054_a73bf47cdc\\manifest.json",
+      "status": "complete",
+      "completed_days": [
+        "2026-10-26"
+      ],
+      "use_production_history": false,
+      "persist_context": false,
+      "engine_fingerprint": "538c97ea3c8c90a8"
+    },
+    {
+      "manifest": "D:\\JohnsonProgram\\instockMonitorTK\\logs\\fusion_iterations\\20261101_123156_dbf2fabd20\\manifest.json",
+      "status": "complete",
+      "completed_days": [
+        "2026-10-26"
+      ],
+      "use_production_history": false,
+      "persist_context": false,
+      "engine_fingerprint": "8c9b4d182c1eda4b"
+    }
+  ],
+  "paper": {
+    "read_status": "READY",
+    "snapshot_day": "2026-10-30",
+    "cycles": 538,
+    "unresolved": 342,
+    "issues": {
+      "快照持仓未匹配买入流水": 10,
+      "流水/持仓数量待对账": 11,
+      "缺少买入成本": 309,
+      "卖出数量缺少对应买入": 310,
+      "SELL整仓记录数量不一致": 21
+    }
+  },
+  "read_errors": [],
+  "inputs_changed_during_audit": [],
+  "input_sha256": {
+    "D:\\JohnsonProgram\\instockMonitorTK\\logs\\fusion_shadow\\2026-10-23.jsonl": "da28432c03e409f4d38a1b0efa08d14d174c60f8e5403f41f01b7be9ebf55a47",
+    "D:\\JohnsonProgram\\instockMonitorTK\\logs\\fusion_shadow\\2026-10-26.jsonl": "493531863f45970d68a74c83d69732ec4d89b630e4ea9d70aca1aa40363bb5f5",
+    "D:\\JohnsonProgram\\instockMonitorTK\\logs\\fusion_shadow\\2026-10-27.jsonl": "07dc082ab80bf73030e451c52cfc4657cef7a95188915114af28d79297d4f22e",
+    "D:\\JohnsonProgram\\instockMonitorTK\\logs\\fusion_shadow\\2026-10-28.jsonl": "2d79cae93c8fd0f8c0b3674d7ac07782238149b2af94717f227741870536b36f",
+    "D:\\JohnsonProgram\\instockMonitorTK\\logs\\fusion_shadow\\2026-10-29.jsonl": "042bd6f7364df8bf734274e62fc31934fb1a2590fd5369791634d5754250ddae",
+    "D:\\JohnsonProgram\\instockMonitorTK\\logs\\fusion_shadow\\2026-10-30.jsonl": "6ff2439b51ad0638ab41fe869aef6de055f627fd310c88679fb0a7859631d0b9",
+    "D:\\JohnsonProgram\\instockMonitorTK\\logs\\fusion_iterations\\20261031_225151_b146b2bfb5\\manifest.json": "914c4227638c0898fab85159dea59f0931589ec5a6de041da5ecf823ad041072",
+    "D:\\JohnsonProgram\\instockMonitorTK\\logs\\fusion_iterations\\20261101_011109_c79d4fc256\\manifest.json": "a68b8ac1e09d9ee29c4763c96ccd655d29389202da51e9c105218253dcbea90a",
+    "D:\\JohnsonProgram\\instockMonitorTK\\logs\\fusion_iterations\\20261101_011312_ad2491a0bf\\manifest.json": "68bae48fe1d1bcf09398e1c14d9d05f92bb610338063c30a95c5befc9f41839a",
+    "D:\\JohnsonProgram\\instockMonitorTK\\logs\\fusion_iterations\\20261101_114054_a73bf47cdc\\manifest.json": "0afbd44daf7186f73954610afc4826676c44f6569806c022e2645554de476efc",
+    "D:\\JohnsonProgram\\instockMonitorTK\\logs\\fusion_iterations\\20261101_123156_dbf2fabd20\\manifest.json": "2bde7a9046de749a132d7547044e9205fe8b80a44714aad71582bc3c100310d8",
+    "D:\\JohnsonProgram\\instockMonitorTK\\logs\\paper_account_state.json": "cbc35822245365edaa18b0f79afe99698bb32a7a3921119d58b67dab52fc0ad5",
+    "D:\\JohnsonProgram\\instockMonitorTK\\ats\\config\\ipo_trading_ledger.json": "f2bd9f16390cc991a23b36447c18a4d71a3c1f7b95c7564c9ea51ac75933f92e"
+  },
+  "limitations": [
+    "开发切片与合成测试不作为生产业务验收证据",
+    "文件哈希一致仅证明检查期间输入未变，不证明历史数据真实或完整",
+    "未核实旧备份及原始成交；未执行 EXE 部署或真实跨交易日验收",
+    "旧影子量比不视为可信实盘观测；缺少记录不推断没有信号"
+  ]
+}

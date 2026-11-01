@@ -1,5 +1,15 @@
 # -*- coding: utf-8 -*-
 """影子记录的实时与回放来源判定。"""
+from datetime import datetime
+
+
+def record_matches_day(row, day):
+    try:
+        ts = float(row.get("ts") or 0)
+        return (ts > 0 and datetime.fromtimestamp(ts).strftime("%Y-%m-%d") == day
+                and all(not row.get(key) or str(row[key])[:10] == day for key in ("day", "trade_date")))
+    except (TypeError, ValueError, OverflowError, OSError, AttributeError):
+        return False
 
 
 def is_replay_record(row):

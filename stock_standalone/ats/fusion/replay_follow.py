@@ -62,6 +62,8 @@ def read_replay_follow(roots, asof_day, preferred_run="", price_days=(), minute_
     engine = chosen.get("engine_fingerprint")
     compatible = [run for run in runs if run[0] == selected_run or (fingerprint and engine
                   and run[1].get("config_fingerprint") == fingerprint and run[1].get("engine_fingerprint") == engine)]
+    replaced_days = set(chosen.get("days") or [entry.get("day") for entry in chosen["completed"]
+                                              if isinstance(entry, dict)])
     files = {}
     for directory, manifest, mtime in compatible:
         for entry in manifest["completed"]:
@@ -69,6 +71,9 @@ def read_replay_follow(roots, asof_day, preferred_run="", price_days=(), minute_
                 continue
             day, name = str(entry.get("day") or ""), str(entry.get("file") or "")
             if len(day) != 10 or day > asof_day or name != day + ".json.gz":
+                continue
+            # 所选批次覆盖日期绝不借用其他批次；空结果也代表本次重算结果。
+            if directory != selected_run and day in replaced_days:
                 continue
             if day not in files or mtime > files[day][1]:
                 files[day] = (directory / name, mtime)

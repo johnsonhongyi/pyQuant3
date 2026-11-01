@@ -226,7 +226,7 @@ def test_live_focus_reports_missing_production_evidence(qapp, monkeypatch):
         dlg.chk_hit_only.setChecked(False)
         dlg.chk_structure_only.setChecked(False)
         dlg._render_live(force=True)
-        assert "来源记录缺少重点所需证据" in dlg.lbl_status.text()
+        assert "来源记录缺少重点所需证据" in dlg.status_details.text()
         assert "#ffa64d" in dlg.lbl_status.styleSheet()
     finally:
         dlg.close()
@@ -258,7 +258,8 @@ def test_cross_day_displays_replay_and_live_separately_without_paper_link(qapp, 
                             "account": {"read_status": "READY"}},
                   "replay": {"rows": replay_rows, "status": "ready", "independent": True, "sources": {day: "isolated", "2026-10-28": "older"}, "errors": []}}
         dlg._render_cross_day(output, day)
-        assert dlg.cmb_day.findText("2026-10-28") >= 0
+        assert dlg._replay_days == [day]
+        assert "2026-10-28" in dlg._comparison_archive_days
         table = dlg.tbl_cross_day
         source_col = next(c for c in range(table.columnCount()) if table.horizontalHeaderItem(c).text() == "信号来源")
         compare_col = next(c for c in range(table.columnCount()) if table.horizontalHeaderItem(c).text() == "双流对照")
@@ -274,6 +275,7 @@ def test_cross_day_displays_replay_and_live_separately_without_paper_link(qapp, 
         by_source = {table.item(i, source_col).text(): i for i in range(table.rowCount())}
         assert "回放含生产证据" in by_source
         assert "不能独立验证" in table.item(by_source["回放含生产证据"], compare_col).text()
+        dlg._follow_pending_day = day
         dlg._on_follow_finished()
         qapp.processEvents()
         assert refreshed[-1] == day
@@ -288,7 +290,7 @@ def test_custom_cols_toggle_and_visibility(qapp):
     dlg = FusionLadderDialog()
     try:
         assert hasattr(dlg, "chk_custom_cols")
-        assert dlg.chk_custom_cols.text() == "📊 自定义列"
+        assert dlg.chk_custom_cols.text() == "扩展列"
 
         # 1. 打开自定义列开关
         dlg.chk_custom_cols.setChecked(True)
@@ -416,3 +418,161 @@ def test_track_day_close_pct_and_sorting(qapp):
     finally:
         dlg.close()
 
+
+
+def test_replay_custom_columns_never_use_current_quotes(qapp, monkeypatch):
+    from ats.ui.fusion_ladder_dialog import FusionLadderDialog
+    from ats.fusion.replay import ReplayResult
+    dlg = FusionLadderDialog()
+    try:
+        dlg.extra_cols = ["trade"]
+        dlg.tbl_replay.setColumnCount(len(dlg._REPLAY_BASE_HEADERS) + 1)
+        monkeypatch.setattr(dlg, "_extract_stock_custom_val", lambda *args: (_ for _ in ()).throw(AssertionError("live quote accessed")))
+        base = {"code": "000001", "name": "test", "ts": 100, "time": "09:31", "entry": 10,
+                "pct": 10, "tier": 1, "tier_name": "L1", "rar": 55, "size_pct": 0,
+                "mfe": 0, "mae": 0, "temp": 40}
+        result = ReplayResult(day="2026-10-29", records=[dict(base, close_ret=10)],
+                              meta={"codes": 1, "bars": 1, "evaluations": 1, "records": 1})
+        dlg._on_replay_done(result)
+        assert dlg.tbl_replay.item(0, 5).text() == "+21.00%"
+        assert dlg.tbl_replay.item(0, len(dlg._REPLAY_BASE_HEADERS)).text() == "--"
+        result.records = [base]
+        dlg._on_replay_done(result)
+        assert dlg.tbl_replay.item(0, 5).text() == "--"
+    finally:
+        dlg.close()
+
+
+def test_calendar_only_accepts_red_available_dates(qapp):
+    from PyQt6.QtCore import QDate
+    from PyQt6.QtWidgets import QDialog
+    from ats.ui.fusion_ladder_dialog import FusionCalendarDialog
+    dlg = FusionCalendarDialog(["2026-10-26", "2026-10-30"], "2026-10-23")
+    try:
+        assert dlg.selected_day == "2026-10-30"
+        assert dlg.calendar.dateTextFormat(QDate(2026, 10, 26)).foreground().color().name() == "#ff6868"
+        dlg.calendar.setSelectedDate(QDate(2026, 10, 23))
+        assert dlg.calendar.selectedDate() == QDate(2026, 10, 30)
+        dlg._on_date_selected(QDate(2026, 10, 23))
+        assert dlg.result() != QDialog.DialogCode.Accepted
+        dlg._on_date_selected(QDate(2026, 10, 26))
+        assert dlg.selected_day == "2026-10-26"
+        assert dlg.result() == QDialog.DialogCode.Accepted
+    finally:
+        dlg.close()
+
+
+def test_missing_minute_day_never_falls_back_to_another_day(qapp, monkeypatch):
+    from ats.ui import fusion_ladder_dialog as ui
+    worker = ui.ReplayWorker(day="2026-10-23", focus=[])
+    class Replay:
+        cache = {"nonempty": True}
+        def days(self):
+            return ["2026-10-26"]
+    monkeypatch.setattr(ui, "DayReplay", lambda **kwargs: Replay())
+    done, errors = [], []
+    worker.done.connect(done.append)
+    worker.failed.connect(errors.append)
+    worker.run()
+    assert errors and not done
+
+
+def test_persistence_rejects_2024_timestamp_before_opening_2026_file(monkeypatch):
+    from ats.ui import fusion_ladder_dialog as ui
+    monkeypatch.setattr(ui, "_shadow_storage_paths", lambda *args: (_ for _ in ()).throw(AssertionError("must not write")))
+    assert ui.persist_shadow_records([{"code": "000001", "ts": 1729648000, "price": 10.5}], "2026-10-23") == 0
+
+
+def test_live_answer_dates_are_independent_of_replay_calendar(qapp):
+    from ats.ui.fusion_ladder_dialog import FusionLadderDialog
+    dlg = FusionLadderDialog()
+    try:
+        dlg.cmb_day.addItem("2026-10-23")
+        dlg.cmb_day.setCurrentText("2026-10-23")
+        dlg._apply_verified_days(["2026-10-26", "2026-10-30"])
+        assert dlg.cmb_day.currentText() == "2026-10-23"
+        assert [dlg.cmb_replay_day.itemText(i) for i in range(dlg.cmb_replay_day.count())] == ["2026-10-26", "2026-10-30"]
+        dlg.cmb_replay_day.setCurrentText("2026-10-26")
+        assert dlg.cmb_day.currentText() == "2026-10-23"
+        dlg._apply_verified_days([])
+        assert dlg.cmb_replay_day.count() == 0
+        assert dlg.cmb_day.currentText() == "2026-10-23"
+        assert dlg.cmb_day.isEnabled()
+    finally:
+        dlg.close()
+
+
+def test_cell_viewport_tooltip_uses_gradient_card_theme(qapp):
+    from PyQt6.QtCore import QEvent, QPoint
+    from PyQt6.QtGui import QHelpEvent
+    from PyQt6.QtWidgets import QWidget, QTableWidget, QTableWidgetItem
+    from ats.ui.fusion_ladder_dialog import UnifiedToolTipFilter
+    window = QWidget()
+    table = QTableWidget(1, 1, window)
+    table.setHorizontalHeaderLabels(["逐日轨迹"])
+    item = QTableWidgetItem("10-26 → 10-30")
+    item.setToolTip("生产影子参考价；MFE/MAE仅含采样价格\n2026-10-30：34条记录，价格<240")
+    table.setItem(0, 0, item)
+    filter_obj = UnifiedToolTipFilter(window)
+    try:
+        pos = table.visualItemRect(item).center()
+        event = QHelpEvent(QEvent.Type.ToolTip, pos, table.viewport().mapToGlobal(pos))
+        assert filter_obj.eventFilter(table.viewport(), event)
+        html = filter_obj._tip_card._body.text()
+        assert "逐日轨迹" in html and "#4dd0e1" in html
+        assert "价格&lt;240" in html
+        assert filter_obj._tip_card._body.wordWrap()
+    finally:
+        filter_obj._tip_card.close()
+        window.close()
+
+
+def test_cross_day_percentage_delegate_renders_both_colors_when_selected(qapp):
+    from PyQt6.QtCore import Qt, QRect
+    from PyQt6.QtGui import QImage, QPainter, QFont
+    from PyQt6.QtWidgets import QTableWidget, QTableWidgetItem, QStyleOptionViewItem, QStyle
+    from ats.ui.fusion_ladder_dialog import SignedPercentDelegate, _change_color
+    table = QTableWidget(1, 1)
+    item = QTableWidgetItem("10-26 +2.00% → 10-27 -3.00% → 10-28 +0.00%")
+    table.setItem(0, 0, item)
+    delegate = SignedPercentDelegate(table)
+    table.setItemDelegate(delegate)
+    option = QStyleOptionViewItem()
+    option.rect = QRect(0, 0, 700, 44)
+    option.font = QFont("Arial", 14)
+    option.state = QStyle.StateFlag.State_Enabled | QStyle.StateFlag.State_Selected
+    image = QImage(700, 44, QImage.Format.Format_ARGB32)
+    image.fill(Qt.GlobalColor.black)
+    painter = QPainter(image)
+    try:
+        delegate.paint(painter, option, table.model().index(0, 0))
+    finally:
+        painter.end()
+        table.close()
+    colors = {image.pixelColor(x, y).name() for x in range(image.width()) for y in range(image.height())}
+    assert "#ff5c5c" in colors
+    assert "#00ff88" in colors
+    assert _change_color(0) is None
+    assert _change_color(None) is None
+    assert _change_color(float("nan")) is None
+
+
+def test_paper_realized_returns_use_red_and_green(qapp):
+    from ats.fusion.paper_follow import build_paper_follow
+    from ats.ui.fusion_ladder_dialog import FusionLadderDialog
+    orders = []
+    for code, exit_price in (("000001", 11), ("000002", 9)):
+        orders.extend([
+            {"code": code, "action": "BUY", "price": 10, "volume": 100, "timestamp": "2026-10-29T10:00:00"},
+            {"code": code, "action": "SELL", "price": exit_price, "volume": 100, "timestamp": "2026-10-30T10:00:00"}])
+    output = build_paper_follow({"read_status": "READY", "trade_date": "2026-10-30", "positions": {}, "orders": orders}, [], "2026-10-30")
+    dlg = FusionLadderDialog()
+    try:
+        dlg._render_paper_follow(output)
+        table = dlg.tbl_paper_follow
+        for i in range(table.rowCount()):
+            expected = "#ff5c5c" if table.item(i, 0).text() == "000001" else "#00ff88"
+            assert table.item(i, 12).foreground().color().name() == expected
+            assert table.item(i, 13).foreground().color().name() == expected
+    finally:
+        dlg.close()

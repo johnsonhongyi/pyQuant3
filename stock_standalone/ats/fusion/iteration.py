@@ -150,6 +150,11 @@ def run_iterations(days=None, top_n=600, step=1, focus=(), output_root=None,
     selected = sorted(set(days or available[-5:]))
     if not selected or any(day not in available for day in selected):
         raise ValueError("所选日期不在分钟缓存中")
+    # 新批次从空时间线起步；批次内部仍按交易日连续携带状态。
+    rp.tracker = None
+    rp._last_day = ""
+    if hasattr(rp, "_day_cache"):
+        rp._day_cache.clear()
     from ats.fusion.paper_follow import read_paper_account, read_shadow_days, build_paper_follow
     from ats.fusion.cross_day import build_cross_day
     from ats.fusion.liquidity_history import DailyLiquidityHistory
@@ -163,6 +168,7 @@ def run_iterations(days=None, top_n=600, step=1, focus=(), output_root=None,
     cfg = asdict(rp.cfg)
     fingerprint = hashlib.sha256(json.dumps(cfg, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
     manifest = {"schema": 1, "run_id": run_id, "status": "running", "days": selected,
+                "timeline_policy": "replace_selected_days_after_complete",
                 "config": cfg, "config_fingerprint": fingerprint, "completed": [],
                 "engine_fingerprint": _replay_engine_fingerprint(),
                 "source_policy": "回放不读取生产事件；生产影子仅用于结果生成后的独立对照；数据不足不补造",

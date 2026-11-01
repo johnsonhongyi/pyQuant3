@@ -81,13 +81,13 @@ def log_days(directories):
 
 def list_day_files(directory, day):
     """列出指定日期的所有原始文件路径（含 .gz），用于归档和清理。"""
-    dirs = log_directories(directory) if directory and os.path.exists(directory) else [directory]
+    dirs = log_directories(directory) if directory else []
     return day_paths(dirs, day)
 
 
 def day_has_records(directory, day):
     """快速判断指定日期是否存在任何记录文件。"""
-    dirs = log_directories(directory) if directory and os.path.exists(directory) else [directory]
+    dirs = log_directories(directory) if directory else []
     return bool(day_paths(dirs, day))
 
 
@@ -102,31 +102,12 @@ def iter_day_records(directory, day):
     跳过解析失败的行，不中断迭代。
     """
     paths = list_day_files(directory, day)
-    seen = set()
-    for path in paths:
-        try:
-            opener = gzip.open if str(path).endswith(".gz") else open
-            with opener(path, "rt", encoding="utf-8-sig") as stream:
-                for line in stream:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        row = json.loads(line)
-                        if not isinstance(row, dict):
-                            continue
-                    except (ValueError, TypeError):
-                        continue
-                    # 避免多副本/跨源重复行
-                    identity = json.dumps({k: v for k, v in row.items()
-                                           if k != "name" and not k.startswith("_source_")},
-                                          sort_keys=True, ensure_ascii=False)
-                    if identity not in seen:
-                        seen.add(identity)
-                        yield row
-        except (OSError, EOFError, UnicodeError, zlib.error) as exc:
-            logger.warning("读取影子文件失败，跳过该分片 %s: %s", path, exc)
-            continue
+    records, errors = read_paths(paths)
+    if errors:
+        if any(error.startswith(str(path) + ": ") for error in errors for path in paths):
+            raise ValueError("影子分片读取不完整: {}".format(errors[:5]))
+        logger.warning("跳过影子日志坏行: %s", errors[:5])
+    yield from records
 
 
 def read_paths(paths, max_records=None):

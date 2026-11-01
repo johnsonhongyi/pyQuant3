@@ -9,7 +9,8 @@ import shutil
 import tempfile
 import threading
 import time
-from datetime import date
+from datetime import date, timedelta
+import zlib
 
 
 _DAY_FILE = re.compile(r"^\d{4}-\d{2}-\d{2}(?:_\d+)?\.jsonl$")
@@ -17,6 +18,32 @@ _CHUNK = 1024 * 1024
 _logger = logging.getLogger(__name__)
 _registered = set()
 _registration_lock = threading.Lock()
+
+
+def _pid_alive(pid):
+    """无法确定进程状态时按存活处理，禁止收割或清理。"""
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        api = ctypes.WinDLL("kernel32", use_last_error=True)
+        api.OpenProcess.restype = wintypes.HANDLE
+        api.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        api.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        api.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = api.OpenProcess(0x100000, False, pid)
+        if not handle:
+            return ctypes.get_last_error() != 87
+        try:
+            return api.WaitForSingleObject(handle, 0) != 0
+        finally:
+            api.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
 
 
 def _sync_orphan_shards(ramdisk_dir, persist_dir, own_pid=None, settle_seconds=120, now=None):
@@ -43,6 +70,8 @@ def _sync_orphan_shards(ramdisk_dir, persist_dir, own_pid=None, settle_seconds=1
             continue
         if own_pid_suffix and name.endswith(own_pid_suffix):
             continue  # 跳过本进程 PID，本进程正常退出走 close()
+        if _pid_alive(int(name.rsplit("_", 1)[1][:-6])):
+            continue
         src = os.path.join(ramdisk_dir, name)
         dst = os.path.join(persist_dir, name)
         try:
@@ -56,9 +85,18 @@ def _sync_orphan_shards(ramdisk_dir, persist_dir, own_pid=None, settle_seconds=1
             try:
                 with os.fdopen(fd, "wb") as out:
                     with open(src, "rb") as inp:
+                        if os.path.exists(dst):
+                            with open(dst, "rb") as previous:
+                                for chunk in iter(lambda: previous.read(_CHUNK), b""):
+                                    if inp.read(len(chunk)) != chunk:
+                                        raise RuntimeError("持久副本与 RAMDisk 前缀冲突，拒绝覆盖")
+                            inp.seek(0)
                         shutil.copyfileobj(inp, out)
                     out.flush()
                     os.fsync(out.fileno())
+                after = os.stat(src)
+                if (st.st_size, st.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+                    raise RuntimeError("孤儿分片在复制时变化，保留源文件")
                 os.replace(tmp, dst)
                 synced.append(name)
             finally:
@@ -72,6 +110,47 @@ def _sync_orphan_shards(ramdisk_dir, persist_dir, own_pid=None, settle_seconds=1
             _logger.warning("[fusion] 孤儿分片落盘失败 %s: %s", name, exc)
 
     return {"synced": synced, "errors": errors}
+
+
+def cleanup_verified_shards(directory, today, keep_days=9, max_files=1, archive_directory=None):
+    """仅删除过期、进程已退出且逐字节匹配压缩档的 PID 原文件。"""
+    cutoff = (date.fromisoformat(today) - timedelta(days=max(1, keep_days))).isoformat()
+    removed, errors = [], []
+    root = os.path.realpath(directory)
+    if archive_directory:
+        candidates = [{"source": os.path.join(directory, name),
+                       "archive": os.path.join(archive_directory, name + ".gz")}
+                      for name in sorted(os.listdir(directory))
+                      if _DAY_FILE.fullmatch(name) and name[:10] < cutoff
+                      and os.path.isfile(os.path.join(archive_directory, name + ".gz"))]
+    else:
+        candidates = cleanup_candidates(directory, cutoff)
+    for candidate in candidates:
+        if len(removed) >= max_files:
+            break
+        source = candidate["source"]
+        name = os.path.basename(source)
+        if "_" not in name or _pid_alive(int(name.rsplit("_", 1)[1][:-6])):
+            continue
+        try:
+            if os.path.dirname(os.path.realpath(source)) != root or os.path.islink(source):
+                raise RuntimeError("清理目标超出日志目录")
+            before = os.stat(source)
+            with open(source, "rb") as raw, gzip.open(candidate["archive"], "rb") as archived:
+                while True:
+                    chunk = raw.read(_CHUNK)
+                    if archived.read(len(chunk) or 1) != chunk:
+                        raise RuntimeError("压缩档与源文件不一致，拒绝清理")
+                    if not chunk:
+                        break
+            after = os.stat(source)
+            if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+                raise RuntimeError("源文件发生变化，拒绝清理")
+            os.unlink(source)
+            removed.append(source)
+        except (OSError, EOFError, RuntimeError, zlib.error) as exc:
+            errors.append({"source": source, "error": str(exc)})
+    return {"removed": removed, "errors": errors}
 
 
 def archive_day(source, before_day, archive_directory=None):
@@ -195,6 +274,11 @@ def register_archive_worker(directory):
 
                 # 历史日限量归档
                 result = archive_finished_days(directory, day)
+                cleanup = cleanup_verified_shards(directory, day)
+                result["errors"].extend(cleanup["errors"])
+                if ram and os.path.isdir(ram):
+                    cleanup = cleanup_verified_shards(ram, day, archive_directory=directory)
+                    result["errors"].extend(cleanup["errors"])
                 for error in result["errors"]:
                     _logger.warning("梯度历史归档失败，源文件保留: %s", error)
             except Exception:

@@ -14,6 +14,7 @@ _writers = set()
 _registry_lock = threading.RLock()
 _by_path = weakref.WeakValueDictionary()
 _started = False
+MAX_PENDING_BYTES = 64 * 1024 * 1024
 
 
 def _checkpoint_all(close=False):
@@ -65,6 +66,7 @@ class ShadowWriter:
     def __init__(self, directory, day):
         self._lock = threading.RLock()
         self._pending = []
+        self._pending_bytes = 0
         self._closed = False
         self._users = 1
         self._fh = None
@@ -100,6 +102,7 @@ class ShadowWriter:
                             if source.read(len(chunk)) != chunk:
                                 raise RuntimeError("RAMDisk 与本地影子前缀不一致，拒绝覆盖")
                 self._pending = [source.read()]
+                self._pending_bytes = len(self._pending[0])
             self._checkpoint_pending()
         elif local_size:
             shutil.copyfile(self.local, self.path)
@@ -119,6 +122,7 @@ class ShadowWriter:
                 os.fsync(target.fileno())
             os.replace(temporary, self.local)
             self._pending.clear()
+            self._pending_bytes = 0
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
@@ -140,7 +144,10 @@ class ShadowWriter:
                 raise ValueError("shadow writer is closed")
             if self.on_ramdisk:
                 self._pending.append(data)
+                self._pending_bytes += len(data)
                 try:
+                    if self._pending_bytes >= MAX_PENDING_BYTES:
+                        raise OSError("影子待落盘缓冲达到容量上限")
                     if not os.path.isfile(self.path):
                         raise OSError("RAMDisk 分片已消失")
                     if self._fh.write(data) != len(data):

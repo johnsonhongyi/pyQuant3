@@ -248,7 +248,8 @@ def test_shadow_io_unified_interface_and_corrupt_line_handling(tmp_path):
     assert [r["price"] for r in records] == [10, 11, 12]
 
 
-def test_sync_orphan_shards_harvests_crashed_process_shards(tmp_path):
+def test_sync_orphan_shards_harvests_crashed_process_shards(tmp_path, monkeypatch):
+    monkeypatch.setattr("ats.fusion.shadow_archive._pid_alive", lambda pid: False)
     from ats.fusion.shadow_archive import _sync_orphan_shards
     ram = tmp_path / "ram"
     persist = tmp_path / "persist"
@@ -291,3 +292,75 @@ def test_sync_orphan_shards_harvests_crashed_process_shards(tmp_path):
     result2 = _sync_orphan_shards(str(ram), str(persist), own_pid=own_pid, settle_seconds=120, now=now)
     assert result2["synced"] == []
 
+
+
+def test_stream_iterator_does_not_publish_corrupt_gzip_prefix(tmp_path):
+    archive = tmp_path / (DAY + "_123.jsonl.gz")
+    archive.write_bytes(gzip.compress((json.dumps(row()) + "\n").encode())[:-4])
+    iterator = shadow_io.iter_day_records(str(tmp_path), DAY)
+    with pytest.raises(ValueError, match="不完整"):
+        next(iterator)
+
+
+def test_cleanup_requires_verified_archive_and_dead_pid(tmp_path, monkeypatch):
+    from ats.fusion import shadow_archive as archive
+    old = "2026-10-01_123.jsonl"
+    source = tmp_path / old
+    source.write_bytes(b"valid\n")
+    archive.archive_day(str(source), DAY)
+    monkeypatch.setattr(archive, "_pid_alive", lambda pid: True)
+    assert not archive.cleanup_verified_shards(str(tmp_path), DAY)["removed"]
+    monkeypatch.setattr(archive, "_pid_alive", lambda pid: False)
+    (tmp_path / (old + ".gz")).write_bytes(gzip.compress(b"other\n"))
+    assert archive.cleanup_verified_shards(str(tmp_path), DAY)["errors"]
+    assert source.exists()
+    (tmp_path / (old + ".gz")).write_bytes(gzip.compress(b"valid\n"))
+    assert archive.cleanup_verified_shards(str(tmp_path), DAY)["removed"] == [str(source)]
+    assert (tmp_path / (old + ".gz")).exists()
+
+
+def test_pending_capacity_falls_back_without_dropping_record(tmp_path, monkeypatch):
+    monkeypatch.setattr(shadow_writer, "ram_directory", lambda directory: str(tmp_path / "ram"))
+    monkeypatch.setattr(shadow_writer, "MAX_PENDING_BYTES", 1)
+    writer = shadow_writer.ShadowWriter(str(tmp_path / "local"), DAY)
+    writer.write(json.dumps(row()) + "\n")
+    assert not writer.on_ramdisk
+    writer.close()
+    assert len(shadow_io.read_paths([writer.local])[0]) == 1
+
+
+def test_orphan_harvest_never_copies_live_idle_process(tmp_path, monkeypatch):
+    from ats.fusion import shadow_archive as archive
+    ram = tmp_path / "ram"
+    ram.mkdir()
+    source = ram / (DAY + "_123.jsonl")
+    source.write_bytes(b"test\n")
+    os.utime(source, (1, 1))
+    monkeypatch.setattr(archive, "_pid_alive", lambda pid: True)
+    result = archive._sync_orphan_shards(str(ram), str(tmp_path / "local"), now=1000)
+    assert result == {"synced": [], "errors": []}
+
+
+def test_ram_cleanup_requires_verified_physical_archive(tmp_path, monkeypatch):
+    from ats.fusion import shadow_archive as archive
+    ram, disk = tmp_path / "ram", tmp_path / "disk"
+    ram.mkdir()
+    disk.mkdir()
+    source = ram / "2026-10-01_123.jsonl"
+    source.write_bytes(b"test\n")
+    archive.archive_day(str(source), DAY, str(disk))
+    monkeypatch.setattr(archive, "_pid_alive", lambda pid: False)
+    result = archive.cleanup_verified_shards(str(ram), DAY, archive_directory=str(disk))
+    assert result["removed"] == [str(source)]
+    assert (disk / (source.name + ".gz")).exists()
+
+
+def test_live_ui_excludes_legacy_replay_records(tmp_path, monkeypatch):
+    from ats.ui import fusion_ladder_dialog as ui
+    directory = tmp_path / "logs" / "fusion_shadow"
+    directory.mkdir(parents=True)
+    records = [row(), {**row(1), "source": "replay_backfill", "writer_pid": 0}]
+    (directory / (DAY + ".jsonl")).write_text("\n".join(json.dumps(r) for r in records), encoding="utf-8")
+    monkeypatch.setattr(ui, "load_config_node", lambda *args: str(tmp_path))
+    assert ui.load_live_rows(DAY, allow_fallback=False)[0]["price"] == 10
+    assert len(ui.load_live_series(DAY, allow_fallback=False)["000001"]) == 1

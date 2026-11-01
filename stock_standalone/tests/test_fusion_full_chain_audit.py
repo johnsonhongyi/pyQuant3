@@ -1,3 +1,4 @@
+from datetime import datetime
 # -*- coding: utf-8 -*-
 """tests/test_fusion_full_chain_audit.py — 融合信号梯度全链路闭环深度集成审计"""
 
@@ -52,7 +53,7 @@ def test_fusion_full_chain_end_to_end_audit(qapp, tmp_path, monkeypatch):
         {
             "code": "688787",
             "name": "海天瑞声",
-            "ts": 1729647600.0,
+            "ts": datetime(2026, 10, 23, 9, 30).timestamp(),
             "price": 112.20,
             "pct": 6.85,
             "fusion": {
@@ -70,7 +71,7 @@ def test_fusion_full_chain_end_to_end_audit(qapp, tmp_path, monkeypatch):
         {
             "code": "300296",
             "name": "利亚德",
-            "ts": 1729647900.0,
+            "ts": datetime(2026, 10, 23, 9, 35).timestamp(),
             "price": 6.88,
             "pct": 4.25,
             "fusion": {
@@ -121,6 +122,8 @@ def test_fusion_full_chain_end_to_end_audit(qapp, tmp_path, monkeypatch):
     dlg.refresh_live()
 
     assert dlg.tbl_live.rowCount() == 2
+    from PyQt6.QtCore import Qt
+    dlg.tbl_live.sortItems(5, Qt.SortOrder.DescendingOrder)
     # 验证第 1 行是海天瑞声，包含代码、名称、现价、涨幅、RAR
     assert dlg.tbl_live.item(0, 1).text() == "688787"
     assert dlg.tbl_live.item(0, 2).text() == "海天瑞声"

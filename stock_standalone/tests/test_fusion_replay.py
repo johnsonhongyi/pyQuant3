@@ -172,3 +172,11 @@ class TestReplay(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+def test_replay_calendar_scans_beyond_first_200_codes_and_rejects_single_bar():
+    cache = {str(i).zfill(6): _mk_day(_DAY1, [10, 11]) for i in range(200)}
+    cache["999999"] = _mk_day(_DAY2, [10, 11])
+    assert DayReplay(cache=cache).days() == [_DAY1, _DAY2]
+    cache["999999"] = _mk_day(_DAY2, [10])
+    assert DayReplay(cache=cache).days() == [_DAY1]

@@ -1,3 +1,4 @@
+from datetime import datetime
 # -*- coding: utf-8 -*-
 import os
 import pytest
@@ -382,7 +383,7 @@ def test_fusion_ladder_ramdisk_persistence_and_resilience(tmp_path, monkeypatch)
         {
             "code": "300750",
             "name": "宁德时代",
-            "ts": 1729648000,
+            "ts": datetime(2026, 10, 23, 10, 0).timestamp(),
             "price": 250.0,
             "pct": 4.5,
             "fusion": {"tier": 4, "rar": 89.0, "size_pct": 25.0},
@@ -390,7 +391,7 @@ def test_fusion_ladder_ramdisk_persistence_and_resilience(tmp_path, monkeypatch)
         {
             "code": "002594",
             "name": "比亚迪",
-            "ts": 1729648100,
+            "ts": datetime(2026, 10, 23, 10, 1).timestamp(),
             "price": 290.0,
             "pct": 3.2,
             "fusion": {"tier": 3, "rar": 78.5, "size_pct": 15.0},

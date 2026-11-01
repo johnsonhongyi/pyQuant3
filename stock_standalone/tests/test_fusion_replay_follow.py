@@ -135,3 +135,27 @@ def test_stream_comparison_uses_latest_shared_signal_day_not_price_only_day():
     replay["timeline"][-1]["signal_records"] = 1
     compared = compare_signal_streams([live], [replay])["000568"]
     assert "2026-10-28" in compared and "2026-10-30" in compared
+
+
+def test_selected_run_replaces_overlap_even_if_old_manifest_was_touched(tmp_path):
+    day = "2026-10-29"
+    signal = {"code": "000568", "ts": stamp(day, "10:00"), "entry": 10, "tier": 2}
+    old = archive(tmp_path, "old", day, [signal])
+    other_day = "2026-10-28"
+    archive(tmp_path, "nonoverlap", other_day, [{**signal, "ts": stamp(other_day, "10:00")}])
+    fresh = archive(tmp_path, "fresh", day, [])
+    os.utime(old / "manifest.json", (time.time() + 100, time.time() + 100))
+    result = read_replay_follow([tmp_path], day, preferred_run=str(fresh))
+    assert result["sources"][day] == str(fresh / (day + ".json.gz"))
+    assert other_day in result["sources"]
+    assert result["rows"][0]["last_day"] == other_day
+    assert (old / (day + ".json.gz")).exists()
+
+
+def test_replacement_day_with_bad_archive_does_not_revive_old_signals(tmp_path):
+    day = "2026-10-29"
+    archive(tmp_path, "old", day, [{"code": "000568", "ts": stamp(day, "10:00"), "entry": 10, "tier": 2}])
+    fresh = archive(tmp_path, "fresh", day, [])
+    (fresh / (day + ".json.gz")).write_bytes(b"broken")
+    result = read_replay_follow([tmp_path], day, preferred_run=str(fresh))
+    assert result["errors"] and not result["rows"]

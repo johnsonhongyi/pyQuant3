@@ -293,13 +293,20 @@ class DayReplay:
 
     # -- 基础取数 ---------------------------------------------------------
     def days(self) -> List[str]:
-        """从样本标的的 bar 时间戳推出可用交易日。"""
+        """完整扫描缓存日期；至少一只标的有两根有效价格 bar 才可回放。"""
         seen: set = set()
-        for i, (code, arr) in enumerate(self.cache.items()):
-            if i >= 200:
-                break
-            for ts in arr["time"][:: max(1, len(arr) // 60)]:
-                seen.add(time.strftime("%Y-%m-%d", time.localtime(int(ts))))
+        for arr in self.cache.values():
+            if arr is None or not len(arr):
+                continue
+            valid = np.isfinite(arr["time"]) & (arr["time"] > 0)
+            for field in ("open", "high", "low", "close"):
+                valid &= np.isfinite(arr[field]) & (arr[field] > 0)
+            valid &= np.isfinite(arr["volume"]) & (arr["volume"] >= 0)
+            # A 股时间按 UTC+8 归日，重复时间戳不能冒充两根 bar。
+            times = np.unique(arr["time"][valid].astype("int64"))
+            days, counts = np.unique((times + 8 * 3600) // 86400, return_counts=True)
+            for day in days[counts >= 2]:
+                seen.add(time.strftime("%Y-%m-%d", time.gmtime(int(day) * 86400)))
         return sorted(seen)
 
     def _slice_day(self, code: str, day: str) -> Optional[Dict[str, np.ndarray]]:
@@ -1926,7 +1933,7 @@ def render_report(result: ReplayResult, top: int = 20) -> str:
         lines.append(
             "| {} | {} | {} | {} | {}% | {}% | {}% | {}% | {}% |".format(
                 r["time"], r["code"], r["tier_name"], r["rar"], r["size_pct"],
-                r["pct"], r["mfe"], r["mae"], r["close_ret"],
+                r["pct"], r["mfe"], r["mae"], r.get("close_ret") if r.get("close_ret") is not None else "未知",
             )
         )
     lines.append("")

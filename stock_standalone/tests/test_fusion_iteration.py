@@ -125,6 +125,11 @@ def test_iteration_persists_isolated_and_carries_prior_observation(tmp_path, mon
             return 10.0
 
         def run_day(self, day, focus=(), carry_codes=(), progress=None):
+            if day == days[0]:
+                assert self.tracker is None
+                assert self._last_day == ""
+                assert not self._day_cache
+            self.tracker = object()
             self.carried.append(list(carry_codes))
             row = {"code": "000568", "ts": _ts(day, "10:00"), "time": "10:00", "entry": 10.0,
                    "pct": 0.1, "tier": 1, "veto": "", "patterns": [] if day == days[1] else ["逆势收复启动"],
@@ -134,6 +139,9 @@ def test_iteration_persists_isolated_and_carries_prior_observation(tmp_path, mon
             return ReplayResult(day=day, records=[row], meta=meta)
 
     rp = FakeReplay()
+    rp.tracker = object()
+    rp._last_day = days[-1]
+    rp._day_cache = {("000568", days[0]): "stale"}
     out = run_iterations(days=days, replay=rp, history_root=str(tmp_path), output_root=str(tmp_path / "runs"))
     assert rp.carried == [[], ["000568"], ["000568"]]
     assert out["manifest"]["status"] == "complete"
@@ -146,7 +154,12 @@ def test_iteration_persists_isolated_and_carries_prior_observation(tmp_path, mon
     assert out["last_result"].meta["focus_selection"]["first_selected"][0]["ts"] == _ts(days[-1], "10:00")
     prior = out["last_result"].meta["liquidity_history"]["000568"]["history"][0]
     assert prior["date"] == "2026-10-27" and prior["turnover_pct"] == 5.5
+    again = run_iterations(days=days, replay=rp, history_root=str(tmp_path), output_root=str(tmp_path / "runs"))
+    assert again["run_dir"] != out["run_dir"]
+    assert rp.carried == [[], ["000568"], ["000568"]] * 2
+    assert again["manifest"]["timeline_policy"] == "replace_selected_days_after_complete"
     gap_replay = FakeReplay()
+    gap_replay._day_cache = {}
     gap_output = run_iterations(days=[days[0], days[2]], replay=gap_replay,
                                 history_root=str(tmp_path), output_root=str(tmp_path / "runs_gap"))
     assert gap_replay.carried == [[], ["000568"]]
