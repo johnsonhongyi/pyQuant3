@@ -5092,6 +5092,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if self.ColumnSetManager._columns_dirty:
                 self.ColumnSetManager.update_grid()
             if self.ColumnSetManager.state() != "withdrawn" and self.ColumnSetManager.focus_displayof() == self.ColumnSetManager:
+                if hasattr(self, 'save_window_position'):
+                    try:
+                        self.save_window_position(self.ColumnSetManager, "column_set_manager")
+                    except Exception:
+                        pass
                 self.ColumnSetManager.withdraw()
             else:
                 self.ColumnSetManager.deiconify()
@@ -5104,8 +5109,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self, all_columns, self.ColManagerconfig, self.update_treeview_cols,
                 default_cols=self.current_cols, logger=logger)
             self.ColumnSetManager.protocol("WM_DELETE_WINDOW", self.on_close_column_manager)
-            self.ColumnSetManager.bind("<Alt-c>", lambda e: self.ColumnSetManager.withdraw() or "break")
-            self.ColumnSetManager.bind("<Alt-C>", lambda e: self.ColumnSetManager.withdraw() or "break")
+            self.ColumnSetManager.bind("<Alt-c>", lambda e: self.ColumnSetManager.open_column_manager_editor() or "break")
+            self.ColumnSetManager.bind("<Alt-C>", lambda e: self.ColumnSetManager.open_column_manager_editor() or "break")
             self.ColumnSetManager.lift()
             self.ColumnSetManager.focus_force()
 
@@ -5117,6 +5122,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def on_close_column_manager(self):
         if self.ColumnSetManager is not None:
+            if hasattr(self, 'save_window_position'):
+                try:
+                    self.save_window_position(self.ColumnSetManager, "column_set_manager")
+                except Exception:
+                    pass
             self.ColumnSetManager.destroy()
             self.ColumnSetManager = None
             self._open_column_manager_job = None
@@ -8959,16 +8969,31 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 q_size = self.queue.qsize()  # 获取积压深度
                         except: pass
                         
-                        logger.warning(f"🚨 [UI_BLOCK] 主线程假死检测! 延迟: {delay:.2f}s | Queue积压: {q_size if q_size >= 0 else 'N/A'}")
-                        # Read only Python frames; never call Tk from the watchdog.
-                        try:
-                            import sys
-                            import traceback
-                            frame = sys._current_frames().get(threading.main_thread().ident)
-                            if frame is not None:
-                                logger.warning("[UI-BLOCK-STACK]\n%s", ''.join(traceback.format_stack(frame, limit=12)))
-                        except Exception:
-                            logger.debug("[UI-BLOCK-STACK] 堆栈读取失败", exc_info=True)
+                        self._ui_block_count = getattr(self, "_ui_block_count", 0) + 1
+                        cur_block_count = self._ui_block_count
+
+                        logger.warning(
+                            f"🚨 [UI_BLOCK] 主线程假死检测! 延迟: {delay:.2f}s | "
+                            f"Queue积压: {q_size if q_size >= 0 else 'N/A'} "
+                            f"| 累计假死: 第 {cur_block_count} 次"
+                        )
+                        # 超过5次输出一次主线程堆栈 (每5次采样一次，避免大量堆栈刷屏塞满日志)
+                        if cur_block_count % 5 == 0:
+                            # Read only Python frames; never call Tk from the watchdog.
+                            try:
+                                import sys
+                                import traceback
+                                frame = sys._current_frames().get(threading.main_thread().ident)
+                                if frame is not None:
+                                    logger.warning(
+                                        "[UI-BLOCK-STACK] (累计假死超过5次输出堆栈，当前第 %d 次)\n%s",
+                                        cur_block_count,
+                                        ''.join(traceback.format_stack(frame, limit=12))
+                                    )
+                            except Exception:
+                                logger.debug("[UI-BLOCK-STACK] 堆栈读取失败", exc_info=True)
+                        else:
+                            logger.debug(f"[UI-BLOCK-STACK] 堆栈日志已限流抑制 (当前第 {cur_block_count % 5}/5 次，超过5次输出一次)")
                         # 🧬 [NEW] 联动自动画像审计：同步输出最近周期的 Top 10 耗时任务
                         # self.show_ui_performance_audit(reset=False)
                         

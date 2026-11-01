@@ -1,5 +1,29 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-11-01 17:30 【彻底根除子窗口多重/二次缩放放得巨大Bug、列组合管理器尺寸持久化自愈与客观DPI识别闭环】(`column_manager.py`, `tk_gui_modules/dpi_mixin.py`, `dpi_utils.py`, `instock_MonitorTK.py`, `tests/test_column_manager_dpi_and_persistence.py`)
+- [x] **【看门狗 [UI-BLOCK-STACK] 堆栈输出限流优化 (超过5次输出一次)】**：
+  - 在 `instock_MonitorTK.py` 的 `watchdog_loop` 中引入假死累计计数器 `self._ui_block_count`；
+  - 遇到主线程延迟卡顿仍输出紧凑的单行 Warning 告警（附带累计卡顿次数），保留必要健康监控；
+  - 对十几行长度的完整 Traceback 堆栈 `[UI-BLOCK-STACK]` 实施限流：`cur_block_count % 5 == 0`（累计超过 5 次）才输出一次，其余次数平滑抑制并记录 Debug 日志，彻底根治高频卡顿日志被海量堆栈塞满刷屏的痛点；
+  - 新增 `tests/test_watchdog_stack_throttling.py` 覆盖 12 次卡顿模拟（仅第 5 次和第 10 次输出堆栈，其余 10 次成功抑制），100% 验证通过。
+- [x] **【彻底查清“初始打开正常随后被放得巨大、手动调小再开又巨大”灾难性二次缩放根因】**：
+  - **根因确认**：`tk_gui_modules/dpi_mixin.py` 的后台轮询巡检 `_adapt_unregistered_toplevels`（每 1.5 秒触发一次）针对新打开的未持久化子窗口（`ColumnSetManager` 及各类弹窗），误将其在当前 DPI 下渲染出的真实物理像素 `w, h` 当作 1.0 基准尺寸，调用 `scale_tk_window` 暴力乘以 `scale_factor` 并进行 `_clamp_window_to_screen`；
+  - 导致本已具备合适尺寸（如 800x520）的窗口在 1.5 秒内被突袭放大为两倍大（1600x1040 甚至 3200x2000），撑死铺满全屏；
+  - **彻底斩除二次缩放**：
+    - `_adapt_unregistered_toplevels` 发现新子窗口时，直接将其注册为 `_dpi_applied = current_scale`，仅对内部未缩放 Treeview 列宽做一次性对齐，**坚决不篡改窗口自身物理 geometry**；
+    - `scale_tk_window` 明确约束：仅在发生跨 DPI 动态切换（已有基准且比率改变）或窗口显式要求初始化缩放时才缩放自身几何，彻底绝缘后台定时器对业务子窗口的二次膨胀。
+- [x] **【彻底移除 RDP 强制 2.0 伪标，恢复系统真实客观 DPI 单源识别】**：
+  - 在 `dpi_utils.py` 中彻底废除 `if scale == 1.0 and is_rdp_session(): return 2.0` 的写死伪标逻辑；
+  - 客观如实返回系统与当前显示器的物理真实 DPI 比例，多 DPI 显示器切换与远程会话不再出现 1.0 变 2.0 再变 1.0 的反复震荡打架。
+- [x] **【列组合管理器 (ColumnSetManager) 注入完整持久化体系与尺寸自愈】**：
+  - 初始化时接入 `load_window_position`，优先恢复用户此前手动调整过的大小与位置，打上 `_persisted_window_name = "column_set_manager"` 权威标记；
+  - 监听 `<Configure>` 事件（350ms 防抖）以及窗口关闭/隐藏时自动调用 `save_window_position`，实现用户拉大/拉小窗口后 100% 精确记住；
+  - 拔除 `_build_ui` 中重复覆盖 `geometry` 的陈旧代码，列宽随 DPI 安全留白，彻底解决长标签（如 `ch_res_slope_deg`）局部遮挡问题；
+  - 无论用户打开、手动拉伸/缩小、关闭还是多次 Alt+C 隐藏/恢复，尺寸始终固若金汤！
+- [x] **【自动化测试全绿通过】**：
+  - 新增 `tests/test_column_manager_dpi_and_persistence.py` 专项验证（初始尺寸合理、后台巡检不膨胀、手动调整与持久化自愈 100% 覆盖）；
+  - 全量 8 项 DPI 与窗口持久化测试（`test_dpi_scaling_e2e.py`、`test_dpi_window_restore_and_subwindow_persistence.py`、`test_column_manager_dpi_and_persistence.py`）秒级全绿 PASS。
+
 ## 2026-11-01 11:15 【影子日志方案 v2 闭环实施与全流程审核验收】(`ats/fusion/shadow_io.py`, `ats/fusion/shadow_archive.py`, `tools/audit_weekly_outcomes.py`, `tests/test_fusion_shadow_remediation.py`)
 - [x] **Phase 1 基础容错与语义对齐**：
   - `cross_day.py`：对时间戳提取加安全防护与 `math.isfinite` 校验，彻底消除坏时间戳导致跨日排序抛异常问题；

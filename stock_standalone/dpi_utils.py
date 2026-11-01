@@ -148,9 +148,7 @@ def get_windows_dpi_scale_factor():
             except Exception:
                 pass
         scale = round(dpi / 96.0, 2)
-        if scale == 1.0 and is_rdp_session():
-            return 2.0
-        return scale
+        return scale if scale > 0 else 1.0
     except Exception:
         return 1.0
 

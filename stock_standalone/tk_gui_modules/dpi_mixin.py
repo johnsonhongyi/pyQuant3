@@ -193,19 +193,21 @@ class DPIMixin:
             logger.debug(f"[DPI] clamp 失败: {e}")
 
     def _adapt_unregistered_toplevels(self, current_scale: float) -> None:
-        """巡检并自动适配所有新打开尚未缩放的子窗口，杜绝窄列文字重叠。"""
+        """巡检并自动注册新打开尚未记录 DPI 状态的子窗口，按需适配其内部 Treeview 列宽，绝不篡改窗口自身物理尺寸。"""
         for win in self._get_all_toplevel_windows():
             if getattr(win, "_dpi_applied", None) is None:
                 try:
                     title = getattr(win, "title", lambda: "SubWindow")()
-                    # 若窗口已经由 load_window_position 明确恢复了持久化 geometry，直接标记已对齐，绝不二次放大自身尺寸
-                    if getattr(win, "_persisted_window_name", None) is not None:
-                        win._dpi_applied = current_scale
+                    # 仅针对内部未缩放的 Treeview 列宽按需适配（保持文字完整可见）
+                    if abs(current_scale - 1.0) >= 0.01:
                         for tv in self._find_all_treeviews(win):
                             self._scale_treeview_widget(tv, current_scale)
-                        continue
-                    self.scale_tk_window(win, current_scale, title)
-                    logger.info(f"[DPI] 新建子窗口自动对齐当前 DPI @ {current_scale:.2f}x: {title}")
+                    # 仅对显式声明需要未缩放基准几何按 DPI 放大的窗口（如特定单测）才缩放几何
+                    if getattr(win, "_needs_dpi_initial_scale", False) and abs(current_scale - 1.0) >= 0.01:
+                        self.scale_tk_window(win, current_scale, title, old_scale=1.0, ratio=current_scale)
+                    else:
+                        win._dpi_applied = current_scale
+                    logger.debug(f"[DPI] 新建子窗口注册当前 DPI @ {current_scale:.2f}x: {title}")
                 except Exception as e:
                     logger.debug(f"[DPI] 自动对齐子窗口异常: {e}")
 
@@ -291,10 +293,13 @@ class DPIMixin:
         if is_persisted and applied is not None:
             # 关键：已由配置文件精确恢复几何的窗口拥有绝对权威，禁止外部后台调用篡改窗口几何
             return
-        if applied is None:
-            ratio = scale_factor / 1.0
-        elif ratio is None:
-            ratio = scale_factor / applied if applied else 1.0
+        if ratio is None:
+            if applied is not None:
+                ratio = scale_factor / applied
+            elif old_scale is not None:
+                ratio = scale_factor / old_scale
+            else:
+                ratio = 1.0
         window._dpi_applied = scale_factor
         
         # 调整窗口自身尺寸 (先让窗口尺寸生效，防止 Treeview 列宽被挤压)
@@ -302,18 +307,23 @@ class DPIMixin:
             if window.state() == 'normal':
                 w, h = window.winfo_width(), window.winfo_height()
                 x, y = window.winfo_x(), window.winfo_y()
-                # 只有真正发生跨 DPI 动态切换，或者完全新建且未受持久化配置保护的窗口才缩放自身几何
-                should_scale_geom = (applied is not None and abs(ratio - 1.0) >= 0.01) or (applied is None and not is_persisted and abs(ratio - 1.0) >= 0.01)
+                # 只有真正发生跨 DPI 动态切换（由 scale_refesh_windows 驱动，或原窗口已有 applied/old_scale 基准），
+                # 或者窗口显式声明需要未缩放基准几何初始化时才缩放自身几何
+                needs_init = getattr(window, "_needs_dpi_initial_scale", False)
+                should_scale_geom = (applied is not None and abs(ratio - 1.0) >= 0.01) or (old_scale is not None and abs(ratio - 1.0) >= 0.01) or (needs_init and abs(scale_factor - 1.0) >= 0.01)
                 if should_scale_geom:
-                    window.geometry(f"{max(120, int(w * ratio))}x{max(80, int(h * ratio))}+{x}+{y}")
+                    geom_ratio = ratio if (applied is not None or old_scale is not None) else scale_factor
+                    window.geometry(f"{max(120, int(w * geom_ratio))}x{max(80, int(h * geom_ratio))}+{x}+{y}")
                 window.update_idletasks()
                 self._clamp_window_to_screen(window)
         except Exception as e:
             logger.debug(f"[DPI] {name} 尺寸缩放失败: {e}")
 
         # 调整窗口内所有的 Treeview 列宽
-        for tv in self._find_all_treeviews(window):
-            self._scale_treeview_widget(tv, ratio)
+        tv_ratio = ratio if (applied is not None or old_scale is not None) else scale_factor
+        if abs(tv_ratio - 1.0) >= 0.01:
+            for tv in self._find_all_treeviews(window):
+                self._scale_treeview_widget(tv, tv_ratio)
 
     def scale_refesh_windows(self, scale_factor: float, old_scale: Optional[float] = None) -> None:
         """刷新所有已打开的子窗口。"""

@@ -17,10 +17,25 @@ class ColumnSetManager(tk.Toplevel):
         super().__init__(master)
         self.master = master
         self.title("列组合管理器")
-        # ---------- 基础尺寸 ----------
-        self.width = 800
-        self.height = 500
-        self.geometry(f"{self.width}x{self.height}")
+        # ---------- DPI 与基础尺寸安全初始化 ----------
+        dpi_scale = getattr(self.master, "scale_factor", 1.0) or 1.0
+        self.width = int(800 * dpi_scale)
+        self.height = int(520 * dpi_scale)
+        self._persisted_window_name = "column_set_manager"
+        self._dpi_applied = dpi_scale
+
+        # 优先从统一配置 window_config.json 恢复用户手动调整过的大小与位置
+        if hasattr(self.master, "load_window_position"):
+            w, h, x, y = self.master.load_window_position(
+                self, "column_set_manager", default_width=self.width, default_height=self.height
+            )
+            if w and h:
+                self.width, self.height = w, h
+        else:
+            self.geometry(f"{self.width}x{self.height}")
+
+        self._save_geom_job = None
+        self.bind("<Configure>", self._on_window_configure)
 
         # ---------- 参数 ----------
         self.all_columns = list(all_columns)
@@ -83,20 +98,6 @@ class ColumnSetManager(tk.Toplevel):
                 logger.info(f"⚠️ 自动应用列组合失败：{e}")
 
     def _build_ui(self):
-        # ---------- 高 DPI 初始化 ----------
-        # try:
-        #     from ctypes import windll
-        #     windll.shcore.SetProcessDpiAwareness(1)  # Windows 高 DPI 感知
-        # except:
-        #     pass
-        # dpi_scale = self.winfo_fpixels('1i') / 72  # 获取 DPI 缩放比例
-        dpi_scale = self.master.scale_factor
-        # dpi_scale = get_windows_dpi_scale_factor()
-        base_width, base_height = 800, 500
-        self.width = int(base_width * dpi_scale)
-        self.height = int(base_height * dpi_scale)
-        self.geometry(f"{self.width}x{self.height}")
-
         # ---------- 主容器 ----------
         self.main = ttk.Frame(self)
         self.main.pack(fill=tk.BOTH, expand=True)
@@ -195,6 +196,22 @@ class ColumnSetManager(tk.Toplevel):
   
 
 
+    def _on_window_configure(self, event):
+        # 仅针对窗口自身的尺寸或位置变动进行防抖保存，忽略内部子控件事件
+        if event.widget == self:
+            if getattr(self, "_save_geom_job", None):
+                self.after_cancel(self._save_geom_job)
+            self._save_geom_job = self.after(350, self._save_geometry)
+
+    def _save_geometry(self):
+        if not self.winfo_exists():
+            return
+        if hasattr(self.master, "save_window_position"):
+            try:
+                self.master.save_window_position(self, "column_set_manager")
+            except Exception:
+                pass
+
     def open_column_manager_editor(self):
         """切换显示/隐藏"""
         if self.state() == "withdrawn":
@@ -203,7 +220,8 @@ class ColumnSetManager(tk.Toplevel):
             self.lift()
             self.focus_set()
         else:
-            # 已显示 → 隐藏
+            # 已显示 → 隐藏前先保存当前窗口几何
+            self._save_geometry()
             self.withdraw()
 
 
@@ -276,7 +294,8 @@ class ColumnSetManager(tk.Toplevel):
         # 计算每行列数（使用 canvas 宽度 fallback）
         self.update_idletasks()
         total_width = self.canvas.winfo_width() if self.canvas.winfo_width() > 600 else self.width
-        col_w = 100
+        dpi_scale = getattr(self.master, 'scale_factor', 1.0) or 1.0
+        col_w = max(100, int(115 * min(dpi_scale, 1.5)))
         cols_per_row = max(3, total_width // col_w - 2)
 
         # 计算高度（最多显示 max_rows 行）

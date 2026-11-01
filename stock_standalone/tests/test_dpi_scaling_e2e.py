@@ -73,22 +73,35 @@ def test_dpi_scaling_and_subwindow_adaptation():
     assert abs(w_rank_15 - int(round(w_rank_init * 1.5))) <= 2
     assert abs(w_win_15 - int(round(w_win_init * 1.5))) <= 2
 
-    # 3. 动态新窗口捕捉测试：当前已是 1.5x，此时新弹出一个子窗口
+    # 3. 动态新窗口捕捉测试：
+    # 3.1 显式声明需要未缩放基准放大的子窗口
     new_top = tk.Toplevel(app)
     new_top.title('动态新开概念窗口')
     new_top.geometry('360x200+200+200')
+    new_top._needs_dpi_initial_scale = True
     new_tree = ttk.Treeview(new_top, columns=('code', 'rank'), show='headings')
     new_tree.column('code', width=80)
     new_tree.column('rank', width=40)
     new_tree.pack(fill='both', expand=True)
     new_top.update()
 
+    # 3.2 正常业务子窗口（已在当前 DPI 下布局或具备真实物理尺寸，如 ColumnSetManager 等），绝不能被二次放大
+    normal_dialog = tk.Toplevel(app)
+    normal_dialog.title('列组合管理器或业务弹窗')
+    normal_dialog.geometry('800x500+250+250')
+    normal_dialog.update()
+    assert normal_dialog.winfo_width() == 800
+
     # 巡检自动捕获新窗口并按 1.5x 对齐
     app._adapt_unregistered_toplevels(1.5)
     new_top.update()
+    normal_dialog.update()
 
     assert new_top._dpi_applied == 1.5
     assert new_top.winfo_width() >= 500  # 360 * 1.5 = 540
+    # 核心保障：正常业务子窗口尺寸绝不膨胀
+    assert normal_dialog.winfo_width() == 800
+    assert normal_dialog._dpi_applied == 1.5
 
     # 4. 模拟切换回 1.0x DPI (96 DPI)
     app._apply_scale_dpi_change(1.0)
@@ -105,6 +118,13 @@ def test_dpi_scaling_and_subwindow_adaptation():
     assert abs(w_rank_back - w_rank_init) <= 2
     assert abs(w_win_back - w_win_init) <= 2
 
+    try:
+        top.destroy()
+        new_top.destroy()
+        normal_dialog.destroy()
+    except Exception:
+        pass
+    app._apply_dpi_scaling(1.0)
     app.destroy()
 
 def test_real_dpi_scale_factor_no_fake_rdp_doubling():
