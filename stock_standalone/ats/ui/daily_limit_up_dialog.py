@@ -47,7 +47,7 @@ from ats.ui.styles import (
     parse_bool_config, TOOLTIP_STYLE, apply_dark_tooltip_palette
 )
 from ats.ui.favorite_panel import get_ats_extra_cols
-from ats.limit_up_engine import LimitUpEngine, get_ats_custom_extra_cols
+from ats.limit_up_engine import LimitUpEngine, get_ats_custom_extra_cols, extract_turnover_rate
 from JohnsonUtil import commonTips as cct
 
 logger = LoggerFactory.getLogger(__name__)
@@ -1873,7 +1873,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
         # 10. 换手% (必须 0 < turnover <= 100)
         elif col_idx == 10:
-            t = _safe_float(r.get("turnover_rate", r.get("turnover", 0.0)))
+            t = extract_turnover_rate(r)
             if 0.0 < t <= 100.0:
                 return (0, -t if is_descending else t)
             return (1, 0.0)
@@ -3003,7 +3003,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                 seal_amt_wan = _safe_float(r.get("seal_amount_wan", 0.0))
                 seal_to_circ = _safe_float(r.get("seal_to_circ_ratio", 0.0))
                 seal_to_vol = _safe_float(r.get("seal_to_vol_ratio", 0.0))
-                turnover = _safe_float(r.get("turnover_rate", r.get("turnover", 0.0)))
+                turnover = extract_turnover_rate(r)
                 vol_ratio = _safe_float(r.get("vol_ratio", 1.0))
                 amt_yi = _safe_float(r.get("amount_yi", 0.0))
                 last_close = _safe_float(r.get("last_close", price))
@@ -3201,8 +3201,10 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                                      align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                                      is_pinned=is_fav, pin_rank=pin_rank); col += 1
 
-                # 10. 换手%
-                self._set_table_item(row_idx, col, f"{turnover:.2f}%", user_data=turnover, fg=QColor("#e2e2e5"), bg=fav_bg,
+                # 10. 换手% (对齐龙头突击跟单榜标准：有效换手显示百分比，<=0 或异常显示 "--")
+                turn_str = f"{turnover:.2f}%" if (0.0 < turnover <= 100.0) else "--"
+                turn_data = turnover if (0.0 < turnover <= 100.0) else None
+                self._set_table_item(row_idx, col, turn_str, user_data=turn_data, fg=QColor("#e2e2e5"), bg=fav_bg,
                                      align=Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                                      is_pinned=is_fav, pin_rank=pin_rank); col += 1
 

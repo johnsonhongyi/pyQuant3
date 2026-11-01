@@ -1,5 +1,21 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-11-01 23:15 【彻底根治强势股天梯换手率错显为成交额大数、对齐龙头突击跟单榜规范闭环】(`ats/limit_up_engine.py`, `ats/ui/daily_limit_up_dialog.py`, `ats/intraday_strategy_engine.py`, `tests/test_limit_up_turnover_rate_remediation.py`)
+- [x] **【彻底查清“天梯换手率显示为 822522... / 368020... 大数、龙头跟单榜正确 43.54%”根因】**：
+  - **根因确认 1 (字段语义错位与缺少过滤)**：在 A 股新浪/东财及系统主行情宽表中，`turnover` 字段的含义是**成交金额 (元/万元)**（如万邦医药 8.22 亿、中远海控 36.8 亿、百花医药 9.11 亿）；而真实换手率字段名为 `turnover_rate` / `hsl` / `turnoverratio` / `ratio`；
+  - **根因确认 2 (天梯引擎错误映射与量比污染)**：`ats/limit_up_engine.py` 在初始化底板时，误写了 `"turnover_rate": _safe_float(row.get('turnover', ...))`，直接把几亿成交额泄漏给换手率；且误将换手率 `ratio` 作为量比 `vol_ratio` 的备用值；
+  - **根因确认 3 (白天盘中被 TDX 覆盖、夜间休眠/冷启动兜底暴露)**：白天盘中有 TDX 五档分笔时，代码会用流通股本动态重算覆盖换手率；但夜间休市、非交易休眠、或冷启动兜底回退时无实时分笔，直接暴露了未清洗的底板大数；
+  - **根因确认 4 (龙头榜权威正确原因)**：`ats/hot_sector_engine.py` 中明确具备 `"注意：Sina数据中 turnover 为成交额元，需过滤掉 >100 的大数，优先取 turnover_rate / hsl / ratio"` 与 `(0, 100]` 安全守卫。
+- [x] **【全面规范与对齐龙头突击跟单榜规范】**：
+  - **统一提取器封装 (`extract_turnover_rate` & `extract_vol_ratio`)**：
+    - 换手率严格遍历 `('turnover_rate', 'hsl', 'turnoverratio', 'turnover_ratio', 'ratio')`，坚决避开 `turnover`（成交额）；
+    - 健壮容错处理 `NaN`，严格限制合法区间 `(0.0, 100.0]`，无效或超范围自动归零；
+    - 量比严格提取 `('vol_ratio', 'volume_ratio', 'vr')`，杜绝被换手率 `ratio` 污染覆盖；
+  - **天梯与分时策略全面闭环接入**：`ats/limit_up_engine.py`、`daily_limit_up_dialog.py`、`intraday_strategy_engine.py` 统一复用标准提取逻辑；
+  - **UI 呈现规范化**：`daily_limit_up_dialog.py` 严格保持有效换手率显示百分比（如 `43.54%`），无效或 0 换手显示 `"--"`，绝不输出带省略号的超大数字。
+- [x] **【自动化测试全绿通过】**：
+  - 新增 `tests/test_limit_up_turnover_rate_remediation.py`（4 项通过）；相关回归测试（28 项）100% PASS。
+
 ## 2026-11-01 22:00 【修复融合梯度监视器拖动崩溃(0x8001010d)与非交易日白板无效果】(`ats/ui/fusion_ladder_dialog.py`, `tests/test_fusion_ladder_drag_crash_remediation.py`)
 - [x] **【彻底查清“其他窗口正常、只有梯度拖动报错0x8001010d”根因】**：
   - **根因确认 1 (全局事件过滤器污染)**：全项目只有 `FusionLadderDialog` 在 `__init__` 中执行了 `app.installEventFilter(self._tooltip_filter)`；在 Windows 原生模态拖拽移动循环或拖动表头列宽时，线程处于 Windows 严格的 **Input-Synchronous Call** 状态。此时过滤器捕获全局鼠标事件调用了独立 OS 顶层窗口 `_TipCard.hide()`（Win32 `ShowWindow` 跨 HWND 同步消息），严重违反 COM STA 调用契约，直接抛出 `0x8001010D` (`RPC_E_CANTCALLOUT_ININPUTSYNCCALL`) 致命崩溃；

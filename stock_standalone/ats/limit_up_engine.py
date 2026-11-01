@@ -131,6 +131,38 @@ def calc_theoretical_limit_up_price(code: str, last_close: float, name: str = ""
     return round(last_close * (1.0 + ratio), 2)
 
 
+def extract_turnover_rate(row: Dict[str, Any]) -> float:
+    """从行字典中精准提取真实换手率 (%)，对齐龙头突击跟单榜规范：
+    - 遍历有效换手字段 ('turnover_rate', 'hsl', 'turnoverratio', 'turnover_ratio', 'ratio')；
+    - 严格避开 'turnover' (Sina/行情大表中代表成交额元/万元，避免泄漏几亿大数)；
+    - 过滤 NaN 并限定合法区间 (0.0, 100.0]，无效则返回 0.0。
+    """
+    for k in ('turnover_rate', 'hsl', 'turnoverratio', 'turnover_ratio', 'ratio'):
+        v = row.get(k)
+        if v is not None:
+            try:
+                fv = float(v)
+                if not math.isnan(fv) and 0.0 < fv <= 100.0:
+                    return round(fv, 2)
+            except (ValueError, TypeError):
+                continue
+    return 0.0
+
+
+def extract_vol_ratio(row: Dict[str, Any]) -> float:
+    """从行字典中提取量比，优先 ('vol_ratio', 'volume_ratio', 'vr')，默认 1.0，杜绝将换手率 ratio 误当量比"""
+    for k in ('vol_ratio', 'volume_ratio', 'vr'):
+        v = row.get(k)
+        if v is not None:
+            try:
+                fv = float(v)
+                if not math.isnan(fv) and fv > 0.0:
+                    return round(fv, 2)
+            except (ValueError, TypeError):
+                continue
+    return 1.0
+
+
 def get_ats_custom_extra_cols() -> List[str]:
     """获取 ats_col 排除已有基础固定列后的自定义追加列"""
     try:
@@ -574,6 +606,10 @@ class LimitUpEngine:
             # 板块分类
             category = str(row.get('category', row.get('industry', row.get('hy', '')))).strip()
 
+            # 换手率与量比提取 (对齐龙头突击跟单榜标准：严格避开成交额 turnover，过滤 NaN 与异常大数)
+            turnover_init = extract_turnover_rate(row)
+            vol_ratio_init = extract_vol_ratio(row)
+
             records.append({
                 "code": c_clean,
                 "name": name,
@@ -607,8 +643,8 @@ class LimitUpEngine:
                 "seal_to_vol_ratio": 0.0,
                 "bid_pressure": 50.0,
                 "seal_quality_score": 70.0,
-                "vol_ratio": _safe_float(row.get('vol_ratio', row.get('ratio', 1.0)), 1.0),
-                "turnover_rate": _safe_float(row.get('turnover', row.get('turnover_rate', 0.0))),
+                "vol_ratio": vol_ratio_init,
+                "turnover_rate": turnover_init,
                 "consecutive_boards": 1,
                 "tier_tag": "🔥 换手首板"
             })
@@ -679,7 +715,8 @@ class LimitUpEngine:
 
                         # 真实换手率 (%)
                         if circ_shares > 0 and vol_now > 0:
-                            r["turnover_rate"] = round((vol_now * 100.0 / circ_shares) * 100.0, 2)
+                            calc_to = round((vol_now * 100.0 / circ_shares) * 100.0, 2)
+                            r["turnover_rate"] = min(100.0, max(0.0, calc_to))
 
                         # 封板状态核实 (支持集合竞价涨停状态判定)
                         if price_now >= r["theoretical_zt_price"] - 0.01 or r["pct"] >= r["threshold"]:

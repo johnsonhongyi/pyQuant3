@@ -1309,7 +1309,11 @@ class IntradayStrategyEngine:
                 if op > 1.0:
                     state["open_price"] = op
 
-            to_val = float(row.get("turnover", row.get("turnover_rate", row.get("turnoverratio", 0.0))))
+            # 换手率提取 (对齐龙头突击跟单榜标准：Sina数据中 turnover 为成交额元，需过滤掉 >100 的大数，优先取 turnover_rate / hsl / ratio)
+            raw_to = row.get("turnover_rate", row.get("turnoverratio", row.get("turnover_ratio", row.get("hsl", row.get("ratio", 0.0)))))
+            to_val = float(raw_to or 0.0)
+            if to_val < 0.0 or to_val > 100.0:
+                to_val = 0.0
             vw_val = float(row.get("vwap", p))
             h_val = float(row.get("high", p))
             l_val = float(row.get("low", p))
@@ -2375,7 +2379,10 @@ class IntradayStrategyEngine:
             if trigger_expr:
                 try:
                     vwap_val = float(tick_row.get("vwap", price))
-                    to_val = float(tick_row.get("turnover", tick_row.get("turnover_rate", 0.0)))
+                    raw_to = tick_row.get("turnover_rate", tick_row.get("turnoverratio", tick_row.get("ratio", tick_row.get("hsl", 0.0))))
+                    to_val = float(raw_to or 0.0)
+                    if to_val < 0.0 or to_val > 100.0:
+                        to_val = 0.0
                     amt_val = float(tick_row.get("amount", 0.0))
                     eval_scope = {
                         "price": price,
