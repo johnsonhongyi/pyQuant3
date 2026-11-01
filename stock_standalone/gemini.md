@@ -1,5 +1,21 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-11-01 22:00 【修复融合梯度监视器拖动崩溃(0x8001010d)与非交易日白板无效果】(`ats/ui/fusion_ladder_dialog.py`, `tests/test_fusion_ladder_drag_crash_remediation.py`)
+- [x] **【彻底查清“其他窗口正常、只有梯度拖动报错0x8001010d”根因】**：
+  - **根因确认 1 (全局事件过滤器污染)**：全项目只有 `FusionLadderDialog` 在 `__init__` 中执行了 `app.installEventFilter(self._tooltip_filter)`；在 Windows 原生模态拖拽移动循环或拖动表头列宽时，线程处于 Windows 严格的 **Input-Synchronous Call** 状态。此时过滤器捕获全局鼠标事件调用了独立 OS 顶层窗口 `_TipCard.hide()`（Win32 `ShowWindow` 跨 HWND 同步消息），严重违反 COM STA 调用契约，直接抛出 `0x8001010D` (`RPC_E_CANTCALLOUT_ININPUTSYNCCALL`) 致命崩溃；
+  - **根因确认 2 (表头 HeaderToolTip 450ms 定时弹窗打断拖拽)**：全项目仅梯度给每个表格表头挂载了 `HeaderToolTip`。用户在表头拖拽微调列宽停顿超 450ms 时，定时器在拖拽中强行 `show()` 并置顶 `_TipCard`，打断 Windows 鼠标捕获引发崩溃；
+  - **根因确认 3 (moveEvent 拖拽中每像素高频写入配置)**：拖拽移动每像素都触发 `_save_window_states(is_open=True)`，造成大量对象开销并干扰消息循环；
+  - **根因确认 4 (合并单元格占位行开启排序)**：在 `not rows` 只有占位说明行时开启了 `tbl.setSortingEnabled(True)`，用户拖拽/点击表头极易触发视图重绘越界；
+  - **根因确认 5 (“没有任何效果”元凶)**：非交易时段（夜间/周末）写死了 `load_live_rows(day, allow_fallback=False)`，彻底禁用了回退机制，直接返回空列表呈现白板。
+- [x] **【全面彻底治理与工程闭环】**：
+  - **拔除全局侵入**：移除 `app.installEventFilter`，事件过滤严格收敛在本窗口自身；过滤器与 `_hide_card` 增加左键按压前置短路（拖拽期间绝不操作外部卡片）；
+  - **表头 HeaderToolTip 注入拖拽静默守卫**：检测到鼠标左键按下时立即终止定时器并静默隐藏，严禁在拖拽列宽过程中弹出置顶窗口；
+  - **moveEvent 彻底轻量化**：移除拖拽移动中的高频状态保存，对齐 `DailyLimitUpDialog` 规范，仅保留防抖定时器，在拖拽完全停止后才持久化；
+  - **占位说明行严格保持 setSortingEnabled(False)**：彻底消除合并单元格排序越界隐患；
+  - **非交易时段平滑回退，根绝白板**：非交易时段无当日影子流时，自动启用 `allow_fallback=True` 平滑展示最近有效交易日（如 2026-10-30）数据，并友好提示“今日暂无记录，展示 2026-10-30 数据”；`_init_days` 启动默认优选含有实际影子日志的有效交易日。
+- [x] **【自动化测试全绿通过】**：
+  - 新增 `tests/test_fusion_ladder_drag_crash_remediation.py`（4 项通过）；全量 Fusion 监视器相关测试（29 项）100% PASS。
+
 ## 2026-11-01 20:10 【拔除潜伏池无谓自动刷新、Windows外部窗口扫描提速与网关SQLite锁节流治理】(`instock_MonitorTK.py`, `system_linkage_gateway.py`, `tests/test_realtime_monitor_perf_and_scan.py`)
 - [x] **【彻底拔除潜伏池每5秒无谓自动刷新 (`refresh_pool_data`)】**：
   - 根因：在实时监控窗口中，5 秒一次的 `update_status` 定时器无条件调用 `refresh_pool_data()`，在 UI 主线程遍历数百只股票提取 K 线计算均量、评分并全量清空重插 Treeview，每次占满主线程 700~1100ms 并触发 `[UI-SLOW-TASK]` 刷屏；

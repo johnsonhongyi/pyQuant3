@@ -86,6 +86,8 @@ from ats.ui.styles import (
     NumericTableWidgetItem,
     load_config_node,
     save_config_node,
+    save_config_node_async,
+    save_config_nodes_async,
     set_seamless_stay_on_top,
 )
 from global_favorites import GlobalFavoriteManager
@@ -489,17 +491,25 @@ class UnifiedToolTipFilter(QObject):
     def _hide_card(self) -> None:
         try:
             if self._tip_card is not None and self._tip_card.isVisible():
-                self._tip_card.hide()
+                if not (QApplication.mouseButtons() & Qt.MouseButton.LeftButton):
+                    self._tip_card.hide()
         except Exception:
             pass
 
     def eventFilter(self, obj, event):  # noqa: N802
         try:
-            et = event.type()
+            # 拖拽或鼠标按住期间绝不弹出/操作外部卡片，杜绝 Windows Input-Synchronous 循环崩溃 (0x8001010d)
+            if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+                return False
+
+            if not isinstance(obj, QWidget):
+                return False
+
             # 仅处理隶属于当前监视器窗口体系的组件
-            if isinstance(obj, QWidget):
-                if obj != self.window and not self.window.isAncestorOf(obj) and getattr(obj, "window", lambda: None)() != self.window:
-                    return False
+            if obj != self.window and not self.window.isAncestorOf(obj) and getattr(obj, "window", lambda: None)() != self.window:
+                return False
+
+            et = event.type()
 
             if et == QEvent.Type.ToolTip:
                 tip_text = ""
@@ -825,6 +835,11 @@ class HeaderToolTip(QObject):
         return ""
 
     def _show_pending(self) -> None:
+        # 若鼠标左键按下（正拖拽调整列宽）或窗口正在移动，绝不弹出卡片打断 Windows 输入同步循环
+        if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+            self._pending_html = ""
+            self._pending_pos = None
+            return
         if self._pending_html and self._pending_pos is not None:
             self._show(self._pending_pos, self._pending_html)
 
@@ -832,6 +847,11 @@ class HeaderToolTip(QObject):
         try:
             et = event.type()
             if et == QEvent.Type.MouseMove:
+                if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
+                    self._delay.stop()
+                    self._hide()
+                    self._hover_idx = -1
+                    return False
                 idx = self._get_logical_index(obj, event.pos())
                 if idx != self._hover_idx:
                     self._hover_idx = idx
@@ -1698,6 +1718,11 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self.snap_timer.setSingleShot(True)
         self.snap_timer.setInterval(400)
         self.snap_timer.timeout.connect(self._detect_and_snap)
+        self._state_save_timer = QTimer(self)
+        self._state_save_timer.setSingleShot(True)
+        self._state_save_timer.setInterval(10000)
+        self._state_save_timer.timeout.connect(self._persist_window_states)
+        self._pending_window_states = None
 
         # 2. 独立窗口 flags 与置顶配置
         self.stays_on_top = self._load_stays_on_top()
@@ -1742,10 +1767,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
         apply_dark_tooltip_palette(self)
         self._tooltip_filter = UnifiedToolTipFilter(self)
         try:
-            app = QApplication.instance()
-            if app is not None:
-                apply_dark_tooltip_palette(app)
-                app.installEventFilter(self._tooltip_filter)
+            self.installEventFilter(self._tooltip_filter)
         except Exception:
             pass
 
@@ -2081,18 +2103,14 @@ class FusionLadderDialog(QWidget, WindowMixin):
 
                 flt.restore_callback = _restore_then_narrow
 
-            # 🛡️ 落盘兜底：TK 主循环退出时 Qt 的 aboutToQuit 不一定会触发，
-            # 只靠退出前 flush 会让"重启 ATS 后列宽丢失"。这里在调整结束后主动 flush。
-            from ats.ui.styles import flush_config_writer
-
+            # 调整结束后将表头状态排入后台写入队列。
             _flush_timer = QTimer(tbl)
             _flush_timer.setSingleShot(True)
             _flush_timer.setInterval(800)
 
             def _persist_layout_now(_tbl=tbl):
                 try:
-                    _tbl.save_header_state(sync=True)
-                    flush_config_writer(timeout_sec=1.0)
+                    _tbl.save_header_state(sync=False)
                 except Exception as exc:
                     logger.debug("[FusionLadder] 布局落盘失败 %s: %s", name, exc)
 
@@ -2494,7 +2512,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
     # ------------------------------------------------------------------
     def _on_narrow_mode_toggled(self, checked: bool) -> None:
         self.is_narrow_mode = bool(checked)
-        save_config_node("fusion_ladder_narrow_mode", self.is_narrow_mode)
+        save_config_node_async("fusion_ladder_narrow_mode", self.is_narrow_mode)
         self._apply_all_narrow_modes()
 
     def _load_show_custom_cols(self) -> bool:
@@ -2505,7 +2523,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
 
     def _on_custom_cols_toggled(self, checked: bool) -> None:
         self.show_custom_cols = bool(checked)
-        save_config_node("fusion_ladder_show_custom_cols", self.show_custom_cols)
+        save_config_node_async("fusion_ladder_show_custom_cols", self.show_custom_cols)
         self._apply_all_narrow_modes()
 
     def _resolve_ats_strategy_df(self) -> Optional[pd.DataFrame]:
@@ -2724,7 +2742,12 @@ class FusionLadderDialog(QWidget, WindowMixin):
         if is_trade_day and now_hm >= "09:15" and (cur_today in days_set):
             target_default_day = cur_today
         else:
-            target_default_day = last_trade_day if last_trade_day in self._production_days else self._production_days[-1]
+            # 优先选择有实际影子数据记录的有效交易日，避免开盘前或周末打开白板
+            days_with_data = [d for d in self._production_days if d in days_set]
+            if days_with_data:
+                target_default_day = days_with_data[-1]
+            else:
+                target_default_day = last_trade_day if last_trade_day in self._production_days else self._production_days[-1]
 
         self.cmb_day.blockSignals(True)
         self.cmb_day.clear()
@@ -2751,7 +2774,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
 
     def _on_hit_only_toggled(self, checked: bool) -> None:
         try:
-            save_config_node("fusion_ladder_hit_only", bool(checked))
+            save_config_node_async("fusion_ladder_hit_only", bool(checked))
         except Exception:
             pass
         self._style_hit_only(bool(checked))
@@ -2783,7 +2806,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
     def _on_structure_only_toggled(self, checked: bool) -> None:
         """只看结构机会切换：持久化并即时刷新全界面。"""
         try:
-            save_config_node("fusion_ladder_structure_only", bool(checked))
+            save_config_node_async("fusion_ladder_structure_only", bool(checked))
         except Exception:
             pass
         self._style_structure_only(bool(checked))
@@ -3110,12 +3133,25 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 "is_hidden": False if self.stays_on_top else self.is_hidden_state,
                 "is_open": is_open,
             }
-            save_config_node("fusion_ladder_dialog", node_data)
-            save_config_node("fusion_ladder_stays_on_top", self.stays_on_top)
-            save_config_node("fusion_ladder_anchor_edge", None if self.stays_on_top else self.anchor_edge)
-            save_config_node("fusion_ladder_is_hidden", False if self.stays_on_top else self.is_hidden_state)
+            self._pending_window_states = {
+                "fusion_ladder_dialog": node_data,
+                "fusion_ladder_stays_on_top": self.stays_on_top,
+                "fusion_ladder_anchor_edge": None if self.stays_on_top else self.anchor_edge,
+                "fusion_ladder_is_hidden": False if self.stays_on_top else self.is_hidden_state,
+            }
+            self._state_save_timer.start()
         except Exception as e:
             logger.debug(f"[FusionLadderDialog] 保存窗口状态异常: {e}")
+
+    def _persist_window_states(self) -> None:
+        updates = self._pending_window_states
+        if updates is None:
+            return
+        if save_config_nodes_async(updates):
+            self._pending_window_states = None
+        else:
+            logger.warning("[FusionLadderDialog] 窗口状态未能加入配置写入队列")
+            self._state_save_timer.start()
 
     # ------------------------------------------------------------------
     # 磁吸贴边与平滑展开/隐藏动效
@@ -3167,7 +3203,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
 
     def _detect_and_snap(self) -> None:
         """拖拽结束检测边缘磁吸吸附 (35px 阈值，支持 top / left / right)"""
-        if self.is_hidden_state:
+        if self.is_hidden_state or self.isMaximized() or self.isFullScreen():
             return
 
         if QApplication.mouseButtons() & Qt.MouseButton.LeftButton:
@@ -3221,7 +3257,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
 
     def hide_to_edge(self) -> None:
         """贴边后收缩为 5px 边缘观察/感应条 (透明度 0.35)"""
-        if getattr(self, "stays_on_top", False):
+        if getattr(self, "stays_on_top", False) or self.isMaximized() or self.isFullScreen():
             return
         if not self.anchor_edge or not self.normal_geometry:
             return
@@ -3293,7 +3329,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
 
     def _check_hover(self) -> None:
         """贴边状态下的鼠标悬停/离开巡检 (0 开销设计)"""
-        if not self.isVisible() or getattr(self, "stays_on_top", False):
+        if (not self.isVisible() or getattr(self, "stays_on_top", False)
+                or self.isMaximized() or self.isFullScreen()):
             if hasattr(self, "hover_timer") and self.hover_timer.isActive():
                 self.hover_timer.stop()
             return
@@ -3346,15 +3383,21 @@ class FusionLadderDialog(QWidget, WindowMixin):
     # ------------------------------------------------------------------
     def moveEvent(self, event) -> None:  # noqa: N802
         super().moveEvent(event)
-        if self.stays_on_top:
-            self.snap_timer.stop()
+        if self.isMaximized() or self.isFullScreen():
+            if hasattr(self, "snap_timer") and self.snap_timer:
+                self.snap_timer.stop()
+            return
+        if getattr(self, "stays_on_top", False):
+            if hasattr(self, "snap_timer") and self.snap_timer:
+                self.snap_timer.stop()
             self.anchor_edge = None
             self.normal_geometry = None
             return
         if not self.is_hidden_state and not getattr(self, "_in_snap_action", False):
             self._is_dragging = True
             self.anchor_edge = None
-            self.snap_timer.start(300)
+            if hasattr(self, "snap_timer") and self.snap_timer:
+                self.snap_timer.start(400)
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
@@ -3372,6 +3415,18 @@ class FusionLadderDialog(QWidget, WindowMixin):
     def changeEvent(self, event) -> None:  # noqa: N802
         """系统事件响应：当窗口被系统/Alt+R激活时，若处于边缘折叠隐藏状态，自动平滑展开"""
         try:
+            if (event and event.type() == QEvent.Type.WindowStateChange
+                    and (self.isMaximized() or self.isFullScreen())):
+                self.snap_timer.stop()
+                self.hover_timer.stop()
+                if self.anim_group:
+                    self.anim_group.stop()
+                self._in_snap_action = False
+                self._is_dragging = False
+                self.anchor_edge = None
+                self.is_hidden_state = False
+                self.normal_geometry = None
+                self.setWindowOpacity(1.0)
             if event and event.type() == QEvent.Type.ActivationChange:
                 if self.isActiveWindow() and getattr(self, "is_hidden_state", False):
                     self._is_auto_popping = True
@@ -3618,7 +3673,9 @@ class FusionLadderDialog(QWidget, WindowMixin):
         cached_ts = float(getattr(self, "_latest_live_ts", 0.0) or 0.0)
         if cached_day == day and cached_ts > 0 and (now - cached_ts) <= 180:
             return
-        rows = load_live_rows(day, allow_fallback=False)
+        # 交易时段严格查看当天实时流；非交易时段（夜间/周末/盘前）无数据时自动平滑回退至最近有数据的交易日，绝不白板
+        allow_fallback = not (self._is_trading_window() and day == today_str())
+        rows = load_live_rows(day, allow_fallback=allow_fallback)
         has_data = bool(rows)
         if has_data:
             try:
@@ -3748,7 +3805,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
             tbl.setSpan(0, 0, 1, max(1, tbl.columnCount()))
             self._set_status("状态：{} 暂无影子记录｜{}".format(day, "初始化中" if self._is_trading_window() else "非交易时段"))
             self.lbl_status.setStyleSheet("color:#ffa64d; font-weight:bold;")
-            tbl.setSortingEnabled(True)
+            tbl.setSortingEnabled(False)
             self._maybe_ensure_data()
             return
 
@@ -4700,6 +4757,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
             self._follow_worker.requestInterruption()
             self._follow_worker.wait(2000)
         self._save_window_states(is_open=False)
+        self._state_save_timer.stop()
+        self._persist_window_states()
         super().closeEvent(event)
 
 

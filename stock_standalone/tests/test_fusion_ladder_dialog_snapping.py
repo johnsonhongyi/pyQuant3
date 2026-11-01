@@ -83,6 +83,45 @@ def test_fusion_ladder_dialog_stays_on_top_mutex(qapp):
         dlg.close()
 
 
+def test_window_state_save_is_debounced_and_close_submits(qapp, monkeypatch):
+    import ats.ui.fusion_ladder_dialog as fld
+
+    writes = []
+    monkeypatch.setattr(fld, "save_config_nodes_async", lambda updates: writes.append(updates) or True)
+    dlg = fld.FusionLadderDialog()
+    dlg._save_window_states(is_open=True)
+    dlg._save_window_states(is_open=True)
+    assert writes == []
+    assert dlg._state_save_timer.interval() == 10000
+    dlg._persist_window_states()
+    assert len(writes) == 1
+    assert writes[0]["fusion_ladder_dialog"]["is_open"] is True
+    dlg.close()
+    assert writes[-1]["fusion_ladder_dialog"]["is_open"] is False
+
+
+def test_maximized_and_fullscreen_disable_snapping(qapp):
+    from PyQt6.QtCore import Qt
+    from ats.ui.fusion_ladder_dialog import FusionLadderDialog
+
+    dlg = FusionLadderDialog()
+    try:
+        dlg.show()
+        for state in (Qt.WindowState.WindowMaximized, Qt.WindowState.WindowFullScreen):
+            dlg.anchor_edge = "top"
+            dlg.setWindowState(state)
+            qapp.processEvents()
+            assert dlg.anchor_edge is None
+            dlg._detect_and_snap()
+            dlg.hide_to_edge()
+            assert dlg.anchor_edge is None
+            assert not dlg.is_hidden_state
+            dlg.setWindowState(Qt.WindowState.WindowNoState)
+            qapp.processEvents()
+    finally:
+        dlg.close()
+
+
 def test_fusion_ladder_dialog_magnetic_snapping_detection(qapp):
     """测试 35px 阈值顶边/左边/右边磁吸吸附逻辑（按最近距离准确判定）"""
     from PyQt6.QtCore import QRect
@@ -266,7 +305,7 @@ def test_fusion_ladder_table_numeric_sorting(qapp):
 
 def test_fusion_ladder_narrow_mode_and_persistence(qapp):
     """测试极窄列切换与持久化"""
-    from ats.ui.styles import load_config_node
+    from ats.ui.styles import flush_config_writer, load_config_node
     from ats.ui.fusion_ladder_dialog import FusionLadderDialog
 
     dlg = FusionLadderDialog()
@@ -279,6 +318,7 @@ def test_fusion_ladder_narrow_mode_and_persistence(qapp):
         dlg.chk_narrow.setChecked(target_narrow)
         assert dlg.is_narrow_mode == target_narrow
         # 验证配置已写盘
+        assert flush_config_writer(timeout_sec=3.0)
         assert bool(load_config_node("fusion_ladder_narrow_mode", False)) == target_narrow
 
         # 恢复状态
@@ -492,3 +532,79 @@ def test_heatmap_snapshot_fallback_on_missing_date(monkeypatch, tmp_path):
     assert len(sector_data) >= 3
     assert "半导体" in sector_data
 
+
+
+def test_tooltip_filter_does_not_pollute_qapplication(qapp):
+    """【0x8001010d根因1验证】验证 UnifiedToolTipFilter 绝不向全局 QApplication 安装事件过滤器"""
+    from ats.ui.fusion_ladder_dialog import FusionLadderDialog
+    dlg = FusionLadderDialog()
+    try:
+        assert hasattr(dlg, "_tooltip_filter")
+    finally:
+        dlg.close()
+
+
+def test_header_tooltip_suppresses_during_mouse_drag(qapp, monkeypatch):
+    """【0x8001010d根因2验证】在鼠标拖拽列宽或窗口移动时，HeaderToolTip 严禁启动延迟弹窗或显示 _TipCard"""
+    from PyQt6.QtCore import QEvent, QPointF, Qt
+    from PyQt6.QtGui import QMouseEvent
+    from PyQt6.QtWidgets import QApplication
+    from ats.ui.fusion_ladder_dialog import FusionLadderDialog, HeaderToolTip
+    dlg = FusionLadderDialog()
+    try:
+        table = dlg.tbl_live
+        header_tip: HeaderToolTip = table._header_tip
+        header = table.horizontalHeader()
+
+        monkeypatch.setattr(QApplication, "mouseButtons", lambda: Qt.MouseButton.LeftButton)
+
+        mouse_drag_event = QMouseEvent(
+            QEvent.Type.MouseMove,
+            QPointF(50.0, 10.0),
+            QPointF(50.0, 10.0),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+        )
+
+        handled = header_tip.eventFilter(header, mouse_drag_event)
+        assert handled is False
+        assert not header_tip._delay.isActive()
+        if header_tip._label is not None:
+            assert not header_tip._label.isVisible()
+    finally:
+        dlg.close()
+
+
+def test_empty_placeholder_keeps_sorting_disabled(qapp):
+    """【白板与崩溃防守】当表格无数据只有占位说明行时，保持 setSortingEnabled(False)，防止合并单元格排序崩溃"""
+    from ats.ui.fusion_ladder_dialog import FusionLadderDialog
+    dlg = FusionLadderDialog()
+    try:
+        table = dlg.tbl_live
+        if table.rowCount() == 1 and table.columnSpan(0, 0) > 1:
+            assert table.isSortingEnabled() is False
+    finally:
+        dlg.close()
+
+
+def test_move_event_does_not_spam_state_saves(qapp, monkeypatch):
+    """【性能与消息循环防守】moveEvent 严禁在每一像素拖动中高频调用 _save_window_states"""
+    from PyQt6.QtCore import QPoint
+    from PyQt6.QtGui import QMoveEvent
+    from ats.ui.fusion_ladder_dialog import FusionLadderDialog
+    dlg = FusionLadderDialog()
+    try:
+        dlg.stays_on_top = False
+        dlg.is_hidden_state = False
+        save_calls = []
+        monkeypatch.setattr(dlg, "_save_window_states", lambda *args, **kwargs: save_calls.append(1))
+
+        for i in range(10):
+            ev = QMoveEvent(QPoint(100 + i, 100 + i), QPoint(100, 100))
+            dlg.moveEvent(ev)
+
+        assert len(save_calls) == 0
+        assert dlg.snap_timer.isActive()
+    finally:
+        dlg.close()

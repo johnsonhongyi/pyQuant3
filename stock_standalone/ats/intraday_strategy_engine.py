@@ -1429,6 +1429,8 @@ class IntradayStrategyEngine:
         triggered_rule_ids = set()
         rem_ratio = 1.0
         cum_high = open_price
+        filtered_count = 0
+        filtered_first = filtered_last = None
 
         for idx_row, (t_idx, row) in enumerate(df_intraday.iterrows()):
             t_str = str(t_idx).strip()[-8:]
@@ -1444,7 +1446,10 @@ class IntradayStrategyEngine:
             if open_price > 10.0:
                 max_allowed_p = open_price * 1.70
                 if p > max_allowed_p or h_p > max_allowed_p:
-                    logger.warning(f"⚠️ [IntradayStrategyEngine] 识别并强力过滤 K 线中 异常毛刺脏数据: t={t_5}, p={p:.2f}, h_p={h_p:.2f} (上限={max_allowed_p:.2f})")
+                    filtered_count += 1
+                    if filtered_first is None:
+                        filtered_first = (t_5, p, h_p)
+                    filtered_last = (t_5, p, h_p)
                     continue
 
             cum_high = max(cum_high, h_p, p)
@@ -1557,6 +1562,11 @@ class IntradayStrategyEngine:
                     if log_entry not in execution_logs:
                         execution_logs.append(log_entry)
 
+        if filtered_count:
+            logger.warning(
+                "[IntradayStrategyEngine] %s 过滤异常 K 线 %d 根，上限=%.2f，首条=%s，末条=%s",
+                code, filtered_count, open_price * 1.70, filtered_first, filtered_last,
+            )
         state["signals"] = signals
         state["triggered_rules"] = triggered_rule_ids
         state["remaining_ratio"] = max(0.0, float(rem_ratio))
