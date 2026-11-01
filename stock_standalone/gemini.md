@@ -1,5 +1,24 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 2026-11-01 11:15 【影子日志方案 v2 闭环实施与全流程审核验收】(`ats/fusion/shadow_io.py`, `ats/fusion/shadow_archive.py`, `tools/audit_weekly_outcomes.py`, `tests/test_fusion_shadow_remediation.py`)
+- [x] **Phase 1 基础容错与语义对齐**：
+  - `cross_day.py`：对时间戳提取加安全防护与 `math.isfinite` 校验，彻底消除坏时间戳导致跨日排序抛异常问题；
+  - `replay_follow.py` & `discovery_audit.py`：对齐价格补样可见时刻为 `bars['time'][1:] + MINUTE_PUBLICATION_LAG`（下一条 bar 时间 + 60s），与评分引擎语义一致；
+  - `shadow.py`：`json.dumps` 移至锁外，上限判断移至 `_rotate(day)` 之后，跨日自动重置当日计数器。
+- [x] **Phase 2 PID 分文件写入与统一读取契约 (`shadow_io.py`)**：
+  - 写入端独立命名 `{day}_{pid}.jsonl`，多进程零写竞争；
+  - 统一暴露 `iter_day_records(directory, day)`、`list_day_files`、`day_has_records` 规范接口，支持按明文旧格式、PID 分片、.gz 压缩的优先级流式迭代；
+  - 坏行行级容错跳过，不中断读取；`tools/audit_weekly_outcomes.py` 改造为调用 `iter_day_records`。
+- [x] **Phase 3 RAMDisk 持久化闭环与孤儿分片收割 (`shadow_archive.py`)**：
+  - 写入优先 RAMDisk，运行中 RAMDisk 丢失平滑降级至本地持久目录；
+  - 正常退出时 `close()` 只原子发布自有 PID 分片；
+  - 异常崩溃路径由归档线程在收盘窗口（`window == 'close'`）调用 `_sync_orphan_shards(ram, persist, own_pid=os.getpid(), settle_seconds=120)`，对超过 settle 期的孤儿分片同卷临时文件原子发布（`os.replace`），同大小不重复写盘，全流程无缝闭环！
+- [x] **自动化测试全绿验证**：
+  - `tests/test_fusion_shadow_remediation.py`（15 项）全过；
+  - `test_fusion_shadow*.py` 全量（34 项）全过；
+  - `test_fusion_replay*.py` 与 `test_fusion_discovery_audit.py` 全量（25 项）全过。
+
+
 ## 2026-10-31 【重排弹窗、量比显示与 Luck 自动弹出限额修复】
 - [x] 重排配置弹窗支持缩放、最小尺寸与历史尺寸自愈；先布局底部按钮，再布局内容区，避免内容超高挤掉按钮。
 - [x] 主表“量”映射量比并保留一位小数；取消原始成交量回退，缺失或异常显示空值，合法零值保留，支持数值排序。

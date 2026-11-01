@@ -182,7 +182,7 @@ def test_track_entries_from_shadow_dynamic_snapshot(qapp):
         ]
         import ats.ui.fusion_ladder_dialog as fld
         orig_load = fld.load_live_series
-        fld.load_live_series = lambda day: {"688000": recs}
+        fld.load_live_series = lambda day, **kwargs: {"688000": recs}
 
         try:
             entries = dlg._track_entries_from_shadow("2026-10-27")

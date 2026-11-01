@@ -226,3 +226,4 @@ stock_standalone/docs/engineering/
 scratch/
 stock_standalone/scratch/
 .agents/skills/code-review-router/
+stock_standalone/artifacts/fusion_research/iterations/*

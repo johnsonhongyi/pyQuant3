@@ -5,9 +5,11 @@ from __future__ import annotations
 import gzip
 import json
 import os
+import zlib
 from datetime import datetime
 
 from ats.fusion.adapter import today_str
+from ats.fusion.source_identity import is_replay_record
 
 
 class HistoricalEvents:
@@ -16,10 +18,12 @@ class HistoricalEvents:
         self.events = []
         self.latest = {}
         self.cursor = 0
-        path = os.path.join(root, "logs", "fusion_shadow", day + ".jsonl")
-        self.stats = {"gradient": 0, "ledger": 0, "gradient_file_present": os.path.isfile(path),
+        from ats.fusion.shadow_io import day_paths, log_directories
+        paths = day_paths(log_directories(os.path.join(root, "logs", "fusion_shadow")), day)
+        self.stats = {"gradient": 0, "ledger": 0, "gradient_file_present": bool(paths),
                       "ledger_snapshot_for_day": False, "excluded_backfill": 0, "invalid": 0, "errors": []}
-        self._gradient(path)
+        for path in paths:
+            self._gradient(path)
         self._ledger(os.path.join(root, "logs", "signal_snapshots"))
         self.events.sort(key=lambda event: event[0])
 
@@ -37,8 +41,11 @@ class HistoricalEvents:
     def _gradient(self, path):
         if not os.path.isfile(path):
             return
+        initial_count = len(self.events)
+        initial_gradient = self.stats["gradient"]
         try:
-            with open(path, "r", encoding="utf-8") as stream:
+            opener = gzip.open if path.endswith(".gz") else open
+            with opener(path, "rt", encoding="utf-8") as stream:
                 for line in stream:
                     try:
                         row = json.loads(line)
@@ -46,9 +53,7 @@ class HistoricalEvents:
                             raise ValueError("invalid record")
                         if row.get("trade_date") and str(row["trade_date"])[:10] != self.day:
                             raise ValueError("cross-day record")
-                        origin = str(row.get("writer_exe") or "").upper()
-                        source = str(row.get("source") or "").lower()
-                        if "BACKFILL" in origin or "REPLAY" in origin or "replay" in source or row.get("writer_pid") == 0:
+                        if is_replay_record(row):
                             self.stats["excluded_backfill"] += 1
                             continue
                         fusion = row.get("fusion") or {}
@@ -62,7 +67,10 @@ class HistoricalEvents:
                         })
                     except (ValueError, TypeError, OverflowError, AttributeError, json.JSONDecodeError):
                         self.stats["invalid"] += 1
-        except OSError as exc:
+        except (OSError, EOFError, UnicodeError, zlib.error) as exc:
+            # 压缩流末尾损坏时，不能把前半段当作完整历史。
+            del self.events[initial_count:]
+            self.stats["gradient"] = initial_gradient
             self.stats["errors"].append("gradient: {}".format(exc))
 
     def _ledger(self, directory):

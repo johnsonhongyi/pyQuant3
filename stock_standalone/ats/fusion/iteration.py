@@ -6,6 +6,8 @@ import gzip
 import hashlib
 import json
 import os
+from pathlib import Path
+import sys
 import time
 import uuid
 from dataclasses import asdict
@@ -98,6 +100,24 @@ def _atomic_json(path, data, compressed=False):
     os.replace(tmp, path)
 
 
+def _replay_engine_fingerprint():
+    """限制跨批次联动只能使用相同实现，不把不同版本的回放拼成一条轨迹。"""
+    digest = hashlib.sha256()
+    sources = ([] if getattr(sys, "frozen", False) or "__compiled__" in globals() else
+               sorted(p for p in Path(__file__).resolve().parent.glob("*.py") if not p.name.startswith("test_")))
+    if not sources:
+        sources = [Path(sys.executable)]
+    try:
+        for path in sources:
+            digest.update(path.name.encode("utf-8"))
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+    except OSError:
+        return ""
+    return digest.hexdigest()[:16]
+
+
 def _next_cached_session(available, index):
     """缺少交易日历时，不跨过可能缺失的工作日假定下一交易日。"""
     if index + 1 >= len(available):
@@ -118,11 +138,13 @@ def run_iterations(days=None, top_n=600, step=1, focus=(), output_root=None,
     root = history_root or _app_root()
     rp = replay or DayReplay(config=ReplayConfig(top_n=top_n, step=step, track=True, max_records=100000,
                                                  history_root=root, persist_context=False,
-                                                 market_path=os.devnull))
+                                                 market_path=os.devnull, use_production_history=False))
     if not rp.cache:
         raise ValueError("找不到可用分钟线缓存")
     if rp.cfg.persist_context or rp.cfg.state_path:
         raise ValueError("逐日迭代必须禁用生产上下文写入和外部跟踪状态")
+    if rp.cfg.use_production_history:
+        raise ValueError("独立逐日回放必须禁用生产历史事件输入")
     rp.cfg.first_only = False
     available = rp.days()
     selected = sorted(set(days or available[-5:]))
@@ -130,8 +152,10 @@ def run_iterations(days=None, top_n=600, step=1, focus=(), output_root=None,
         raise ValueError("所选日期不在分钟缓存中")
     from ats.fusion.paper_follow import read_paper_account, read_shadow_days, build_paper_follow
     from ats.fusion.cross_day import build_cross_day
+    from ats.fusion.liquidity_history import DailyLiquidityHistory
     paper_snapshot = read_paper_account(root)
     production_series, production_bad_rows = read_shadow_days(root, selected[-1])
+    liquidity = DailyLiquidityHistory()
     out = output_root or os.path.join(_app_root(), "logs", "fusion_iterations")
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:10]
     run_dir = os.path.join(out, run_id)
@@ -140,7 +164,8 @@ def run_iterations(days=None, top_n=600, step=1, focus=(), output_root=None,
     fingerprint = hashlib.sha256(json.dumps(cfg, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
     manifest = {"schema": 1, "run_id": run_id, "status": "running", "days": selected,
                 "config": cfg, "config_fingerprint": fingerprint, "completed": [],
-                "source_policy": "生产事件按观测时刻可见；回放回补排除；数据不足不补造",
+                "engine_fingerprint": _replay_engine_fingerprint(),
+                "source_policy": "回放不读取生产事件；生产影子仅用于结果生成后的独立对照；数据不足不补造",
                 "paper_source": {"path": paper_snapshot.get("source_path"), "mtime": paper_snapshot.get("source_mtime"),
                                  "snapshot_day": paper_snapshot.get("trade_date"), "read_status": paper_snapshot["read_status"],
                                  "shadow_bad_rows": production_bad_rows},
@@ -155,9 +180,10 @@ def run_iterations(days=None, top_n=600, step=1, focus=(), output_root=None,
             training = [x for x in settled if x.get("next_day") and x["next_day"] < day]
             advice = _advice(training)
             day_index = available.index(day)
-            if index and (day_index == 0 or selected[index - 1] != available[day_index - 1]
-                          or _next_cached_session(available, day_index - 1) != day):
-                previous = {}
+            gap = bool(index and (day_index == 0 or selected[index - 1] != available[day_index - 1]
+                                  or _next_cached_session(available, day_index - 1) != day))
+            if gap:
+                # 缺日不能假定赛马状态延续；但已发现标的仍保留作观察并显式标记缺口。
                 rp.tracker = None
             next_day = _next_cached_session(available, day_index)
             def on_progress(cur, total):
@@ -166,6 +192,12 @@ def run_iterations(days=None, top_n=600, step=1, focus=(), output_root=None,
             result = rp.run_day(day, focus=focus, carry_codes=previous.keys(), progress=on_progress)
             if result.meta.get("error"):
                 raise RuntimeError("{}: {}".format(day, result.meta["error"]))
+            # 仅在评分完成后附加证据，不能改变回放的候选、评分或执行。
+            codes = {str(row.get("code") or "").zfill(6) for row in result.records if row.get("code")}
+            result.meta["liquidity_archive"] = {"status": liquidity.status, "source": liquidity.path,
+                                                "error": liquidity.error,
+                                                "note": "仅截至前日的归档证据；逐行写入时点未知，不参与评分"}
+            result.meta["liquidity_history"] = {code: liquidity.asof(code, day) for code in codes}
             first = _first_reclaims(result)
             latest_carried = {}
             for row in result.records:
@@ -181,12 +213,15 @@ def run_iterations(days=None, top_n=600, step=1, focus=(), output_root=None,
                 else:
                     carry_states[code] = "收盘前不再满足观察"
             summary = summarize_result(rp, result, next_day, focus)
+            # 重用后台审计结果供回放表格标记，不在 UI 线程再次扫描全量历史。
+            result.meta["focus_selection"] = summary.get("focus_selection", {})
             summary["production_compare"] = _compare_production(root, result, first)
             summary["previous_observations"] = {
                 "day": selected[index - 1] if index else None,
                 "carried": len(previous), "observed_again": len(set(previous) & set(first)),
                 "not_reobserved": sorted(set(previous) - set(first)),
                 "close_states": carry_states,
+                "gap": "中间交易日未连续回放，赛马状态已重置" if gap else "",
             }
             summary["prior_day_advice"] = advice
             summary["approximations"] = result.meta.get("approximations", [])
@@ -207,7 +242,8 @@ def run_iterations(days=None, top_n=600, step=1, focus=(), output_root=None,
             manifest["completed"].append({"day": day, "file": filename, "summary": summary})
             _atomic_json(manifest_path, manifest)
             settled.append(summary)
-            previous = first
+            # 已发现的观察继续跨日跟踪；当日没有新信号不等于历史观察应被遗忘。
+            previous.update(first)
         manifest["status"] = "complete"
         _atomic_json(manifest_path, manifest)
     except Exception as exc:

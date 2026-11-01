@@ -9,17 +9,19 @@ import os
 import numpy as np
 
 from ats.fusion.anomaly import PATTERN_COUNTER_RECLAIM
-from ats.fusion.replay import DayReplay, ReplayConfig, day_bounds
+from ats.fusion.replay import DayReplay, ReplayConfig, MINUTE_PUBLICATION_LAG, day_bounds
 
 
 def _price_at(cache, code, day, hour, minute, max_age=360):
     arr = cache.get(code)
-    if arr is None:
+    if arr is None or len(arr) < 2:
         return None
     start, _ = day_bounds(day)
     target = start + hour * 3600 + minute * 60
-    i = np.searchsorted(arr["time"], target, side="right") - 1
-    if i < 0 or arr["time"][i] < start or target - arr["time"][i] > max_age:
+    available = np.r_[arr["time"][1:] + MINUTE_PUBLICATION_LAG, np.inf]
+    i = np.searchsorted(available, target, side="right") - 1
+    if (i < 0 or arr["time"][i] < start or arr["time"][i + 1] >= start + 86400
+            or target - available[i] > max_age):
         return None
     return float(arr["close"][i])
 
@@ -57,6 +59,19 @@ def summarize_result(replay, result, next_day, focus=()):
                 false_positives.add(code)
 
     detected = opportunities & observed
+    # 候选池以外也可能有机会：单独计算缓存范围的覆盖，保留原候选池指标供兼容比较。
+    cache_outcomes = {}
+    cache_opportunities = set()
+    if next_day:
+        for code in replay.cache:
+            morning = _price_at(replay.cache, code, day, 10, 0)
+            future = _price_at(replay.cache, code, next_day, 15, 0)
+            if morning is None or morning <= 0 or future is None:
+                continue
+            cache_outcomes[code] = (morning, future)
+            if future / morning - 1 >= 0.03:
+                cache_opportunities.add(code)
+    cache_detected = cache_opportunities & observed
     trace = {}
     for code in focus:
         rows = [r for r in result.records if r["code"] == code]
@@ -81,6 +96,13 @@ def summarize_result(replay, result, next_day, focus=()):
         "false_positive_rate": round(len(false_positives) / len(observed), 4) if observed else None,
         "opportunity_count": len(opportunities), "detected_opportunities": len(detected),
         "miss_rate": round(1 - len(detected) / len(opportunities), 4) if opportunities else None,
+        "cache_universe_audit": {
+            "scope": "分钟缓存中两个时点均有有效价格的全部代码，可能包含指数或基金",
+            "labelled_codes": len(cache_outcomes), "opportunity_count": len(cache_opportunities),
+            "detected_opportunities": len(cache_detected),
+            "miss_rate": round(1 - len(cache_detected) / len(cache_opportunities), 4) if cache_opportunities else None,
+            "outside_candidate_opportunities": len(cache_opportunities - universe),
+        },
         "largest_falls": changes[:5], "largest_gains": list(reversed(changes[-5:])),
         "missed_examples": [{"code": c, "morning": round(outcomes[c]["morning"], 3),
                              "next_close": round(outcomes[c]["next_close"], 3)}

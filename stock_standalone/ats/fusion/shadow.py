@@ -3,7 +3,7 @@
 
 职责边界（很重要）：
     - 只读。不改 decision、不改 snap、不下单、不发语音。
-    - 唯一的副作用是往 logs/fusion_shadow/YYYY-MM-DD.jsonl 追加一行。
+    - 仅写影子分片及跟踪状态，不回写 PAPER 或执行入口。
     - 任何异常都吞掉并计数，绝不影响主循环——融合层是"旁听者"。
 
 为什么先做影子：
@@ -213,6 +213,8 @@ class FusionShadow:
         if self.enabled:
             try:
                 os.makedirs(self._log_dir, exist_ok=True)
+                from ats.fusion.shadow_archive import register_archive_worker
+                register_archive_worker(self._log_dir)
             except Exception as exc:
                 logger.warning("[fusion] 影子日志目录创建失败，降级为仅内存: %s", exc)
 
@@ -847,7 +849,9 @@ class FusionShadow:
     # 落盘
     # ------------------------------------------------------------------
     def _append(self, record: Dict[str, Any], day: str) -> None:
-        if self._written_today >= self._max_per_day:
+        from ats.fusion.source_identity import is_replay_record
+        if is_replay_record(record):
+            logger.warning("[fusion] 拒绝回放记录写入生产影子")
             return
         try:
             line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
@@ -858,6 +862,8 @@ class FusionShadow:
             try:
                 if self._fh is None or self._fh_day != day:
                     self._rotate(day)
+                if self._written_today >= self._max_per_day:
+                    return
                 if self._fh is None:
                     return
                 self._fh.write(line + "\n")
@@ -875,27 +881,24 @@ class FusionShadow:
                 logger.debug("[fusion] 写影子日志失败: %s", exc)
 
     def _rotate(self, day: str) -> None:
-        try:
-            if self._fh is not None:
-                self._fh.flush()
-                self._fh.close()
-        except Exception:
-            pass
+        if self._fh is not None:
+            # 检查点失败时保留旧 writer 及待落盘记录，由后台重试。
+            self._fh.close()
         self._fh = None
         self._fh_day = day
         self._written_today = 0
         self._buf.clear()
-        path = os.path.join(self._log_dir, "{}.jsonl".format(day))
-        self._fh = open(path, "a", encoding="utf-8")
+        from ats.fusion.shadow_writer import open_writer
+        self._fh = open_writer(self._log_dir, day)
 
     def flush(self) -> None:
         with self._lock:
             try:
                 if self._fh is not None:
-                    self._fh.flush()
+                    self._fh.checkpoint()
                     self._buf.clear()
             except Exception:
-                pass
+                logger.exception("[fusion] 影子 flush 失败")
             self._save_tracker_locked(force=True)
 
     def close(self) -> None:
@@ -905,8 +908,10 @@ class FusionShadow:
                     self._fh.flush()
                     self._fh.close()
             except Exception:
-                pass
-            self._fh = None
+                self._stats["errors"] += 1
+                logger.exception("[fusion] 影子退出落盘失败，保留待重试 writer")
+            else:
+                self._fh = None
             self._save_tracker_locked(force=True)
 
     def _save_tracker_locked(self, force: bool = False) -> None:

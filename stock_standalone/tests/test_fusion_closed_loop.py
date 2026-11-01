@@ -161,7 +161,7 @@ class TestClosedLoop(unittest.TestCase):
 
         # 落盘 + 复盘闭环
         self.shadow.flush()
-        path = os.path.join(self.root, "logs", "fusion_shadow", _DAY + ".jsonl")
+        path = os.path.join(self.root, "logs", "fusion_shadow", "{}_{}.jsonl".format(_DAY, os.getpid()))
         with open(path, "r", encoding="utf-8") as f:
             lines = [x for x in f if x.strip()]
         self.assertEqual(len(lines), expected)

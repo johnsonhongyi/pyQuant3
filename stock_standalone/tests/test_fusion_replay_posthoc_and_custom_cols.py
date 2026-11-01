@@ -60,6 +60,17 @@ def test_replay_records_posthoc_fields():
     assert record["close_ret"] == 5.00
 
 
+def test_ui_replay_worker_disables_production_signal_input(qapp, monkeypatch):
+    from types import SimpleNamespace
+    from ats.ui import fusion_ladder_dialog as module
+
+    configs = []
+    monkeypatch.setattr(module, "DayReplay", lambda config: (configs.append(config) or SimpleNamespace(cache={})))
+    worker = module.ReplayWorker("2026-10-29", [])
+    worker.run()
+    assert configs and configs[0].use_production_history is False
+
+
 def test_custom_cols_extra_detection_and_vis_map():
     """验证 get_ats_custom_extra_cols 与 get_ats_col_display_name"""
     from ats.ui.fusion_ladder_dialog import get_ats_custom_extra_cols, get_ats_col_display_name
@@ -132,6 +143,140 @@ def test_tbl_replay_posthoc_column_and_render(qapp):
         assert "当时入局涨幅: +3.25%" in tip_text
         assert "终收涨幅: +9.95%" in tip_text
         assert "全天收盘价: 65.50" in tip_text
+    finally:
+        dlg.close()
+
+
+def test_replay_focus_is_red_and_remains_first_for_any_sort(qapp, monkeypatch):
+    from ats.ui.fusion_ladder_dialog import FusionLadderDialog
+    from ats.fusion.replay import ReplayResult
+
+    dlg = FusionLadderDialog()
+    try:
+        monkeypatch.setattr(dlg, "_render_live", lambda **kwargs: None)
+        base = {"tier": 1, "tier_name": "L1", "rar": 55, "entry": 10, "pct": 1,
+                "mfe": 1, "mae": -1, "close_ret": 0, "size_pct": 0, "temp": 40}
+        rows = [dict(base, ts=100, time="09:31", code="000001", name="普通"),
+                dict(base, ts=200, time="09:32", code="600809", name="重点", pct=3)]
+        result = ReplayResult(day="2026-10-29", records=rows, meta={"codes": 2, "bars": 2, "evaluations": 2, "records": 2,
+            "liquidity_history": {"600809": {"source": "archive.h5", "history": [{"date": "2026-10-28", "turnover_pct": 21.43, "volume_ratio": 0.8}]}}, "focus_selection": {
+            "first_selected": [{"code": "600809", "ts": 200, "time": "09:33", "focus_rank": 1}]}})
+        dlg._on_replay_done(result)
+        table = dlg.tbl_replay
+        for column in (1, 2, 4):
+            for order in (Qt.SortOrder.AscendingOrder, Qt.SortOrder.DescendingOrder):
+                table.sortItems(column, order)
+                assert table.item(0, 1).text() == "600809"
+        assert table.item(0, 1).foreground().color().name() == "#ff6868"
+        assert table.item(0, 1).background().color().name() == "#4b2026"
+        assert "09:33" in table.item(0, 1).toolTip()
+        headers = {table.horizontalHeaderItem(c).text(): c for c in range(table.columnCount())}
+        assert table.item(0, headers["历史换手%"]).text() == "21.43"
+        assert table.item(0, headers["历史量比"]).text() == "0.80"
+        assert table.item(0, headers["特征日期"]).text() == "2026-10-28"
+        assert "不参与评分" in table.item(0, headers["历史量比"]).toolTip()
+        dlg.chk_focus_only.setChecked(False)
+        assert all(table.item(i, 1).foreground().color().name() != "#ff6868" for i in range(table.rowCount()))
+    finally:
+        dlg.close()
+
+
+def test_live_focus_is_red_and_pinned_when_sorting_numeric_columns(qapp, monkeypatch):
+    import datetime
+    from ats.ui import fusion_ladder_dialog as module
+
+    ts = datetime.datetime(2026, 10, 29, 10, 0).timestamp()
+    base = {"ts": ts, "trade_date": "2026-10-29", "schema": 2, "price": 10.1, "pct": 1,
+            "fusion": {"tier": 1, "rar": 50}, "vwap": 10, "coverage": 1}
+    rows = [dict(base, code="000001", name="普通", patterns=[]),
+            dict(base, code="600809", name="重点", pct=2, patterns=["逆势收复启动"],
+                 reclaim_detail={"vwap3": 10, "vwap5": 10, "hold_ratio": .8})]
+    monkeypatch.setattr(module, "load_live_rows", lambda *args, **kwargs: rows)
+    dlg = module.FusionLadderDialog()
+    try:
+        monkeypatch.setattr(dlg, "_resolve_ats_strategy_df", lambda: None)
+        dlg.cmb_day.addItem("2026-10-29")
+        dlg.cmb_day.setCurrentText("2026-10-29")
+        dlg.chk_hit_only.setChecked(False)
+        dlg.chk_structure_only.setChecked(False)
+        dlg._render_live(force=True)
+        table = dlg.tbl_live
+        for column in (1, 2, 4, 5):
+            for order in (Qt.SortOrder.AscendingOrder, Qt.SortOrder.DescendingOrder):
+                table.sortItems(column, order)
+                assert table.item(0, 1).text() == "600809"
+        assert table.item(0, 1).foreground().color().name() == "#ff6868"
+    finally:
+        dlg.close()
+
+
+def test_live_focus_reports_missing_production_evidence(qapp, monkeypatch):
+    import datetime
+    from ats.ui import fusion_ladder_dialog as module
+
+    ts = datetime.datetime(2026, 10, 29, 10, 0).timestamp()
+    rows = [{"ts": ts, "trade_date": "2026-10-29", "schema": 2, "code": "600809", "name": "山西汾酒",
+             "price": 10, "pct": 1, "vwap": 10, "fusion": {"tier": 1, "rar": 50}, "patterns": []}]
+    monkeypatch.setattr(module, "load_live_rows", lambda *args, **kwargs: rows)
+    dlg = module.FusionLadderDialog()
+    try:
+        monkeypatch.setattr(dlg, "_resolve_ats_strategy_df", lambda: None)
+        dlg.cmb_day.addItem("2026-10-29")
+        dlg.cmb_day.setCurrentText("2026-10-29")
+        dlg.chk_hit_only.setChecked(False)
+        dlg.chk_structure_only.setChecked(False)
+        dlg._render_live(force=True)
+        assert "来源记录缺少重点所需证据" in dlg.lbl_status.text()
+        assert "#ffa64d" in dlg.lbl_status.styleSheet()
+    finally:
+        dlg.close()
+
+
+def test_cross_day_displays_replay_and_live_separately_without_paper_link(qapp, monkeypatch):
+    import datetime
+    from ats.fusion.cross_day import build_cross_day
+    from ats.ui.fusion_ladder_dialog import FusionLadderDialog
+
+    day = "2026-10-29"
+    ts = datetime.datetime(2026, 10, 29, 10, 0).timestamp()
+    live = {"code": "000568", "ts": ts, "price": 10, "trade_date": day, "fusion": {"tier": 2}}
+    replay = {**live, "ts": ts + 60, "source": "replay_archive", "price": 10.1}
+    prod_rows = build_cross_day({day: {"000568": [live]}}, day)
+    replay_rows = build_cross_day({day: {"000568": [replay]}}, day, allow_replay=True)
+    assert len(prod_rows) == len(replay_rows) == 1
+    dlg = FusionLadderDialog()
+    try:
+        monkeypatch.setattr(dlg, "_render_paper_follow", lambda *args: None)
+        refreshed = []
+        monkeypatch.setattr(dlg, "_start_cross_day", lambda requested: refreshed.append(requested))
+        dlg.cmb_day.addItem(day)
+        dlg.cmb_day.setCurrentText(day)
+        dlg._replay_days = [day]
+        output = {"root": os.path.abspath(dlg.ed_trade_root.text().strip()), "requested_replay": "",
+                  "signals": prod_rows, "shadow_errors": 0,
+                  "paper": {"rows": [{"code": "000568", "remaining": 100, "status": "持仓"}],
+                            "account": {"read_status": "READY"}},
+                  "replay": {"rows": replay_rows, "status": "ready", "independent": True, "sources": {day: "isolated", "2026-10-28": "older"}, "errors": []}}
+        dlg._render_cross_day(output, day)
+        assert dlg.cmb_day.findText("2026-10-28") >= 0
+        table = dlg.tbl_cross_day
+        source_col = next(c for c in range(table.columnCount()) if table.horizontalHeaderItem(c).text() == "信号来源")
+        compare_col = next(c for c in range(table.columnCount()) if table.horizontalHeaderItem(c).text() == "双流对照")
+        paper_col = next(c for c in range(table.columnCount()) if table.horizontalHeaderItem(c).text() == "PAPER交易状态")
+        by_source = {table.item(i, source_col).text(): i for i in range(table.rowCount())}
+        assert set(by_source) == {"生产影子", "独立回放"}
+        assert table.item(by_source["生产影子"], paper_col).text() == "持仓"
+        assert table.item(by_source["独立回放"], paper_col).text() == "未关联（回放）"
+        assert "价差+1.00%" in table.item(by_source["独立回放"], compare_col).text()
+        output["replay"]["independent"] = False
+        output["replay"]["production_history"] = True
+        dlg._render_cross_day(output, day)
+        by_source = {table.item(i, source_col).text(): i for i in range(table.rowCount())}
+        assert "回放含生产证据" in by_source
+        assert "不能独立验证" in table.item(by_source["回放含生产证据"], compare_col).text()
+        dlg._on_follow_finished()
+        qapp.processEvents()
+        assert refreshed[-1] == day
     finally:
         dlg.close()
 

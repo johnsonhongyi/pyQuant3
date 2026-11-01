@@ -71,7 +71,7 @@ class TestShadow(unittest.TestCase):
 
     def _log_path(self):
         day = time.strftime("%Y-%m-%d", time.localtime(_NOW))
-        return os.path.join(self.root, "fusion_shadow_test", day + ".jsonl")
+        return os.path.join(self.root, "fusion_shadow_test", "{}_{}.jsonl".format(day, os.getpid()))
 
     def test_record_written(self):
         rec = self.shadow.observe(

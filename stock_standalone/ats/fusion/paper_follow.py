@@ -35,21 +35,21 @@ def _stamp(value):
 
 def read_shadow_days(root, asof_day):
     series, errors = {}, 0
-    for path in sorted((Path(root) / "logs/fusion_shadow").glob("????-??-??.jsonl")):
-        day = path.stem
+    directory = Path(root) / "logs/fusion_shadow"
+    from ats.fusion.shadow_io import day_paths, log_days, log_directories, read_paths
+    directories = log_directories(str(directory))
+    for day in log_days(directories):
         if day > asof_day:
             continue
+        rows, bad = read_paths(day_paths(directories, day))
+        errors += len(bad)
         by_code = defaultdict(list)
-        with path.open(encoding="utf-8-sig") as stream:
-            for line in stream:
-                if not line.strip():
-                    continue
-                try:
-                    row = json.loads(line)
-                    code = str(row["code"]).split(".")[0].zfill(6)
-                    by_code[code].append(row)
-                except (ValueError, TypeError, KeyError):
-                    errors += 1
+        for row in rows:
+            try:
+                code = str(row["code"]).split(".")[0].zfill(6)
+                by_code[code].append(row)
+            except (ValueError, TypeError, KeyError):
+                errors += 1
         series[day] = dict(by_code)
     return series, errors
 

@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import datetime
+import gzip
 import json
 import logging
 import os
@@ -689,6 +690,7 @@ _LIVE_BASE_HEADERS = [
 
 _REPLAY_BASE_HEADERS = [
     "时间", "代码", "名称", "现价", "涨幅%", "终收%", "级别", "RAR", "仓位%", "MFE%", "MAE%", "收盘%", "温度℃",
+    "历史换手%", "历史量比", "特征日期",
 ]
 
 _TRADES_BASE_HEADERS = [
@@ -703,7 +705,7 @@ _TRACK_BASE_HEADERS = [
 # 各表默认列宽（仅在从未保存过布局时使用；用户调整后由 ATS 表头持久化接管）
 _DEFAULT_COL_WIDTHS: Dict[str, List[int]] = {
     "tbl_live": [56, 74, 104, 76, 78, 64, 52, 52, 52, 52, 64, 108, 78, 70, 104, 82, 52, 62],
-    "tbl_replay": [70, 74, 104, 76, 78, 78, 56, 64, 64, 64, 64, 64, 62],
+    "tbl_replay": [70, 74, 104, 76, 78, 78, 56, 64, 64, 64, 64, 64, 62, 82, 76, 100],
     "tbl_trades": [74, 104, 64, 76, 60, 64, 76, 72, 78, 78, 200],
     "tbl_track": [74, 104, 60, 76, 84, 76, 88, 72, 64, 60, 220, 74, 64, 64],
 }
@@ -785,19 +787,16 @@ def _shadow_dir_candidates() -> List[str]:
 
 def _day_file_candidates(day: str) -> List[str]:
     """当日影子文件的所有候选路径（Ramdisk 优先）。"""
-    d_str = day or today_str()
-    selected_root = str(load_config_node("fusion_trade_center_root", "") or "").strip()
-    if selected_root:
-        return [os.path.join(selected_root, "logs", "fusion_shadow", "{}.jsonl".format(d_str))]
-    out: List[str] = []
-    ramdisk_dir = _detect_ramdisk_dir()
-    if ramdisk_dir:
-        out.append(os.path.join(ramdisk_dir, "{}.jsonl".format(d_str)))
-    for d in _shadow_dir_candidates():
-        p = os.path.join(d, "{}.jsonl".format(d_str))
-        if p not in out:
-            out.append(p)
-    return out
+    from ats.fusion.shadow_io import day_paths, log_directories
+    paths = []
+    for directory in _shadow_dir_candidates():
+        paths.extend(day_paths(log_directories(directory), day or today_str()))
+    # 兼容旧版 UI 快照目录，生产新分片使用按应用根隔离的目录。
+    if not str(load_config_node("fusion_trade_center_root", "") or "").strip():
+        ram = _detect_ramdisk_dir()
+        if ram:
+            paths.extend(day_paths([ram], day or today_str()))
+    return paths
 
 
 def _resolve_day_file(day: str) -> Optional[str]:
@@ -807,12 +806,27 @@ def _resolve_day_file(day: str) -> Optional[str]:
     for p in _day_file_candidates(day):
         try:
             if os.path.exists(p) and os.path.getsize(p) > 0:
+                if p.endswith(".gz") and best and not best.endswith(".gz"):
+                    continue
+                if best and best.endswith(".gz") and not p.endswith(".gz"):
+                    best, best_mtime = p, -1.0
                 m = os.path.getmtime(p)
                 if m > best_mtime:
                     best, best_mtime = p, m
         except Exception:
             continue
     return best
+
+
+def _resolved_day_paths(path, day):
+    """合并所选应用根的全部 PID 分片，避免把不同部署目录混成一条流。"""
+    from ats.fusion.shadow_io import day_paths, log_directories
+    directory = os.path.normcase(os.path.dirname(os.path.abspath(path)))
+    for root in _shadow_dir_candidates():
+        directories = log_directories(root)
+        if directory in {os.path.normcase(os.path.abspath(p)) for p in directories}:
+            return day_paths(directories, day)
+    return day_paths([os.path.dirname(path)], day)
 
 
 def _resolve_shadow_file(day: str) -> Tuple[Optional[str], str]:
@@ -826,7 +840,11 @@ def _resolve_shadow_file(day: str) -> Tuple[Optional[str], str]:
     newest_path: Optional[str] = None
     newest_day = ""
     newest_mtime = -1.0
-    for d in _shadow_dir_candidates() + ([_detect_ramdisk_dir()] if _detect_ramdisk_dir() else []):
+    from ats.fusion.shadow_io import log_directories, LOG_NAME
+    directories = [p for directory in _shadow_dir_candidates() for p in log_directories(directory)]
+    if not str(load_config_node("fusion_trade_center_root", "") or "").strip() and _detect_ramdisk_dir():
+        directories.append(_detect_ramdisk_dir())
+    for d in directories:
         if not d or not os.path.isdir(d):
             continue
         try:
@@ -834,7 +852,7 @@ def _resolve_shadow_file(day: str) -> Tuple[Optional[str], str]:
         except Exception:
             continue
         for nm in names:
-            if not nm.endswith(".jsonl") or nm.startswith("."):
+            if not LOG_NAME.fullmatch(nm):
                 continue
             p = os.path.join(d, nm)
             try:
@@ -844,7 +862,7 @@ def _resolve_shadow_file(day: str) -> Tuple[Optional[str], str]:
             except Exception:
                 continue
             if m > newest_mtime:
-                newest_path, newest_day, newest_mtime = p, nm[:-6], m
+                newest_path, newest_day, newest_mtime = p, nm[:10], m
     return newest_path, (newest_day or d_str)
 
 
@@ -987,26 +1005,24 @@ def load_live_series(day: str = "", max_lines: int = 20000, allow_fallback: bool
     path = _resolve_shadow_file(day)[0] if allow_fallback else _resolve_day_file(day)
     if not path or not os.path.exists(path):
         return {}
+    path_day = os.path.basename(path)[:10]
     try:
-        st = os.stat(path)
-        cache_key = (path, st.st_size, round(st.st_mtime, 3), int(max_lines))
+        from ats.fusion.shadow_io import read_paths, file_signature, record_ts
+        paths = _resolved_day_paths(path, path_day)
+        cache_key = (file_signature(paths), int(max_lines), path_day)
         cached = _LIVE_SERIES_CACHE.get(cache_key)
         if cached is not None:
             return cached
-        with open(path, "r", encoding="utf-8") as f:
-            tail = deque(f, maxlen=max_lines)
-    except Exception:
+        records, errors = read_paths(paths, max_records=max_lines)
+        if errors:
+            logger.warning("[FusionLadder] 影子读取异常: %s", errors[:5])
+        tail = sorted((r for r in records if record_ts(r) is not None), key=record_ts)[-max_lines:]
+    except (OSError, ValueError, TypeError):
+        logger.exception("[FusionLadder] 影子分片读取失败")
         return {}
 
     series: Dict[str, List[Dict[str, Any]]] = {}
-    for line in tail:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rec = json.loads(line)
-        except Exception:
-            continue
+    for rec in tail:
         code = str(rec.get("code") or "").split(".")[0].zfill(6)
         if not code:
             continue
@@ -1111,6 +1127,10 @@ def persist_shadow_records(records: List[Dict[str, Any]], day: str = "", merge: 
     """
     if not records:
         return 0
+    from ats.fusion.source_identity import is_replay_record
+    if any(not isinstance(record, dict) or is_replay_record(record) for record in records):
+        logger.warning("拒绝将回放或无效记录写入生产影子日志")
+        return 0
     primary, ramdisk = _shadow_storage_paths(day)
     payload = _merge_records(primary, records) if merge else list(records)
 
@@ -1145,25 +1165,22 @@ def load_live_rows(day: str = "", max_lines: int = 5000, allow_fallback: bool = 
     if not target_path or not os.path.exists(target_path):
         return []
     try:
-        st = os.stat(target_path)
-        cache_key = (target_path, st.st_size, round(st.st_mtime, 3), int(max_lines), str(src_day))
+        from ats.fusion.shadow_io import read_paths, file_signature, record_ts
+        paths = _resolved_day_paths(target_path, src_day)
+        cache_key = (file_signature(paths), int(max_lines), src_day)
         cached = _LIVE_ROWS_CACHE.get(cache_key)
         if cached is not None:
             return list(cached)
-        with open(target_path, "r", encoding="utf-8") as f:
-            tail = deque(f, maxlen=max_lines)
-    except Exception:
+        records, errors = read_paths(paths, max_records=max_lines)
+        if errors:
+            logger.warning("[FusionLadder] 影子读取异常: %s", errors[:5])
+        tail = sorted((r for r in records if record_ts(r) is not None), key=record_ts)[-max_lines:]
+    except (OSError, ValueError, TypeError):
+        logger.exception("[FusionLadder] 影子分片读取失败")
         return []
 
     latest: Dict[str, Dict[str, Any]] = {}
-    for line in tail:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            rec = json.loads(line)
-        except Exception:
-            continue
+    for rec in tail:
         code = str(rec.get("code") or "")
         if not code:
             continue
@@ -1218,7 +1235,7 @@ class ReplayWorker(QThread):
                 top_n=self.top_n, step=self.step,
                 focus_codes=tuple(self.focus), cuts_mode=self.cuts_mode,
                 persist_context=False, market_path=os.devnull, max_records=100000,
-                history_root=self.history_root,
+                history_root=self.history_root, use_production_history=False,
             ))
             if not rp.cache:
                 self.failed.emit("找不到分钟线缓存（cct ramdisk: minute_kline_cache.pkl）")
@@ -1250,22 +1267,39 @@ class CrossDayWorker(QThread):
     done = pyqtSignal(object, str)
     failed = pyqtSignal(str)
 
-    def __init__(self, days, day, parent=None, root=""):
+    def __init__(self, days, day, parent=None, root="", replay_run=""):
         super().__init__(parent)
         self.days, self.day = days, day
         self.root = root
+        self.replay_run = replay_run
 
     def run(self):
         from ats.fusion.cross_day import build_cross_day
         from ats.fusion.paper_follow import read_paper_account, read_shadow_days, build_paper_follow
+        from ats.fusion.replay_follow import read_replay_follow
+        from ats.fusion.replay import load_minute_cache
+        from sys_utils import get_app_root
         try:
             series, errors = read_shadow_days(self.root, self.day)
             if self.isInterruptionRequested():
                 return
             signals = build_cross_day(series, self.day)
             paper = build_paper_follow(read_paper_account(self.root), signals, self.day)
+            if self.isInterruptionRequested():
+                return
+            minute_cache = load_minute_cache()
+            if self.isInterruptionRequested():
+                return
+            replay = read_replay_follow([os.path.join(self.root, "logs", "fusion_iterations"),
+                                         os.path.join(get_app_root(), "logs", "fusion_iterations"),
+                                         os.path.join(get_app_root(), "artifacts", "fusion_research", "iterations")],
+                                        self.day, self.replay_run, price_days=self.days,
+                                        minute_cache=minute_cache, should_cancel=self.isInterruptionRequested)
+            if self.isInterruptionRequested():
+                return
             self.done.emit({"signals": signals, "paper": paper, "root": self.root,
-                            "shadow_errors": errors}, self.day)
+                            "shadow_errors": errors, "replay": replay,
+                            "requested_replay": self.replay_run}, self.day)
         except (OSError, ValueError, TypeError, KeyError) as exc:
             self.failed.emit("跨日/PAPER读取失败：{}".format(exc))
 
@@ -1326,6 +1360,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self._worker: Optional[ReplayWorker] = None
         self._follow_worker = None
         self._result = None
+        self._replay_follow_dir = ""
         self._replay_days: List[str] = []
 
         # 盘后自动沉淀与每日上下文定时检查
@@ -1405,10 +1440,10 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self._style_hit_only(self.chk_hit_only.isChecked())
         bar.addWidget(self.chk_hit_only)
 
-        self.chk_focus_only = QCheckBox("高亮重点≤10")
+        self.chk_focus_only = QCheckBox("红色重点优先")
         self.chk_focus_only.setChecked(True)
-        self.chk_focus_only.setToolTip("标记最多10只当前逆势重点，其中最多2个新发现席位，同板块最多2只，其余按承接与低追高距离排序；保留其他候选。代码和名称排序均将重点置前。不代表买入。")
-        self.chk_focus_only.toggled.connect(lambda _: self._render_live(force=True))
+        self.chk_focus_only.setToolTip("实时页最多标记10只当前重点；回放页标记当日14:45前首次进入重点的记录，全天累计可能超过10只。重点排序置前；观察不代表买入。")
+        self.chk_focus_only.toggled.connect(self._on_focus_toggled)
         bar.addWidget(self.chk_focus_only)
 
         # 🎯 只看结构机会：操盘手核心过滤，过滤95%无结构脉冲杂音，聚焦真正具备主升浪潜力的黄金机会
@@ -1521,11 +1556,18 @@ class FusionLadderDialog(QWidget, WindowMixin):
         v3.addWidget(self.txt_report, 1)
         self.tabs.addTab(page3, "验收与复盘")
 
+        cross_page = QWidget()
+        cross_layout = QVBoxLayout(cross_page)
+        cross_layout.setContentsMargins(4, 4, 4, 4)
+        self.lbl_cross_status = QLabel("跨日跟踪：等待加载生产与回放来源。")
+        self.lbl_cross_status.setWordWrap(True)
+        cross_layout.addWidget(self.lbl_cross_status)
         self.tbl_cross_day = self._create_interactive_table(
-            ["代码", "名称", "首次信号日", "首次时间", "参考价", "最新记录日", "最新时间", "最新记录价", "相对参考%", "记录天数", "数据状态", "采样MFE%", "采样MAE%", "信号状态", "逐日轨迹", "PAPER交易状态"],
+            ["代码", "信号来源", "名称", "首次信号日", "首次时间", "参考价", "最新记录日", "最新时间", "最新记录价", "相对参考%", "记录天数", "数据状态", "采样MFE%", "采样MAE%", "信号状态", "逐日轨迹", "PAPER交易状态", "双流对照"],
             "tbl_cross_day")
-        self.tabs.addTab(self.tbl_cross_day, "跨日信号跟踪")
-        self.tbl_cross_day.setToolTip("持续展示历次信号后的逐日采样轨迹；缺失日期不填零，不把影子入局或PAPER当作实盘成交。")
+        cross_layout.addWidget(self.tbl_cross_day)
+        self.tabs.addTab(cross_page, "跨日信号跟踪")
+        self.tbl_cross_day.setToolTip("分别展示生产影子和兼容回放档案的跨日轨迹；回放不关联PAPER成交，缺失日期不填零。")
 
         from sys_utils import get_app_root
         paper_page = QWidget()
@@ -2184,12 +2226,9 @@ class FusionLadderDialog(QWidget, WindowMixin):
             ram_d = _detect_ramdisk_dir()
             if ram_d:
                 cand_dirs.append(ram_d)
-            for d in cand_dirs:
-                if not d or not os.path.isdir(d):
-                    continue
-                for nm in os.listdir(d):
-                    if nm.endswith(".jsonl") and len(nm) == 16 and nm[:4].isdigit():
-                        days_set.add(nm[:-6])
+            from ats.fusion.shadow_io import log_days, log_directories
+            directories = [p for directory in cand_dirs for p in log_directories(directory)]
+            days_set.update(log_days(directories))
             try:
                 from ats.fusion.session_ctx import default_store
 
@@ -2870,9 +2909,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
 
             # 只读当日文件，绝不把"回退展示的其他交易日"写进今天
             live_rows = load_live_rows(day, allow_fallback=False)
-            if live_rows:
-                # 双通道持久化（合并语义，保留当日全量流水不被截断）
-                persist_shadow_records(live_rows, day)
+            # 日志由生产写入进程落盘；UI 不复制 PID 分片回旧单文件。
 
             store.close_day(
                 day,
@@ -2945,8 +2982,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
             path, src_day = _resolve_shadow_file(day)
             if not path or not os.path.exists(path):
                 return (day, "", 0, 0.0)
-            st = os.stat(path)
-            return (day, path, st.st_size, round(st.st_mtime, 3))
+            from ats.fusion.shadow_io import file_signature
+            return (day, src_day, file_signature(_resolved_day_paths(path, src_day)))
         except Exception:
             return (day, "", 0, 0.0)
 
@@ -3089,6 +3126,28 @@ class FusionLadderDialog(QWidget, WindowMixin):
             "状态：{} 未找到主程序扫描入口｜请确认主程序在运行，或点 [▶ 跑回放(回补)] 初始化".format(day)
         )
         self.lbl_status.setStyleSheet("color:#ffa64d; font-weight:bold;")
+
+    def _on_focus_toggled(self, _checked) -> None:
+        self._render_live(force=True)
+        result = getattr(self, "_result", None)
+        if result is not None:
+            self._on_replay_done(result)
+
+    @staticmethod
+    def _mark_focus_row(table, row, identity_columns):
+        """所有列参与重点置顶，代码和名称使用红色提示。"""
+        for column in range(table.columnCount()):
+            item = table.item(row, column)
+            if item is None:
+                continue
+            if hasattr(item, "set_pin_status"):
+                item.set_pin_status(True)
+            item.setBackground(QColor("#4b2026"))
+            if column in identity_columns:
+                item.setForeground(QColor("#ff6868"))
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
 
     def _render_live(self, force: bool = True) -> None:
         day = self.cmb_day.currentText().strip() or today_str()
@@ -3251,8 +3310,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
             for col, text in ((1, code), (2, name)):
                 item = FusionFocusItem(text, r.get("focus_rank"))
                 if r.get("focus_rank"):
-                    item.setForeground(QColor("#ffd166"))
-                    item.setBackground(QColor("#3c321c"))
+                    item.setForeground(QColor("#ff6868"))
+                    item.setBackground(QColor("#4b2026"))
                     font = item.font()
                     font.setBold(True)
                     item.setFont(font)
@@ -3297,6 +3356,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 for idx_ec, ec in enumerate(self.extra_cols):
                     val_txt, val_raw = self._extract_stock_custom_val(df_strat, code, ec)
                     tbl.setItem(i, 18 + idx_ec, self._num_item(val_txt, val_raw))
+            if r.get("focus_rank"):
+                self._mark_focus_row(tbl, i, (1, 2))
 
         tbl.setSortingEnabled(True)
 
@@ -3332,8 +3393,12 @@ class FusionLadderDialog(QWidget, WindowMixin):
         day_note = ""
         if source_day and source_day != day:
             day_note = "｜⚠ 今日暂无记录，展示 {} 数据".format(source_day)
+        focus_evidence_missing = False
         if self.chk_focus_only.isChecked():
             count_txt = "重点 {} / 上限10｜展示{} / 原始{}条".format(sum(bool(r.get("focus_rank")) for r in rows), len(rows), total_rows)
+            if rows and not any(r.get("reclaim_detail") for r in rows):
+                focus_evidence_missing = True
+                count_txt += "｜⚠ 来源记录缺少重点所需证据"
         elif structure_only:
             count_txt = "🎯 结构机会 {} / 共 {} 条 (已过滤脉冲杂音)".format(len(rows), total_rows)
         elif hit_only:
@@ -3346,7 +3411,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 hit_count, cov_avg * 100, now_txt, stale, day_note, schema_note, writer_note,
             )
         )
-        warn = bool(stale or day_note or schema_note)
+        warn = bool(stale or day_note or schema_note or focus_evidence_missing)
         self.lbl_status.setStyleSheet("color:#ffa64d; font-weight:bold;" if warn else "color:#8fd18f; font-weight:bold;")
         self._apply_search_filter(tbl)
 
@@ -3687,124 +3752,16 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self.lbl_status.setStyleSheet("color:#ff5c5c; font-weight:bold;")
 
     def _persist_replay_shadow_and_context(self, result) -> int:
-        """回测即回补数据：将所选日期的回放结果自动持久化落盘至影子日志与上下文快照"""
-        day = getattr(result, "day", "")
-        if not day or not getattr(result, "records", None):
-            return 0
-        try:
-            from ats.fusion.session_ctx import default_store
-
-            # 1. 回补双通道持久化：同时落盘 logs/fusion_shadow/{day}.jsonl 与 Ramdisk
-            entry_by_code: Dict[str, Dict[str, Any]] = {}
-            for e_item in (getattr(result, "entries", None) or []):
-                if isinstance(e_item, dict):
-                    ec = str(e_item.get("code") or "").split(".")[0].zfill(6)
-                    if ec and ec not in entry_by_code:
-                        entry_by_code[ec] = e_item
-
-            by_code: Dict[str, Dict[str, Any]] = {}
-            first_reclaim: Dict[str, Dict[str, Any]] = {}
-            for r in result.records:
-                cd = str(r.get("code") or "").split(".")[0].zfill(6)
-                if not cd:
-                    continue
-                tier = int(r.get("tier") or 0)
-                rar = float(r.get("rar") or 0.0)
-                entry_p = float(r.get("entry") or 0.0)
-                pct_val = float(r.get("pct") or 0.0)
-                ev_list = list(r.get("evidence") or [])
-                if not ev_list:
-                    for p_tag in (r.get("patterns") or []):
-                        ev_list.append(f"形态:{p_tag}")
-                    if r.get("lead_label"):
-                        ev_list.append(f"先锋:{r.get('lead_label')}")
-                    if r.get("chain"):
-                        ev_list.append(str(r.get("chain")))
-                row = {
-                    # 回补记录必须与实盘记录同构：否则界面会把它当成"旧版 exe 写入"，
-                    # 覆盖% / 命中 / 证据链也会集体缺失。
-                    "schema": 2,
-                    "writer_pid": 0,
-                    "writer_exe": "REPLAY_BACKFILL",
-                    "ts": float(r.get("ts") or time.time()),
-                    "code": cd,
-                    "name": self._resolve_name(cd, r),
-                    "price": entry_p,
-                    "pct": pct_val,
-                    "trade_date": day,
-                    "hit": bool(tier >= 2),
-                    "patterns": list(r.get("patterns") or []),
-                    "counter_reclaim_first_ts": r.get("counter_reclaim_first_ts"),
-                    "reclaim_detail": dict(r.get("reclaim_detail") or {}),
-                    "coverage": 1.0,
-                    "mfe": round(float(r.get("mfe") or 0.0), 2),
-                    "mae": round(float(r.get("mae") or 0.0), 2),
-                    "close_ret": round(float(r.get("close_ret") or 0.0), 2),
-                    "track_entry": entry_by_code.get(cd) or {
-                        "first_ts": float(r.get("ts") or 0.0),
-                        "first_pct": float(r.get("first_pct") if r.get("first_pct") is not None else pct_val),
-                        "enter_ts": float(r.get("ts") or 0.0),
-                        "enter_pct": pct_val,
-                        "persist": float(r.get("persist") or 0.0),
-                        "evidence_n": int(r.get("attach_n") or len(ev_list)),
-                        "chain": str(r.get("chain") or " · ".join(ev_list)),
-                        "mfe": round(float(r.get("mfe") or 0.0), 2),
-                        "mae": round(float(r.get("mae") or 0.0), 2),
-                        "close_ret": round(float(r.get("close_ret") or 0.0), 2),
-                    },
-                    "fusion": {
-                        "tier": tier,
-                        "tier_name": str(r.get("tier_name") or ""),
-                        "rar": rar,
-                        "size_pct": float(r.get("size_pct") or 0.0),
-                        "age_min": float(r.get("age_min") or 0.0),
-                        "coverage": 1.0,
-                        "provisional": False,
-                        "entry": {
-                            "price_lo": float(r.get("entry_lo") or entry_p),
-                            "price_hi": float(r.get("entry_hi") or entry_p),
-                        },
-                        "stop": {"price": r.get("stop") or "-"},
-                        "axes": {
-                            "position": float((r.get("axes") or {}).get("position") or 50.0),
-                            "support": float((r.get("axes") or {}).get("support") or 50.0),
-                            "intent": float((r.get("axes") or {}).get("intent") or 50.0),
-                            "regime": float((r.get("axes") or {}).get("regime") or 50.0),
-                            "relative": float((r.get("axes") or {}).get("relative") or 50.0),
-                            "penalty": float((r.get("axes") or {}).get("penalty") or 0.0),
-                            "rar": rar,
-                        },
-                        "evidence": ev_list[:6],
-                        "sources": ["REPLAY_BACKFILL"],
-                    },
-                }
-                if "逆势收复启动" in row["patterns"]:
-                    prev_first = first_reclaim.get(cd)
-                    if prev_first is None or row["ts"] < prev_first["ts"]:
-                        first_reclaim[cd] = row
-                prev = by_code.get(cd)
-                if (prev is None or
-                        row["fusion"]["tier"] > prev["fusion"]["tier"] or
-                        (row["fusion"]["tier"] == prev["fusion"]["tier"] and row["fusion"]["rar"] > prev["fusion"]["rar"])):
-                    by_code[cd] = row
-
-            persist_shadow_records(list(by_code.values()) + list(first_reclaim.values()), day)
-
-            # 2. 回补沉淀 logs/fusion_state/session_ctx/{day}.json 上下文快照
-            store = default_store()
-            store.close_day(
-                day,
-                phase_path=[{"time": "15:00", "phase": "回补就绪", "note": f"回补标的{len(by_code)}只"}],
-                amount_wan=None,
-                capital_ratio=None,
-            )
-            return len(by_code)
-        except Exception as exc:
-            logger.warning(f"[FusionLadderDialog] 回放回补持久化异常: {exc}")
-            return 0
+        """停用旧回补入口；独立回放由 run_iterations 写入隔离档案。"""
+        logger.warning("旧回放回补入口已停用：禁止写入生产影子日志和会话快照")
+        return 0
 
     def _on_replay_done(self, result) -> None:
         self._result = result
+        run_dir = result.meta.get("iteration_dir") or ""
+        if run_dir and run_dir != self._replay_follow_dir:
+            self._replay_follow_dir = run_dir
+            self._start_cross_day(result.day)
         self.btn_run.setEnabled(True)
         self.btn_focus.setEnabled(True)
         self.btn_iteration.setEnabled(True)
@@ -3815,9 +3772,23 @@ class FusionLadderDialog(QWidget, WindowMixin):
         df_strat = self._resolve_ats_strategy_df()
         # 展示首次发现优先，避免最高分帧淹没早期观察。
         first_by_code = {}
-        for record in sorted(result.records, key=lambda r: float(r.get("ts") or 0)):
+        records = sorted(result.records, key=lambda r: float(r.get("ts") or 0))
+        for record in records:
             first_by_code.setdefault(record.get("code"), record)
-        rows = list(first_by_code.values())[:1000]
+        focus_rows = []
+        if self.chk_focus_only.isChecked():
+            selected = (result.meta.get("focus_selection") or {}).get("first_selected") or []
+            by_identity = {(str(r.get("code")), float(r.get("ts") or 0)): r for r in records}
+            for item in selected:
+                code = str(item.get("code") or "")
+                record = by_identity.get((code, float(item.get("ts") or 0)))
+                if record is not None:
+                    focus_rows.append(dict(record, focus_rank=item.get("focus_rank") or 1,
+                                           focus_selected_time=item.get("time") or ""))
+            focus_codes = {r.get("code") for r in focus_rows}
+            rows = (focus_rows + [r for c, r in first_by_code.items() if c not in focus_codes])[:1000]
+        else:
+            rows = list(first_by_code.values())[:1000]
         tbl = self.tbl_replay
         tbl.setSortingEnabled(False)
         tbl.setRowCount(0)
@@ -3870,11 +3841,28 @@ class FusionLadderDialog(QWidget, WindowMixin):
             tbl.setItem(i, 11, self._num_item(f"{close_ret_v:+.2f}%", close_ret_v, color=QColor("#ff5c5c") if close_ret_v >= 0 else QColor("#00ff88"), bold=True))
             tbl.setItem(i, 12, self._num_item(f"{r['temp']}℃", float(r["temp"] or 0)))
 
+            liquidity = (result.meta.get("liquidity_history") or {}).get(cd) or {}
+            history = liquidity.get("history") or []
+            latest = history[0] if history else {}
+            turnover, vol_ratio, feature_day = latest.get("turnover_pct"), latest.get("volume_ratio"), latest.get("date")
+            evidence = "历史归档：{}；只取回放日前日期，逐行写入时间未知，不参与评分。量比1.0可能为归档默认值。".format(liquidity.get("source") or "不可用")
+            for column, value in ((13, turnover), (14, vol_ratio), (15, feature_day)):
+                text = "--" if value is None else "{:.2f}".format(value) if isinstance(value, (int, float)) else str(value)
+                item = self._num_item(text, value)
+                item.setToolTip(evidence)
+                tbl.setItem(i, column, item)
+
             # 动态自定义列 (ats_col)
             if getattr(self, "extra_cols", None):
                 for idx_ec, ec in enumerate(self.extra_cols):
                     val_txt, val_raw = self._extract_stock_custom_val(df_strat, cd, ec)
-                    tbl.setItem(i, 13 + idx_ec, self._num_item(val_txt, val_raw))
+                    tbl.setItem(i, len(self._REPLAY_BASE_HEADERS) + idx_ec, self._num_item(val_txt, val_raw))
+            if r.get("focus_rank"):
+                self._mark_focus_row(tbl, i, (1, 2))
+                for column in (1, 2):
+                    tbl.item(i, column).setToolTip(
+                        "当日首次进入重点：{}；该条行情时间：{}。历史重点不代表当前重点或买入。".format(
+                            r.get("focus_selected_time") or r["time"], r["time"]))
         tbl.setSortingEnabled(True)
 
         # Tab 2: T+1 订单与成交
@@ -3964,9 +3952,9 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self._apply_search_filter()
 
         self.lbl_status.setText(
-            "状态：{} 回放完成｜独立档案 {}｜评估 {}｜入局 {}".format(
+            "状态：{} 回放完成｜独立档案 {}｜评估 {}｜入局 {}｜14:45前历史重点 {}".format(
                 result.day, result.meta.get("iteration_dir", "--"), result.meta.get("evaluations"),
-                result.meta.get("entries", 0),
+                result.meta.get("entries", 0), len(focus_rows),
             )
         )
         self.lbl_status.setStyleSheet("color:#8fd18f; font-weight:bold;")
@@ -3981,10 +3969,17 @@ class FusionLadderDialog(QWidget, WindowMixin):
         days = [d for d in self._replay_days if d <= day]
         self._follow_pending_day = None
         root = os.path.abspath(self.ed_trade_root.text().strip())
-        self._follow_worker = CrossDayWorker(days, day, self, root=root)
+        self._follow_worker = CrossDayWorker(days, day, self, root=root, replay_run=self._replay_follow_dir)
         self._follow_worker.done.connect(self._render_cross_day)
         self._follow_worker.failed.connect(self.lbl_paper_status.setText)
+        self._follow_worker.finished.connect(self._on_follow_finished)
         self._follow_worker.start()
+
+    def _on_follow_finished(self) -> None:
+        pending = getattr(self, "_follow_pending_day", None)
+        if pending:
+            self._follow_pending_day = None
+            QTimer.singleShot(0, lambda: self._start_cross_day(pending))
 
     def _refresh_cross_day_if_visible(self) -> None:
         if self.isVisible() and self.tabs.currentIndex() in (6, 7):
@@ -4001,10 +3996,36 @@ class FusionLadderDialog(QWidget, WindowMixin):
 
     def _render_cross_day(self, output, day: str) -> None:
         if (os.path.normcase(output["root"]) != os.path.normcase(os.path.abspath(self.ed_trade_root.text().strip()))
-                or day != self.cmb_day.currentText().strip()):
-            QTimer.singleShot(0, lambda: self._start_cross_day(self.cmb_day.currentText().strip() or today_str()))
+                or day != self.cmb_day.currentText().strip()
+                or output.get("requested_replay", "") != self._replay_follow_dir):
+            self._follow_pending_day = self.cmb_day.currentText().strip() or today_str()
             return
-        rows = output["signals"]
+        replay = output.get("replay") or {"rows": [], "status": "unavailable", "sources": {}, "errors": []}
+        archive_days = set(replay.get("sources") or {})
+        missing_days = archive_days - set(self._replay_days)
+        if missing_days:
+            self._replay_days = sorted(set(self._replay_days) | archive_days)
+            self.cmb_day.blockSignals(True)
+            self.cmb_day.clear()
+            self.cmb_day.addItems(self._replay_days)
+            self.cmb_day.setCurrentText(day)
+            self.cmb_day.blockSignals(False)
+            self._follow_pending_day = day
+        from ats.fusion.replay_follow import compare_signal_streams
+        independent = replay.get("independent") is True
+        replay_label = ("独立回放" if independent else
+                        "回放含生产证据" if replay.get("production_history") is True else "回放来源待核")
+        comparison = compare_signal_streams(output["signals"], replay["rows"]) if independent else {
+            row["code"]: "回放输入非独立或未核，不能独立验证" for row in output["signals"] + replay["rows"]}
+        rows = [(row, "生产影子") for row in output["signals"]] + [(row, replay_label) for row in replay["rows"]]
+        replay_note = ("回放 {} 条 / {} 个档案日｜{}".format(len(replay["rows"]), len(replay["sources"]), replay.get("run_dir", ""))
+                       if replay.get("status") == "ready" else "未发现可用回放档案，请运行逐日迭代")
+        if replay.get("compatibility_note"):
+            replay_note += "｜" + replay["compatibility_note"]
+        if replay.get("status") == "ready":
+            replay_note += "｜" + replay_label
+        self.lbl_cross_status.setText("生产影子 {} 条｜{}｜信号流独立、共用行情缓存；回放不关联PAPER".format(len(output["signals"]), replay_note)
+                                      + ("｜档案提示：" + "；".join(replay["errors"][:3]) if replay.get("errors") else ""))
         self._render_paper_follow(output["paper"], output["shadow_errors"])
         paper_by_code = {}
         for cycle in output["paper"]["rows"]:
@@ -4013,28 +4034,33 @@ class FusionLadderDialog(QWidget, WindowMixin):
         table = self.tbl_cross_day
         table.setSortingEnabled(False)
         table.setRowCount(0)
-        for row in rows:
+        for row, source in rows:
             i = table.rowCount()
             table.insertRow(i)
-            values = [row["code"], row["name"], row["first_day"], _fmt_hms(row["first_ts"]),
+            values = [row["code"], source, row["name"], row["first_day"], _fmt_hms(row["first_ts"]),
                       "{:.2f}".format(row["reference"]), row["last_day"], _fmt_hms(row["last_ts"]),
                       "{:.2f}".format(row["last_price"]), "{:+.2f}%".format(row["return_pct"]),
                       len(row["days"]), row["status"], "{:+.2f}%".format(row["mfe_pct"]),
                       "{:+.2f}%".format(row["mae_pct"]), row["signal_status"],
                       " → ".join("{} {:+.2f}%".format(d["day"][5:], d["return_pct"]) for d in row["timeline"]),
-                      (paper_by_code[row["code"]]["status"] if row["code"] in paper_by_code else
-                       "无PAPER成交" if output["paper"]["account"].get("read_status") == "READY" else "PAPER源不可用")]
+                      ("未关联（回放）" if source != "生产影子" else
+                       paper_by_code[row["code"]]["status"] if row["code"] in paper_by_code else
+                       "无PAPER成交" if output["paper"]["account"].get("read_status") == "READY" else "PAPER源不可用"),
+                      comparison.get(row["code"], "来源不足")]
             for col, value in enumerate(values):
                 item = self._num_item(str(value), value)
-                item.setToolTip("影子参考价；MFE/MAE仅含信号后采样价格，非完整行情极值；最新记录不等于收盘价。\n" + "\n".join("{}：{}条，末价{:.2f}".format(d["day"], d["records"], d["last_price"]) for d in row["timeline"]))
+                note = "回放记录" if source != "生产影子" else "生产影子"
+                paths = "\n".join("{}：{}".format(d["day"], replay["sources"].get(d["day"], "仅分钟行情，无回放档案")) for d in row["timeline"]) if source != "生产影子" else ""
+                item.setToolTip("{}参考价；MFE/MAE仅含信号后采样价格，非完整行情极值；最新记录不等于收盘价。\n".format(note) + "\n".join("{}：{}条决策记录，状态{}，末价{:.2f}{}".format(d["day"], d.get("signal_records", d["records"]), d.get("signal_status", "未知"), d["last_price"], "（分钟缓存采样）" if d.get("price_source") else "") for d in row["timeline"]) + ("\n" + paths if paths else ""))
+                if col == len(values) - 1:
+                    item.setToolTip("逐日比较同代码共同记录日的首条决策记录；时间差=回放时间−生产时间。相差不超过3分钟才显示参考价差，不代表成交或两套决策完全一致。\n" + comparison.get(row["code"], "来源不足").replace("｜", "\n"))
                 table.setItem(i, col, item)
         table.setSortingEnabled(True)
         if not rows:
-            self._fill_table_hint(table, "所选交易中心目录没有可用生产观察记录；PAPER成交另见[交易中心 PAPER 全程]。")
+            self._fill_table_hint(table, "没有可用生产或回放观察；请运行逐日迭代并确认档案目录。")
+        if replay.get("errors"):
+            self.lbl_paper_status.setText(self.lbl_paper_status.text() + "｜回放档案提示：" + "；".join(replay["errors"][:3]))
         self._apply_search_filter(table)
-        pending = getattr(self, "_follow_pending_day", None)
-        if pending and pending != day:
-            QTimer.singleShot(0, lambda: self._start_cross_day(pending))
 
     def _render_paper_follow(self, output, shadow_errors=0) -> None:
         account, rows = output["account"], output["rows"]
@@ -4116,6 +4142,12 @@ class FusionLadderDialog(QWidget, WindowMixin):
             except Exception:
                 pass
         if self._follow_worker is not None and self._follow_worker.isRunning():
+            self._follow_pending_day = None
+            try:
+                self._follow_worker.done.disconnect(self._render_cross_day)
+                self._follow_worker.finished.disconnect(self._on_follow_finished)
+            except (TypeError, RuntimeError):
+                pass
             self._follow_worker.requestInterruption()
             self._follow_worker.wait(2000)
         self._save_window_states(is_open=False)

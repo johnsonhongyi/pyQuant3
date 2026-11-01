@@ -66,8 +66,9 @@ _ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 _LIMIT_MAIN = 9.8
 _LIMIT_GROWTH = 19.6
 # 滚动悬空垫的窗口长度（分钟）。与实盘 enrich.intraday_fields(cushion_window=20) 的 20 根 1 分钟线等价。
-# 回放缓存是 3 分钟线，根数由 run() 按真实 bar 间隔换算，保证"时间"一致而不是"根数"一致。
+# 回放缓存可能有错位 bar，按合并时钟的真实时间截取窗口。
 STRUCT_CUSHION_MINUTES = 20
+MINUTE_PUBLICATION_LAG = 60
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +315,12 @@ class DayReplay:
         if not mask.any():
             return None
         sub = arr[mask]
+        # 生产缓存按分钟截断时间，上一根的最终成交量在下一条行情到达时补写。
+        # 等下一条所属分钟结束后才使用完整 OHLCV；最后一根没有后续确认，不参与回放。
+        if len(sub) < 2:
+            return None
+        available_ts = sub["time"][1:].astype("int64") + MINUTE_PUBLICATION_LAG
+        sub = sub[:-1]
         v = sub["volume"].astype("float64")
         close = sub["close"].astype("float64")
         high = sub["high"].astype("float64")
@@ -336,7 +343,7 @@ class DayReplay:
         bid = 40.0 + (close - low) / rng * 40.0
         above_vwap = (close >= vwap).astype("float64")
         out = {
-            "ts": sub["time"].astype("int64"),
+            "ts": available_ts,
             "open": sub["open"].astype("float64"),
             "high": high,
             "low": low,
@@ -500,13 +507,6 @@ class DayReplay:
         limit_pct = aligned["limit_pct"]
         clock = aligned["clock"]
         n_code, n_t = mat["close"].shape
-
-        # 滚动悬空垫的窗口必须按【时间】对齐，而不是按 bar 根数：
-        # 实盘是 1 分钟线（20 根 = 20 分钟），回放缓存是 3 分钟线（20 根 = 60 分钟），
-        # 若都写死 20 根，实盘与回放会得出不同的结构结论。
-        _bar_sec = float(clock[1] - clock[0]) if len(clock) > 1 else 180.0
-        _bar_sec = max(60.0, _bar_sec)
-        STRUCT_CUSHION_WIN = max(3, int(round(STRUCT_CUSHION_MINUTES * 60.0 / _bar_sec)))
 
         # 大盘情绪上下文：连续冰点/低温天数（"饿了几天"）来自历史，不含当日
         try:
@@ -731,7 +731,8 @@ class DayReplay:
 
             # 资金量能（冲锋号）：本根 bar 全市场成交额
             try:
-                _amt = float(np.nansum(mat["volume"][:, t] * mat["close"][:, t]))
+                # 合并时钟上的前向填充只是价格快照，不能重复计入旧 bar 的成交额。
+                _amt = float(np.nansum(np.where(new_bar[:, t], mat["volume"][:, t] * mat["close"][:, t], 0.0)))
             except Exception:
                 _amt = 0.0
             _cap_ratio = capital.update(_amt)
@@ -930,7 +931,7 @@ class DayReplay:
                         if cush_list:
                             _cushion = min(cush_list)
 
-                # 滚动悬空垫（时间可恢复）：只看最近 STRUCT_CUSHION_WIN 根，与实盘 enrich 同口径
+                # 合并时钟间隔不均匀，按实际时间截取滚动悬空垫。
                 #   必须跳过"首根有效 bar"：该根的 VWAP 就等于它自己的均价，low 必然 <= VWAP，
                 #   悬空垫恒为负，留在窗口里会把整个滚动垫永久压成 0（正是原 bug 的另一种形态）。
                 _cushion_roll = 0.0
@@ -940,7 +941,7 @@ class DayReplay:
                         if mat["vwap"][i, _k] > 0:
                             _fk = _k
                             break
-                    _s0 = max(_fk + 1, t - STRUCT_CUSHION_WIN + 1)
+                    _s0 = max(_fk + 1, int(np.searchsorted(clock, clock[t] - STRUCT_CUSHION_MINUTES * 60, side="left")))
                     _roll = [
                         (mat["low"][i, k] - mat["vwap"][i, k]) / mat["vwap"][i, k] * 100.0
                         for k in range(_s0, t + 1)
@@ -1489,6 +1490,7 @@ class DayReplay:
             "lifecycle": life_series[-1] if life_series else {},
             "lifecycle_series": life_series,
             "approximations": [
+                "完整OHLCV最早在下一条缓存行情所属分钟结束后可见，最后一根无后续确认不参与回放",
                 "vwap=3分钟(H+L+C)/3按量加权",
                 "taker/bid 由 bar 推导（外盘占比/收盘位置）",
                 "structure_clarity=近10根站上均价比例",
@@ -1622,7 +1624,7 @@ def _roll_mean(mat: np.ndarray, w: int) -> np.ndarray:
 
 def _roll_max(mat: np.ndarray, w: int) -> np.ndarray:
     out = np.full_like(mat, -np.inf)
-    for k in range(w):
+    for k in range(min(w, mat.shape[1])):
         out[:, k:] = np.fmax(out[:, k:], mat[:, : mat.shape[1] - k])
     out[~np.isfinite(out)] = np.nan
     return out

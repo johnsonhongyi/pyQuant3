@@ -78,6 +78,6 @@ def audit_focus(records, next_close, limit=10):
     return {"limit": limit, "max_simultaneous": peak, "daily_distinct": len(first),
             "outcome_samples": len(settled), "false_positive_count": false_n,
             "false_positive_rate": round(false_n / len(settled), 4) if settled else None,
-            "first_selected": [{k: row.get(k) for k in ("code", "time", "signal_time", "entry", "pct", "focus_rank")}
+            "first_selected": [{k: row.get(k) for k in ("code", "ts", "time", "signal_time", "entry", "pct", "focus_rank")}
                                for row in first.values()],
             "note": "重点为观察排序，非交易指令；同时上限不等于全天累计上限。"}

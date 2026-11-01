@@ -288,63 +288,15 @@ def test_fusion_ladder_narrow_mode_and_persistence(qapp):
 
 
 def test_fusion_ladder_replay_backfill_persistence(qapp, tmp_path, monkeypatch):
-    """测试跑回放后的回补数据持久化写入 logs/fusion_shadow/{day}.jsonl 与 session_ctx/{day}.json"""
-    import json
+    """旧回补入口不能写生产影子日志和会话快照。"""
     from ats.ui.fusion_ladder_dialog import FusionLadderDialog
-
-    # 替换 app root 避免污染真实根目录
     monkeypatch.setattr("sys_utils.get_app_root", lambda: str(tmp_path))
-
     dlg = FusionLadderDialog()
     try:
-        class DummyResult:
-            def __init__(self):
-                self.day = "2026-10-23"
-                self.records = [
-                    {
-                        "code": "600000",
-                        "name": "浦发银行",
-                        "ts": 1729647300,
-                        "entry": 10.5,
-                        "pct": 2.1,
-                        "tier": 4,
-                        "rar": 86.5,
-                        "size_pct": 20.0,
-                    },
-                    {
-                        "code": "000001",
-                        "name": "平安银行",
-                        "ts": 1729647720,
-                        "entry": 11.2,
-                        "pct": 3.8,
-                        "tier": 3,
-                        "rar": 76.0,
-                        "size_pct": 12.0,
-                    },
-                ]
-
-        dummy_res = DummyResult()
-        count = dlg._persist_replay_shadow_and_context(dummy_res)
-        assert count == 2
-
-        # 1. 验证 logs/fusion_shadow/2026-10-23.jsonl
-        shadow_path = tmp_path / "logs" / "fusion_shadow" / "2026-10-23.jsonl"
-        assert shadow_path.exists()
-        lines = shadow_path.read_text(encoding="utf-8").strip().splitlines()
-        assert len(lines) == 2
-        rec0 = json.loads(lines[0])
-        assert rec0["code"] == "600000"
-        assert rec0["name"] == "浦发银行"
-        assert rec0["price"] == 10.5
-        assert rec0["fusion"]["tier"] == 4
-        assert rec0["fusion"]["rar"] == 86.5
-
-        # 2. 验证 session_ctx/2026-10-23.json 快照
-        from ats.fusion.session_ctx import default_store
-        store = default_store()
-        ctx = store.load("2026-10-23")
-        assert ctx is not None
-        assert ctx.day == "2026-10-23"
+        result = type("Result", (), {"day": "2026-10-23", "records": [{"code": "600000"}]})()
+        assert dlg._persist_replay_shadow_and_context(result) == 0
+        assert not (tmp_path / "logs" / "fusion_shadow" / "2026-10-23.jsonl").exists()
+        assert not (tmp_path / "logs" / "fusion_state" / "session_ctx" / "2026-10-23.json").exists()
     finally:
         dlg.close()
 

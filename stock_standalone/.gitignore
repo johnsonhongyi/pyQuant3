@@ -127,3 +127,7 @@ data/ipo_learning/shadow_observations.sqlite
 !tests/test_signal_regressions.py
 
 !tests/test_manual_close_and_auto_trading.py
+!tests/test_fusion_shadow_remediation.py
+!tests/test_fusion_iteration.py
+!tests/test_fusion_replay_follow.py
+!tests/test_fusion_discovery_audit.py

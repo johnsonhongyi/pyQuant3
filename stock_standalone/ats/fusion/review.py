@@ -41,23 +41,13 @@ def log_dir(root: Optional[str] = None) -> str:
 def load_records(day: str = "", root: Optional[str] = None) -> List[Dict[str, Any]]:
     """读取某日（默认今日）影子日志；坏行跳过，不抛异常。"""
     day = day or today_str()
-    path = os.path.join(log_dir(root), "{}.jsonl".format(day))
-    if not os.path.exists(path):
-        return []
-    out: List[Dict[str, Any]] = []
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    out.append(json.loads(line))
-                except Exception:
-                    continue
-    except Exception:
-        return out
-    return out
+    from ats.fusion.shadow_io import day_paths, log_directories, read_paths
+    paths = day_paths(log_directories(log_dir(root)), day)
+    rows, errors = read_paths(paths)
+    if errors:
+        import logging
+        logging.getLogger(__name__).warning("影子复盘读取异常: %s", errors[:5])
+    return rows
 
 
 def _percentile(values: List[float], q: float) -> float:

@@ -101,6 +101,14 @@ class TestReplay(unittest.TestCase):
     def test_days_detected(self):
         self.assertEqual(self.rp.days(), [_DAY1, _DAY2])
 
+    def test_completed_bar_is_visible_only_after_next_snapshot_minute(self):
+        raw = self.rp.cache["300001"]
+        day = raw[raw["time"] >= int(time.mktime(time.strptime(_DAY2, "%Y-%m-%d")))]
+        sliced = self.rp._slice_day("300001", _DAY2)
+        self.assertEqual(sliced["ts"][0], day["time"][1] + 60)
+        self.assertAlmostEqual(sliced["close"][0], day["close"][0])
+        self.assertEqual(len(sliced["ts"]), len(day) - 1)
+
     def test_vwap_time_counts_observed_bars(self):
         aligned = self.rp._align(["300001"], _DAY2)
         minutes = aligned["mat"]["minutes_above_vwap"][0]
@@ -114,7 +122,8 @@ class TestReplay(unittest.TestCase):
         self.assertNotIn("error", res.meta)
 
     def test_records_and_outcome_direction(self):
-        rp = DayReplay(cache=_cache(), config=ReplayConfig(top_n=10, step=1, cuts_mode="percentile"))
+        # 本用例验证收益方向，不依赖自适应阈值是否将上涨样本筛进 L1。
+        rp = DayReplay(cache=_cache(), config=ReplayConfig(top_n=10, step=1, cuts_mode="percentile", record_tier_min=0))
         res = rp.run_day(_DAY2)
         self.assertGreater(res.meta["records"], 0)
         rising = [r for r in res.records if r["code"] == "300001"]
