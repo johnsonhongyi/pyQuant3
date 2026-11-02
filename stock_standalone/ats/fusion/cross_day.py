@@ -63,10 +63,12 @@ def build_cross_day(series_by_day, asof_day, allow_replay=False):
                     daily["price_source"] = "分钟缓存采样"
                 else:
                     daily["signal_records"] += 1
-                    from ats.fusion.shadow_io import hydrate
-                    evidence = hydrate(row).get("observation_evidence")
+                    evidence = row.get("observation_evidence")
                     if isinstance(evidence, dict):
                         daily["observation_evidence"] = evidence
+                        daily.pop("_observation_record", None)
+                    elif row.get("_has_observation_evidence"):
+                        daily["_observation_record"] = row
                 state["high"], state["low"] = max(state["high"], price), min(state["low"], price)
                 tracking = row.get("track") or row.get("tracker") or {}
                 if row.get("price_only"):
@@ -89,5 +91,11 @@ def build_cross_day(series_by_day, asof_day, allow_replay=False):
         state["mfe_pct"] = (state["high"] / state["reference"] - 1) * 100
         state["mae_pct"] = (state["low"] / state["reference"] - 1) * 100
         for daily in state["timeline"]:
+            pending = daily.pop("_observation_record", None)
+            if pending is not None:
+                from ats.fusion.shadow_io import hydrate
+                evidence = hydrate(dict(pending)).get("observation_evidence")
+                if isinstance(evidence, dict):
+                    daily["observation_evidence"] = evidence
             daily["return_pct"] = (daily["last_price"] / state["reference"] - 1) * 100
     return sorted(result, key=lambda x: x["last_ts"], reverse=True)

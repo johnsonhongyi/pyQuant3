@@ -117,6 +117,16 @@ class DayLogCursorTest(unittest.TestCase):
         cursor.refresh([self.path])
         self.assertEqual(2, len(cursor.rows()), "补齐后应落地")
 
+    def test_line_across_read_chunks_keeps_hydration_offset(self):
+        from ats.fusion.shadow_io import hydrate
+
+        payload = "x" * (1024 * 1024 + 100)
+        _write(self.path, [_rec(ts=1.0, observation_evidence={"pad": payload})])
+        cursor = DayLogCursor(compact=True)
+        cursor.refresh([self.path])
+        self.assertEqual(1, len(cursor.rows()))
+        self.assertEqual(payload, hydrate(cursor.rows()[0])["observation_evidence"]["pad"])
+
     def test_truncation_rebuilds_dataset(self):
         _write(self.path, [_rec(ts=float(i)) for i in range(10)])
         cursor = DayLogCursor()
@@ -124,6 +134,14 @@ class DayLogCursorTest(unittest.TestCase):
         _write(self.path, [_rec(ts=99.0)])
         cursor.refresh([self.path])
         self.assertEqual(1, len(cursor.rows()))
+
+    def test_same_size_rewrite_rebuilds_dataset(self):
+        _write(self.path, [_rec(ts=1.0)])
+        cursor = DayLogCursor()
+        cursor.refresh([self.path])
+        _write(self.path, [_rec(ts=2.0)])
+        cursor.refresh([self.path])
+        self.assertEqual([2.0], [row["ts"] for row in cursor.rows()])
 
     def test_max_records_keeps_newest_tail(self):
         _write(self.path, [_rec(ts=float(i)) for i in range(30)])
@@ -237,11 +255,41 @@ class CompactRecordTest(unittest.TestCase):
         hydrate(rec)                      # 不应抛异常
         self.assertNotIn("observation_evidence", rec)
 
+    def test_hydrate_rejects_replaced_line(self):
+        from ats.fusion.shadow_io import hydrate
+
+        _write(self.path, [self._row(ts=1.0)])
+        cursor = DayLogCursor(compact=True)
+        cursor.refresh([self.path])
+        rec = cursor.rows()[0]
+        _write(self.path, [self._row(ts=2.0)])
+        hydrate(rec)
+        self.assertNotIn("observation_evidence", rec)
+
     def test_plain_mode_keeps_full_records(self):
         _write(self.path, [self._row()])
         cursor = DayLogCursor(compact=False)
         cursor.refresh([self.path])
         self.assertIn("observation_evidence", cursor.rows()[0])
+
+    def test_cross_day_hydrates_only_latest_evidence(self):
+        import time
+        from unittest.mock import patch
+        from ats.fusion.cross_day import build_cross_day
+        from ats.fusion.shadow_io import hydrate
+
+        day = "2026-11-02"
+        ts = time.mktime((2026, 11, 2, 10, 0, 0, 0, 0, -1))
+        rows = [self._row(ts=ts + i, price=12.5 + i, day=day, trade_date=day)
+                for i in range(2)]
+        _write(self.path, rows)
+        cursor = DayLogCursor(compact=True)
+        cursor.refresh([self.path])
+        with patch("ats.fusion.shadow_io.hydrate", wraps=hydrate) as read_cold:
+            result = build_cross_day({day: {"300001": cursor.rows()}}, day)
+        self.assertEqual(1, read_cold.call_count)
+        self.assertEqual(rows[-1]["observation_evidence"], result[0]["timeline"][0]["observation_evidence"])
+        self.assertNotIn("observation_evidence", cursor.rows()[-1])
 
 
 if __name__ == "__main__":

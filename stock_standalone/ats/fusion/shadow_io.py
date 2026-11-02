@@ -194,6 +194,8 @@ def compact_record(row, ref=None):
             kept[key] = value
     if ref:
         kept["_raw_ref"] = ref
+        if isinstance(row.get("observation_evidence"), dict):
+            kept["_has_observation_evidence"] = True
         reason = _evidence_reason(row.get("observation_evidence"))
         if reason:
             kept["_evidence_reason"] = intern(reason)
@@ -216,13 +218,18 @@ def hydrate(record):
         with open(path, "rb") as stream:
             stream.seek(int(offset))
             raw = stream.read(int(length))
+        if record.get("_raw_digest") is not None and line_digest(raw) != record["_raw_digest"]:
+            return record
         full = json.loads(raw.decode("utf-8-sig"))
     except (OSError, ValueError, TypeError, UnicodeDecodeError):
+        return record
+    if not isinstance(full, dict):
         return record
     for key in missing:
         if key in full:
             record[key] = full[key]
     record.pop("_raw_ref", None)
+    record.pop("_raw_digest", None)
     return record
 
 
@@ -284,7 +291,7 @@ class DayLogCursor:
         self._rows = deque(maxlen=self._max)
         self._seen = set()
         self._seen_keys = set()
-        self._states = {}   # path -> ("raw", size, mtime_ns, offset) / ("gz", (size, mtime_ns))
+        self._states = {}   # path -> ("raw", size, mtime_ns, offset, file_id) / ("gz", signature)
         self._tails = {}    # path -> 未成行的尾部字节
         self._errors = []
         self._version = 0
@@ -314,7 +321,13 @@ class DayLogCursor:
             return False
         self._seen.add(digest)
         self._seen_keys.add(key)
-        self._rows.append(compact_record(row, ref) if self._compact else row)
+        if self._compact:
+            kept = compact_record(row, ref)
+            if ref:
+                kept["_raw_digest"] = digest
+            self._rows.append(kept)
+        else:
+            self._rows.append(row)
         return True
 
     def _forget_old(self):
@@ -326,12 +339,7 @@ class DayLogCursor:
                               for r in self._rows)
             self._seen_keys.update(record_key(r) for r in self._rows)
 
-    def _read_raw(self, path, offset):
-        with open(path, "rb") as stream:
-            stream.seek(offset)
-            return stream.read()
-
-    def _consume_bytes(self, path, chunk, buf_start):
+    def _consume_bytes(self, path, chunk, buf_start, final=True):
         buf = self._tails.get(path, b"") + chunk
         parts = buf.split(b"\n")
         self._tails[path] = parts.pop()
@@ -356,7 +364,7 @@ class DayLogCursor:
         # 文件末尾可能没有换行：只要尾巴能解析成完整对象就提交，
         # 否则留到下一次 refresh（写端正在写这一行）。
         tail = self._tails.get(path)
-        if tail and tail.strip():
+        if final and tail and tail.strip():
             try:
                 row = json.loads(tail.decode("utf-8-sig"))
             except (ValueError, TypeError, UnicodeDecodeError):
@@ -371,6 +379,22 @@ class DayLogCursor:
     def refresh(self, paths):
         """把各分片新增的行并入游标，返回是否有变化。"""
         changed = False
+        # 覆盖/原子替换会让旧偏移失效；先检查全部分片，再整体重建。
+        for path in paths:
+            state = self._states.get(path)
+            if not state or state[0] != "raw":
+                continue
+            try:
+                stat = os.stat(path)
+            except OSError:
+                continue
+            file_id = (stat.st_dev, stat.st_ino, stat.st_ctime_ns if os.name == "nt" else 0)
+            if (stat.st_size < state[3] or file_id != state[4]
+                    or (stat.st_size == state[3] and stat.st_mtime_ns != state[2])):
+                self._reset()
+                self._states.clear()
+                changed = True
+                break
         for path in paths:
             try:
                 stat = os.stat(path)
@@ -400,21 +424,31 @@ class DayLogCursor:
                 continue
 
             offset = state[3] if state and state[0] == "raw" else 0
-            if stat.st_size < offset:      # 被截断或替换：身份已变，整体重建
-                self._reset()
-                offset = 0
             if state and state[0] == "raw" and stat.st_size == offset and stat.st_mtime_ns == state[2]:
                 continue
+            added = 0
+            consumed = offset
             try:
-                chunk = self._read_raw(path, offset)
+                with open(path, "rb") as stream:
+                    stream.seek(offset)
+                    while True:
+                        chunk = stream.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        # 半行从上一块的起点继续，偏移始终是文件绝对位置。
+                        buf_start = consumed - len(self._tails.get(path, b""))
+                        added += self._consume_bytes(path, chunk, buf_start, final=False)
+                        consumed += len(chunk)
+                added += self._consume_bytes(path, b"", consumed - len(self._tails.get(path, b"")))
             except OSError as exc:
                 self._errors.append("{}: {}".format(path, exc))
+                self._reset()
+                self._states.clear()
+                changed = True
                 continue
-            # 上一轮残留的半行也属于本次 buf，其绝对起点要回退掉它的长度。
-            buf_start = offset - len(self._tails.get(path, b""))
-            added = self._consume_bytes(path, chunk, buf_start)
-            self._states[path] = ("raw", stat.st_size, stat.st_mtime_ns, offset + len(chunk))
-            if added or chunk:
+            file_id = (stat.st_dev, stat.st_ino, stat.st_ctime_ns if os.name == "nt" else 0)
+            self._states[path] = ("raw", stat.st_size, stat.st_mtime_ns, consumed, file_id)
+            if added or consumed > offset:
                 changed = True
         if changed:
             self._version += 1

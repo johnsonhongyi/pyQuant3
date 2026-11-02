@@ -522,6 +522,13 @@ class UnifiedToolTipFilter(QObject):
                     index = view.indexAt(pos)
                     if index.isValid():
                         tip_text = str(index.data(Qt.ItemDataRole.ToolTipRole) or "")
+                        cold_value = index.data(Qt.ItemDataRole.UserRole + 100)
+                        if isinstance(cold_value, (tuple, dict)):
+                            from ats.fusion.observation import observation_summary
+                            from ats.fusion.shadow_io import hydrate
+                            evidence = (hydrate({"_raw_ref": cold_value[0], "_raw_digest": cold_value[1]}).get("observation_evidence")
+                                        if isinstance(cold_value, tuple) else cold_value)
+                            tip_text += "\n" + observation_summary(evidence)
                         title = str(view.model().headerData(index.column(), Qt.Orientation.Horizontal) or "")
                         if tip_text and title and not re.match(r"\s*<", tip_text):
                             tip_text = title + "\n" + tip_text
@@ -1375,7 +1382,16 @@ def _shadow_dataset(paths: Sequence[str], src_day: str, max_records: int = 20000
         for stale in [k for k in _SHADOW_CURSORS if k[0] == src_day]:
             _SHADOW_CURSORS.pop(stale, None)
             _SHADOW_ROWS_SNAPSHOT.pop(stale, None)
+        # 浏览历史日期时限制驻留天数，避免每切一天就累积一份 2 万条记录。
+        while len(_SHADOW_CURSORS) >= 2:
+            stale = next(iter(_SHADOW_CURSORS))
+            _SHADOW_CURSORS.pop(stale, None)
+            _SHADOW_ROWS_SNAPSHOT.pop(stale, None)
         cursor = DayLogCursor(max_records=max_records, compact=True)
+        _SHADOW_CURSORS[key] = cursor
+    else:
+        # dict 保持插入顺序；命中日期移到末尾，淘汰最久未查看的日期。
+        _SHADOW_CURSORS.pop(key)
         _SHADOW_CURSORS[key] = cursor
     cursor.refresh(paths)
     if cursor.errors:
@@ -3982,10 +3998,13 @@ class FusionLadderDialog(QWidget, WindowMixin):
             if observing and first_ts:
                 source_item.setToolTip("首次发现：{}；仅为观察信号，梯度及否决原因以本行为准".format(
                     datetime.datetime.fromtimestamp(float(first_ts)).strftime("%H:%M:%S")))
-            from ats.fusion.observation import observation_summary
-            from ats.fusion.shadow_io import hydrate
-            # 证据属冷字段（常驻记录里已剥离），悬停时才按行偏移回读，避免 2 万条常驻 700MB。
-            source_item.setToolTip(source_item.toolTip() + "\n" + observation_summary(hydrate(r).get("observation_evidence")))
+            # Qt 单元格只保存回读位置，不复制整条记录或证据。
+            cold_value = ((r["_raw_ref"], r.get("_raw_digest"))
+                          if r.get("_has_observation_evidence") and r.get("_raw_ref")
+                          else r.get("observation_evidence"))
+            if cold_value is not None:
+                source_item.setData(Qt.ItemDataRole.UserRole + 100, cold_value)
+            source_item.setToolTip(source_item.toolTip() or "观察证据：旧记录未保存，不能回填推断")
             tbl.setItem(i, 14, source_item)
             tbl.setItem(i, 15, self._num_item(time_txt, ts))
             tbl.setItem(i, 16, self._num_item("✅" if hit else "", 1 if hit else 0,
