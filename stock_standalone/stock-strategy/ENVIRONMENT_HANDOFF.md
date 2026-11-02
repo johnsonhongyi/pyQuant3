@@ -1,3 +1,11 @@
+## 2026-11-02 19:50 AI复盘面板显示生成时间并告警陈旧结果（API/Web 20261102194533）
+
+- 背景：复盘停在 2026-10-21 长达 12 天无人发现，面板只有正文里模型自述的日期，没有独立时间戳。
+- 改动：`AIReviewPanel` 新增 `reviewFreshness()`，时间戳优先 `finished_at` → `created_at` → `as_of`，渲染“生成于 YYYY-MM-DD HH:mm · 交易日 · 当日复盘 / ⚠ 非当日复盘，已 N 天未更新，今日盘后复盘未完成”，非当日结果标红；无可用时间戳时明确写“无法判断新鲜度”。`ai_review` 类型补充 `created_at/finished_at/trade_date/status`。
+- 验证：新增 `AIReviewPanel.test.tsx` 4 项通过（时间戳用本地时区构造，避免时区差异）；`tsc --noEmit` 通过；前端全量 51 个测试文件仅 `StockResearchReport.test.tsx` 1 项失败，属既有问题与本次无关；线上 `assets/AutoFollowWorkspace-D1E656aO.js` 已含“生成于 / 非当日复盘，已 / 当日复盘”文案。
+- 发布：API/Web `20261102194533`，Deployment healthy，两容器 healthy。当前线上复盘应显示“生成于 2026-10-21 17:20 · 交易日 2026-10-21 · ⚠ 已 12 天未更新”。
+- 回滚：`bash <DEPLOY_DIR>/docker/rollback-prebuilt.sh 20261102194533`。
+
 ## 2026-11-02 18:00 WAL 失控、数据保留与“结算并恢复”清零（worker 20261102175930 / API+Web 20261102175116）
 
 - 现象：`account.db-wal` 涨到 872MB（主库仅 1.2MB），主库自 10-31 23:14 起未被 checkpoint；“结算并恢复”点了不恢复。
