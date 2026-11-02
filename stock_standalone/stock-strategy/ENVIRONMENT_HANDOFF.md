@@ -1,3 +1,45 @@
+## 2026-11-02 18:00 WAL 失控、数据保留与“结算并恢复”清零（worker 20261102175930 / API+Web 20261102175116）
+
+- 现象：`account.db-wal` 涨到 872MB（主库仅 1.2MB），主库自 10-31 23:14 起未被 checkpoint；“结算并恢复”点了不恢复。
+- 根因：
+  1. 写放大：`state` 单行 695KB（events 2000 条 308KB + ai.jobs 20 条含完整提案 160KB），每 180s 全量重写，约 13MB/h。
+  2. checkpoint 被读快照卡死：`/proc/locks` 显示 PID 1972061（stockstrategy-api）在 `account.db-shm` 字节 124/128 持 POSIX READ 锁，`wal_checkpoint` 只能推进 486/213628 帧；停 worker 后仍 busy，确认是 API 侧持有。
+  3. `autoFollowStatus` 在 `defer db.Close()` 之前读取整行 state，随后要写 700KB JSON；客户端慢/断连时 handler 阻塞，连接与 WAL 读快照长期不释放。
+  4. “结算并恢复”只把 `usage_known=0` 结算为已确认，不清零当日 `runs`，所以 `runs=20 ≥ max=12` 时永远 budget_exhausted。
+- 修复：
+  1. 新增 `housekeeping.py`：每周期 `wal_checkpoint(PASSIVE)`，WAL ≥64MB 时 `TRUNCATE`；`journal_size_limit=64MB`、`wal_autocheckpoint=512`；按日清理 `ai_jobs`(14d)/`automatic_research_runs`(90d)/`commands`(30d,非 pending)/`decisions`(180d)/`runs`(30d)；state 精简 events→300、回执→200。
+  2. `follow_ai.sync_ai`：仅最近 5 个任务保留完整 `result`，其余只留状态与 `answer/market_view/rotation_view`。
+  3. API：`readFollowState()` 先读后关连接再写响应，杜绝慢客户端把读快照拖住。
+  4. `automatic_research_runs` 新增 `cleared` 列（启动时 ALTER 迁移）；“结算并恢复”把当日已终止任务的用量置 `cleared=1`（保留审计、不再计数），并写入 `resume_research` 控制指令；worker 收到后清掉 `ai_last_requested_at/ai_phase_requested/ai_review_day` 立即恢复排任务。运行中的任务不清零，避免重复领取。
+- 验证：
+  - 目标机 Python 3.9.2：73 项单测全绿（新增 housekeeping 4 项、cleared 计数 1 项）；Go `./internal/httpapi` 全绿（新增 `TestManualSettleClearsTodayUsageAndResumesWorker`）；`go test ./...` 仅 `internal/hermes` 的 sandbox/skills 用例失败，属既有环境依赖，与本次无关。
+  - 线上：WAL 881,721,232 → 786,952 字节（TRUNCATE busy=0，主库 1,667,072 字节已回写）；state 694,855 → 349,660 字节；`housekeeping_day=2026-11-02`、`housekeeping_last={"ai_jobs":14}`。
+  - 按钮实测：`POST /api/v1/ai/auto-research/settle` 返回 `status=ready, runs=0, tokens=0`；worker 下一周期 `auto_research_admission` 同步为 `ready, runs=0`，控制指令回执 `resume_research/applied/research_resumed`。
+- 发布：worker `20261102175930`（active/running、NRestarts=0）；API/Web `20261102175116`（Deployment healthy，两个容器 healthy）。
+- 回滚：worker `ln -sfn .../releases/20261102174614 .../current && systemctl restart stockstrategy-auto-follow.service`；API/Web `bash <DEPLOY_DIR>/docker/rollback-prebuilt.sh 20261102175116`。
+- 注意：`source` 目录在 Windows 上属主为 CodexSandboxOffline，构建前需 `git config --global --add safe.directory <source>`；`$env:TEMP` 指向不可写的 `G:\Temp` 时需先改到可写目录再跑 `build-and-deploy.ps1`。
+
+## 2026-11-02 17:36 自动投研额度卡死与复盘长期不更新根治（worker 发布 20261102173401）
+
+- 现象：`#auto-follow` 的“最近AI复盘”停在 2026-10-21；11-02 从 14:45 起 4 个任务全部“等待桌面领取超时/任务已过期”。
+- 根因（只读核验 control.db 与 `/api/v1/ai/auto-research`）：
+  1. 服务端准入在 `claimAutomaticResearch` 按“当日 runs/token/未结算/interval”拒绝发放；11-02 `runs=20`，旧上限 20 在 14:29 第 20 次用满，此后 14:45/15:02/15:18/15:35 全部无法被领取，`status=budget_exhausted`。
+  2. worker 的 `follow_ai.enqueue` 只看桌面在线与自身 interval，不知道服务端额度，仍每 15 分钟造必然过期的任务；`sync_ai` 又把未领取一律写成“等待桌面领取超时”，把服务端拒绝误报成桌面离线。
+  3. `ai_review` 仅由 `post_close_review/execution_review` 完成写入；10-21 之后无该类任务完成，故面板冻结。`ai_jobs` 现存 45 条（10-15/16/19/20 失败、10-31 1 条、11-02 24 条），10-22~10-30 空白且 10-21 的 `22481134` 已不在表内，说明期间任务库被回滚/重建，state 里残留旧复盘结果。
+- 修复（`follow_ai.py`，均为加法，不改交易/风控路径）：
+  1. 新增 `admission()` 复刻服务端准入（enabled/未结算/当日 runs/token/interval），额度不足时不再入队；账本不可读时返回 None 失败开放，不阻塞投研。
+  2. 新增 `review_state()`：以 `ai_jobs` 为准统计当日复盘完成与尝试次数；复盘任务过期后可在当日重试，上限 3 次，不再一次失败丢掉整天。
+  3. `sync_ai` 过期文案区分“服务端额度已用尽（20/12 次）/用量未结算/间隔未到/停用”与真正的桌面未领取。
+  4. 只有显式 `stage` 的复盘才写 `ai_review`（上下文新增 `review_stage`）；15:35 后自动生成的通用快照只进 `ai_latest`，不再冒充复盘。
+  5. `ai_ask` 未入队时回执带上真实原因（原为 “AI desktop not configured or disabled”）。
+- 验证：目标机 Python 3.9.2 上 68 项单测全绿（新增 5 项：额度/未结算拦截、过期原因、复盘重试、通用快照不覆盖复盘）；部署脚本 preflight + 48 项单测通过。
+- 发布：`20261102173401`，`/mnt/4TB/dockerf/stockstrategy/auto-follow/releases/20261102173401`，`paper_release=20261102173401`；active/running，`NRestarts=0`；API/Web 容器未重建，仍 healthy。
+- 线上核验：state 新增 `auto_research_admission={status:budget_exhausted,runs:20,max_runs:12,tokens:914096,unsettled:0}`；4 条过期任务文案已变为“服务端额度已用尽（20/12 次），任务未被领取”。
+- 用户当日参数（revision 6）：`interval_seconds=3600`、`daily_max_runs=12`、`token_budget=3000000`。当日计数不随改设置清零，“结算并恢复”只结算未确认用量，故 11-02 无法恢复；额度按 Asia/Shanghai 自然日归零。
+- 回滚：`ln -sfn /mnt/4TB/dockerf/stockstrategy/auto-follow/releases/20261031234708 /mnt/4TB/dockerf/stockstrategy/auto-follow/current && systemctl restart stockstrategy-auto-follow.service`。
+- 下一交易日重点：15:35 后确认 `ai_review` 当日更新；若再次 budget_exhausted，先看 `state.auto_research_admission`；12 次上限按 3600s 间隔应只用到 8~9 次。
+- 遗留观察：`data/auto-follow/account.db-wal` 已增至约 872MB（checkpoint 未生效），已在本文件 2026-11-02 18:00 条目中定位并修复（读快照 + 写放大）。
+
 ## 2026-10-31 23:45 自动跟单/AI投研闭环 v1.11 上线（分层降仓 + 多层信号 + 归因优化）
 
 - 目标：修复 `#auto-follow` 长期零成交、AI 投研与执行脱节、强势股分析不入池、无参数优化四个断点。

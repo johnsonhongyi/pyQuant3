@@ -154,6 +154,65 @@ class AIFollowTests(unittest.TestCase):
         ai.schedule_workflow(self.db,self.state,NOW+timedelta(seconds=120),Calendar)
         self.assertEqual(self.db.execute('SELECT COUNT(*) FROM ai_jobs').fetchone()[0],1)
 
+    def _runs(self, rows):
+        self.db.executescript('CREATE TABLE IF NOT EXISTS automatic_research_runs(job_id TEXT PRIMARY KEY,day TEXT NOT NULL,'
+                              'started_at TEXT NOT NULL,token_budget INTEGER NOT NULL,total_tokens INTEGER,usage_known INTEGER NOT NULL DEFAULT 0);')
+        for index, (day, tokens, known) in enumerate(rows):
+            self.db.execute('INSERT INTO automatic_research_runs VALUES(?,?,?,?,?,?)',
+                            ('run-%d' % index, day, NOW.isoformat(), 1000, tokens, known))
+
+    def test_exhausted_daily_runs_never_queue_a_job_the_server_refuses(self):
+        self._runs([(NOW.date().isoformat(), 1000, 1)] * 3)
+        self.assertIsNone(ai.enqueue(self.db, self.state, NOW, force=True, stage='post_close_review'))
+        self.assertEqual(self.db.execute('SELECT COUNT(*) FROM ai_jobs').fetchone()[0], 0)
+        self.assertEqual(self.state['auto_research_status'], 'budget_exhausted')
+        self.assertEqual(self.state['auto_research_admission']['max_runs'], 3)
+
+    def test_unsettled_usage_pauses_queueing(self):
+        self._runs([(NOW.date().isoformat(), 0, 0)])
+        self.assertIsNone(ai.enqueue(self.db, self.state, NOW, force=True))
+        self.assertEqual(self.state['auto_research_status'], 'usage_unsettled')
+
+    def test_cleared_usage_stops_counting_against_the_daily_limit(self):
+        self._runs([(NOW.date().isoformat(), 1000, 1)] * 3)
+        self.db.execute('ALTER TABLE automatic_research_runs ADD COLUMN cleared INTEGER NOT NULL DEFAULT 0')
+        self.assertIsNone(ai.enqueue(self.db, self.state, NOW, force=True))
+        self.assertEqual(self.state['auto_research_status'], 'budget_exhausted')
+        # The console button clears the day; the rows stay for audit.
+        self.db.execute('UPDATE automatic_research_runs SET cleared=1')
+        identity = ai.enqueue(self.db, self.state, NOW, force=True)
+        self.assertIsNotNone(identity)
+        self.assertEqual(self.state['auto_research_admission']['status'], 'ready')
+
+    def test_unclaimed_expiry_reports_server_budget_not_desktop(self):
+        identity = ai.enqueue(self.db, self.state, NOW)
+        self.state['auto_research_admission'] = {'status': 'budget_exhausted', 'runs': 20, 'max_runs': 12}
+        self.db.execute("UPDATE ai_jobs SET status='expired' WHERE id=?", (identity,))
+        ai.sync_ai(self.db, self.state, NOW)
+        self.assertIn('额度', self.state['ai']['jobs'][0]['error'])
+
+    def test_expired_review_is_retried_instead_of_losing_the_day(self):
+        after_close = NOW.replace(hour=15, minute=40)
+        self.db.execute('UPDATE ai_desktop SET heartbeat=?', (after_close.isoformat(),))
+        identity = ai.enqueue(self.db, self.state, after_close, question='review', force=True, stage='post_close_review')
+        self.db.execute("UPDATE ai_jobs SET status='expired' WHERE id=?", (identity,))
+        self.state['ai_review_day'] = after_close.date().isoformat()
+        self.state['ai_last_requested_at'] = (after_close - timedelta(minutes=61)).isoformat()
+        ai.schedule_workflow(self.db, self.state, after_close + timedelta(minutes=1), Calendar)
+        self.assertEqual(self.db.execute('SELECT COUNT(*) FROM ai_jobs').fetchone()[0], 2)
+        self.assertEqual(ai.review_state(self.db, after_close.date().isoformat()), (False, 2))
+
+    def test_generic_post_close_snapshot_never_overwrites_the_review(self):
+        after_close = NOW.replace(hour=16, minute=5)
+        self.db.execute('UPDATE ai_desktop SET heartbeat=?', (after_close.isoformat(),))
+        identity = ai.enqueue(self.db, self.state, after_close, force=True)
+        self.db.execute('UPDATE ai_jobs SET status=?,result=? WHERE id=?',
+                        ('completed', json.dumps({'proposal': self.proposal, 'thread_id': 'fixture'}), identity))
+        ai.sync_ai(self.db, self.state, after_close)
+        self.assertNotIn('ai_review', self.state)
+        self.assertEqual(self.state['ai_latest']['id'], identity)
+
+
 
 if __name__ == "__main__":
     unittest.main()

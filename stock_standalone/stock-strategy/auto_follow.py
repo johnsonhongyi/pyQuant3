@@ -217,6 +217,10 @@ def connect(path):
     shared_permissions(path)
     db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA synchronous=FULL")
+    # The state row is rewritten every cycle; cap the WAL instead of letting a
+    # checkpoint that never truncates grow it without limit.
+    db.execute("PRAGMA wal_autocheckpoint=512")
+    db.execute("PRAGMA journal_size_limit=%d" % (64 * 1024 * 1024))
     db.execute("CREATE TABLE IF NOT EXISTS state(id INTEGER PRIMARY KEY CHECK(id=1), body TEXT NOT NULL)")
     shared_permissions(path)
     return db
@@ -282,8 +286,15 @@ def apply_commands(db, state, now):
                     raise ValueError("invalid AI question")
                 job_id = enqueue(db, state, now, question=data["question"].strip(), force=True)
                 if not job_id:
-                    raise ValueError("AI desktop not configured or disabled")
+                    raise ValueError("AI task not queued: " + str(state.get("auto_research_status") or "unknown"))
                 result = "ai_job=" + job_id
+            elif action == "resume_research":
+                # The console cleared the day's automatic-research usage; drop the
+                # worker's own request throttle so planning resumes on this cycle
+                # instead of waiting out the configured interval.
+                for key in ("ai_last_requested_at", "ai_phase_requested", "ai_review_day"):
+                    state.pop(key, None)
+                result = "research_resumed"
             elif action == "settings":
                 data = json.loads(payload)
                 allowed = {"limit_up", "theme_trend", "theme_ids", "manual_symbols"}
@@ -729,6 +740,7 @@ def main():
     args = parser.parse_args()
     sys.path.insert(0, str(SERVICE))
     import daily_review as dr
+    import housekeeping
     import trading_calendar as calendar
     dr.BASE = os.environ.get("EASY_STOCK_API_URL", dr.BASE).rstrip("/")
     try:
@@ -857,8 +869,14 @@ def main():
                 if args.dry_run:
                     db.rollback()
                 else:
+                    housekeeping.slim_state(state)
+                    housekeeping_day = datetime.now(BJ).date().isoformat()
+                    if state.get("housekeeping_day") != housekeeping_day:
+                        state["housekeeping_day"] = housekeeping_day
+                        state["housekeeping_last"] = housekeeping.prune(control, journal, datetime.now(BJ))
                     db.execute("INSERT OR REPLACE INTO state VALUES(1,?)", (json.dumps(state, ensure_ascii=False, allow_nan=False),))
                     db.commit()
+                    housekeeping.checkpoint(db, args.db)
                     for command_id, status, applied_at, result_text in receipts:
                         control.execute("UPDATE commands SET status=?,applied_at=?,result=? WHERE id=?",
                                         (status, applied_at, result_text, command_id))

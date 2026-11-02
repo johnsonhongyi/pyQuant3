@@ -26,10 +26,11 @@ def main():
     service.mkdir(parents=True)
     for name in ("auto_follow.py", "follow_research.py", "follow_ai.py", "auto_research_policy.py",
                  "signal_engine.py", "loop_state.py", "strong_scan.py", "attribution.py", "optimizer.py",
-                 "simple_config.py",
+                 "simple_config.py", "housekeeping.py",
                  "test_auto_follow.py", "test_follow_research.py", "test_follow_ai.py",
                  "test_auto_research_policy.py", "test_signal_engine.py", "test_attribution.py",
-                 "test_optimizer.py", "test_loop_cycle.py", "stockstrategy-auto-follow.service"):
+                 "test_optimizer.py", "test_loop_cycle.py", "test_housekeeping.py",
+                 "stockstrategy-auto-follow.service"):
         shutil.copyfile(ROOT / name, target / name)
     for name in ("daily_review.py", "market_cache.py", "market_network.py", "data_store.py", "trading_calendar.py"):
         shutil.copyfile(ROOT / "source" / "easy-stock-service" / name, service / name)

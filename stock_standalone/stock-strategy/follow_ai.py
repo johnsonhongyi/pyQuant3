@@ -7,6 +7,11 @@ import uuid
 from datetime import timedelta
 
 DEFAULT_AI = {"enabled": False, "mode": "shadow", "node_id": "", "workspace_id": "", "interval_seconds": 900, "model": "gpt-6-luna", "reasoning_effort": "medium"}
+POLICY_DEFAULT = {"enabled": False, "interval_seconds": 900, "daily_max_runs": 3, "daily_token_budget": 300000}
+REVIEW_QUESTION = "盘后闭环复盘：核对当日市场状态、漏斗拦截、AI提案与实际成交/退出，指出最大的闭环瓶颈与下一交易日观察重点；不直接修改参数。"
+REVIEW_STAGES = ("post_close_review", "execution_review")
+REVIEW_MAX_ATTEMPTS = 3
+AI_JOB_DETAIL = 5
 
 
 def init_ai(db):
@@ -26,6 +31,93 @@ def init_ai(db):
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False,
                                      separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def admission(db, now):
+    """Mirror the API claim gate so a job is never queued that cannot be claimed.
+
+    The server refuses a claim when the day's run count, the token budget, an
+    unsettled run or its own interval says no.  Queueing anyway produced jobs
+    that could only expire ten minutes later, and the UI then blamed the desktop
+    for not picking them up.  Returns None when the run ledger is unreadable, so
+    a missing table or a read error never stalls research by itself.
+    """
+    from auto_research_policy import _parse_iso
+    try:
+        row = db.execute("SELECT body FROM automatic_research_policy WHERE id=1").fetchone()
+        policy = {**POLICY_DEFAULT, **(json.loads(row[0]) if row else {})}
+        day = now.date().isoformat()
+        # The console can clear a day's usage; those rows stay for audit but stop
+        # counting.  Older databases predate the column, so probe for it.
+        cleared = any(column[1] == "cleared" for column in db.execute("PRAGMA table_info(automatic_research_runs)"))
+        usage = ("SELECT count(*),COALESCE(sum(total_tokens),0),"
+                 "COALESCE(sum(CASE WHEN usage_known=0 THEN 1 ELSE 0 END),0) "
+                 "FROM automatic_research_runs WHERE day=?")
+        runs, tokens, unknown = db.execute(usage + (" AND cleared=0" if cleared else ""), (day,)).fetchone()
+        last = db.execute("SELECT started_at FROM automatic_research_runs" + (" WHERE cleared=0" if cleared else "")
+                          + " ORDER BY started_at DESC LIMIT 1").fetchone()
+    except (sqlite3.Error, ValueError, TypeError):
+        return None
+    remaining = None
+    if last and last[0]:
+        try:
+            remaining = int(policy.get("interval_seconds", 900) - (now - _parse_iso(last[0])).total_seconds())
+        except (ValueError, TypeError, OverflowError):
+            remaining = None
+    max_runs, budget = int(policy.get("daily_max_runs", 3)), int(policy.get("daily_token_budget", 300000))
+    if policy.get("enabled") is not True:
+        status = "disabled"
+    elif unknown:
+        status = "usage_unsettled"
+    elif runs >= max_runs or tokens >= budget:
+        status = "budget_exhausted"
+    elif remaining is not None and remaining > 0:
+        status = "interval_wait"
+    else:
+        status = "ready"
+    return {"status": status, "day": day, "runs": runs, "max_runs": max_runs, "tokens": tokens,
+            "token_budget": budget, "unsettled": unknown, "interval_remaining_seconds": remaining,
+            "checked_at": now.isoformat()}
+
+
+def review_state(db, day):
+    """(completed, attempts) for the day's explicit review jobs.
+
+    The job table is the source of truth, so a lost state file cannot silently
+    skip a whole day of review, and an expired attempt is retried instead of
+    ending the day with no review at all.
+    """
+    completed, attempts = False, 0
+    try:
+        rows = db.execute("SELECT status,context FROM ai_jobs WHERE trade_date=? ORDER BY created_at DESC LIMIT 60",
+                          (day,)).fetchall()
+    except sqlite3.Error:
+        return False, REVIEW_MAX_ATTEMPTS
+    for status, raw in rows:
+        try:
+            stage = json.loads(raw).get("workflow_stage")
+        except (ValueError, TypeError, AttributeError):
+            continue
+        if stage != "post_close_review" or status == "cancelled":
+            continue
+        attempts += 1
+        completed = completed or status == "completed"
+    return completed, attempts
+
+
+def unclaimed_reason(state):
+    """Say why a queued job expired unclaimed instead of always blaming the desktop."""
+    gate = state.get("auto_research_admission") or {}
+    status = gate.get("status")
+    if status == "budget_exhausted":
+        return "服务端额度已用尽（%s/%s 次），任务未被领取" % (gate.get("runs"), gate.get("max_runs"))
+    if status == "usage_unsettled":
+        return "服务端用量未结算，任务未被领取"
+    if status == "interval_wait":
+        return "服务端调用间隔未到，任务未被领取"
+    if status == "disabled":
+        return "自动投研已停用，任务未被领取"
+    return "等待桌面领取超时"
 
 
 def evidence_context(state, now):
@@ -81,6 +173,14 @@ def enqueue(db, state, now, question="", force=False, stage=None):
         if stage and json.loads(pending[1]).get("workflow_stage") != stage:
             return None
         return pending[0]
+    gate = admission(db, now)
+    if gate is not None:
+        state["auto_research_admission"] = gate
+        if gate["status"] != "ready":
+            # The server would refuse the claim; do not create a job that can
+            # only expire and then be misreported as a desktop timeout.
+            state["auto_research_status"] = gate["status"]
+            return None
     prior = state.get("ai_last_requested_at")
     if prior and (now - af.stamp(prior)).total_seconds() < policy.get("interval_seconds", 900):
         return None
@@ -88,6 +188,9 @@ def enqueue(db, state, now, question="", force=False, stage=None):
     phase = stage or ("interactive" if question else "post_close_review" if now.strftime("%H:%M") >= "15:35" else
                       "premarket" if now.strftime("%H:%M") < "09:30" else "intraday")
     context["workflow_stage"] = phase
+    # Only an explicitly staged review may replace the review panel; a generic
+    # post-close snapshot keeps its own slot instead of overwriting the review.
+    context["review_stage"] = stage if stage in REVIEW_STAGES else None
     context["ai_runtime"] = {"model": policy.get("model", "gpt-6-luna"), "reasoning_effort": policy.get("reasoning_effort", "medium")}
     context['auto_research_revision'] = policy.get('revision', 0)
     # Keep all stock and freshness evidence; trim only explicitly marked optional
@@ -184,8 +287,32 @@ def validate_result(result, context):
     return result
 
 
+def slim_job(item, rank):
+    """Keep the expandable answer for the newest jobs only.
+
+    Every cycle rewrites the whole state row, and sixteen completed jobs with
+    full proposals were the second largest block in it.  Older entries keep
+    their status, identifiers and error so the task list stays complete.
+    """
+    if rank < AI_JOB_DETAIL:
+        return item
+    result = item.get("result")
+    if not isinstance(result, dict):
+        return item
+    proposal = result.get("proposal") if isinstance(result.get("proposal"), dict) else {}
+    trimmed = {key: result[key] for key in ("thread_id", "model", "reasoning_effort", "error_code", "token_usage")
+               if key in result}
+    trimmed["proposal"] = {key: proposal[key] for key in ("answer", "market_view", "rotation_view") if key in proposal}
+    return {**item, "result": trimmed}
+
+
 def sync_ai(db, state, now):
     import auto_follow as af
+    gate = admission(db, now)
+    if gate is not None:
+        # Keep the ledger's own verdict next to the jobs so an unclaimed expiry
+        # can name the real reason instead of always blaming the desktop.
+        state["auto_research_admission"] = gate
     db.execute("UPDATE ai_jobs SET status='expired' WHERE status IN ('queued','running') AND expires_at<=?", (now.isoformat(),))
     try:
         db.execute("UPDATE automatic_research_runs SET usage_known=1, total_tokens=COALESCE(total_tokens, 0) WHERE usage_known=0 AND job_id IN (SELECT id FROM ai_jobs WHERE status IN ('expired','failed','cancelled','completed'))")
@@ -201,7 +328,7 @@ def sync_ai(db, state, now):
         item = {"id": job_id, "status": status, "question": question, "created_at": created, "finished_at": finished,
                 "evidence_hash": evidence_hash, "trade_date": trade_date}
         if status == 'expired':
-            item['error'] = '执行或回传超时' if lease else '等待桌面领取超时'
+            item['error'] = '执行或回传超时' if lease else unclaimed_reason(state)
         if raw:
             try:
                 result = json.loads(raw)
@@ -214,7 +341,8 @@ def sync_ai(db, state, now):
                 try:
                     validate_result(result["proposal"], json.loads(context_raw))
                     context = json.loads(context_raw)
-                    destination = "ai_review" if context.get("workflow_stage") in ("post_close_review", "execution_review") else "ai_latest"
+                    stage = context.get("review_stage", context.get("workflow_stage"))
+                    destination = "ai_review" if stage in REVIEW_STAGES else "ai_latest"
                     if not state.get(destination) or created > state[destination].get("created_at", ""):
                         state[destination] = {**item, "as_of": context["as_of"], "workflow_stage": context.get("workflow_stage"),
                                               "basis_context": {"account": context.get("account"), "risk": context.get("risk")}}
@@ -223,7 +351,7 @@ def sync_ai(db, state, now):
         jobs.append(item)
     health = db.execute("SELECT heartbeat,status,detail FROM ai_desktop WHERE node_id=? AND workspace_id=?",
                         (policy.get("node_id", ""), policy.get("workspace_id", ""))).fetchone()
-    state["ai"] = {"jobs": jobs, "desktop_online": bool(health and 0 <= (now - af.stamp(health[0])).total_seconds() < 90),
+    state["ai"] = {"jobs": [slim_job(item, rank) for rank, item in enumerate(jobs)], "desktop_online": bool(health and 0 <= (now - af.stamp(health[0])).total_seconds() < 90),
                    "desktop_heartbeat": health[0] if health else None, "desktop_status": health[1] if health else "not_connected",
                    "desktop_detail": json.loads(health[2]) if health and health[2] else {}}
 
@@ -306,13 +434,13 @@ def schedule_workflow(db, state, now, calendar):
     if not "08:30" <= now.strftime("%H:%M") <= "17:30":
         return
     today = now.date().isoformat()
-    if now.strftime("%H:%M") >= "15:35" and state.get("ai_review_day") != today:
-        job = enqueue(db, state, now,
-                      question="盘后闭环复盘：核对当日市场状态、漏斗拦截、AI提案与实际成交/退出，指出最大的闭环瓶颈与下一交易日观察重点；不直接修改参数。",
-                      stage="post_close_review", force=True)
-        if job:
-            state["ai_review_day"] = today
-            return
+    if now.strftime("%H:%M") >= "15:35":
+        completed, attempts = review_state(db, today)
+        if not completed and attempts < REVIEW_MAX_ATTEMPTS:
+            job = enqueue(db, state, now, question=REVIEW_QUESTION, stage="post_close_review", force=True)
+            if job:
+                state["ai_review_day"] = today
+                return
     closed_count = len(state.get("closed", []))
     if closed_count > state.get("ai_review_requested_closed_count", 0):
         job = enqueue(db, state, now, question="复盘已实际发生的模拟成交、拒绝和退出，核对AI提案与风控执行差异，提出下一轮观察重点，不修改参数。",
