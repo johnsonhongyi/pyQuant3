@@ -29,8 +29,10 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from collections import deque
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
@@ -104,6 +106,51 @@ def _change_color(value):
         return QColor("#ff5c5c" if number > 0 else "#00ff88")
     except (TypeError, ValueError, OverflowError):
         return None
+
+
+class _FusionSortCache:
+    """缓存单元格排序解析，写入内容时失效。"""
+
+    def __init__(self, *args, **kwargs):
+        self._fusion_sort_cache = {}
+        super().__init__(*args, **kwargs)
+
+    def setData(self, role, value):
+        self._fusion_sort_cache.clear()
+        return super().setData(role, value)
+
+    def setText(self, text):
+        self._fusion_sort_cache.clear()
+        return super().setText(text)
+
+    def set_raw_value(self, value):
+        self._fusion_sort_cache.clear()
+        return super().set_raw_value(value)
+
+    def _is_empty(self):
+        cache = self._fusion_sort_cache
+        if 'empty' not in cache:
+            cache['empty'] = super()._is_empty()
+        return cache['empty']
+
+    def _get_sort_val(self, target=None):
+        item = self if target is None else target
+        if item is not self:
+            if isinstance(item, _FusionSortCache):
+                return item._get_sort_val()
+            return super()._get_sort_val(item)
+        cache = self._fusion_sort_cache
+        if 'value' not in cache:
+            cache['value'] = super()._get_sort_val(self)
+        return cache['value']
+
+
+class FusionSortItem(_FusionSortCache, NumericTableWidgetItem):
+    pass
+
+
+class FusionSortFocusItem(_FusionSortCache, FusionFocusItem):
+    pass
 
 
 class SignedPercentDelegate(ColorPreservingItemDelegate):
@@ -1350,6 +1397,7 @@ def _row_is_structure_opportunity(rec: Dict[str, Any]) -> bool:
 _SHADOW_CURSORS: Dict[Tuple[str, Tuple[str, ...]], Any] = {}
 _SHADOW_ROWS_SNAPSHOT: Dict[Tuple[str, Tuple[str, ...]], Tuple[int, List[Dict[str, Any]]]] = {}
 _SHADOW_RETENTION_DEFAULT = 20000
+_SHADOW_CACHE_LOCK = threading.RLock()
 
 
 def _shadow_retention_records() -> int:
@@ -1401,13 +1449,14 @@ def _shadow_dataset(paths: Sequence[str], src_day: str, max_records: int = 20000
 
 def _shadow_rows(paths: Sequence[str], src_day: str, max_records: int = 20000) -> List[Dict[str, Any]]:
     """游标内记录的只读快照；同一版本号内不重复复制列表。"""
-    key, cursor = _shadow_dataset(paths, src_day, max_records)
-    cached = _SHADOW_ROWS_SNAPSHOT.get(key)
-    if cached is not None and cached[0] == cursor.version:
-        return cached[1]
-    rows = cursor.rows()
-    _SHADOW_ROWS_SNAPSHOT[key] = (cursor.version, rows)
-    return rows
+    with _SHADOW_CACHE_LOCK:
+        key, cursor = _shadow_dataset(paths, src_day, max_records)
+        cached = _SHADOW_ROWS_SNAPSHOT.get(key)
+        if cached is not None and cached[0] == cursor.version:
+            return cached[1]
+        rows = cursor.rows()
+        _SHADOW_ROWS_SNAPSHOT[key] = (cursor.version, rows)
+        return rows
 
 
 def load_live_series(day: str = "", max_lines: int = 20000, allow_fallback: bool = True) -> Dict[str, List[Dict[str, Any]]]:
@@ -1723,6 +1772,31 @@ class CrossDayWorker(QThread):
                             "requested_replay": self.replay_run}, self.day)
         except (OSError, ValueError, TypeError, KeyError) as exc:
             self.failed.emit("跨日/PAPER读取失败：{}".format(exc))
+
+
+class _ShadowRefreshContext:
+    """后台只持有行情和名称快照，不访问 QWidget 或宿主方法。"""
+
+    def __init__(self, parents):
+        columns = ("code", "trade", "price", "close", "high", "low", "percent", "pct",
+                   "change_pct", "chg", "day_pct", "last_close", "lastp", "prev_close",
+                   "preclose", "llastp")
+        snapshots = []
+        for parent in parents:
+            attrs = {}
+            for attr in ("df_realtime", "current_df"):
+                frame = getattr(parent, attr, None)
+                if frame is not None and not frame.empty:
+                    attrs[attr] = frame.loc[:, frame.columns.isin(columns)].copy(deep=True)
+            attrs["name_cache"] = dict(getattr(parent, "name_cache", None) or {})
+            snapshots.append(SimpleNamespace(**attrs))
+        self._py_parent, self.parent_window = snapshots
+
+    def _get_batch_quotes_snapshot(self, codes):
+        return FusionLadderDialog._get_batch_quotes_snapshot(self, codes)
+
+    def _resolve_name(self, code, fallback_dict=None):
+        return FusionLadderDialog._resolve_name(self, code, fallback_dict)
 
 
 class FusionLadderDialog(QWidget, WindowMixin):
@@ -2105,6 +2179,9 @@ class FusionLadderDialog(QWidget, WindowMixin):
         tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         tbl.horizontalHeader().setStretchLastSection(True)
         tbl.setSortingEnabled(True)
+        tbl.horizontalHeader().sectionClicked.connect(
+            lambda _section, table=tbl: QTimer.singleShot(0, table.scrollToTop)
+        )
 
         # 💡 设置字典级专业列头 ToolTip（富文本三段式，供自绘卡片使用；
         #    系统提示只放纯文本兜底，避免白底浅字看不清）
@@ -2591,7 +2668,17 @@ class FusionLadderDialog(QWidget, WindowMixin):
                     return cand
         return None
 
-    def _extract_stock_custom_val(self, df: Optional[pd.DataFrame], code: str, col_key: str) -> tuple[str, Any]:
+    @staticmethod
+    def _custom_code_lookup(df):
+        if df is None or df.empty or 'code' not in df.columns:
+            return {}
+        lookup = {}
+        for position, code in enumerate(df['code'].astype(str).str.zfill(6)):
+            lookup.setdefault(code, position)
+        return lookup
+
+    def _extract_stock_custom_val(self, df: Optional[pd.DataFrame], code: str, col_key: str,
+                                  code_lookup=None) -> tuple[str, Any]:
         """从策略 DataFrame 中提取指定股票代码的自定义列值与数值表示 (供 NumericTableWidgetItem 排序)"""
         if df is None or df.empty:
             return "--", 0.0
@@ -2606,9 +2693,12 @@ class FusionLadderDialog(QWidget, WindowMixin):
         if cd in df.index:
             row = df.loc[cd]
         elif 'code' in df.columns:
-            matched = df[df['code'].astype(str).str.zfill(6) == cd]
-            if not matched.empty:
-                row = matched.iloc[0]
+            if code_lookup is None:
+                matched = df[df['code'].astype(str).str.zfill(6) == cd]
+                if not matched.empty:
+                    row = matched.iloc[0]
+            elif cd in code_lookup:
+                row = df.iloc[code_lookup[cd]]
 
         if row is not None:
             for k in (col_key, col_key.lower(), col_key.upper()):
@@ -2816,7 +2906,11 @@ class FusionLadderDialog(QWidget, WindowMixin):
     def _on_day_changed(self, text: str) -> None:
         day = text.strip()
         if day:
-            self.refresh_live()
+            self._live_sig = None
+            self._tab_signatures.clear()
+            index = self.tabs.currentIndex()
+            if index in (0, 3):
+                self._queue_shadow_refresh(index)
             if self.tabs.currentIndex() in (6, 7):
                 self._start_cross_day(day)
 
@@ -2826,7 +2920,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
         except Exception:
             pass
         self._style_hit_only(bool(checked))
-        self._render_live(force=True)
+        self._live_sig = None
+        self._queue_shadow_refresh(0)
 
     def _style_hit_only(self, checked: bool) -> None:
         """选中态用颜色表达：走窗口 QSS 的属性选择器，避免覆盖原生指示器样式。"""
@@ -2858,10 +2953,18 @@ class FusionLadderDialog(QWidget, WindowMixin):
         except Exception:
             pass
         self._style_structure_only(bool(checked))
-        self._render_live(force=True)
+        # 未显示的表格只标记过期；赛马页可能读取大量记录并请求行情，
+        # 不能在用户操作其他页面时同步执行。
+        self._live_sig = None
+        getattr(self, "_tab_signatures", {}).pop(3, None)
+        active_tab = self.tabs.currentIndex()
+        if active_tab == 0:
+            self._queue_shadow_refresh(0)
+            return
+        if active_tab != 3:
+            return
         try:
-            day = self.cmb_day.currentText().strip() or today_str()
-            self._render_track_from_shadow(day)
+            self._queue_shadow_refresh(3)
         except Exception:
             pass
 
@@ -2960,6 +3063,10 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 for attr in ("df_realtime", "current_df"):
                     df = getattr(p_obj, attr, None)
                     if df is not None and not getattr(df, "empty", True):
+                        # 一次建索引，避免每只股票都对整列 code 做布尔扫描。
+                        code_lookup = None
+                        if "code" in df.columns and any(cd not in df.index for cd in clean_codes):
+                            code_lookup = df.drop_duplicates(subset="code").set_index("code", drop=False)
                         for cd in clean_codes:
                             if cd in out:
                                 continue
@@ -2967,10 +3074,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
                                 row = None
                                 if cd in df.index:
                                     row = df.loc[cd]
-                                elif "code" in df.columns:
-                                    m = df[df["code"] == cd]
-                                    if not m.empty:
-                                        row = m.iloc[0]
+                                elif code_lookup is not None and cd in code_lookup.index:
+                                    row = code_lookup.loc[cd]
                                 if row is not None:
                                     p = float(row.get("trade", row.get("price", row.get("close", 0.0))) or 0.0)
                                     h = float(row.get("high", p) or p)
@@ -3064,7 +3169,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
     @staticmethod
     def _num_item(text: Any, raw_val: Any = None, color: Optional[QColor] = None, bold: bool = False) -> NumericTableWidgetItem:
         """基于 ATS NumericTableWidgetItem 构建支持高精度数值比对的单元格"""
-        it = NumericTableWidgetItem(value=text, raw_val=raw_val)
+        it = FusionSortItem(value=text, raw_val=raw_val)
         if color is not None:
             it.setForeground(color)
         if bold:
@@ -3449,6 +3554,14 @@ class FusionLadderDialog(QWidget, WindowMixin):
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
+        if getattr(self, "_shadow_refresh_closed", False):
+            self._shadow_refresh_closed = False
+            index = self.tabs.currentIndex()
+            if getattr(self, "_shadow_refresh_thread", None) is not None:
+                self._shadow_refresh_pending = (index, self.cmb_day.currentText().strip() or today_str(), True)
+                self._shadow_refresh_timer.start()
+            elif index in (0, 3):
+                self._queue_shadow_refresh(index)
         if (self.anchor_edge is not None or getattr(self, "is_hidden_state", False)) and not getattr(self, "stays_on_top", False):
             if hasattr(self, "hover_timer") and not self.hover_timer.isActive():
                 self.hover_timer.start()
@@ -3591,7 +3704,110 @@ class FusionLadderDialog(QWidget, WindowMixin):
     # 实时与回补数据展示
     # ------------------------------------------------------------------
     def refresh_live(self) -> None:
-        self._render_live(force=True)
+        self._queue_shadow_refresh(0, force=True)
+
+    def _queue_shadow_refresh(self, index: int, force: bool = True) -> None:
+        """同进程单任务读取：忙时只保留最后一次请求，Qt 线程仅负责落表。"""
+        if getattr(self, "_shadow_refresh_closed", False) or index != self.tabs.currentIndex():
+            return
+        day = self.cmb_day.currentText().strip() or today_str()
+        page_days = getattr(self, "_shadow_page_days", None)
+        if page_days is None:
+            page_days = self._shadow_page_days = {}
+        if page_days.get(index) != day:
+            table = getattr(self, "tbl_live" if index == 0 else "tbl_track", None)
+            if table is not None:
+                self._fill_table_hint(table, "正在加载 {} 数据…".format(day))
+            page_days[index] = day
+        task = (index, day, force)
+        thread = getattr(self, "_shadow_refresh_thread", None)
+        if thread is not None:
+            if task[:2] != self._shadow_refresh_task[:2]:
+                self._shadow_refresh_pending = task
+            else:
+                self._shadow_refresh_pending = None
+                self._shadow_refresh_force = self._shadow_refresh_force or force
+            return
+        signature = self._live_source_signature(day)
+        if self.chk_focus_only.isChecked() and day == today_str() and self._is_trading_window():
+            signature = (signature, int(time.time() // 30))
+        context = (_ShadowRefreshContext((getattr(self, "_py_parent", None),
+                                          getattr(self, "parent_window", None)))
+                   if index == 3 else None)
+        result = {}
+
+        def prepare():
+            try:
+                result["data"] = (load_live_rows(day, allow_fallback=False) if index == 0 else
+                                  FusionLadderDialog._track_entries_from_shadow(context, day))
+            except Exception as exc:
+                result["error"] = "{}: {}".format(type(exc).__name__, exc)
+
+        if not hasattr(self, "_shadow_refresh_timer"):
+            self._shadow_refresh_timer = QTimer(self)
+            self._shadow_refresh_timer.setInterval(50)
+            self._shadow_refresh_timer.timeout.connect(self._finish_shadow_refresh)
+        self._shadow_refresh_task = task
+        self._shadow_refresh_force = force
+        self._shadow_refresh_signature = signature
+        self._shadow_refresh_result = result
+        self._shadow_refresh_pending = None
+        # 只读 daemon 不持有 Qt 对象；关闭窗口无需在主线程等网络或销毁运行中的 QThread。
+        thread = threading.Thread(target=prepare, name="FusionShadowRefresh", daemon=True)
+        self._shadow_refresh_thread = thread
+        try:
+            thread.start()
+        except RuntimeError:
+            self._shadow_refresh_thread = None
+            self._tab_signatures.pop(index, None)
+            logger.exception("[FusionLadder] 无法启动后台刷新")
+            self._set_status("状态：{} 后台刷新无法启动，请重试".format(day))
+            return
+        self._shadow_refresh_timer.start()
+
+    def _finish_shadow_refresh(self) -> None:
+        thread = getattr(self, "_shadow_refresh_thread", None)
+        if thread is None or thread.is_alive():
+            return
+        self._shadow_refresh_timer.stop()
+        self._shadow_refresh_thread = None
+        index, day, _ = self._shadow_refresh_task
+        force = self._shadow_refresh_force
+        pending = self._shadow_refresh_pending
+        self._shadow_refresh_pending = None
+        if getattr(self, "_shadow_refresh_closed", False):
+            return
+        if pending is not None:
+            self._queue_shadow_refresh(pending[0], force=pending[2])
+            return
+        if (index != self.tabs.currentIndex() or
+                day != (self.cmb_day.currentText().strip() or today_str())):
+            return
+        result = self._shadow_refresh_result
+        if "error" in result:
+            self._tab_signatures.pop(index, None)
+            self._shadow_page_days.pop(index, None)
+            logger.warning("[FusionLadder] 后台刷新失败 (%s): %s", day, result["error"])
+            self._fill_table_hint(self.tbl_live if index == 0 else self.tbl_track,
+                                  "{} 数据加载失败，请重试".format(day))
+            self._set_status("状态：{} 数据刷新失败｜{}".format(day, result["error"]))
+            return
+        try:
+            if index == 0:
+                self._render_live(force=force, rows=result["data"],
+                                  source_sig=self._shadow_refresh_signature)
+            else:
+                table = self.tbl_track
+                previous = table.updatesEnabled()
+                table.setUpdatesEnabled(False)
+                try:
+                    self._render_track_from_shadow(day, entries=result["data"])
+                finally:
+                    table.setUpdatesEnabled(previous)
+        except Exception:
+            self._tab_signatures.pop(index, None)
+            logger.exception("[FusionLadder] 后台结果渲染失败 (%s)", day)
+            self._set_status("状态：{} 表格更新失败，请重试".format(day))
 
     def _live_source_signature(self, day: str) -> tuple:
         """影子文件指纹：路径 + 大小 + 修改时间。用于判断是否需要重绘。"""
@@ -3626,10 +3842,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 self._maybe_ensure_data()
             return
         tab_sig_map[idx] = sig
-        if idx == 3:
-            self._render_track_from_shadow(day)
-            return
-        self._render_live(force=False)
+        self._queue_shadow_refresh(idx, force=False)
 
     # ------------------------------------------------------------------
     # 初始化扫描（永远执行一次；非交易时段豁免；永不白板）
@@ -3694,7 +3907,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
     def _startup_init_scan(self) -> None:
         """窗口打开后的初始化：先渲染已有数据，再确保交易时段内至少跑过一轮扫描。"""
         try:
-            self._render_live(force=True)
+            self.refresh_live()
         except Exception as exc:
             logger.debug("[FusionLadder] 首次渲染异常: %s", exc)
         try:
@@ -3721,9 +3934,11 @@ class FusionLadderDialog(QWidget, WindowMixin):
         cached_ts = float(getattr(self, "_latest_live_ts", 0.0) or 0.0)
         if cached_day == day and cached_ts > 0 and (now - cached_ts) <= 180:
             return
-        # 交易时段严格查看当天实时流；非交易时段（夜间/周末/盘前）无数据时自动平滑回退至最近有数据的交易日，绝不白板
-        allow_fallback = not (self._is_trading_window() and day == today_str())
-        rows = load_live_rows(day, allow_fallback=allow_fallback)
+        # 数据读取由后台刷新负责，空表/断流巡检不再在 UI 线程重复读盘。
+        if getattr(self, "_loaded_live_day", None) != day:
+            self._queue_shadow_refresh(0, force=False)
+            return
+        rows = self._loaded_live_rows
         has_data = bool(rows)
         if has_data:
             try:
@@ -3747,7 +3962,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self.lbl_status.setStyleSheet("color:#ffa64d; font-weight:bold;")
 
     def _on_focus_toggled(self, _checked) -> None:
-        self._render_live(force=True)
+        self._live_sig = None
+        self._queue_shadow_refresh(0)
         result = getattr(self, "_result", None)
         if result is not None:
             self._on_replay_done(result)
@@ -3783,27 +3999,29 @@ class FusionLadderDialog(QWidget, WindowMixin):
             for r in rows
         ))
 
-    def _render_live(self, force: bool = True) -> None:
+    def _render_live(self, force: bool = True, rows=None, source_sig=None) -> None:
         """包一层重绘开关：整表重建期间关闭重绘，避免 3 万个单元格逐个触发刷新。"""
         tbl = getattr(self, "tbl_live", None)
         if tbl is None:
-            return self._render_live_inner(force=force)
+            return self._render_live_inner(force=force, rows=rows, source_sig=source_sig)
         previous = tbl.updatesEnabled()
         tbl.setUpdatesEnabled(False)
         try:
-            self._render_live_inner(force=force)
+            self._render_live_inner(force=force, rows=rows, source_sig=source_sig)
         finally:
             if previous:
                 tbl.setUpdatesEnabled(True)
 
-    def _render_live_inner(self, force: bool = True) -> None:
+    def _render_live_inner(self, force: bool = True, rows=None, source_sig=None) -> None:
         day = self.cmb_day.currentText().strip() or today_str()
-        sig = self._live_source_signature(day)
-        if self.chk_focus_only.isChecked() and day == today_str() and self._is_trading_window():
+        sig = source_sig if source_sig is not None else self._live_source_signature(day)
+        if source_sig is None and self.chk_focus_only.isChecked() and day == today_str() and self._is_trading_window():
             sig = (sig, int(time.time() // 30))
         if not force and sig == getattr(self, "_live_sig", None):
             return
-        rows = load_live_rows(day, allow_fallback=False)
+        if rows is None:
+            rows = load_live_rows(day, allow_fallback=False)
+        self._loaded_live_day, self._loaded_live_rows = day, rows
         tbl = self.tbl_live
         total_rows = len(rows)
         if self.chk_focus_only.isChecked():
@@ -3915,12 +4133,12 @@ class FusionLadderDialog(QWidget, WindowMixin):
         latest_ts = 0.0
         hit_count = 0
         df_strat = self._resolve_ats_strategy_df()
-        for r in rows:
+        custom_lookup = self._custom_code_lookup(df_strat) if getattr(self, "extra_cols", None) else None
+        tbl.setRowCount(len(rows))
+        for i, r in enumerate(rows):
             fusion = r.get("fusion") or {}
             tier = int(fusion.get("tier") or 0)
             tier_count[tier] = tier_count.get(tier, 0) + 1
-            i = tbl.rowCount()
-            tbl.insertRow(i)
             axes = fusion.get("axes") or {}
             entry = fusion.get("entry") or {}
             stop = fusion.get("stop") or {}
@@ -3962,7 +4180,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
             # 表头: [级别, 代码, 名称, 现价, 涨幅%, RAR, 位, 接, 意, 环, 仓位%, 进场, 止损, 先手min, 来源, 更新时间, 命中, 覆盖%]
             tbl.setItem(i, 0, self._num_item(f"L{tier}", tier, _TIER_COLORS.get(tier), bold=True))
             for col, text in ((1, code), (2, name)):
-                item = FusionFocusItem(text, r.get("focus_rank"))
+                item = FusionSortFocusItem(text, r.get("focus_rank"))
                 if r.get("focus_rank"):
                     item.setForeground(QColor("#ff6868"))
                     item.setBackground(QColor("#4b2026"))
@@ -4015,7 +4233,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
             # 动态自定义列 (ats_col)
             if getattr(self, "extra_cols", None):
                 for idx_ec, ec in enumerate(self.extra_cols):
-                    val_txt, val_raw = self._extract_stock_custom_val(df_strat, code, ec)
+                    val_txt, val_raw = self._extract_stock_custom_val(df_strat, code, ec, custom_lookup)
                     tbl.setItem(i, 18 + idx_ec, self._num_item(val_txt, val_raw))
             if r.get("focus_rank"):
                 self._mark_focus_row(tbl, i, (1, 2))
@@ -4096,7 +4314,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
         # 1. 批量获取权威行情快照，实现通达信全口径对齐
         # 仅对当日或显式注入/测试 mock 的场景获取快照，历史普通回放使用时间切片内极值
         quotes_map = {}
-        if day == today_str() or hasattr(self, "_custom_quotes_snapshot") or hasattr(self, "_get_batch_quotes_snapshot"):
+        if (day == today_str() or hasattr(self, "_custom_quotes_snapshot")
+                or "_get_batch_quotes_snapshot" in vars(self)):
             try:
                 quotes_map = self._get_batch_quotes_snapshot(list(series.keys()))
             except Exception:
@@ -4263,14 +4482,17 @@ class FusionLadderDialog(QWidget, WindowMixin):
         out.sort(key=lambda e: (-e["tier"], -e["persist"]))
         return out
 
-    def _render_track_from_shadow(self, day: str) -> None:
+    def _render_track_from_shadow(self, day: str, entries=None) -> None:
         t3 = self.tbl_track
         df_strat = self._resolve_ats_strategy_df()
-        entries = self._track_entries_from_shadow(day)
+        custom_lookup = self._custom_code_lookup(df_strat) if getattr(self, "extra_cols", None) else None
+        if entries is None:
+            entries = self._track_entries_from_shadow(day)
         structure_only = bool(getattr(self, "chk_structure_only", None) is not None and self.chk_structure_only.isChecked())
         if structure_only and entries:
             entries = [e for e in entries if e.get("is_structure")]
         t3.setSortingEnabled(False)
+        t3.clearSpans()
         t3.setRowCount(0)
         if not entries:
             self._fill_table_hint(
@@ -4280,9 +4502,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
             )
             t3.setSortingEnabled(True)
             return
-        for e in entries:
-            i = t3.rowCount()
-            t3.insertRow(i)
+        t3.setRowCount(len(entries))
+        for i, e in enumerate(entries):
             day_pct = float(e.get("day_close_pct") if e.get("day_close_pct") is not None else (e.get("close_ret") or 0.0))
             holding_ret = float(e.get("holding_ret") if e.get("holding_ret") is not None else (e.get("close_ret") or 0.0))
             color_ret = QColor("#ff5c5c") if day_pct >= 0 else QColor("#00ff88")
@@ -4331,13 +4552,14 @@ class FusionLadderDialog(QWidget, WindowMixin):
             t3.setItem(i, 13, item_ret)
             if getattr(self, "extra_cols", None):
                 for idx_ec, ec in enumerate(self.extra_cols):
-                    val_txt, val_raw = self._extract_stock_custom_val(df_strat, e["code"], ec)
+                    val_txt, val_raw = self._extract_stock_custom_val(df_strat, e["code"], ec, custom_lookup)
                     t3.setItem(i, 14 + idx_ec, self._num_item(val_txt, val_raw))
         t3.setSortingEnabled(True)
         self._apply_search_filter(t3)
 
     def _fill_table_hint(self, tbl: QTableWidget, text: str) -> None:
         """空表占位：写清"为什么没有数据"，不留白板。"""
+        tbl.clearSpans()
         tbl.setRowCount(0)
         tbl.insertRow(0)
         it = self._num_item(text, text)
@@ -4354,12 +4576,12 @@ class FusionLadderDialog(QWidget, WindowMixin):
         day = self.cmb_day.currentText().strip() or today_str()
         if index == 0:
             try:
-                self._render_live(force=False)
+                self._queue_shadow_refresh(0, force=False)
             except Exception as exc:
                 logger.debug("[FusionLadder] 实时梯度刷新失败: %s", exc)
         elif index == 3:
             try:
-                self._render_track_from_shadow(day)
+                self._queue_shadow_refresh(3)
             except Exception as exc:
                 logger.debug("[FusionLadder] 赛马跟踪渲染失败: %s", exc)
         elif index in (6, 7):
@@ -4451,6 +4673,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
         # Tab 1: 按日回放表格渲染
         # 表头: [时间(0), 代码(1), 名称(2), 现价(3), 涨幅%(4), 终收%(5), 级别(6), RAR(7), 仓位%(8), MFE%(9), MAE%(10), 收盘%(11), 温度℃(12)] + 自定义列
         df_strat = self._resolve_ats_strategy_df()
+        custom_lookup = self._custom_code_lookup(df_strat) if getattr(self, "extra_cols", None) else None
         # 展示首次发现优先，避免最高分帧淹没早期观察。
         first_by_code = {}
         records = sorted(result.records, key=lambda r: float(r.get("ts") or 0))
@@ -4615,7 +4838,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
             t3.setItem(i, 13, item_ret)
             if getattr(self, "extra_cols", None):
                 for idx_ec, ec in enumerate(self.extra_cols):
-                    val_txt, val_raw = self._extract_stock_custom_val(df_strat, cd, ec)
+                    val_txt, val_raw = self._extract_stock_custom_val(df_strat, cd, ec, custom_lookup)
                     t3.setItem(i, 14 + idx_ec, self._num_item(val_txt, val_raw))
         t3.setSortingEnabled(True)
 
@@ -4845,6 +5068,10 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 pass
             self._follow_worker.requestInterruption()
             self._follow_worker.wait(2000)
+        self._shadow_refresh_closed = True
+        self._shadow_refresh_pending = None
+        if hasattr(self, "_shadow_refresh_timer"):
+            self._shadow_refresh_timer.stop()
         self._save_window_states(is_open=False)
         self._state_save_timer.stop()
         self._persist_window_states()
