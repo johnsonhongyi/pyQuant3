@@ -19,6 +19,26 @@ def _number(value, positive=False):
         return None
 
 
+def _prune_none(value):
+    """剔除值为 None 的键：对所有 .get() 读取方语义等价，但单条记录可省 25%+。
+
+    观察证据占单条影子记录 68%（实测 4.4KB/6.6KB），其中约 9 个字段整条为 None、
+    另有一批 asof/feature_timestamp 为空。这些空键只贡献字节不贡献信息，且当日
+    33k 条记录会把分片推到 220MB，读取端每次刷新都要重新解析。
+    """
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            item = _prune_none(item)
+            if item is None:
+                continue
+            out[key] = item
+        return out
+    if isinstance(value, list):
+        return [_prune_none(item) for item in value if item is not None]
+    return value
+
+
 def build_observation_evidence(row, snap, now, day, source, today_vwap=0, today_volume=0):
     row = row if hasattr(row, "get") else {}
     snap = snap if hasattr(snap, "get") else {}
@@ -91,6 +111,10 @@ def build_observation_evidence(row, snap, now, day, source, today_vwap=0, today_
             early[key] = {"value": value[:160], "source": origin, **field_time(key, origin)}
         else:
             early[key] = {"value": _number(value), "source": origin, **field_time(key, origin)}
+    # 未收到的字段只留空壳：整条剔除（读取方全部走 .get()，语义等价），
+    # 保留的字段仅去掉值为 None 的键（asof / feature_timestamp 常为空）。
+    early = {key: item for key, item in ((k, _prune_none(v)) for k, v in early.items())
+             if item is not None and item.get("value") is not None}
     context = snap.get("_observation_daily_context") or {}
     history = context.get("values", {}) if isinstance(context, dict) and context.get("asof_day") == day else {}
     if not isinstance(history, dict):

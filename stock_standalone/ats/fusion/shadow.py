@@ -181,6 +181,12 @@ class FusionShadow:
         # 交易时段闸门：默认开启，盘后轮询不再污染当日流水（历史/回放不受影响）
         self._session_gate = bool(self.cfg.get("session_gate", True))
         self._last_sample: Dict[str, float] = {}
+        # 策略观察源的"阶梯"闸门：只在状态变化时落一条；已激活标的再按心跳留价格锚点。
+        # 旧行为是每轮采样都写，单上午 3.3 万条/222MB，占全部记录量的 91%。
+        self._observation_state: Dict[str, tuple] = {}
+        self._observation_last_ts: Dict[str, float] = {}
+        self._observation_active: Dict[str, bool] = {}
+        self._observation_heartbeat = max(60.0, float(self.cfg.get("observation_state_heartbeat_s", 600.0) or 600.0))
 
         self._fh = None
         self._fh_day = ""
@@ -370,6 +376,9 @@ class FusionShadow:
                         self._counter_reclaim_first.clear()
                         self._struct_timeline.reset(day)
                         self._last_sample.clear()
+                        self._observation_state.clear()
+                        self._observation_last_ts.clear()
+                        self._observation_active.clear()
                         self._rar_samples.clear()
                         self._latest_rar_by_code.clear()
                         self._cuts = None
@@ -746,6 +755,34 @@ class FusionShadow:
 
             # 注意：保持 (snap or {}).get("name") 直接调用，使异常隔离单测 Boom() 可精确触发
             snap_name = str((snap or {}).get("name") or "")
+
+            # 策略观察是"过程类"记录：阶梯的每一级都要留，但同一个状态不再重复写。
+            # 口径：
+            #   1) 结构状态 / 确认次数 / 级别 / 观察结论 任一变化 -> 立刻落一条（阶梯步点）
+            #   2) 状态没变 -> 只有"曾经激活"的标的按心跳留价格锚点（保证入局后 MFE/MAE 连续）
+            #   3) 从未激活且状态未变的票 -> 不落盘（它们的价格序列没有下游用途）
+            if source == "strategy_observation":
+                from ats.fusion.observation import observation_reason
+                reason = observation_reason(event.extra.get("observation_evidence"))
+                state_key = (
+                    str(getattr(_tl, "status", "") or ""),
+                    int(getattr(_tl, "confirm_n", 0) or 0),
+                    int(fusion.tier),
+                    reason,
+                )
+                if reason or fusion.tier >= 2:
+                    self._observation_active[code] = True
+                if self._observation_state.get(code) != state_key:
+                    self._observation_state[code] = state_key
+                    self._observation_last_ts[code] = now
+                elif (self._observation_active.get(code)
+                      and (now - self._observation_last_ts.get(code, 0.0)) >= self._observation_heartbeat):
+                    self._observation_last_ts[code] = now
+                else:
+                    with self._lock:
+                        self._stats["skipped_state"] = self._stats.get("skipped_state", 0) + 1
+                    return None
+
             record = {
                 # 记录结构版本：2 = 含 price/pct/vwap/hit/coverage。
                 # 界面据此判断"写盘进程是不是新版本"，旧版本写的记录会缺字段。

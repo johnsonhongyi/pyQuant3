@@ -31,7 +31,7 @@ import os
 import re
 import time
 from collections import deque
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 from PyQt6.QtCore import (
@@ -1340,8 +1340,58 @@ def _row_is_structure_opportunity(rec: Dict[str, Any]) -> bool:
     return False
 
 
-_LIVE_ROWS_CACHE: Dict[Tuple[str, int, float, int, str], List[Dict[str, Any]]] = {}
-_LIVE_SERIES_CACHE: Dict[Tuple[str, int, float, int], Dict[str, List[Dict[str, Any]]]] = {}
+_SHADOW_CURSORS: Dict[Tuple[str, Tuple[str, ...]], Any] = {}
+_SHADOW_ROWS_SNAPSHOT: Dict[Tuple[str, Tuple[str, ...]], Tuple[int, List[Dict[str, Any]]]] = {}
+_SHADOW_RETENTION_DEFAULT = 20000
+
+
+def _shadow_retention_records() -> int:
+    """内存驻留条数上限（可配）。
+
+    实测单条记录解析后约 38KB，2 万条约 750MB；赛马视图需要当日过程序列，
+    因此默认不压缩。内存吃紧时把 `fusion_shadow_retention_records` 调到
+    8000 可省约 440MB，代价是当日更早的序列点被裁掉。
+    """
+    try:
+        value = int(load_config_node("fusion_shadow_retention_records", _SHADOW_RETENTION_DEFAULT) or 0)
+    except (TypeError, ValueError):
+        value = 0
+    return value if value >= 500 else _SHADOW_RETENTION_DEFAULT
+
+
+def _shadow_dataset(paths: Sequence[str], src_day: str, max_records: int = 20000):
+    """当日分片的唯一增量游标：看板与赛马共用一次解析。
+
+    旧实现 rows/series 各建一份"按文件指纹"的缓存，交易时段文件每几秒追加一次，
+    指纹必然变化 → 缓存必然失效 → 每次刷新把 200MB+ 分片整份重解析两遍（实测
+    12.6 秒/次），并把最多 8~12 份全量副本留在内存里。现在改为按字节偏移增量
+    读取：稳态零解析，新增一行只解析一行。
+    """
+    from ats.fusion.shadow_io import DayLogCursor
+
+    key = (src_day, tuple(str(p) for p in paths))
+    cursor = _SHADOW_CURSORS.get(key)
+    if cursor is None:
+        for stale in [k for k in _SHADOW_CURSORS if k[0] == src_day]:
+            _SHADOW_CURSORS.pop(stale, None)
+            _SHADOW_ROWS_SNAPSHOT.pop(stale, None)
+        cursor = DayLogCursor(max_records=max_records, compact=True)
+        _SHADOW_CURSORS[key] = cursor
+    cursor.refresh(paths)
+    if cursor.errors:
+        logger.warning("[FusionLadder] 影子读取异常: %s", cursor.errors[:5])
+    return key, cursor
+
+
+def _shadow_rows(paths: Sequence[str], src_day: str, max_records: int = 20000) -> List[Dict[str, Any]]:
+    """游标内记录的只读快照；同一版本号内不重复复制列表。"""
+    key, cursor = _shadow_dataset(paths, src_day, max_records)
+    cached = _SHADOW_ROWS_SNAPSHOT.get(key)
+    if cached is not None and cached[0] == cursor.version:
+        return cached[1]
+    rows = cursor.rows()
+    _SHADOW_ROWS_SNAPSHOT[key] = (cursor.version, rows)
+    return rows
 
 
 def load_live_series(day: str = "", max_lines: int = 20000, allow_fallback: bool = True) -> Dict[str, List[Dict[str, Any]]]:
@@ -1349,22 +1399,16 @@ def load_live_series(day: str = "", max_lines: int = 20000, allow_fallback: bool
 
     与 `load_live_rows` 的区别：那个只保留每只票最新一条（看板用），
     这个保留整条时间序列，才能算出入局时间、入局后 MFE/MAE、持续分。
-    内置文件指纹 (path, size, mtime) 缓存，文件未变时 0 磁盘 IO 直接返回。
+    两者共用同一个增量游标，不再各自全量重读。
     """
     path = _resolve_shadow_file(day)[0] if allow_fallback else _resolve_day_file(day)
     if not path or not os.path.exists(path):
         return {}
     path_day = os.path.basename(path)[:10]
     try:
-        from ats.fusion.shadow_io import read_paths, file_signature, record_ts
+        from ats.fusion.shadow_io import record_ts
         paths = _resolved_day_paths(path, path_day)
-        cache_key = (file_signature(paths), int(max_lines), path_day)
-        cached = _LIVE_SERIES_CACHE.get(cache_key)
-        if cached is not None:
-            return cached
-        records, errors = read_paths(paths, max_records=max_lines)
-        if errors:
-            logger.warning("[FusionLadder] 影子读取异常: %s", errors[:5])
+        records = _shadow_rows(paths, path_day, _shadow_retention_records())
         tail = sorted((r for r in records if record_ts(r) is not None), key=record_ts)[-max_lines:]
     except (OSError, ValueError, TypeError):
         logger.exception("[FusionLadder] 影子分片读取失败")
@@ -1373,7 +1417,7 @@ def load_live_series(day: str = "", max_lines: int = 20000, allow_fallback: bool
     series: Dict[str, List[Dict[str, Any]]] = {}
     for rec in tail:
         from ats.fusion.source_identity import record_matches_day, is_replay_record
-        if is_replay_record(rec) or not record_matches_day(rec, os.path.basename(path)[:10]):
+        if is_replay_record(rec) or not record_matches_day(rec, path_day):
             continue
         code = str(rec.get("code") or "").split(".")[0].zfill(6)
         if not code:
@@ -1383,9 +1427,6 @@ def load_live_series(day: str = "", max_lines: int = 20000, allow_fallback: bool
         series.setdefault(code, []).append(rec)
     for recs in series.values():
         recs.sort(key=lambda r: float(r.get("ts") or 0.0))
-    if len(_LIVE_SERIES_CACHE) >= 8:
-        _LIVE_SERIES_CACHE.clear()
-    _LIVE_SERIES_CACHE[cache_key] = series
     return series
 
 
@@ -1522,15 +1563,9 @@ def load_live_rows(day: str = "", max_lines: int = 5000, allow_fallback: bool = 
     if not target_path or not os.path.exists(target_path):
         return []
     try:
-        from ats.fusion.shadow_io import read_paths, file_signature, record_ts
+        from ats.fusion.shadow_io import record_ts
         paths = _resolved_day_paths(target_path, src_day)
-        cache_key = (file_signature(paths), int(max_lines), src_day)
-        cached = _LIVE_ROWS_CACHE.get(cache_key)
-        if cached is not None:
-            return list(cached)
-        records, errors = read_paths(paths, max_records=max_lines)
-        if errors:
-            logger.warning("[FusionLadder] 影子读取异常: %s", errors[:5])
+        records = _shadow_rows(paths, src_day, _shadow_retention_records())
         tail = sorted((r for r in records if record_ts(r) is not None), key=record_ts)[-max_lines:]
     except (OSError, ValueError, TypeError):
         logger.exception("[FusionLadder] 影子分片读取失败")
@@ -1551,16 +1586,11 @@ def load_live_rows(day: str = "", max_lines: int = 5000, allow_fallback: bool = 
         if prev is None or float(rec.get("ts") or 0) >= float(prev.get("ts") or 0):
             latest[code] = rec
 
-    rows = list(latest.values())
-    for r in rows:
-        r["_source_day"] = src_day
-        r["_source_file"] = target_path
+    # 记录由游标长期持有，这里只做浅拷贝再打来源标记，避免把 _source_* 写回共享记录。
+    rows = [dict(r, _source_day=src_day, _source_file=target_path) for r in latest.values()]
     rows.sort(key=lambda r: (int((r.get("fusion") or {}).get("tier") or 0),
                              float((r.get("fusion") or {}).get("rar") or 0)), reverse=True)
-    if len(_LIVE_ROWS_CACHE) >= 12:
-        _LIVE_ROWS_CACHE.clear()
-    _LIVE_ROWS_CACHE[cache_key] = rows
-    return list(rows)
+    return rows
 
 
 class _ReplayCancelled(Exception):
@@ -1749,15 +1779,17 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self._closing_settle_timer.timeout.connect(self._check_and_auto_settle_closing)
         self._closing_settle_timer.start(15000)
 
-        # 实时梯度自动刷新：2s 巡检一次，仅在影子文件真的变化时重绘（静止不重绘，零额外开销）
+        # 实时梯度自动刷新：30s 巡检一次。看板展示的是"每票最新一条"，
+        # 该行集通常几分钟才变化一次，2s 一次纯属空转（每次要重建 3 万多个单元格）。
         self._live_sig = None
+        self._live_render_fp = None
         self._tab_signatures: Dict[int, Any] = {}
         self._last_init_scan_t = 0.0
         self._init_scan_started = False
         self._replay_backfill_started = False
         self._live_timer = QTimer(self)
         self._live_timer.timeout.connect(self._auto_refresh_live)
-        self._live_timer.start(2000)
+        self._live_timer.start(30000)
 
         # 启动即初始化：每次打开窗口都保证跑一次（非交易时段自动豁免），绝不白板
         QTimer.singleShot(1200, self._startup_init_scan)
@@ -3720,7 +3752,35 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 font.setBold(True)
                 item.setFont(font)
 
+    @staticmethod
+    def _rows_fingerprint(rows: Sequence[Dict[str, Any]]) -> int:
+        """看板行集指纹：只有真正影响展示的数据变了才重建表格。
+
+        文件指纹（大小+修改时间）每追加一条记录就会变，但"每票最新一条"的行集
+        往往几分钟才变一次。用行集指纹判断，可以避免把 3 万多个单元格反复重建。
+        """
+        return hash(tuple(
+            (r.get("code"), r.get("ts"),
+             (r.get("fusion") or {}).get("tier"),
+             (r.get("fusion") or {}).get("rar"),
+             r.get("focus_rank"))
+            for r in rows
+        ))
+
     def _render_live(self, force: bool = True) -> None:
+        """包一层重绘开关：整表重建期间关闭重绘，避免 3 万个单元格逐个触发刷新。"""
+        tbl = getattr(self, "tbl_live", None)
+        if tbl is None:
+            return self._render_live_inner(force=force)
+        previous = tbl.updatesEnabled()
+        tbl.setUpdatesEnabled(False)
+        try:
+            self._render_live_inner(force=force)
+        finally:
+            if previous:
+                tbl.setUpdatesEnabled(True)
+
+    def _render_live_inner(self, force: bool = True) -> None:
         day = self.cmb_day.currentText().strip() or today_str()
         sig = self._live_source_signature(day)
         if self.chk_focus_only.isChecked() and day == today_str() and self._is_trading_window():
@@ -3786,6 +3846,13 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 selected_code = self._get_row_code_name(tbl, cur)[0]
         except Exception:
             selected_code = ""
+
+        fingerprint = self._rows_fingerprint(rows)
+        if not force and fingerprint == getattr(self, "_live_render_fp", None):
+            # 行集完全没变：不重建表格，只更新状态栏时间戳。
+            self._live_sig = sig
+            return
+        self._live_render_fp = fingerprint
 
         tbl.setSortingEnabled(False)
         tbl.setRowCount(0)
@@ -3916,7 +3983,9 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 source_item.setToolTip("首次发现：{}；仅为观察信号，梯度及否决原因以本行为准".format(
                     datetime.datetime.fromtimestamp(float(first_ts)).strftime("%H:%M:%S")))
             from ats.fusion.observation import observation_summary
-            source_item.setToolTip(source_item.toolTip() + "\n" + observation_summary(r.get("observation_evidence")))
+            from ats.fusion.shadow_io import hydrate
+            # 证据属冷字段（常驻记录里已剥离），悬停时才按行偏移回读，避免 2 万条常驻 700MB。
+            source_item.setToolTip(source_item.toolTip() + "\n" + observation_summary(hydrate(r).get("observation_evidence")))
             tbl.setItem(i, 14, source_item)
             tbl.setItem(i, 15, self._num_item(time_txt, ts))
             tbl.setItem(i, 16, self._num_item("✅" if hit else "", 1 if hit else 0,
@@ -4112,7 +4181,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 if t >= 1:
                     keep += 1
             ev = list((entry_rec.get("fusion") or {}).get("evidence") or [])
-            te = entry_rec.get("track_entry") or entry_rec.get("track") or {}
+            from ats.fusion.shadow_io import hydrate
+            te = hydrate(entry_rec).get("track_entry") or entry_rec.get("track") or {}
 
             # 5. 首异动与入局点数据精确提取（严密对齐时序）
             # 入局：
