@@ -27,6 +27,10 @@ def safe_deepcopy(x, memo=None, max_depth=100, _current_depth=0):
             return dict(x)
         elif isinstance(x, list):
             return list(x)
+        elif isinstance(x, tuple):
+            return tuple(x)
+        elif isinstance(x, set):
+            return set(x)
         return x
 
     cls = type(x)
@@ -57,9 +61,11 @@ def safe_deepcopy(x, memo=None, max_depth=100, _current_depth=0):
         memo[d] = y
         return y
 
+    # 对未知复杂自定义对象，仍进行深度保护
     try:
+        # 在受控栈保护下调用标准 deepcopy
         return copy.deepcopy(x, memo)
-    except Exception:
+    except (RecursionError, Exception):
         return x
 
 CHECKPOINT_LIMIT = 64

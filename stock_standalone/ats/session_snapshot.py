@@ -113,14 +113,15 @@ class SessionSnapshot:
     def _capture_ledger(self, ledger):
         # Capture on the caller's thread; the disk writer never borrows live entries.
         from contextlib import nullcontext
+        from ats.bounded_evaluation_store import safe_deepcopy
         with self._capture_lock, getattr(ledger, '_mutation_lock', nullcontext()):
             entries = {}
             for code, entry in list(ledger.entries.items()):
-                data = copy.deepcopy(entry.to_dict())
+                data = safe_deepcopy(entry.to_dict())
                 entries[code] = SimpleNamespace(**data, to_dict=lambda value=data: value)
             frozen = SimpleNamespace(entries=entries,
                 _next_day_watch_event_ids=set(getattr(ledger, '_next_day_watch_event_ids', set())),
-                _next_day_watch_event_outcomes=copy.deepcopy(getattr(ledger, '_next_day_watch_event_outcomes', {})))
+                _next_day_watch_event_outcomes=safe_deepcopy(getattr(ledger, '_next_day_watch_event_outcomes', {})))
             self._capture_revision += 1
             return frozen, self._capture_revision
 

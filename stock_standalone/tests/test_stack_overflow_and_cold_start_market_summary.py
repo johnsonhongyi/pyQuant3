@@ -132,3 +132,24 @@ def test_main_window_market_volume_self_heal():
     called_html = label.setText.call_args[0][0]
     assert "上证:" in called_html
     assert "全市:" in called_html
+
+
+def test_safe_deepcopy_tuple_set_and_session_snapshot_capture():
+    from ats.session_snapshot import SessionSnapshot
+    from types import SimpleNamespace
+
+    deep_tuple = (1, 2, (3, (4, {'inner': 5})))
+    res_t = safe_deepcopy(deep_tuple, max_depth=10)
+    assert res_t == deep_tuple
+
+    snap = SessionSnapshot()
+    mock_entry = SimpleNamespace(to_dict=lambda: {'code': '688432', 'name': '有研硅', 'nested': {'a': [1, 2, 3]}})
+    mock_ledger = SimpleNamespace(
+        entries={'688432': mock_entry},
+        _next_day_watch_event_ids={'event_1'},
+        _next_day_watch_event_outcomes={'event_1': {'win': True}}
+    )
+    frozen, rev = snap._capture_ledger(mock_ledger)
+    assert '688432' in frozen.entries
+    assert frozen.entries['688432'].name == '有研硅'
+    assert rev >= 1

@@ -7556,17 +7556,17 @@ class ATSMainWindow(QMainWindow):
 
 
     def _begin_shutdown_drain(self):
-        import copy
+        from ats.bounded_evaluation_store import safe_deepcopy
         from datetime import datetime
         from ats.shutdown import ShutdownDrain
         captured, revision = self.session_snapshot._capture_ledger(self.signal_ledger)
         snapshot = self.session_snapshot
-        alpha_records = copy.deepcopy(getattr(self, '_recorded_alpha_list', []))
+        alpha_records = safe_deepcopy(getattr(self, '_recorded_alpha_list', []))
         alpha_day = getattr(self, '_alpha_flush_date', datetime.now().strftime('%Y-%m-%d'))
         alpha_timer = getattr(self, '_alpha_flush_timer', None)
         if alpha_timer is not None:
             alpha_timer.stop()
-        alpha_jobs = {day: {'records': copy.deepcopy(job['records']), 'submitted': False}
+        alpha_jobs = {day: {'records': safe_deepcopy(job['records']), 'submitted': False}
                       for day, job in getattr(self, '_alpha_flush_jobs', {}).items()
                       if not job.get('submitted', False)}
         if alpha_records:

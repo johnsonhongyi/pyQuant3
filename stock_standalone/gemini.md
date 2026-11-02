@@ -1,5 +1,26 @@
 > 历史工程任务与设计文档已完整归档至 [Antigravity历史工程设计与任务归档文档](design/antigravity_historical_tasks_archive.md)
 
+## 模型协同调度规范（Manager-Worker）
+- **触发条件**：主会话为 **Gemini 4 Argon** 等高阶模型时启用；主会话为 **Gemini Flash** 时直接自理，不触发派发。
+- **角色定位**：
+  - **Argon（管理者）**：任务定位 + 方案与架构决策 + 最终质量验收。
+  - **Flash（执行者）**：通过 `invoke_subagent(..., Model="flash")` 承接写代码、跑测试、批量扫描等高 Token 消耗的具体事务。
+- **动态裁量**：以质量为主、价格为辅；质量第一、效率第二。轻微修改与极高难度核心问题由 Argon 亲自操刀。
+
+## 2026-11-02 19:40 【ATS打包Nuitka版本运行信号弹出后Stack Overflow栈溢出彻底修复与快照安全深拷贝治理】(`docs/tasks/2026-11-02_1940_ATS打包Nuitka版本运行信号弹出后StackOverflow修复.md`, `run_ats.py`, `ats/bounded_evaluation_store.py`, `ats/session_snapshot.py`, `ats/ui/main_window.py`, `tests/test_stack_overflow_and_cold_start_market_summary.py`)
+- [x] **【彻底查清并根除 ATS Nuitka 打包版弹出信号后触发 Windows fatal exception: stack overflow 闪退 BUG】**：
+  - **用户业务与现场反馈**：“ats打包nuitka版本运行就出现 📢 [ALERT_NOTIFY] 串行轮播弹出信号 [有研硅 | 688432 ]: 逆市抗跌... Windows fatal exception: stack overflow”；
+  - **根本原因 1 (Nuitka 打包真实入口线程栈狭窄)**：Nuitka 打包编译脚本 `nuitka_build_ats_console_onlyClang.bat` 真实指定的主入口为 `run_ats.py`。之前仅在 `main_ats.py` 中扩容栈深度，`run_ats.py` 顶层缺失设置，Windows 默认仅为子线程分配 512KB~1MB 栈空间，在 Nuitka 编译调用与多层对象结构下极易击穿 Guard Page；
+  - **根本原因 2 (信号快照与归档路径残留标准库裸调用 `copy.deepcopy`)**：信号轮播弹窗后触发信号账本快照持久化（`SessionSnapshot._capture_ledger`）与 Alpha 归档（`ATSMainWindow._begin_shutdown_drain`）。原实现对复杂账本条目及嵌套成果裸调 `copy.deepcopy`，深层对象递归引发栈溢出；
+  - **根本原因 3 (safe_deepcopy 截断类型与兜底保护不完整)**：原 `safe_deepcopy` 超深熔断未包含 tuple/set，且兜底调用原生 deepcopy 缺失捕获 `RecursionError`；
+- [x] **【全链路栈扩容与安全快照治理落地】**：
+  - **主入口 4MB 安全栈扩容**：在 `run_ats.py` 顶层注入 `threading.stack_size(4 * 1024 * 1024)`，全面覆盖 Nuitka / Python 下所有子线程；
+  - **全面收敛为 `safe_deepcopy`**：在 `SessionSnapshot._capture_ledger` 及 `ATSMainWindow._begin_shutdown_drain` 中，将所有裸 `copy.deepcopy` 统一替换为具有栈深度熔断与 memo 防环的 `safe_deepcopy`；
+  - **强化深度截断与异常捕获**：在 `ats/bounded_evaluation_store.py` 中扩展 tuple/set 截断，并在兜底 deepcopy 中安全拦截 `RecursionError`，杜绝任何外部扩散；
+  - **Windows 注册表 LocalDumps 完备配置**：指导用户在管理员 PowerShell 中配置 `ATS_Terminal.exe` 的 `DumpFolder = %LOCALAPPDATA%\CrashDumps`，确保后续原生异常可生成 MiniDump。
+- [x] **【自动化测试全绿通过】**：
+  - 针对性回归测试 `tests/test_stack_overflow_and_cold_start_market_summary.py`，6 项全部 100% PASS；静态语法编译 0 错误。
+
 ## 2026-11-01 23:15 【彻底根治强势股天梯换手率错显为成交额大数、对齐龙头突击跟单榜规范闭环】(`ats/limit_up_engine.py`, `ats/ui/daily_limit_up_dialog.py`, `ats/intraday_strategy_engine.py`, `tests/test_limit_up_turnover_rate_remediation.py`)
 - [x] **【彻底查清“天梯换手率显示为 822522... / 368020... 大数、龙头跟单榜正确 43.54%”根因】**：
   - **根因确认 1 (字段语义错位与缺少过滤)**：在 A 股新浪/东财及系统主行情宽表中，`turnover` 字段的含义是**成交金额 (元/万元)**（如万邦医药 8.22 亿、中远海控 36.8 亿、百花医药 9.11 亿）；而真实换手率字段名为 `turnover_rate` / `hsl` / `turnoverratio` / `ratio`；

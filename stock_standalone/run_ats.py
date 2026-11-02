@@ -7,7 +7,13 @@ Runs the Autonomous Trading System dashboard.
 import sys
 import os
 import multiprocessing
+import threading
 import argparse
+
+try:
+    threading.stack_size(4 * 1024 * 1024)  # 4MB 安全栈深度，根除 Windows/Nuitka 下子线程 Stack Overflow
+except Exception:
+    pass
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
