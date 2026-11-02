@@ -76,6 +76,7 @@ if __name__ == "__main__" and any(arg in sys.argv[1:] for arg in ("-h", "--help"
                             action="store_true", help="只启动 SBC 持仓独立看板")
         parser.add_argument("--sbc", metavar="CODE", help="只启动 SBC 指定股票窗口（可接周期参数）")
         parser.add_argument("--shadow-live", action="store_true", help="启动隔离 PAPER 影子运行器；参数转交给运行器")
+        parser.add_argument("--perf-log", action="store_true", help="开启 ATS 梯度看板性能日志")
         parser.print_help()
         sys.exit(0)
 
@@ -133,9 +134,11 @@ if __name__ == "__main__":
 from PyQt6.QtWidgets import QApplication
 
 from ats.ui.main_window import ATSMainWindow
+from ats.performance_trace import configure_performance_trace, stop_performance_trace
 from sys_utils import ensure_backend_tk_running
 
 def main():
+    configure_performance_trace(current_dir, sys.argv)
     # 💥 1. 打包自修复：在任何 ATS 模块读取配置之前，抢占式完成所有注册核心配置文件的自愈释放。
     # PyInstaller Onefile 模式下，内置资源打包在临时解压目录 _MEIPASS，
     # 自愈引擎负责将其无损释放至物理运行目录下的对应路径（若已存在且有效则绝不覆盖）。
@@ -223,10 +226,14 @@ def main():
         if not health.get('pid') or health.get('error'):
             raise RuntimeError('Next-day worker failed its packaged startup check')
         keyboard_interrupt_guard.restore()
+        stop_performance_trace()
         return 0
         
     window.show()
-    exit_code = app.exec()
+    try:
+        exit_code = app.exec()
+    finally:
+        stop_performance_trace()
     if is_packaged_env():
         os._exit(exit_code if isinstance(exit_code, int) else 0)
     return exit_code

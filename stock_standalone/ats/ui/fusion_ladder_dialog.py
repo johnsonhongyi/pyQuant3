@@ -77,6 +77,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ats.fusion.adapter import today_str
+from ats.performance_trace import perf_logger
 from ats.fusion.names import name_of
 from ats.fusion.panel import build_panel, render_panel
 from ats.fusion.replay import DayReplay, ReplayConfig, render_focus, render_report
@@ -1620,6 +1621,7 @@ def load_live_rows(day: str = "", max_lines: int = 5000, allow_fallback: bool = 
     并在每行打上 `_source_day`，由界面显式标注"展示的是哪一天"，不伪装成今日数据。
     内置文件指纹 (path, size, mtime) 缓存，文件未变化时 0 磁盘 IO 直接返回。
     """
+    started = time.perf_counter()
     if allow_fallback:
         target_path, src_day = _resolve_shadow_file(day)
     else:
@@ -1631,6 +1633,7 @@ def load_live_rows(day: str = "", max_lines: int = 5000, allow_fallback: bool = 
         from ats.fusion.shadow_io import record_ts
         paths = _resolved_day_paths(target_path, src_day)
         records = _shadow_rows(paths, src_day, _shadow_retention_records())
+        read_done = time.perf_counter()
         tail = sorted((r for r in records if record_ts(r) is not None), key=record_ts)[-max_lines:]
     except (OSError, ValueError, TypeError):
         logger.exception("[FusionLadder] 影子分片读取失败")
@@ -1655,6 +1658,9 @@ def load_live_rows(day: str = "", max_lines: int = 5000, allow_fallback: bool = 
     rows = [dict(r, _source_day=src_day, _source_file=target_path) for r in latest.values()]
     rows.sort(key=lambda r: (int((r.get("fusion") or {}).get("tier") or 0),
                              float((r.get("fusion") or {}).get("rar") or 0)), reverse=True)
+    perf_logger.debug("[FusionPerf] day=%s shadow_read_ms=%.1f aggregate_sort_ms=%.1f records=%d rows=%d",
+                 src_day, (read_done - started) * 1000, (time.perf_counter() - read_done) * 1000,
+                 len(records), len(rows))
     return rows
 
 
@@ -1880,6 +1886,13 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self._live_timer = QTimer(self)
         self._live_timer.timeout.connect(self._auto_refresh_live)
         self._live_timer.start(30000)
+        if not perf_logger.disabled:
+            self._ui_probe_samples = []
+            self._ui_probe_expected = time.monotonic() + 0.1
+            self._ui_probe_timer = QTimer(self)
+            self._ui_probe_timer.setTimerType(Qt.TimerType.PreciseTimer)
+            self._ui_probe_timer.timeout.connect(self._record_ui_event_lag)
+            self._ui_probe_timer.start(100)
 
         # 启动即初始化：每次打开窗口都保证跑一次（非交易时段自动豁免），绝不白板
         QTimer.singleShot(1200, self._startup_init_scan)
@@ -3445,6 +3458,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
 
     def show_normal_position(self) -> None:
         """鼠标滑过感应条或窗口激活时，平滑展开至原始尺寸与位置 (透明度 1.0)"""
+        was_hidden = getattr(self, "is_hidden_state", False)
         if getattr(self, "is_hidden_state", False):
             self.is_hidden_state = False
             self._is_auto_popping = True
@@ -3478,6 +3492,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
             self.show()
         self.raise_()
         self.activateWindow()
+        if was_hidden:
+            QTimer.singleShot(0, lambda: self._queue_shadow_refresh(self.tabs.currentIndex()))
         self._save_window_states(is_open=True)
 
     def _check_hover(self) -> None:
@@ -3554,6 +3570,9 @@ class FusionLadderDialog(QWidget, WindowMixin):
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
+        if getattr(self, "_live_render_suspended", False):
+            self._live_render_suspended = False
+            QTimer.singleShot(0, lambda: self._queue_shadow_refresh(self.tabs.currentIndex()))
         if getattr(self, "_shadow_refresh_closed", False):
             self._shadow_refresh_closed = False
             index = self.tabs.currentIndex()
@@ -3593,6 +3612,10 @@ class FusionLadderDialog(QWidget, WindowMixin):
                     self._is_auto_popping = True
                     QTimer.singleShot(500, lambda: setattr(self, "_is_auto_popping", False))
                     self.show_normal_position()
+            if (event and event.type() == QEvent.Type.WindowStateChange and not self.isMinimized()
+                    and getattr(self, "_live_render_suspended", False)):
+                self._live_render_suspended = False
+                QTimer.singleShot(0, lambda: self._queue_shadow_refresh(self.tabs.currentIndex()))
         except Exception:
             pass
         try:
@@ -3735,13 +3758,19 @@ class FusionLadderDialog(QWidget, WindowMixin):
                                           getattr(self, "parent_window", None)))
                    if index == 3 else None)
         result = {}
+        submitted_at = time.perf_counter()
 
         def prepare():
+            worker_started = time.perf_counter()
             try:
                 result["data"] = (load_live_rows(day, allow_fallback=False) if index == 0 else
                                   FusionLadderDialog._track_entries_from_shadow(context, day))
             except Exception as exc:
                 result["error"] = "{}: {}".format(type(exc).__name__, exc)
+            finally:
+                perf_logger.debug("[FusionPerf] day=%s tab=%s worker_wait_ms=%.1f worker_ms=%.1f",
+                             day, index, (worker_started - submitted_at) * 1000,
+                             (time.perf_counter() - worker_started) * 1000)
 
         if not hasattr(self, "_shadow_refresh_timer"):
             self._shadow_refresh_timer = QTimer(self)
@@ -3820,9 +3849,25 @@ class FusionLadderDialog(QWidget, WindowMixin):
         except Exception:
             return (day, "", 0, 0.0)
 
+    def _record_ui_event_lag(self) -> None:
+        now = time.monotonic()
+        if not self.isVisible() or self.isMinimized() or getattr(self, "is_hidden_state", False):
+            self._ui_probe_expected = now + 0.1
+            return
+        lag = max(0.0, now - self._ui_probe_expected)
+        self._ui_probe_expected += (int(lag / 0.1) + 1) * 0.1
+        self._ui_probe_samples.append(lag * 1000)
+        if len(self._ui_probe_samples) >= 100:
+            values = sorted(self._ui_probe_samples)
+            perf_logger.debug("[FusionPerf] ui_event_lag_ms p95=%.1f p99=%.1f max=%.1f samples=%d",
+                         values[int((len(values) - 1) * .95)], values[int((len(values) - 1) * .99)],
+                         values[-1], len(values))
+            self._ui_probe_samples.clear()
+
     def _auto_refresh_live(self) -> None:
         """定时静默刷新：只有影子文件真的变了才重绘，避免无谓重建表格。"""
-        if getattr(self, "_is_closing", False) or not self.isVisible():
+        if (getattr(self, "_is_closing", False) or not self.isVisible() or self.isMinimized()
+                or getattr(self, "is_hidden_state", False)):
             return
         idx = self.tabs.currentIndex()
         if idx not in (0, 3):
@@ -3840,6 +3885,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
         if sig == last_sig:
             if idx == 0:
                 self._maybe_ensure_data()
+                if getattr(self, "_loaded_live_day", None) == day:
+                    self._render_live(force=False, rows=self._loaded_live_rows, source_sig=sig)
             return
         tab_sig_map[idx] = sig
         self._queue_shadow_refresh(idx, force=False)
@@ -3976,31 +4023,125 @@ class FusionLadderDialog(QWidget, WindowMixin):
             if item is None:
                 continue
             if hasattr(item, "set_pin_status"):
-                item.set_pin_status(True)
-            item.setBackground(QColor("#4b2026"))
+                if not item.is_pinned:
+                    item.set_pin_status(True)
+            if item.background().color() != QColor("#4b2026"):
+                item.setBackground(QColor("#4b2026"))
             if column in identity_columns:
-                item.setForeground(QColor("#ff6868"))
+                if item.foreground().color() != QColor("#ff6868"):
+                    item.setForeground(QColor("#ff6868"))
                 font = item.font()
-                font.setBold(True)
-                item.setFont(font)
+                if not font.bold():
+                    font.setBold(True)
+                    item.setFont(font)
+
+    @staticmethod
+    def _update_live_cell(table, row, column, replacement):
+        """Retain an existing item and copy all display and sorting state."""
+        item = table.item(row, column)
+        if item is None or type(item) is not type(replacement):
+            table.setItem(row, column, replacement)
+            return
+        if item.text() != replacement.text():
+            item.setText(replacement.text())
+        if getattr(item, '_raw_value', None) != getattr(replacement, '_raw_value', None):
+            item.set_raw_value(getattr(replacement, '_raw_value', None))
+        for getter, setter in (('foreground', 'setForeground'), ('background', 'setBackground'),
+                               ('font', 'setFont'), ('toolTip', 'setToolTip'),
+                               ('textAlignment', 'setTextAlignment'), ('flags', 'setFlags')):
+            value = getattr(replacement, getter)()
+            if getattr(item, getter)() != value:
+                getattr(item, setter)(value)
+        role = Qt.ItemDataRole.UserRole + 100
+        if item.data(role) != replacement.data(role):
+            item.setData(role, replacement.data(role))
+        if hasattr(item, 'focus_rank'):
+            item.focus_rank = replacement.focus_rank
+        item.set_pin_status(replacement.is_pinned, replacement.pin_rank)
 
     @staticmethod
     def _rows_fingerprint(rows: Sequence[Dict[str, Any]]) -> int:
-        """看板行集指纹：只有真正影响展示的数据变了才重建表格。
+        """包含完整记录，避免名称、覆盖率或证据变化被旧指纹遗漏。"""
+        return hash(tuple(repr(row) for row in rows))
 
-        文件指纹（大小+修改时间）每追加一条记录就会变，但"每票最新一条"的行集
-        往往几分钟才变一次。用行集指纹判断，可以避免把 3 万多个单元格反复重建。
-        """
-        return hash(tuple(
-            (r.get("code"), r.get("ts"),
-             (r.get("fusion") or {}).get("tier"),
-             (r.get("fusion") or {}).get("rar"),
-             r.get("focus_rank"))
-            for r in rows
-        ))
+    @staticmethod
+    def _live_sort_fingerprint(row, code, name, custom_values, column):
+        fusion = row.get("fusion") or {}
+        axes = fusion.get("axes") or {}
+        entry = fusion.get("entry") or {}
+        stop = fusion.get("stop") or {}
+        coverage = row.get("coverage")
+        if coverage is None:
+            coverage = fusion.get("coverage")
+        values = (fusion.get("tier"), code, name, row.get("price"), row.get("pct"),
+                  fusion.get("rar"), axes.get("position"), axes.get("support"),
+                  axes.get("intent"), axes.get("regime"), fusion.get("size_pct"),
+                  (entry.get("price_lo"), entry.get("price_hi")), stop.get("price"),
+                  fusion.get("age_min"), fusion.get("sources"), row.get("ts"),
+                  _row_is_hit(row), coverage)
+        if column < 0:
+            return None
+        value = values[column] if column < len(values) else (
+            custom_values[column - len(values)] if column - len(values) < len(custom_values) else None)
+        return repr((row.get("focus_rank"), value))
+
+    @staticmethod
+    def _price_order_stays_fixed(table, rows, codes):
+        """Only skip sorting when old, intermediate and new prices cannot cross."""
+        if not table.isSortingEnabled() or len(rows) != table.rowCount():
+            return False
+        by_code = dict(zip(codes, rows))
+        if len(by_code) != len(rows) or any(row.get("focus_rank") for row in rows):
+            return False
+        descending = table.horizontalHeader().sortIndicatorOrder() == Qt.SortOrder.DescendingOrder
+        previous = None
+        for index in range(table.rowCount()):
+            code_item = table.item(index, 1)
+            item = table.item(index, 3)
+            if code_item is None or item is None or getattr(item, "is_pinned", False):
+                return False
+            code = code_item.text().strip().split(".")[0].zfill(6)
+            row = by_code.get(code)
+            if row is None:
+                return False
+            raw = row.get("price")
+            old = item._get_sort_val() if hasattr(item, "_get_sort_val") else None
+            if not isinstance(raw, (int, float)) or not isinstance(old, (int, float)):
+                return False
+            if not (0 < raw < 99999900 and 0 < old < 99999900 and np.isfinite(raw) and np.isfinite(old)):
+                return False
+            # setText reparses the rounded display before set_raw_value restores raw precision.
+            rounded = float("{:.2f}".format(raw))
+            bounds = (min(float(old), float(raw), rounded), max(float(old), float(raw), rounded))
+            if previous is not None:
+                if descending and previous[0] <= bounds[1]:
+                    return False
+                if not descending and previous[1] >= bounds[0]:
+                    return False
+            previous = bounds
+        return True
+
+    def _live_render_context(self):
+        return (self.cmb_day.currentText().strip() or today_str(),
+                self.chk_focus_only.isChecked(),
+                bool(getattr(self, "chk_hit_only", None) and self.chk_hit_only.isChecked()),
+                bool(getattr(self, "chk_structure_only", None) and self.chk_structure_only.isChecked()),
+                tuple(getattr(self, "extra_cols", ())),
+                getattr(self, "show_custom_cols", False), getattr(self, "is_narrow_mode", False))
 
     def _render_live(self, force: bool = True, rows=None, source_sig=None) -> None:
         """包一层重绘开关：整表重建期间关闭重绘，避免 3 万个单元格逐个触发刷新。"""
+        context = self._live_render_context()
+        if getattr(self, "_live_render_dispatch_scheduled", False):
+            self._live_render_pending = (force, rows, source_sig)
+            return
+        if getattr(self, "_live_render_active", False):
+            if context == getattr(self, "_live_active_context", None):
+                self._live_render_pending = (force, rows, source_sig)
+                return
+            self._live_render_generation += 1
+            self._live_render_active = False
+            self._live_render_pending = None
         tbl = getattr(self, "tbl_live", None)
         if tbl is None:
             return self._render_live_inner(force=force, rows=rows, source_sig=source_sig)
@@ -4012,13 +4153,21 @@ class FusionLadderDialog(QWidget, WindowMixin):
             if previous:
                 tbl.setUpdatesEnabled(True)
 
+    def _schedule_live_render_slice(self, callback) -> None:
+        timer = getattr(self, "_live_slice_timer", None)
+        if timer is None:
+            timer = self._live_slice_timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(lambda: self._live_slice_callback())
+        self._live_slice_callback = callback
+        timer.start(0)
+
     def _render_live_inner(self, force: bool = True, rows=None, source_sig=None) -> None:
+        render_started = time.perf_counter()
         day = self.cmb_day.currentText().strip() or today_str()
         sig = source_sig if source_sig is not None else self._live_source_signature(day)
         if source_sig is None and self.chk_focus_only.isChecked() and day == today_str() and self._is_trading_window():
             sig = (sig, int(time.time() // 30))
-        if not force and sig == getattr(self, "_live_sig", None):
-            return
         if rows is None:
             rows = load_live_rows(day, allow_fallback=False)
         self._loaded_live_day, self._loaded_live_rows = day, rows
@@ -4032,9 +4181,11 @@ class FusionLadderDialog(QWidget, WindowMixin):
         hit_only = bool(getattr(self, "chk_hit_only", None) is not None and self.chk_hit_only.isChecked())
         structure_only = bool(getattr(self, "chk_structure_only", None) is not None and self.chk_structure_only.isChecked())
 
+        self._live_render_generation = getattr(self, "_live_render_generation", 0) + 1
         if structure_only and rows:
             rows = [r for r in rows if r.get("focus_rank") or _row_is_structure_opportunity(r)]
             if not rows:
+                self._live_row_fingerprints = {}
                 tbl.setSortingEnabled(False)
                 tbl.setRowCount(0)
                 tbl.insertRow(0)
@@ -4054,6 +4205,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
         if hit_only and rows:
             rows = [r for r in rows if r.get("focus_rank") or _row_is_hit(r) or {"逆势收复启动", "逆势收复持稳"} & set(r.get("patterns") or [])]
             if not rows:
+                self._live_row_fingerprints = {}
                 tbl.setSortingEnabled(False)
                 tbl.setRowCount(0)
                 tbl.insertRow(0)
@@ -4081,18 +4233,14 @@ class FusionLadderDialog(QWidget, WindowMixin):
         except Exception:
             selected_code = ""
 
-        fingerprint = self._rows_fingerprint(rows)
-        if not force and fingerprint == getattr(self, "_live_render_fp", None):
-            # 行集完全没变：不重建表格，只更新状态栏时间戳。
-            self._live_sig = sig
-            return
-        self._live_render_fp = fingerprint
-
-        tbl.setSortingEnabled(False)
-        tbl.setRowCount(0)
+        self._live_render_generation = getattr(self, "_live_render_generation", 0) + 1
+        generation = self._live_render_generation
         self._live_sig = sig
-        tbl.clearSpans()
         if not rows:
+            self._live_row_fingerprints = {}
+            tbl.setSortingEnabled(False)
+            tbl.setRowCount(0)
+            tbl.clearSpans()
             # 永不白板：放一行占位说明，并按交易时段自动拉起初始化
             tbl.insertRow(0)
             hint = ("正在初始化扫描…（交易时段会自动拉起一轮逻辑扫描，无需手动操作）"
@@ -4134,171 +4282,322 @@ class FusionLadderDialog(QWidget, WindowMixin):
         hit_count = 0
         df_strat = self._resolve_ats_strategy_df()
         custom_lookup = self._custom_code_lookup(df_strat) if getattr(self, "extra_cols", None) else None
-        tbl.setRowCount(len(rows))
-        for i, r in enumerate(rows):
-            fusion = r.get("fusion") or {}
-            tier = int(fusion.get("tier") or 0)
-            tier_count[tier] = tier_count.get(tier, 0) + 1
-            axes = fusion.get("axes") or {}
-            entry = fusion.get("entry") or {}
-            stop = fusion.get("stop") or {}
-            band = ""
-            if entry.get("price_lo") and entry.get("price_hi"):
-                band = "{:.2f}~{:.2f}".format(float(entry["price_lo"]), float(entry["price_hi"]))
+        codes = [str(r.get("code", "")).split(".")[0].zfill(6) for r in rows]
+        names = [self._resolve_name(code, r) for code, r in zip(codes, rows)]
+        custom_values = [[self._extract_stock_custom_val(df_strat, code, ec, custom_lookup)
+                          for ec in getattr(self, "extra_cols", ())] for code in codes]
+        context = (day, tuple(getattr(self, "extra_cols", ())), tbl.columnCount(),
+                   getattr(self, "show_custom_cols", False), getattr(self, "is_narrow_mode", False),
+                   getattr(self, "_display_config_revision", 0))
+        cache = getattr(self, "_live_row_fingerprints", {}) if context == getattr(self, "_live_row_context", None) else {}
+        previous_context = getattr(self, "_live_row_context", None)
+        unique = (len(set(codes)) == len(codes) and
+                  (previous_context is None or previous_context[0] == day))
+        existing = {}
+        if unique:
+            for row_index in range(tbl.rowCount()):
+                item = tbl.item(row_index, 1)
+                code = item.text().strip().split(".")[0].zfill(6) if item else ""
+                if not code or code in existing:
+                    unique = False
+                    break
+                existing[code] = row_index
+        signatures = [repr((r, name, values, context)) for r, name, values in zip(rows, names, custom_values)]
+        changed = (not unique or set(existing) != set(codes) or
+                   any(cache.get(code) != fp for code, fp in zip(codes, signatures)))
+        sort_column = tbl.horizontalHeader().sortIndicatorSection()
+        sort_cache = getattr(self, "_live_sort_fingerprints", {}) if context == getattr(self, "_live_row_context", None) else {}
+        sort_signatures = [self._live_sort_fingerprint(r, code, name, values, sort_column)
+                           for r, code, name, values in zip(rows, codes, names, custom_values)]
+        sort_changed = (not unique or set(existing) != set(codes) or
+                        getattr(self, "_live_sort_column", None) != sort_column or
+                        any(sort_cache.get(code) != fp for code, fp in zip(codes, sort_signatures)) or
+                        any(r.get("focus_rank") and cache.get(code) != fp
+                            for r, code, fp in zip(rows, codes, signatures)))
+        if (sort_changed and unique and sort_column == 3 and set(existing) == set(codes)
+                and getattr(self, "_live_sort_column", None) == sort_column
+                and self._price_order_stays_fixed(tbl, rows, codes)):
+            sort_changed = False
+        code_set = set(codes)
+        self._live_row_context = context
+        self._live_row_fingerprints = cache
 
-            code = str(r.get("code", "")).split(".")[0].zfill(6)
-            name = self._resolve_name(code, r)
+        def render_rows():
+            nonlocal coverage_sum, coverage_n, latest_ts, hit_count, existing, cache, sort_cache
+            if changed:
+                if sort_changed:
+                    tbl.setSortingEnabled(False)
+                tbl.clearSpans()
+                if not unique:
+                    tbl.setRowCount(0)
+                    cache = {}
+                    sort_cache = {}
+                    self._live_row_fingerprints = cache
+                    existing = {}
+                    yield
+                else:
+                    for code, row_index in sorted(existing.items(), key=lambda pair: pair[1], reverse=True):
+                        if code not in code_set:
+                            tbl.removeRow(row_index)
+                            cache.pop(code, None)
+                            sort_cache.pop(code, None)
+                            yield
+                    existing = {}
+                    for row_index in range(tbl.rowCount()):
+                        item = tbl.item(row_index, 1)
+                        if item:
+                            existing[item.text().strip().split(".")[0].zfill(6)] = row_index
+            for input_index, r in enumerate(rows):
+                code_key = codes[input_index]
+                if not unique or code_key not in existing:
+                    i = tbl.rowCount()
+                    tbl.insertRow(i)
+                    if unique:
+                        existing[code_key] = i
+                else:
+                    i = existing[code_key]
+                fusion = r.get("fusion") or {}
+                tier = int(fusion.get("tier") or 0)
+                tier_count[tier] = tier_count.get(tier, 0) + 1
+                axes = fusion.get("axes") or {}
+                entry = fusion.get("entry") or {}
+                stop = fusion.get("stop") or {}
+                band = ""
+                if entry.get("price_lo") and entry.get("price_hi"):
+                    band = "{:.2f}~{:.2f}".format(float(entry["price_lo"]), float(entry["price_hi"]))
 
-            # 现价/涨幅必须来自真实落盘行情；缺失就显示 "--"，绝不伪造成 0.00%
-            raw_price = r.get("price")
-            raw_pct = r.get("pct")
-            price = float(raw_price) if isinstance(raw_price, (int, float)) else 0.0
-            pct = float(raw_pct) if isinstance(raw_pct, (int, float)) else None
-            price_txt = "{:.2f}".format(price) if price > 0 else "--"
-            pct_txt = "{:+.2f}%".format(pct) if pct is not None else "--"
+                code = codes[input_index]
+                name = names[input_index]
 
-            ts = float(r.get("ts") or 0.0)
-            latest_ts = max(latest_ts, ts)
-            time_txt = datetime.datetime.fromtimestamp(ts).strftime("%H:%M:%S") if ts > 0 else "--"
+                # 现价/涨幅必须来自真实落盘行情；缺失就显示 "--"，绝不伪造成 0.00%
+                raw_price = r.get("price")
+                raw_pct = r.get("pct")
+                price = float(raw_price) if isinstance(raw_price, (int, float)) else 0.0
+                pct = float(raw_pct) if isinstance(raw_pct, (int, float)) else None
+                price_txt = "{:.2f}".format(price) if price > 0 else "--"
+                pct_txt = "{:+.2f}%".format(pct) if pct is not None else "--"
 
-            cov = r.get("coverage")
-            if cov is None:
-                cov = fusion.get("coverage")
-            cov_val = float(cov) if isinstance(cov, (int, float)) else 0.0
-            if isinstance(cov, (int, float)):
-                coverage_sum += cov_val
-                coverage_n += 1
+                ts = float(r.get("ts") or 0.0)
+                latest_ts = max(latest_ts, ts)
+                time_txt = datetime.datetime.fromtimestamp(ts).strftime("%H:%M:%S") if ts > 0 else "--"
 
-            legacy_action = str((r.get("legacy") or {}).get("action") or "")
-            hit = _row_is_hit(r)
-            if hit:
-                hit_count += 1
+                cov = r.get("coverage")
+                if cov is None:
+                    cov = fusion.get("coverage")
+                cov_val = float(cov) if isinstance(cov, (int, float)) else 0.0
+                if isinstance(cov, (int, float)):
+                    coverage_sum += cov_val
+                    coverage_n += 1
 
-            pct_color = QColor("#c8c8d0") if pct is None else (QColor("#ff5c5c") if pct >= 0 else QColor("#00ff88"))
+                legacy_action = str((r.get("legacy") or {}).get("action") or "")
+                hit = _row_is_hit(r)
+                if hit:
+                    hit_count += 1
 
-            # 各列严格接入 NumericTableWidgetItem 保证高精度数值排序
-            # 表头: [级别, 代码, 名称, 现价, 涨幅%, RAR, 位, 接, 意, 环, 仓位%, 进场, 止损, 先手min, 来源, 更新时间, 命中, 覆盖%]
-            tbl.setItem(i, 0, self._num_item(f"L{tier}", tier, _TIER_COLORS.get(tier), bold=True))
-            for col, text in ((1, code), (2, name)):
-                item = FusionSortFocusItem(text, r.get("focus_rank"))
+                if unique and cache.get(code) == signatures[input_index]:
+                    sort_cache[code] = sort_signatures[input_index]
+                    yield
+                    continue
+
+                pct_color = QColor("#c8c8d0") if pct is None else (QColor("#ff5c5c") if pct >= 0 else QColor("#00ff88"))
+
+                # 各列严格接入 NumericTableWidgetItem 保证高精度数值排序
+                # 表头: [级别, 代码, 名称, 现价, 涨幅%, RAR, 位, 接, 意, 环, 仓位%, 进场, 止损, 先手min, 来源, 更新时间, 命中, 覆盖%]
+                self._update_live_cell(tbl, i, 0, self._num_item(f"L{tier}", tier, _TIER_COLORS.get(tier), bold=True))
+                for col, text in ((1, code), (2, name)):
+                    item = FusionSortFocusItem(text, r.get("focus_rank"))
+                    if r.get("focus_rank"):
+                        item.setForeground(QColor("#ff6868"))
+                        item.setBackground(QColor("#4b2026"))
+                        font = item.font()
+                        font.setBold(True)
+                        item.setFont(font)
+                        item.setToolTip("当前逆势重点 #{}；承接站稳优先、低追高距离优先。\n观察不等于可执行；否决：{}".format(r["focus_rank"], fusion.get("veto_reason") or "无"))
+                    self._update_live_cell(tbl, i, col, item)
+                self._update_live_cell(tbl, i, 3, self._num_item(price_txt, price))
+                pct_item = self._num_item(pct_txt, pct if pct is not None else 0.0, color=pct_color, bold=True)
+                pct_source = r.get("pct_source")
+                if pct_source == "price_prev_close":
+                    pct_item.setToolTip("按该记录的现价和昨收计算；原始上报涨幅：{}".format(r.get("reported_pct")))
+                elif pct_source == "reported":
+                    pct_item.setToolTip("缺少同源昨收，显示上报值，尚未校验。")
+                else:
+                    pct_item.setToolTip("旧记录或缺少可信涨幅，不能确认口径。")
+                self._update_live_cell(tbl, i, 4, pct_item)
+                self._update_live_cell(tbl, i, 5, self._num_item(fusion.get("rar", 0), float(fusion.get("rar", 0) or 0)))
+                self._update_live_cell(tbl, i, 6, self._num_item(axes.get("position", 0), float(axes.get("position", 0) or 0)))
+                self._update_live_cell(tbl, i, 7, self._num_item(axes.get("support", 0), float(axes.get("support", 0) or 0)))
+                self._update_live_cell(tbl, i, 8, self._num_item(axes.get("intent", 0), float(axes.get("intent", 0) or 0)))
+                self._update_live_cell(tbl, i, 9, self._num_item(axes.get("regime", 0), float(axes.get("regime", 0) or 0)))
+                self._update_live_cell(tbl, i, 10, self._num_item(f"{fusion.get('size_pct', 0)}%", float(fusion.get("size_pct", 0) or 0)))
+                self._update_live_cell(tbl, i, 11, self._num_item(band, band))
+                self._update_live_cell(tbl, i, 12, self._num_item(stop.get("price", "-"), float(stop.get("price") or 0) if stop.get("price") not in ("-", None) else 0.0))
+                self._update_live_cell(tbl, i, 13, self._num_item(fusion.get("age_min", 0), float(fusion.get("age_min", 0) or 0)))
+                sources = ",".join(fusion.get("sources") or [])
+                pats = r.get("patterns") or []
+                observing = "逆势收复启动" in pats or "逆势收复持稳" in pats
+                source_item = self._num_item(("重点{} · ".format(r["focus_rank"]) if r.get("focus_rank") else "") + (("逆势收复持稳" if "逆势收复持稳" in pats else "逆势收复观察") if observing else sources), sources)
+                first_ts = r.get("counter_reclaim_first_ts")
+                if observing and first_ts:
+                    source_item.setToolTip("首次发现：{}；仅为观察信号，梯度及否决原因以本行为准".format(
+                        datetime.datetime.fromtimestamp(float(first_ts)).strftime("%H:%M:%S")))
+                # Qt 单元格只保存回读位置，不复制整条记录或证据。
+                cold_value = ((r["_raw_ref"], r.get("_raw_digest"))
+                              if r.get("_has_observation_evidence") and r.get("_raw_ref")
+                              else r.get("observation_evidence"))
+                if cold_value is not None:
+                    source_item.setData(Qt.ItemDataRole.UserRole + 100, cold_value)
+                source_item.setToolTip(source_item.toolTip() or "观察证据：旧记录未保存，不能回填推断")
+                self._update_live_cell(tbl, i, 14, source_item)
+                self._update_live_cell(tbl, i, 15, self._num_item(time_txt, ts))
+                self._update_live_cell(tbl, i, 16, self._num_item("✅" if hit else "", 1 if hit else 0,
+                                                 color=QColor("#ffd24d") if hit else None, bold=hit))
+                self._update_live_cell(tbl, i, 17, self._num_item(f"{cov_val * 100:.0f}%", cov_val,
+                                                  color=QColor("#8fd18f") if cov_val >= 0.8 else QColor("#ffa64d")))
+
+                # 动态自定义列 (ats_col)
+                if getattr(self, "extra_cols", None):
+                    for idx_ec, ec in enumerate(self.extra_cols):
+                        val_txt, val_raw = custom_values[input_index][idx_ec]
+                        self._update_live_cell(tbl, i, 18 + idx_ec, self._num_item(val_txt, val_raw))
                 if r.get("focus_rank"):
-                    item.setForeground(QColor("#ff6868"))
-                    item.setBackground(QColor("#4b2026"))
-                    font = item.font()
-                    font.setBold(True)
-                    item.setFont(font)
-                    item.setToolTip("当前逆势重点 #{}；承接站稳优先、低追高距离优先。\n观察不等于可执行；否决：{}".format(r["focus_rank"], fusion.get("veto_reason") or "无"))
-                tbl.setItem(i, col, item)
-            tbl.setItem(i, 3, self._num_item(price_txt, price))
-            pct_item = self._num_item(pct_txt, pct if pct is not None else 0.0, color=pct_color, bold=True)
-            pct_source = r.get("pct_source")
-            if pct_source == "price_prev_close":
-                pct_item.setToolTip("按该记录的现价和昨收计算；原始上报涨幅：{}".format(r.get("reported_pct")))
-            elif pct_source == "reported":
-                pct_item.setToolTip("缺少同源昨收，显示上报值，尚未校验。")
+                    self._mark_focus_row(tbl, i, (1, 2))
+                if unique:
+                    cache[code] = signatures[input_index]
+                    sort_cache[code] = sort_signatures[input_index]
+                yield
+
+            self._live_sort_fingerprints = sort_cache
+            self._live_sort_column = sort_column
+            if sort_changed or not tbl.isSortingEnabled():
+                sort_started = time.perf_counter()
+                tbl.setSortingEnabled(True)
+                sort_ms[0] = (time.perf_counter() - sort_started) * 1000
+
+            if selected_code:
+                try:
+                    for r_i in range(tbl.rowCount()):
+                        if self._get_row_code_name(tbl, r_i)[0] == selected_code:
+                            tbl.selectRow(r_i)
+                            break
+                except Exception:
+                    pass
+            try:
+                tbl.verticalScrollBar().setValue(scroll)
+            except Exception:
+                pass
+            if had_focus:
+                # 重建后把焦点还给表格，否则方向键会落到别的控件上，联动就"失灵"了
+                try:
+                    tbl.setFocus(Qt.FocusReason.OtherFocusReason)
+                except Exception:
+                    pass
+
+            cov_avg = (coverage_sum / coverage_n) if coverage_n else 0.0
+            if source_day == day and latest_ts > 0:
+                self._latest_live_day = day
+                self._latest_live_ts = latest_ts
+            now_txt = datetime.datetime.now().strftime("%H:%M:%S")
+            stale = ""
+            if latest_ts > 0:
+                age_s = time.time() - latest_ts
+                if age_s > 60:
+                    stale = "｜⚠ 最新记录已 {}s 未更新".format(int(age_s))
+            day_note = ""
+            if source_day and source_day != day:
+                day_note = "｜⚠ 今日暂无记录，展示 {} 数据".format(source_day)
+            focus_evidence_missing = False
+            if self.chk_focus_only.isChecked():
+                count_txt = "重点 {} / 上限10｜展示{} / 原始{}条".format(sum(bool(r.get("focus_rank")) for r in rows), len(rows), total_rows)
+                if rows and not any(r.get("reclaim_detail") for r in rows):
+                    focus_evidence_missing = True
+                    count_txt += "｜⚠ 来源记录缺少重点所需证据"
+            elif structure_only:
+                count_txt = "🎯 结构机会 {} / 共 {} 条 (已过滤脉冲杂音)".format(len(rows), total_rows)
+            elif hit_only:
+                count_txt = "命中 {} / 共 {} 条".format(len(rows), total_rows)
             else:
-                pct_item.setToolTip("旧记录或缺少可信涨幅，不能确认口径。")
-            tbl.setItem(i, 4, pct_item)
-            tbl.setItem(i, 5, self._num_item(fusion.get("rar", 0), float(fusion.get("rar", 0) or 0)))
-            tbl.setItem(i, 6, self._num_item(axes.get("position", 0), float(axes.get("position", 0) or 0)))
-            tbl.setItem(i, 7, self._num_item(axes.get("support", 0), float(axes.get("support", 0) or 0)))
-            tbl.setItem(i, 8, self._num_item(axes.get("intent", 0), float(axes.get("intent", 0) or 0)))
-            tbl.setItem(i, 9, self._num_item(axes.get("regime", 0), float(axes.get("regime", 0) or 0)))
-            tbl.setItem(i, 10, self._num_item(f"{fusion.get('size_pct', 0)}%", float(fusion.get("size_pct", 0) or 0)))
-            tbl.setItem(i, 11, self._num_item(band, band))
-            tbl.setItem(i, 12, self._num_item(stop.get("price", "-"), float(stop.get("price") or 0) if stop.get("price") not in ("-", None) else 0.0))
-            tbl.setItem(i, 13, self._num_item(fusion.get("age_min", 0), float(fusion.get("age_min", 0) or 0)))
-            sources = ",".join(fusion.get("sources") or [])
-            pats = r.get("patterns") or []
-            observing = "逆势收复启动" in pats or "逆势收复持稳" in pats
-            source_item = self._num_item(("重点{} · ".format(r["focus_rank"]) if r.get("focus_rank") else "") + (("逆势收复持稳" if "逆势收复持稳" in pats else "逆势收复观察") if observing else sources), sources)
-            first_ts = r.get("counter_reclaim_first_ts")
-            if observing and first_ts:
-                source_item.setToolTip("首次发现：{}；仅为观察信号，梯度及否决原因以本行为准".format(
-                    datetime.datetime.fromtimestamp(float(first_ts)).strftime("%H:%M:%S")))
-            # Qt 单元格只保存回读位置，不复制整条记录或证据。
-            cold_value = ((r["_raw_ref"], r.get("_raw_digest"))
-                          if r.get("_has_observation_evidence") and r.get("_raw_ref")
-                          else r.get("observation_evidence"))
-            if cold_value is not None:
-                source_item.setData(Qt.ItemDataRole.UserRole + 100, cold_value)
-            source_item.setToolTip(source_item.toolTip() or "观察证据：旧记录未保存，不能回填推断")
-            tbl.setItem(i, 14, source_item)
-            tbl.setItem(i, 15, self._num_item(time_txt, ts))
-            tbl.setItem(i, 16, self._num_item("✅" if hit else "", 1 if hit else 0,
-                                             color=QColor("#ffd24d") if hit else None, bold=hit))
-            tbl.setItem(i, 17, self._num_item(f"{cov_val * 100:.0f}%", cov_val,
-                                              color=QColor("#8fd18f") if cov_val >= 0.8 else QColor("#ffa64d")))
+                count_txt = "影子 {} 条".format(len(rows))
+            warn = bool(stale or day_note or schema_note or focus_evidence_missing)
+            brief = "状态：{} {}{}".format(
+                day,
+                "重点{}/10".format(sum(bool(r.get("focus_rank")) for r in rows)) if self.chk_focus_only.isChecked()
+                else "{}条".format(len(rows)),
+                " ⚠" if warn else "",
+            )
+            self._set_status(
+                "状态：{} {}｜L4 {} / L3 {} / L2 {} / L1 {} / L0 {}｜命中 {}｜覆盖 {:.0f}%｜刷新 {}{}{}{}{}".format(
+                    day, count_txt, tier_count[4], tier_count[3], tier_count[2], tier_count[1], tier_count[0],
+                    hit_count, cov_avg * 100, now_txt, stale, day_note, schema_note, writer_note,
+                ), summary=brief
+            )
+            self.lbl_status.setStyleSheet("color:#ffa64d; font-weight:bold;" if warn else "color:#8fd18f; font-weight:bold;")
+            self._apply_search_filter(tbl)
 
-            # 动态自定义列 (ats_col)
-            if getattr(self, "extra_cols", None):
-                for idx_ec, ec in enumerate(self.extra_cols):
-                    val_txt, val_raw = self._extract_stock_custom_val(df_strat, code, ec, custom_lookup)
-                    tbl.setItem(i, 18 + idx_ec, self._num_item(val_txt, val_raw))
-            if r.get("focus_rank"):
-                self._mark_focus_row(tbl, i, (1, 2))
+        iterator = render_rows()
+        prepared_at = time.perf_counter()
+        render_cpu = [0.0]
+        sort_ms = [0.0]
+        self._live_render_active = True
+        self._live_active_context = self._live_render_context()
 
-        tbl.setSortingEnabled(True)
-
-        if selected_code:
+        def render_slice():
+            if generation != getattr(self, "_live_render_generation", 0):
+                return
+            if self._live_active_context != self._live_render_context():
+                self._live_render_active = False
+                self._live_render_pending = None
+                tbl.setSortingEnabled(True)
+                return
+            if not self.isVisible() or self.isMinimized() or getattr(self, "is_hidden_state", False):
+                self._live_render_active = False
+                self._live_render_pending = None
+                self._live_render_suspended = True
+                return
+            deadline = time.perf_counter() + 0.010
+            slice_started = time.perf_counter()
+            previous = tbl.updatesEnabled()
+            tbl.setUpdatesEnabled(False)
             try:
-                for r_i in range(tbl.rowCount()):
-                    if self._get_row_code_name(tbl, r_i)[0] == selected_code:
-                        tbl.selectRow(r_i)
-                        break
-            except Exception:
-                pass
-        try:
-            tbl.verticalScrollBar().setValue(scroll)
-        except Exception:
-            pass
-        if had_focus:
-            # 重建后把焦点还给表格，否则方向键会落到别的控件上，联动就"失灵"了
-            try:
-                tbl.setFocus(Qt.FocusReason.OtherFocusReason)
-            except Exception:
-                pass
+                while time.perf_counter() < deadline:
+                    try:
+                        next(iterator)
+                    except StopIteration:
+                        self._live_render_active = False
+                        self._live_render_suspended = False
+                        latest = latest_ts
+                        perf_logger.debug("[FusionPerf] day=%s prepare_ms=%.1f qt_ms=%.1f sort_ms=%.1f wall_ms=%.1f data_age_ms=%s rows=%d",
+                                     day, (prepared_at - render_started) * 1000,
+                                     (render_cpu[0] + time.perf_counter() - slice_started) * 1000,
+                                     sort_ms[0], (time.perf_counter() - render_started) * 1000,
+                                     round((time.time() - latest) * 1000) if latest else "unknown", len(rows))
+                        pending = getattr(self, "_live_render_pending", None)
+                        if pending is not None:
+                            self._live_render_dispatch_scheduled = True
 
-        cov_avg = (coverage_sum / coverage_n) if coverage_n else 0.0
-        if source_day == day and latest_ts > 0:
-            self._latest_live_day = day
-            self._latest_live_ts = latest_ts
-        now_txt = datetime.datetime.now().strftime("%H:%M:%S")
-        stale = ""
-        if latest_ts > 0:
-            age_s = time.time() - latest_ts
-            if age_s > 60:
-                stale = "｜⚠ 最新记录已 {}s 未更新".format(int(age_s))
-        day_note = ""
-        if source_day and source_day != day:
-            day_note = "｜⚠ 今日暂无记录，展示 {} 数据".format(source_day)
-        focus_evidence_missing = False
-        if self.chk_focus_only.isChecked():
-            count_txt = "重点 {} / 上限10｜展示{} / 原始{}条".format(sum(bool(r.get("focus_rank")) for r in rows), len(rows), total_rows)
-            if rows and not any(r.get("reclaim_detail") for r in rows):
-                focus_evidence_missing = True
-                count_txt += "｜⚠ 来源记录缺少重点所需证据"
-        elif structure_only:
-            count_txt = "🎯 结构机会 {} / 共 {} 条 (已过滤脉冲杂音)".format(len(rows), total_rows)
-        elif hit_only:
-            count_txt = "命中 {} / 共 {} 条".format(len(rows), total_rows)
-        else:
-            count_txt = "影子 {} 条".format(len(rows))
-        warn = bool(stale or day_note or schema_note or focus_evidence_missing)
-        brief = "状态：{} {}{}".format(
-            day,
-            "重点{}/10".format(sum(bool(r.get("focus_rank")) for r in rows)) if self.chk_focus_only.isChecked()
-            else "{}条".format(len(rows)),
-            " ⚠" if warn else "",
-        )
-        self._set_status(
-            "状态：{} {}｜L4 {} / L3 {} / L2 {} / L1 {} / L0 {}｜命中 {}｜覆盖 {:.0f}%｜刷新 {}{}{}{}{}".format(
-                day, count_txt, tier_count[4], tier_count[3], tier_count[2], tier_count[1], tier_count[0],
-                hit_count, cov_avg * 100, now_txt, stale, day_note, schema_note, writer_note,
-            ), summary=brief
-        )
-        self.lbl_status.setStyleSheet("color:#ffa64d; font-weight:bold;" if warn else "color:#8fd18f; font-weight:bold;")
-        self._apply_search_filter(tbl)
+                            def dispatch_pending():
+                                self._live_render_dispatch_scheduled = False
+                                latest_pending = self._live_render_pending
+                                self._live_render_pending = None
+                                if latest_pending is not None:
+                                    self._render_live(*latest_pending)
+
+                            self._schedule_live_render_slice(dispatch_pending)
+                        return
+            except Exception:
+                self._live_render_active = False
+                self._live_render_pending = None
+                self._live_row_fingerprints = {}
+                tbl.setSortingEnabled(True)
+                logger.exception("[FusionLadder] 增量渲染失败")
+                self._set_status("状态：表格更新失败，请重试")
+                return
+            finally:
+                tbl.setUpdatesEnabled(previous)
+                render_cpu[0] += time.perf_counter() - slice_started
+            self._schedule_live_render_slice(render_slice)
+
+        render_slice()
 
     # ------------------------------------------------------------------
     # 赛马跟踪（实盘影子流直出，不依赖回放）

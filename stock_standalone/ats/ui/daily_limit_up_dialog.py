@@ -270,6 +270,8 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
     code_clicked = pyqtSignal(str, str) # 单击联动 (code, name)
     code_double_clicked = pyqtSignal(str, str) # 双击查看详情 (code, name)
     scan_done_signal = pyqtSignal(list, bool, str) # 后台扫描完成跨线程信号 (records, is_trade_day, today_str)
+    scan_failed_signal = pyqtSignal(str, int)
+    mode_scan_done_signal = pyqtSignal(object)
     since_pct_done_signal = pyqtSignal() # 距今涨幅后台拉取完成跨线程信号
 
     def __init__(self, parent=None, restore_state=None):
@@ -285,6 +287,8 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
         # ⚡ 跨线程信号绑定（保障后台扫描结果 100% 安全切回 Qt 主线程渲染）
         self.scan_done_signal.connect(self._on_scan_done)
+        self.scan_failed_signal.connect(self._on_today_scan_failed)
+        self.mode_scan_done_signal.connect(self._on_mode_scan_done)
         self.since_pct_done_signal.connect(self._refresh_since_pct_columns)
 
 
@@ -1549,6 +1553,10 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         except Exception:
             pass
 
+        if old_mode != mode and mode in ("TODAY", "RADAR", "BUBBLE"):
+            self.current_records = []
+            self._apply_filter()
+            self.lbl_status.setText("视图【{}】正在扫描…".format(mode))
         self._refresh_data_for_mode()
 
     def _on_history_date_selected(self, index: int):
@@ -1576,7 +1584,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self._pending_sh_pct = sh_pct
 
         # 如果窗口未显示且未隐藏贴边，仅缓存数据并标记脏挂起，跳过耗时计算与 UI 渲染
-        if not self.isVisible() and not getattr(self, 'is_hidden_state', False):
+        if not self.isVisible() or self.isMinimized() or getattr(self, 'is_hidden_state', False):
             self._needs_render = True
             return
 
@@ -1605,10 +1613,6 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             self._needs_render = False
             self._last_refresh_time = 0.0
             self._refresh_data_for_mode()
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        self.ensure_rendered()
 
     def _on_throttle_refresh(self):
         """节流定时器到期回调：合并高频推送后执行单次完整计算与渲染"""
@@ -1643,18 +1647,40 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
         """根据当前选定的视图模式计算并刷新数据
         ⚡ 极限性能优化 (2026-09-11):
-        - TODAY 模式：scan_limit_up_records_from_df 含 TDX API 调用，必须后台线程化
-        - 其他模式：相对轻量，保持现有策略（含轻度节流保护）
+        - TODAY、RADAR、BUBBLE 的扫描在后台执行并合并请求。
         """
+        if not self.isVisible() or self.isMinimized() or getattr(self, 'is_hidden_state', False):
+            self._needs_render = True
+            return
         df = self._resolve_active_strategy_df()
         today_str = time.strftime("%Y-%m-%d")
         is_trade_day = cct.get_trade_date_status() if hasattr(cct, "get_trade_date_status") else True
         effective_trade_date = today_str if is_trade_day else (cct.get_last_trade_date() if hasattr(cct, "get_last_trade_date") else today_str)
 
+        if self.current_mode in ("TODAY", "RADAR", "BUBBLE") and getattr(self, "_scan_worker_busy", False):
+            self._scan_refresh_pending = True
+            return
+
+        if self.current_mode in ("RADAR", "BUBBLE"):
+            mode = self.current_mode
+            revision = getattr(self, "_scan_request_revision", 0)
+            self._scan_worker_busy = True
+            engine = self.engine
+
+            def _bg_mode_scan():
+                try:
+                    scan = engine.get_intraday_radar_records if mode == "RADAR" else engine.get_opening_bubble_records
+                    records = scan(current_df=df)
+                    self.mode_scan_done_signal.emit((mode, effective_trade_date, revision, records, None))
+                except Exception as exc:
+                    logger.exception("[DailyLimitUpDialog] %s scan failed", mode)
+                    self.mode_scan_done_signal.emit((mode, effective_trade_date, revision, None, str(exc)))
+
+            threading.Thread(target=_bg_mode_scan, daemon=True, name="LimitUpModeScanWorker").start()
+            return
+
         if self.current_mode == "TODAY":
             # ⚡ TODAY 模式：全部移入后台线程（scan 含 TDX API 阻塞，不可在主线程执行）
-            if getattr(self, '_scan_worker_busy', False):
-                return  # 防重入：上一次扫描仍在运行则跳过
             if df is None or df.empty:
                 self.current_records = self.engine.get_records_by_date(effective_trade_date)
                 if not self.current_records:
@@ -1684,28 +1710,25 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             _extra_cols = self.extra_cols
             _is_trade_day = is_trade_day
             _today_str = today_str
+            _revision = self._active_scan_revision
 
 
             def _bg_scan():
-                records = []
                 try:
                     records = _engine.scan_limit_up_records_from_df(
                         _df_snap, fetch_l2_quotes=True, extra_cols=_extra_cols
                     )
                 except Exception as _e:
-                    logger.error(f"[DailyLimitUpDialog] bg scan error: {_e}")
-                finally:
-                    # 必须使用 Qt 原生跨线程信号，确保在主线程事件循环中 100% 触发执行
-                    self.scan_done_signal.emit(records, _is_trade_day, _today_str)
+                    logger.exception("[DailyLimitUpDialog] TODAY scan failed")
+                    self.scan_failed_signal.emit(_today_str, _revision)
+                    return
+                # 必须使用 Qt 原生跨线程信号，确保在主线程事件循环中执行
+                self.scan_done_signal.emit(records, _is_trade_day, _today_str)
 
             threading.Thread(target=_bg_scan, daemon=True, name="LimitUpScanWorker").start()
             return  # 主线程立即返回，等待 scan_done_signal 信号回调
 
 
-        elif self.current_mode == "BUBBLE":
-            self.current_records = self.engine.get_opening_bubble_records(current_df=df)
-        elif self.current_mode == "RADAR":
-            self.current_records = self.engine.get_intraday_radar_records(current_df=df)
         elif self.current_mode == "3D":
             self.current_records = self.engine.aggregate_multi_day_strong_stocks(days=3, min_limit_ups=1, current_df=df)
         elif self.current_mode == "5D":
@@ -1723,13 +1746,53 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
         self._update_kpi_display(summary)
         self._apply_filter()
 
+    def _on_today_scan_failed(self, date, revision) -> None:
+        self._scan_worker_busy = False
+        pending = getattr(self, "_scan_refresh_pending", False)
+        self._scan_refresh_pending = False
+        valid = (self.current_mode == "TODAY" and date == time.strftime("%Y-%m-%d") and
+                 revision == getattr(self, "_scan_request_revision", 0))
+        paused = not self.isVisible() or self.isMinimized() or getattr(self, "is_hidden_state", False)
+        if valid and not paused:
+            self.lbl_status.setText("视图【TODAY】扫描失败，保留上次结果")
+        if paused:
+            self._needs_render = True
+        elif (pending or not valid) and self.current_mode in ("TODAY", "RADAR", "BUBBLE"):
+            QTimer.singleShot(0, self._refresh_data_for_mode)
+
+    def _on_mode_scan_done(self, result) -> None:
+        mode, trade_date, revision, records, error = result
+        self._scan_worker_busy = False
+        today = time.strftime("%Y-%m-%d")
+        is_trade_day = cct.get_trade_date_status() if hasattr(cct, "get_trade_date_status") else True
+        current_date = today if is_trade_day else (cct.get_last_trade_date() if hasattr(cct, "get_last_trade_date") else today)
+        valid = (mode == self.current_mode and trade_date == current_date and
+                 revision == getattr(self, "_scan_request_revision", 0))
+        paused = (not self.isVisible() or self.isMinimized() or getattr(self, 'is_hidden_state', False))
+        if valid and error is None:
+            self.current_records = records
+            if paused:
+                self._needs_render = True
+            else:
+                summary = self.engine.get_market_limit_up_summary(trade_date, current_df=self.current_df)
+                self._update_kpi_display(summary)
+                self._apply_filter()
+        elif valid and error is not None and not paused:
+            self.lbl_status.setText("视图【{}】扫描失败，保留上次结果".format(mode))
+        pending = getattr(self, "_scan_refresh_pending", False)
+        self._scan_refresh_pending = False
+        if (pending or not valid) and paused:
+            self._needs_render = True
+        elif (pending or not valid) and self.current_mode in ("TODAY", "RADAR", "BUBBLE"):
+            QTimer.singleShot(0, self._refresh_data_for_mode)
+
     def _on_scan_done(self, records: list, is_trade_day: bool, today_str: str) -> None:
         """后台扫描完成回调 — 在主线程执行 UI 渲染（由 QTimer.singleShot(0) 保证线程安全）"""
         self._scan_worker_busy = False
-        if (self.current_mode != "TODAY" or
+        if (self.current_mode != "TODAY" or today_str != time.strftime("%Y-%m-%d") or
                 getattr(self, "_active_scan_revision", 0) != getattr(self, "_scan_request_revision", 0)):
             self._scan_refresh_pending = False
-            if self.current_mode == "TODAY":
+            if self.current_mode in ("TODAY", "RADAR", "BUBBLE"):
                 QTimer.singleShot(0, self._refresh_data_for_mode)
             return
         self.current_records = records
@@ -1747,6 +1810,11 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
                     kwargs={"force": is_post_trading, "is_eod": is_post_trading},
                     daemon=True
                 ).start()
+
+        if not self.isVisible() or self.isMinimized() or getattr(self, 'is_hidden_state', False):
+            self._needs_render = True
+            self._scan_refresh_pending = False
+            return
 
         # 更新 KPI 卡片与表格
         try:
@@ -2973,8 +3041,9 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             self.table.blockSignals(previous_signals)
             self.table.setUpdatesEnabled(previous_updates)
         if state["cursor"] < len(state["records"]):
-            if not self.isVisible():
+            if not self.isVisible() or self.isMinimized() or getattr(self, 'is_hidden_state', False):
                 self._table_render_timer.stop()
+                self._needs_render = True
             elif not self._table_render_timer.isActive():
                 self._table_render_timer.start(16)
             return
@@ -4060,6 +4129,7 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
             self.show()
         self.raise_()
         self.activateWindow()
+        self.ensure_rendered()
         self._save_window_states(is_open=True)
 
     def _check_hover(self):
@@ -4159,6 +4229,9 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
     def changeEvent(self, event):
         super().changeEvent(event)
+        if event.type() == event.Type.WindowStateChange and not self.isMinimized():
+            if getattr(self, '_needs_render', False):
+                QTimer.singleShot(0, self.ensure_rendered)
         if event.type() == event.Type.ActivationChange:
             if self.isActiveWindow() and self.is_hidden_state:
                 self._is_auto_popping = True
@@ -4224,6 +4297,8 @@ class DailyLimitUpDialog(QWidget, WindowMixin):
 
     def showEvent(self, event):
         super().showEvent(event)
+        if getattr(self, '_needs_render', False):
+            self.ensure_rendered()
         # 仅在处于磁吸边缘或感应隐藏条状态时恢复定时器，普通正常居中展示时保持停止
         if getattr(self, "_table_render_state", None) is not None:
             self._is_populating = True

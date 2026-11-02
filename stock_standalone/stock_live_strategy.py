@@ -12,6 +12,7 @@ import datetime
 import multiprocessing as mp
 import pandas as pd
 import numpy as np
+import copy
 from collections import deque
 import re
 import socket
@@ -395,6 +396,47 @@ class StockLiveStrategy:
     # 💎 [STATIC PERSISTENCE] 类级别静态存储，确保 D/2D/3D 等不同周期的扫描池和游标互不干扰
     _kline_rr_cursors_static: Dict[str, int] = {}
     _kline_rr_pools_static: Dict[str, List[str]] = {}
+
+    _HOT_SCAN_COLUMNS = frozenset((
+        'close', 'high4', 'ma5d', 'hmax', 'red', 'top10', 'volume', 'lastp1d',
+        'lastp2d', 'win', 'category', 'name', 'Hma20d', 'Hma60d', 'percent',
+        'high10', 'low10', 'lmin', 'trade', 'ma10d', 'ma20d', 'low', 'high', 'open',
+    ))
+    _RANK_SCAN_COLUMNS = frozenset((
+        'category', 'name', 'close', 'trade', 'high', 'low', 'open', 'lastp1d',
+        'ma5d', 'ma10d', 'percent', 'win', 'volume',
+    ))
+    _VALIDATION_COLUMNS = frozenset((
+        'close', 'high', 'low', 'open', 'ma5d', 'ma10d', 'upper', 'high4', 'volume', 'win',
+    ))
+
+    def _strategy_scan_snapshot(self, frame, columns):
+        """Copy the required columns under the producer lock when available."""
+        lock = self._df_lock
+        acquired = False
+        try:
+            if lock is not None:
+                acquired = lock.acquire(timeout=0.05)
+                if not acquired:
+                    logger.debug("Strategy scan snapshot deferred: data lock busy")
+                    return None
+            snapshot = frame.loc[:, frame.columns.isin(columns)].copy()
+            # Pandas does not recursively copy objects stored inside object columns.
+            immutable = (str, bytes, int, float, bool, type(None))
+            for col_index, dtype in enumerate(snapshot.dtypes):
+                if dtype != object:
+                    continue
+                for row_index, value in enumerate(snapshot.iloc[:, col_index].to_numpy(copy=False)):
+                    if (type(value) not in immutable and
+                            not (isinstance(value, np.generic) and not value.dtype.hasobject)):
+                        snapshot.iat[row_index, col_index] = copy.deepcopy(value)
+            return snapshot
+        except Exception:
+            logger.exception("Strategy scan snapshot failed; task deferred")
+            return None
+        finally:
+            if acquired:
+                lock.release()
     
     """
     高性能实时行情监控策略类
@@ -1431,24 +1473,30 @@ class StockLiveStrategy:
         logger.info(f"🔍 [DF_PROBE] TradingActive={is_trading_active} Monitors={len(self._monitored_stocks)} Samples={tc_sample} Index={idx_sample} Dtype={idx_dtype}")
 
         # --- 1. 热点题材领涨股发现 (Algorithm Expansion) ---
-        if is_trading_active and (925 <= now_time_int <= 1505):
-             # [OPTIMIZE] 后台扫描只需要局部快照
-             self.executor.submit(self._scan_hot_concepts, df_internal.copy(), concept_top5, resample=resample)
+        if (is_trading_active and 925 <= now_time_int <= 1505
+                and self.scan_hot_concepts_status and concept_top5):
+             snapshot = self._strategy_scan_snapshot(df_internal, self._HOT_SCAN_COLUMNS)
+             if snapshot is not None:
+                 self.executor.submit(self._scan_hot_concepts, snapshot, concept_top5, resample=resample)
 
         # --- 1.2 [NEW] 每日热股跨日验证 (9:15-9:30 处理昨天入队的标的) ---
         if is_trading and 915 <= now_time_int <= 930:
             if getattr(self, '_last_validation_date', '') != today_str:
-                self.executor.submit(self._daily_watchlist_validation, df_internal.copy())
-                self._last_validation_date = today_str
+                snapshot = self._strategy_scan_snapshot(df_internal, self._VALIDATION_COLUMNS)
+                if snapshot is not None:
+                    self.executor.submit(self._daily_watchlist_validation_snapshot, snapshot)
+                    self._last_validation_date = today_str
 
         # --- 1.5 Rank 强势股自动入队跟单 (每日 9:35-10:30 扫描一次) ---
         # 1. 开盘自动全扫描 (每日只需运行一次，不限时间，启动即扫)
         if not getattr(self, '_rank_scan_done_today', False):
             # 只有在非休市时间且有数据时才扫描
             if not df_internal.empty and is_trade_day: # 确保是交易日
-                 self.executor.submit(self._scan_rank_for_follow, df_internal.copy(), concept_top5, top_n=100)
-                 self._rank_scan_done_today = True
-                 logger.info(f"🚀 [Startup] Triggered daily rank scan. (Time: {now_time_int})")
+                 snapshot = self._strategy_scan_snapshot(df_internal, self._RANK_SCAN_COLUMNS)
+                 if snapshot is not None:
+                     self.executor.submit(self._scan_rank_for_follow_snapshot, snapshot, concept_top5, top_n=100)
+                     self._rank_scan_done_today = True
+                     logger.info(f"🚀 [Startup] Triggered daily rank scan. (Time: {now_time_int})")
             else:
                  logger.debug(f"⏳ [Startup] Rank scan skipped (Empty DF or Non-trading day)")
         
@@ -1950,8 +1998,10 @@ class StockLiveStrategy:
         if df is None or df.empty:
             return
         
-        # 🛡️ [THREAD-SAFETY] 局部快照隔离，防止主线程并发修改/缩放底层 DataFrame 导致的 IndexError: index out of bounds
-        df_curr = df.copy()
+        self._scan_rank_for_follow_snapshot(df.copy(), concept_top5, top_n)
+
+    def _scan_rank_for_follow_snapshot(self, df_curr: pd.DataFrame, concept_top5: list = None, top_n: int = 100) -> None:
+        """Consume an already isolated Rank snapshot."""
         
         try:
             hub = get_trading_hub()
@@ -2134,8 +2184,10 @@ class StockLiveStrategy:
         if df is None or df.empty:
             return
             
-        # 🛡️ [THREAD-SAFETY] 局部快照隔离
-        df_curr = df.copy()
+        self._daily_watchlist_validation_snapshot(df.copy())
+
+    def _daily_watchlist_validation_snapshot(self, df_curr: pd.DataFrame):
+        """Consume an already isolated validation snapshot."""
         try:
             hub = get_trading_hub()
             # 1. 构造验证所需的 OHLC 数据字典

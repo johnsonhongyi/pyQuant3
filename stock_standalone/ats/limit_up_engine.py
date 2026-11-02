@@ -114,6 +114,32 @@ def get_limit_up_ratio_threshold(code: str, name: str = "") -> float:
     return 9.8
 
 
+def _conservative_limit_candidates(df: pd.DataFrame) -> pd.DataFrame:
+    """Only discard rows provably below every supported limit threshold.
+
+    Ambiguous schemas, invalid values and auction fallbacks remain in the scan.
+    The full market frame must still be used for market statistics.
+    """
+    columns = ('trade', 'last_close', 'high', 'percent')
+    if not df.columns.is_unique or any(c not in df.columns for c in columns):
+        return df
+    if any(not pd.api.types.is_numeric_dtype(df[c].dtype) or
+           pd.api.types.is_complex_dtype(df[c].dtype) for c in columns):
+        return df
+    try:
+        # Match _safe_float's double-precision arithmetic; do not narrow the
+        # conservative rounding margin for lower-precision source columns.
+        trade, previous, high, pct = (df[c].astype('float64') for c in columns)
+    except (TypeError, ValueError, OverflowError):
+        return df
+    # Even ST uses at least 5%; allow for price rounding and the 0.01 tolerance.
+    lower_price = previous * 1.05 - 0.02
+    discard = ((previous > 0.1) & (previous < 1_000_000) & (trade > 0) &
+               (high > 0) & (pct > -1_000_000) & (pct != 0) & (pct < 4.85) &
+               (trade < lower_price) & (high < lower_price))
+    return df.loc[~discard.fillna(False)]
+
+
 def calc_theoretical_limit_up_price(code: str, last_close: float, name: str = "") -> float:
     """计算个股精准理论涨停价 (元)"""
     if last_close <= 0:
@@ -519,9 +545,10 @@ class LimitUpEngine:
             sh_pct = _safe_float(current_df['percent'].mean(), 0.0)
 
         # 1. 快速遍历 DataFrame 筛选涨停与逼近涨停标的
-        is_index_code = 'code' not in current_df.columns
-        scan_columns = tuple(current_df.columns)
-        for idx, values in zip(current_df.index, current_df.itertuples(index=False, name=None)):
+        scan_df = _conservative_limit_candidates(current_df)
+        is_index_code = 'code' not in scan_df.columns
+        scan_columns = tuple(scan_df.columns)
+        for idx, values in zip(scan_df.index, scan_df.itertuples(index=False, name=None)):
             row = dict(zip(scan_columns, values))
             code_raw = str(idx) if is_index_code else str(row.get('code', idx))
             c_clean = ''.join(c for c in code_raw if c.isdigit()).zfill(6)

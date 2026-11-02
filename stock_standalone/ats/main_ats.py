@@ -38,8 +38,10 @@ from PyQt6.QtCore import Qt, QTimer
 from ats.ui.main_window import ATSMainWindow
 from sys_utils import ensure_backend_tk_running
 from ats.startup_profiler import StartupProfiler, mark_checkpoint
+from ats.performance_trace import configure_performance_trace, stop_performance_trace
 
 def main():
+    configure_performance_trace(project_root, sys.argv)
     profiler = StartupProfiler.get_instance()
     mark_checkpoint("00. Python Runtime & Environment Setup")
 
@@ -114,7 +116,11 @@ def main():
     # 打印启动全链路耗时看板
     profiler.print_summary()
     
-    exit_code = app.exec()
+    try:
+        exit_code = app.exec()
+    finally:
+        # Packaged builds use os._exit below, which does not run atexit handlers.
+        stop_performance_trace()
     from sys_utils import is_packaged_env
     if is_packaged_env():
         import os

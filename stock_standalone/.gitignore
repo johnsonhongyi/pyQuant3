@@ -135,3 +135,8 @@ data/ipo_learning/shadow_observations.sqlite
 
 !tests/test_column_manager_dpi_and_persistence.py
 !tests/test_watchdog_stack_throttling.py
+!tests/test_daily_limit_up_background_scan.py
+!tests/test_fusion_incremental_render.py
+!tests/test_limit_up_conservative_candidates.py
+!tests/test_strategy_scan_snapshots.py
+!tests/test_performance_trace.py

@@ -4,6 +4,7 @@ from datetime import datetime
 
 import os
 import json
+import time
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -121,6 +122,13 @@ def test_fusion_full_chain_end_to_end_audit(qapp, tmp_path, monkeypatch):
     dlg.cmb_day.setCurrentText(test_day)
     dlg.refresh_live()
 
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        qapp.processEvents()
+        if (dlg.tbl_live.rowCount() == 2 and getattr(dlg, "_shadow_refresh_thread", None) is None
+                and not getattr(dlg, "_live_render_active", False)):
+            break
+        time.sleep(0.01)
     assert dlg.tbl_live.rowCount() == 2
     from PyQt6.QtCore import Qt
     dlg.tbl_live.sortItems(5, Qt.SortOrder.DescendingOrder)
