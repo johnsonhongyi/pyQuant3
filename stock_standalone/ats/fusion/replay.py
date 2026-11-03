@@ -38,6 +38,7 @@ import numpy as np
 
 from ats.fusion.adapter import today_str
 from ats.fusion.engine import FusionEngine, leadership_value
+from ats.fusion.launch_signal import classify_launch
 from ats.fusion.regime import (
     MarketRegime,
     MarketRegimeTracker,
@@ -215,6 +216,7 @@ class ReplayResult:
     trades: List[Any] = field(default_factory=list)
     trade_stats: Dict[str, Any] = field(default_factory=dict)
     entries: List[Dict[str, Any]] = field(default_factory=list)   # 赛马入局/剔除事件
+    launch_signals: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -226,6 +228,7 @@ class ReplayResult:
             "trades": [t.to_dict() for t in self.trades],
             "trade_stats": self.trade_stats,
             "entries": self.entries,
+            "launch_signals": self.launch_signals,
             "records": self.records,
         }
 
@@ -537,6 +540,14 @@ class DayReplay:
         dropped_records = 0
         veto_counts: Dict[str, int] = {}
         eval_count = 0
+        launch_watch_first: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        launch_confirmed_first: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        launch_alerts: List[Dict[str, Any]] = []
+        launch_alert_seen = set()
+        launch_horizon_bars = 20  # 60 分钟，3 分钟 bar
+        launch_check_counts: Dict[str, int] = {}
+        launch_shape_evaluations = 0
+        launch_shape_confirmed_evaluations = 0
 
         focus_set = {
             str(c).strip().zfill(6) for c in list(focus) + list(self.cfg.focus_codes)
@@ -640,7 +651,7 @@ class DayReplay:
             low = mat["low"][:, t]
             vwap = mat["vwap"][:, t]
             vol = mat["volume"][:, t]
-            valid = ~np.isnan(close)
+            valid = np.isfinite(close) & (close > 0) & np.isfinite(vwap) & (vwap > 0)
 
             # 当日高低点（滚动）
             day_high = np.where(valid, np.fmax(np.nan_to_num(day_high, nan=-1e9), high), day_high)
@@ -825,6 +836,7 @@ class DayReplay:
                 ret5 = (price / float(_closes[base_i]) - 1.0) * 100.0 if _closes[base_i] > 0 else 0.0
                 slope_proxy = _clamp(40.0 + ret5 * 25.0, 10.0, 100.0)
                 vel_proxy = (price / float(_closes[max(0, _bar_i - 3)]) - 1.0) * 100.0 if _closes[max(0, _bar_i - 3)] > 0 else 0.0
+                vwap_slope_5m_pct = intraday_vwap_slope_pct(_bars["vwap"], _bar_i)
                 recent = _clean(_vols[max(0, _bar_i - 2): _bar_i + 1])
                 older = _clean(_vols[max(0, _bar_i - 8): max(1, _bar_i - 2)])
                 accel = (_mean_small(recent) / max(1e-9, _mean_small(older))) if recent and older else 1.0
@@ -915,6 +927,7 @@ class DayReplay:
                     trade_date=day,
                     extra={
                         "support_proxy": True, "replay": True, "has_rs": True,
+                        "vwap_slope_5m_pct": vwap_slope_5m_pct,
                         "mkt_ret5": mkt_ret5,
                         "hunger": float(day_ctx.hunger) if day_ctx is not None else 1.0,
                         "ice_days": int(day_ctx.ice_days) if day_ctx is not None else 0,
@@ -1131,6 +1144,77 @@ class DayReplay:
                 if self.cfg.require_pattern and decision.tier >= 3 and not patterns:
                     decision = self.engine.evaluate(ev, regime, now=float(clock[t]), tier_cap=2)
 
+                launch_signal = classify_launch(
+                    ev, day_open=_day_open,
+                    prev_low=float(_dc.get("lo_pre1", 0.0) or 0.0),
+                    prev_high=float(_dc.get("hi_pre1", 0.0) or 0.0),
+                    prejudged=bool(_dc.get("is_structure_prejudged")),
+                    struct_status=_tl.status,
+                )
+                if launch_signal:
+                    launch_shape_evaluations += 1
+                    launch_checks = {
+                        "price_above_vwap10": price >= ev.vwap_10d,
+                        "price_above_intraday_vwap": price >= vw,
+                        "bias_0_to_2_5pct": 0.0 <= launch_signal["bias_pct"] <= 2.5,
+                        "vwap10_bias_0_to_2_5pct": 0.0 <= launch_signal["vwap10_bias_pct"] <= 2.5,
+                        "pct_0_to_7": 0.0 <= ev.pct <= 7.0,
+                        "sector_resonance_58_plus": ev.sector_resonance >= 58.0,
+                        "volume_ratio_1_5_plus": ev.vol_ratio >= 1.5,
+                        "volume_ratio_2_plus": ev.vol_ratio >= 2.0,
+                        "velocity_0_2_plus": ev.velocity_pct >= 0.2,
+                        "vwap_slope_positive": (
+                            vwap_slope_5m_pct is not None and vwap_slope_5m_pct > 0.0
+                        ),
+                    }
+                    for check_name, passed in launch_checks.items():
+                        launch_check_counts[check_name] = launch_check_counts.get(check_name, 0) + int(passed)
+                    if launch_signal["status"] == "CONFIRMED":
+                        launch_shape_confirmed_evaluations += 1
+                    launch_type = launch_signal["type"]
+                    launch_key = (codes[i], launch_type)
+                    launch_item = {
+                        "day": day,
+                        "code": codes[i],
+                        "name": name_of(codes[i]),
+                        "type": launch_type,
+                        "label": launch_signal["label"],
+                        "time": time.strftime("%H:%M", time.localtime(int(clock[t]))),
+                        "ts": int(clock[t]),
+                        "entry": round(price, 3),
+                        "vwap10": launch_signal["vwap10"],
+                        "vwap_slope_5m_pct": launch_signal["vwap_slope_5m_pct"],
+                        "bias_pct": launch_signal["bias_pct"],
+                        "vwap10_bias_pct": launch_signal["vwap10_bias_pct"],
+                        "sector_resonance": launch_signal["sector_resonance"],
+                        "vol_ratio": launch_signal["vol_ratio"],
+                        "velocity_pct": launch_signal["velocity_pct"],
+                        "status": launch_signal["status"],
+                        "reason": launch_signal["reason"],
+                        "tier": int(decision.tier),
+                        "coverage": round(float(decision.coverage or 0.0), 3),
+                        "provisional": bool(decision.provisional),
+                        "veto": str(decision.veto_reason or ""),
+                        "sector": _sm.get(codes[i]) if sec_index else "",
+                        "_code_index": i,
+                        "_bar_index": _bar_i,
+                    }
+                    launch_watch_first.setdefault(launch_key, launch_item)
+                    if launch_signal["status"] == "CONFIRMED":
+                        launch_confirmed_first.setdefault(launch_key, launch_item)
+                        allowed = bool(
+                            decision.tier >= 2 and not decision.veto_reason
+                            and not decision.provisional and decision.coverage >= 0.70
+                        )
+                        if allowed:
+                            launch_signal["permission"] = "MANUAL_CONFIRM"
+                            if launch_key not in launch_alert_seen:
+                                launch_alert_seen.add(launch_key)
+                                launch_alerts.append(dict(launch_item, permission="MANUAL_CONFIRM"))
+                        else:
+                            launch_signal["permission"] = "WATCH"
+                            launch_signal["reason"] += "；待L2及数据覆盖门禁确认"
+
                 # ---- 赛马跟踪：把这根 bar 接进这只票的历史（带上旧信号）----
                 # 注意：无论是否被否决、是否达到记录门槛，都要更新，
                 # 否则"被否决一次就永久失联"，正是之前召回上不去的根因。
@@ -1300,6 +1384,8 @@ class DayReplay:
                         "excess": round(excess, 2),
                         "ignition": round(ignition, 1),
                         "patterns": patterns,
+                        "launch_signal": dict(launch_signal) if launch_signal else {},
+                        "vwap_slope_5m_pct": round(vwap_slope_5m_pct, 4) if vwap_slope_5m_pct is not None else None,
                         "production_history": historical_context,
                         "carried_observation": codes[i] in carried,
                         "observation_evidence": strategy_evidence,
@@ -1431,6 +1517,100 @@ class DayReplay:
             except Exception as exc:
                 logger.warning("[replay] 保存跟踪状态失败：%s", exc)
 
+        # 后验只在信号决策结束后计算；分类器只读取当时及更早的分钟 bar。
+        launch_signals: List[Dict[str, Any]] = []
+        first_alert_ts: Dict[Tuple[str, str], int] = {}
+        for item in launch_alerts:
+            code_i = int(item.pop("_code_index"))
+            bar_i = int(item.pop("_bar_index"))
+            series = self._slice_day(item["code"], day)
+            outcome = _forward_close_outcome(
+                series["close"], bar_i, float(item["entry"]), launch_horizon_bars
+            ) if series is not None else {"known": False}
+            item["outcome"] = outcome
+            launch_signals.append(item)
+            alert_key = (item["code"], item["type"])
+            first_alert_ts[alert_key] = min(
+                int(item["ts"]), first_alert_ts.get(alert_key, int(item["ts"]))
+            )
+
+        opportunities: List[Dict[str, Any]] = []
+        for shape_key, item in launch_watch_first.items():
+            i = int(item["_code_index"])
+            bar_i = int(item["_bar_index"])
+            code = item["code"]
+            series = self._slice_day(code, day)
+            if series is None:
+                continue
+            outcome = _forward_close_outcome(
+                series["close"], bar_i, float(item["entry"]), launch_horizon_bars
+            )
+            if not outcome.get("known") or not outcome.get("follow_through"):
+                continue
+            target_bar = int(outcome.get("target_bar") or 0)
+            target_i = bar_i + target_bar
+            target_ts = int(series["ts"][target_i]) if target_i < len(series["ts"]) else 0
+            alert_ts = first_alert_ts.get(shape_key, 0)
+            opportunities.append({
+                "code": code,
+                "type": item["type"],
+                "time": item["time"],
+                "target_ts": target_ts,
+                "captured": bool(alert_ts and alert_ts <= target_ts),
+            })
+        missed = [
+            {
+                "code": row["code"], "type": row["type"], "opportunity_time": row["time"],
+                "reason": (
+                    "融合梯度否决：{}".format(confirmed["veto"])
+                    if confirmed and confirmed.get("veto") else
+                    "融合级别/覆盖未达 L2 门槛"
+                    if confirmed and (confirmed.get("tier", 0) < 2 or confirmed.get("coverage", 0.0) < 0.70 or confirmed.get("provisional")) else
+                    "人工许可晚于后验 +2% 时点"
+                    if confirmed else "量能、加速、VWAP 斜率或结构确认条件未齐"
+                ),
+            }
+            for row in opportunities if not row["captured"]
+            for confirmed in [launch_confirmed_first.get((row["code"], row["type"]))]
+        ]
+        missed_by_reason: Dict[str, int] = {}
+        for row in missed:
+            reason = row["reason"]
+            missed_by_reason[reason] = missed_by_reason.get(reason, 0) + 1
+        known_alerts = [row for row in launch_signals if row["outcome"].get("known")]
+        fp_n = sum(1 for row in known_alerts if not row["outcome"].get("follow_through"))
+        hit_n = sum(1 for row in known_alerts if row["outcome"].get("follow_through"))
+        captured_n = sum(1 for row in opportunities if row["captured"])
+        launch_counts = {
+            "universe_codes": n_code,
+            "scanned_codes": int(candidate_mask.sum()),
+            "shape_watch_first": len(launch_watch_first),
+            "confirmed_shape_first": len(launch_confirmed_first),
+            "shape_evaluations": launch_shape_evaluations,
+            "shape_confirmed_evaluations": launch_shape_confirmed_evaluations,
+            "confirmation_check_pass_counts": launch_check_counts,
+            "first_watch_examples": [
+                {key: value for key, value in row.items() if not key.startswith("_")}
+                for row in list(launch_watch_first.values())[:10]
+            ],
+            "manual_alerts": len(launch_signals),
+            "l2_alerts": sum(1 for row in launch_signals if row["tier"] == 2),
+            "l3_plus_alerts": sum(1 for row in launch_signals if row["tier"] >= 3),
+            "follow_through": hit_n,
+            "false_positives": fp_n,
+            "known_alerts": len(known_alerts),
+            "false_positive_rate": round(fp_n / len(known_alerts), 3) if known_alerts else None,
+            "unknown_horizon": len(launch_signals) - len(known_alerts),
+            "positive_opportunities": len(opportunities),
+            "captured_opportunities": captured_n,
+            "missed_opportunities": len(missed),
+            "missed_by_reason": missed_by_reason,
+            "opportunity_recall": round(captured_n / len(opportunities), 3) if opportunities else None,
+            "missed_examples": missed[:30],
+            "criterion": "A/B首个结构观察后20根3分钟收盘先触及+2%且未先触及-1%; 正机会限于A/B结构观察样本",
+            "future_data_role": "仅用于 outcome/漏报标签，未输入信号分类或融合梯度",
+        }
+
         stats = summarize_tiers(records)
         self._last_rar_samples = rar_samples
 
@@ -1496,6 +1676,7 @@ class DayReplay:
             "trades": len(trades),
             "trade_stats": trade_stats,
             "entries": len(entries),
+            "launch_validation": launch_counts,
             "entries_detail": entries,
             "evictions": [e for e in (race.events()[_ev0:] if race is not None else []) if e.get("kind") == STAGE_EVICT],
             "t1_decisions": [e for e in (race.events()[_ev0:] if race is not None else []) if e.get("kind") == "T1"],
@@ -1516,6 +1697,7 @@ class DayReplay:
             day=day, records=records, regime_series=regime_series,
             tier_stats=stats, meta=meta, orders=orders, trades=trades, trade_stats=trade_stats,
             entries=entries,
+            launch_signals=launch_signals,
         )
 
     def discover(
@@ -1634,6 +1816,43 @@ def _roll_mean(mat: np.ndarray, w: int) -> np.ndarray:
     if mat.shape[1] > w:
         out[:, w:] = (cs[:, w:] - cs[:, :-w]) / np.maximum(cc[:, w:] - cc[:, :-w], 1.0)
     return out
+
+
+def intraday_vwap_slope_pct(vwaps, index: int) -> Optional[float]:
+    """3 分钟回放以两根 bar（约 6 分钟）估算实时分时 VWAP 斜率。"""
+    if index < 2:
+        return None
+    try:
+        current, prior = float(vwaps[index]), float(vwaps[index - 2])
+        if not (_isfinite(current) and _isfinite(prior)) or current <= 0 or prior <= 0:
+            return None
+        return (current / prior - 1.0) * 100.0
+    except (IndexError, TypeError, ValueError, OverflowError):
+        return None
+
+
+def _forward_close_outcome(closes, bar_index: int, entry: float,
+                           horizon: int = 20, target_pct: float = 2.0,
+                           stop_pct: float = 1.0) -> Dict[str, Any]:
+    """以后续收盘价标注 60 分钟跟随，不向信号决策暴露未来 bar。"""
+    end = bar_index + 1 + horizon
+    if entry <= 0 or end > len(closes):
+        return {"known": False}
+    window = np.asarray(closes[bar_index + 1:end], dtype="float64")
+    if len(window) != horizon or not np.isfinite(window).all():
+        return {"known": False}
+    target = np.flatnonzero(window >= entry * (1.0 + target_pct / 100.0))
+    stop = np.flatnonzero(window <= entry * (1.0 - stop_pct / 100.0))
+    target_i = int(target[0]) if len(target) else None
+    stop_i = int(stop[0]) if len(stop) else None
+    return {
+        "known": True,
+        "follow_through": target_i is not None and (stop_i is None or target_i < stop_i),
+        "target_bar": target_i + 1 if target_i is not None else None,
+        "max_close_ret_pct": round((float(np.max(window)) / entry - 1.0) * 100.0, 2),
+        "min_close_ret_pct": round((float(np.min(window)) / entry - 1.0) * 100.0, 2),
+        "close_ret_pct": round((float(window[-1]) / entry - 1.0) * 100.0, 2),
+    }
 
 
 def _roll_max(mat: np.ndarray, w: int) -> np.ndarray:
@@ -1836,6 +2055,36 @@ def render_report(result: ReplayResult, top: int = 20) -> str:
             m["codes"], m["bars"], m["evaluations"], m["records"]
         )
     )
+    launch = m.get("launch_validation") or {}
+    if launch:
+        lines.append(
+            "- A/B 主升回放：观察结构 {}｜确认形态 {}｜L2 人工确认 {}｜L3+ 人工确认 {}｜"
+            "误报 {} / {}｜漏报 {} / {}（20 根收盘线口径）".format(
+                launch.get("shape_watch_first", 0), launch.get("confirmed_shape_first", 0),
+                launch.get("l2_alerts", 0), launch.get("l3_plus_alerts", 0),
+                launch.get("false_positives", 0), launch.get("known_alerts", 0),
+                launch.get("missed_opportunities", 0), launch.get("positive_opportunities", 0),
+            )
+        )
+        if launch.get("missed_by_reason"):
+            lines.append("- 漏报归因：{}".format(
+                " / ".join("{}×{}".format(reason, count)
+                           for reason, count in sorted(launch["missed_by_reason"].items(), key=lambda item: -item[1]))
+            ))
+        for item in sorted(result.launch_signals, key=lambda row: row.get("ts", 0))[:20]:
+            outcome = item.get("outcome") or {}
+            follow = (
+                "未满60分钟" if not outcome.get("known") else
+                "后续命中" if outcome.get("follow_through") else "后续未命中"
+            )
+            lines.append(
+                "  - {} {} {} {} L{} {} 斜率{}%｜{}".format(
+                    item.get("time", ""), item.get("code", ""), item.get("name", ""),
+                    item.get("type", ""), item.get("tier", 0), item.get("permission", ""),
+                    item.get("vwap_slope_5m_pct"), follow,
+                )
+            )
+        lines.append("")
     if m.get("cuts_used"):
         lines.append(
             "- 自适应分档（当日分位 + 绝对下限）：{}".format(

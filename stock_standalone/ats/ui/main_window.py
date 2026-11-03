@@ -2106,6 +2106,18 @@ class ATSMainWindow(QMainWindow):
         self._next_day_watch_timer.setInterval(4000 if market_active else 60000)
         self._next_day_watch_timer.timeout.connect(self._poll_next_day_watch_tdx)
         self._next_day_watch_timer.start()
+
+        # 融合梯度主升提示：主线程增量读取最新影子记录，复用统一语音/Toast。
+        # 不依赖梯度窗口开启；只提示人工确认，不向交易网关发指令。
+        try:
+            from ats.fusion.launch_alerts import LaunchAlertPoller
+            self._launch_alert_poller = LaunchAlertPoller(self._notify_fusion_launch)
+            self._launch_alert_timer = QTimer(self)
+            self._launch_alert_timer.setInterval(3000)
+            self._launch_alert_timer.timeout.connect(self._poll_fusion_launch_alerts)
+            self._launch_alert_timer.start()
+        except Exception:
+            logger.exception("[ATS] 融合梯度提示计时器初始化失败")
         
         # Initialize favorites version-tracking and start polling loop (降频至15s兜底，杜绝盘中500ms高频空转)
         try:
@@ -2201,6 +2213,47 @@ class ATSMainWindow(QMainWindow):
         self.update_timer.timeout.connect(self.on_heartbeat)
         if self.is_auto_refresh_enabled:
             self.update_timer.start(60000)
+
+    def _poll_fusion_launch_alerts(self):
+        """主线程轻量增量轮询；与交易、回放及影子写入线程隔离。"""
+        if getattr(self, "_is_closing", False):
+            return
+        try:
+            poller = getattr(self, "_launch_alert_poller", None)
+            if poller is not None:
+                poller.poll()
+        except Exception:
+            logger.exception("[ATS] 融合梯度主升提示轮询失败")
+
+    def _notify_fusion_launch(self, record):
+        """现有 AlertNotifier 统一去重/弹窗/语音；绝不调用订单执行接口。"""
+        from ats.alert_notifier import AlertNotifier
+        launch = record["launch_signal"]
+        fusion = record["fusion"]
+        entry = fusion.get("entry") or {}
+        stop = fusion.get("stop") or {}
+        entry_hint = ""
+        if entry.get("price_lo") and entry.get("price_hi"):
+            entry_hint = " | 参考入场{:.2f}~{:.2f}".format(
+                float(entry["price_lo"]), float(entry["price_hi"])
+            )
+        stop_hint = " | 参考止损{:.2f}".format(float(stop["price"])) if stop.get("price") else ""
+        reentry_hint = (
+            " | 重新介入许可：曾有卖出记录，本次按新信号判断，当前持仓未核实"
+            if launch.get("reentry_permission") == "MANUAL_CONFIRM" else ""
+        )
+        reason = (
+            "{} | L{} RAR{:.1f} | {}{}{}{} | 仅供人工确认，非自动下单"
+        ).format(
+            launch.get("label", "主升启动"), int(fusion.get("tier") or 0),
+            float(fusion.get("rar") or 0), launch.get("reason", ""),
+            reentry_hint, entry_hint, stop_hint,
+        )
+        AlertNotifier().notify_special_signal(
+            code=record["code"], name=record.get("name") or record["code"],
+            reason=reason, score=90.0 if int(fusion.get("tier") or 0) >= 3 else 82.0,
+            win_rate="未验证", parent=self, source="融合梯度主升", alert_only=True,
+        )
 
     def _prepopulate_name_cache(self):
         """【异步非阻塞】后台预加载历史股票名称字典，物理级 0 毫秒阻塞主线程"""

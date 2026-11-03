@@ -16,16 +16,25 @@ def qapp():
 
 
 @pytest.fixture(autouse=True)
-def clean_config():
+def clean_config(tmp_path, monkeypatch):
+    """隔离窗口持久化配置，避免 UI 测试覆盖用户的 window_config.json。"""
+    import sys_utils
     from ats.ui.styles import save_config_node
 
+    real_get_conf_path = sys_utils.get_conf_path
+
+    def isolated_conf_path(name, *args, **kwargs):
+        if name == "window_config.json":
+            return str(tmp_path / "window_config.json")
+        return real_get_conf_path(name, *args, **kwargs)
+
+    monkeypatch.setattr(sys_utils, "get_conf_path", isolated_conf_path)
     save_config_node("fusion_ladder_stays_on_top", False)
     save_config_node("fusion_ladder_anchor_edge", None)
     save_config_node("fusion_ladder_is_hidden", False)
     yield
-    save_config_node("fusion_ladder_stays_on_top", False)
-    save_config_node("fusion_ladder_anchor_edge", None)
-    save_config_node("fusion_ladder_is_hidden", False)
+    from ats.ui.styles import flush_config_writer
+    assert flush_config_writer(timeout_sec=3.0), "测试窗口配置异步写入未收敛"
 
 
 def _setup_mock_table_data(tbl):
@@ -47,7 +56,9 @@ def _setup_mock_table_data(tbl):
         tbl.setItem(row_idx, 2, NumericTableWidgetItem(nm, nm))
         tbl.setItem(row_idx, 3, NumericTableWidgetItem(f"{p:.2f}", p))
         tbl.setItem(row_idx, 4, NumericTableWidgetItem(f"{pct:+.2f}%", pct))
-    tbl.setSortingEnabled(True)
+    # 搜索测试按插入行号断言；恢复排序会按用户保存的列排序重排行号。
+    # 这里固定样本行序，排序行为应由独立排序测试覆盖。
+    tbl.setSortingEnabled(False)
 
 
 def test_fusion_ladder_search_ui_components(qapp):

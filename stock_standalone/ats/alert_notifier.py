@@ -947,7 +947,7 @@ class AlertNotifier(QObject if HAS_PYQT else object):
             source="集中交易指挥室" if "集中" in target_window_title else "新股次新超短检测"
         )
 
-    def notify_special_signal(self, code, name, reason, score=90.0, win_rate="85.0%", parent=None, is_force=False, source: str = ""):
+    def notify_special_signal(self, code, name, reason, score=90.0, win_rate="85.0%", parent=None, is_force=False, source: str = "", alert_only: bool = False):
         """推送信信号弹窗与语音 (具备跨线程投递、全自动限频与去重保护、单股冷却与异动突变即时放行)
         
         Args:
@@ -1042,8 +1042,10 @@ class AlertNotifier(QObject if HAS_PYQT else object):
 
         # 🔗 集中交易调度中枢即时感知与质量策略评估 (天梯/龙头突击等全信号统一理解价值 & 优质标的自动入池)
         try:
-            from ats.strategy.ipo_trading_center import IPOTradingCenter
-            trading_center = IPOTradingCenter.get_instance()
+            trading_center = None
+            if not alert_only:
+                from ats.strategy.ipo_trading_center import IPOTradingCenter
+                trading_center = IPOTradingCenter.get_instance()
             if trading_center:
                 trading_center.ingest_external_alarm_signal(
                     source=source or "ATS特异信号",

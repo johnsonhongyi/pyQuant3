@@ -1372,6 +1372,8 @@ def _row_is_structure_opportunity(rec: Dict[str, Any]) -> bool:
         return False
     if _status == "CONFIRMED":
         return True
+    if (rec.get("launch_signal") or {}).get("type") in ("A", "B"):
+        return True
 
     # 1. 优先从紧凑结构字典 struct、顶层字段或 extra 提取结构预判标识
     if float(struct.get("is_structure_prejudged") or rec.get("is_structure_prejudged") or extra.get("is_structure_prejudged") or 0.0) == 1.0:
@@ -4437,6 +4439,13 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 pats = r.get("patterns") or []
                 observing = "逆势收复启动" in pats or "逆势收复持稳" in pats
                 source_item = self._num_item(("重点{} · ".format(r["focus_rank"]) if r.get("focus_rank") else "") + (("逆势收复持稳" if "逆势收复持稳" in pats else "逆势收复观察") if observing else sources), sources)
+                launch = r.get("launch_signal") or {}
+                if launch.get("type") in ("A", "B"):
+                    state_cn = "人工确认许可" if launch.get("permission") == "MANUAL_CONFIRM" else "结构观察"
+                    if launch.get("reentry_permission") == "MANUAL_CONFIRM":
+                        state_cn = "重新介入·人工确认（持仓未核实）"
+                    source_item.setText("{}型·{} {}".format(launch["type"], state_cn, sources))
+                    source_item.setToolTip("{} | {}\n{}".format(launch.get("label", ""), state_cn, launch.get("reason", "")))
                 first_ts = r.get("counter_reclaim_first_ts")
                 if observing and first_ts:
                     source_item.setToolTip("首次发现：{}；仅为观察信号，梯度及否决原因以本行为准".format(

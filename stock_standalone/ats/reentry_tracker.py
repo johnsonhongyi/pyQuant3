@@ -142,6 +142,23 @@ class ReentryTracker:
         if code_clean in self._closed_trades:
             self._closed_trades.pop(code_clean, None)
 
+    def prior_exit_context(self, code: str) -> Dict[str, Any]:
+        """只读历史平仓上下文；用于提醒“可重新介入”，不作为买点和风险许可依据。
+
+        不按上一笔盈亏、卖出价、是否卖飞来改变最新梯度结论。
+        """
+        if time.time() - self._last_db_load_time > self._db_load_interval:
+            self.reload_closed_trades()
+        item = self._closed_trades.get(str(code).strip().zfill(6))
+        if not item or not item.get("reentry_active", True):
+            return {}
+        return {
+            "previous_exit": True,
+            "sell_date": str(item.get("sell_date") or ""),
+            "sell_price": float(item.get("sell_price") or 0.0),
+            "position_verified": False,  # 不是实时持仓查询，不用于自动下单
+        }
+
     def check_reentry_signal(
         self,
         code: str,

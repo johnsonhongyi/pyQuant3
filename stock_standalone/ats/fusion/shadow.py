@@ -27,6 +27,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ats.fusion.adapter import LaunchTracker, build_event, in_trading_session, is_today, today_str
 from ats.fusion.anomaly import PATTERN_BOX10_VWAP_HOVER, PATTERN_COUNTER_HOLD, PATTERN_COUNTER_RECLAIM, PATTERN_LATENT_BREAK, PATTERN_STRUCTURE_CONFIRM, counter_reclaim, detect_patterns, pattern_score, rolling_vwaps
 from ats.fusion.config import engine_params, load_config
+from ats.fusion.launch_signal import classify_launch
 from ats.fusion.engine import FusionBus, FusionEngine
 from ats.fusion.regime import MarketRegime, MarketRegimeTracker, RegimeSample
 from ats.fusion.structure_timeline import (
@@ -119,6 +120,29 @@ class FusionShadow:
     def _tracks_source(source: str) -> bool:
         return source in _TRACKER_SOURCES
 
+    def _record_launch_vwap_slope(self, code: str, ts: float, vwap: float) -> Optional[float]:
+        """用同一标的已到达的真实分时 VWAP 样本计算约 5 分钟斜率。"""
+        if not (0.0 < ts < float("inf") and 0.0 < vwap < float("inf")):
+            return None
+        with self._launch_vwap_lock:
+            samples = self._launch_vwap_samples.setdefault(str(code).zfill(6), [])
+            if samples and ts < samples[-1][0]:
+                samples.clear()
+            if samples and ts - samples[-1][0] < 30.0:
+                samples[-1] = (ts, vwap)
+            else:
+                samples.append((ts, vwap))
+            cutoff = ts - 600.0
+            while samples and samples[0][0] < cutoff:
+                samples.pop(0)
+            prior = [item for item in samples[:-1] if 240.0 <= ts - item[0] <= 420.0]
+            if not prior:
+                return None
+            _, baseline = min(prior, key=lambda item: abs((ts - item[0]) - 300.0))
+            if baseline <= 0:
+                return None
+            return (vwap / baseline - 1.0) * 100.0
+
     def __init__(
         self,
         config: Optional[Dict[str, Any]] = None,
@@ -149,6 +173,8 @@ class FusionShadow:
         self._prime_leader_by_sector: Dict[str, str] = {}  # sector -> code 板块总龙头唯一性
         self._latent_pool: Dict[str, float] = {}
         self._counter_reclaim_first: Dict[str, float] = {}
+        self._launch_vwap_samples: Dict[str, List[tuple]] = {}
+        self._launch_vwap_lock = threading.Lock()
         self._regime_provider = regime_provider
 
         # 结构机会时间轴：让"结构验证"成为可成立/可失守/可恢复的状态，而不是开盘一次性盖章
@@ -674,6 +700,20 @@ class FusionShadow:
                 lead_label = raw_lead_label
 
             lead_score = float(event.extra.get("lead_score") or 0.0)
+            # 两类早盘启动证据只作为独立观察，不给形态分加权或抬高梯度。
+            event.extra["vwap_slope_5m_pct"] = self._record_launch_vwap_slope(
+                code, float(event.ts), float(event.vwap)
+            )
+            _prior_low = _pick_float(
+                row.get("lastl1d"), (snap or {}).get("lastl1d"),
+                row.get("prev_low"), (snap or {}).get("prev_low"),
+            )
+            launch_signal = classify_launch(
+                event, day_open=day_open, prev_low=_prior_low,
+                prev_high=_hi_pre1, prejudged=_is_struct_ready,
+                struct_status=_tl.status,
+            )
+            event.extra["launch_signal"] = launch_signal
             _ps = pattern_score(patterns)
             # 结构失守/剔除后不再给结构保底；只有"此刻仍成立"的结构才配拿 L4 保底
             _struct_blocked = _tl.status in (STATUS_BROKEN, STATUS_EVICTED)
@@ -702,6 +742,36 @@ class FusionShadow:
                     tag = "形态:{}".format(p)
                     if tag not in fusion.evidence:
                         fusion.evidence.append(tag)
+            if launch_signal:
+                if (launch_signal["status"] == "CONFIRMED" and fusion.tier >= 2
+                        and not fusion.veto_reason and not vetoed
+                        and not fusion.provisional and fusion.coverage >= 0.70):
+                    launch_signal["permission"] = "MANUAL_CONFIRM"
+                else:
+                    launch_signal["permission"] = "WATCH"
+                    if fusion.veto_reason:
+                        launch_signal["reason"] += "；梯度否决:{}".format(fusion.veto_reason)
+                    elif vetoed:
+                        launch_signal["reason"] += "；既有策略否决"
+                    elif launch_signal["status"] == "CONFIRMED":
+                        launch_signal["reason"] += "；待L2及数据覆盖门禁确认"
+                if launch_signal["permission"] == "MANUAL_CONFIRM":
+                    # 仅查询新近可行动信号；历史平仓不改变当前梯度/价格或风险门禁。
+                    try:
+                        from ats.reentry_tracker import get_reentry_tracker
+                        prior_exit = get_reentry_tracker().prior_exit_context(code)
+                        if prior_exit:
+                            launch_signal["reentry_permission"] = "MANUAL_CONFIRM"
+                            launch_signal["prior_exit"] = prior_exit
+                    except Exception as exc:
+                        logger.debug("[fusion] 历史平仓上下文不可用 %s: %s", code, exc)
+                fusion.evidence.append(
+                    "早盘启动:{}；{}；许可:{}".format(
+                        launch_signal["label"], launch_signal["reason"], launch_signal["permission"]
+                    )
+                )
+                if launch_signal.get("reentry_permission"):
+                    fusion.evidence.append("重新介入许可：存在历史平仓，当前独立入场信号成立；持仓未核实")
             if lead_label in (LABEL_VANGUARD, LABEL_FLAG):
                 ltag = "先锋:{}({:.0f})".format(lead_label, lead_score)
                 if ltag not in fusion.evidence:
@@ -769,6 +839,9 @@ class FusionShadow:
                     int(getattr(_tl, "confirm_n", 0) or 0),
                     int(fusion.tier),
                     reason,
+                    launch_signal.get("type", ""),
+                    launch_signal.get("status", ""),
+                    launch_signal.get("permission", ""),
                 )
                 if reason or fusion.tier >= 2:
                     self._observation_active[code] = True
@@ -807,6 +880,7 @@ class FusionShadow:
                 "hit": bool(fusion.tier >= 2),
                 "coverage": round(float(getattr(fusion, "coverage", 0.0) or 0.0), 3),
                 "patterns": patterns,
+                "launch_signal": launch_signal,
                 "observation_evidence": event.extra.get("observation_evidence"),
                 "counter_reclaim_first_ts": self._counter_reclaim_first.get(code),
                 "reclaim_vwap3": round(_v3, 3),
