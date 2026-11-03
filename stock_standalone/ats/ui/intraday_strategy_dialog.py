@@ -2761,6 +2761,44 @@ class SBCChartCanvas(QWidget):
         if len(prices) == 0:
             return
 
+        # 多日分时折线只连接 close，首分钟内的高开可能因此消失；单独保留今日首根 OHLC。
+        opening_bar = None
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        full_frame = getattr(self, "df_intraday", None)
+        if full_frame is not None and not full_frame.empty:
+            full_start_idx = None
+            if "date" in full_frame.columns:
+                full_dates = full_frame["date"].astype(str).str[:10].to_numpy()
+                today_positions = np.flatnonzero(full_dates == today_str)
+                if len(today_positions):
+                    full_start_idx = int(today_positions[0])
+            elif self.period_mode == "1m" and start_i == 0:
+                full_start_idx = 0
+
+            if full_start_idx is not None and start_i <= full_start_idx <= end_i:
+                full_start_label = str(full_frame.index[full_start_idx])
+                visible_positions = np.flatnonzero(df_view.index.astype(str).to_numpy() == full_start_label)
+                if len(visible_positions):
+                    row = df_view.iloc[int(visible_positions[0])]
+                    try:
+                        bar_open = float(row.get("open", 0.0))
+                        bar_close = float(row.get("close", 0.0))
+                        bar_high = float(row.get("high", max(bar_open, bar_close)))
+                        bar_low = float(row.get("low", min(bar_open, bar_close)))
+                        if all(np.isfinite(v) and v > 0.001 for v in (bar_open, bar_close)):
+                            if not np.isfinite(bar_high) or bar_high <= 0.001:
+                                bar_high = max(bar_open, bar_close)
+                            if not np.isfinite(bar_low) or bar_low <= 0.001:
+                                bar_low = min(bar_open, bar_close)
+                            bar_high = max(bar_high, bar_open, bar_close)
+                            bar_low = min(bar_low, bar_open, bar_close)
+                            opening_bar = {
+                                "idx": int(visible_positions[0]), "open": bar_open,
+                                "close": bar_close, "high": bar_high, "low": bar_low,
+                            }
+                    except (TypeError, ValueError):
+                        opening_bar = None
+
         op_ref = self.open_price if self.open_price > 1.0 else (prices[0] if len(prices) > 0 else 10.0)
 
         cur_hm = datetime.now().strftime("%H:%M")
@@ -2792,6 +2830,11 @@ class SBCChartCanvas(QWidget):
         for v in vwaps:
             if v > 0.001 and np.isfinite(v):
                 all_cands.append(float(v))
+        if opening_bar:
+            for key in ("open", "high", "low", "close"):
+                value = opening_bar[key]
+                if op_ref <= 0.01 or op_ref * 0.5 <= value <= op_ref * 2.0:
+                    all_cands.append(value)
         if op_ref > 0.001:
             all_cands.append(float(op_ref))
 
@@ -3141,6 +3184,29 @@ class SBCChartCanvas(QWidget):
                     path_p.lineTo(time_to_x(i), price_to_y(prices[i]))
             painter.setPen(QPen(QColor("#00b4d8"), 1.8))
             painter.drawPath(path_p)
+
+        # 今日首根一分钟 OHLC 标记：开盘横杠、首分钟高低影线和开收方向。
+        if opening_bar:
+            x_open = time_to_x(opening_bar["idx"])
+            y_open = price_to_y(opening_bar["open"])
+            y_close = price_to_y(opening_bar["close"])
+            y_high = price_to_y(opening_bar["high"])
+            y_low = price_to_y(opening_bar["low"])
+            body_color = QColor("#00FF88") if opening_bar["close"] < opening_bar["open"] else QColor("#FF4444")
+            painter.setPen(QPen(QColor("#FBBF24"), 1.4))
+            painter.drawLine(int(x_open), int(y_high), int(x_open), int(y_low))
+            painter.setPen(QPen(body_color, 2.2))
+            painter.drawLine(int(x_open), int(y_open), int(x_open), int(y_close))
+            painter.drawLine(int(x_open - 4), int(y_open), int(x_open + 4), int(y_open))
+
+            label = f"今开 {opening_bar['open']:.2f}"
+            label_w = painter.fontMetrics().horizontalAdvance(label) + 8
+            label_x = min(margin_left + active_chart_w - label_w, max(margin_left + 2, int(x_open + 6)))
+            label_y = max(margin_top + 2, min(margin_top + main_h - 17, int(y_open - 20)))
+            painter.setPen(QPen(QColor("#FBBF24")))
+            painter.setBrush(QBrush(QColor(15, 23, 42, 220)))
+            painter.drawRoundedRect(label_x, label_y, label_w, 16, 3, 3)
+            painter.drawText(label_x + 4, label_y + 12, label)
 
         painter.restore()
 
@@ -5897,6 +5963,8 @@ class SBCIntradayChartDialog(QWidget):
         self._load_epoch: int = 0
         self._load_inflight = False
         self._pending_load = None
+        self._cache_refresh_pending = False
+        self._cache_refresh_code = ""
         self._async_chart_data_ready.connect(self._on_async_chart_data_arrived)
 
         # 设置为彻底独立的顶层 Window (非模态，不置顶，不妨碍用户与其他窗口重叠与切换)
@@ -8291,6 +8359,48 @@ class SBCIntradayChartDialog(QWidget):
         """【🪟 所在屏幕窗口重排】就地自动平铺重排当前屏幕上所有打开的 SBC 窗口 (多显示器支持，保持原尺寸不变，绝不强行移至主屏)"""
         rearrange_all_sbc_windows(parent_win=self)
 
+    def _finish_cache_refresh(self, payload: Dict[str, Any], success: bool):
+        """清缓存后的异步重拉完成后，按实际返回结果反馈，不把启动请求当成成功。"""
+        if not getattr(self, "_cache_refresh_pending", False):
+            return
+        self._cache_refresh_pending = False
+        refresh_code = getattr(self, "_cache_refresh_code", self.code)
+        self._cache_refresh_code = ""
+        if getattr(self, "_is_closing", False):
+            return
+
+        frame = payload.get("df_target") if isinstance(payload, dict) else None
+        if not success or frame is None or frame.empty:
+            reason = str(payload.get("fetch_error", "TDX 未返回有效分钟数据")) if isinstance(payload, dict) else "TDX 未返回有效分钟数据"
+            QMessageBox.warning(
+                self, "缓存已清理，行情重拉未完成",
+                f"标的 [{refresh_code}] 的底层行情缓存已清除，但本次没有取得可显示的新分时。\n{reason}\n旧图已清空，请稍后重试刷新。"
+            )
+            return
+
+        last_row = frame.iloc[-1]
+        mode = str(payload.get("mode", getattr(self, "_current_period_mode", "1m")))
+        default_date = datetime.now().strftime("%Y-%m-%d") if mode == "1m" else "日期未知"
+        last_date = str(last_row.get("date", default_date))[:10]
+        last_time = str(last_row.get("time_only", frame.index[-1]))
+        last_close = float(last_row.get("close", 0.0) or 0.0)
+        missing_today = bool(payload.get("cache_refresh_missing_today", False))
+        if not missing_today and mode in ("1m", "3d", "5d", "10d") and TDXGlobalCachePool.has_continuous_session():
+            missing_today = last_date != datetime.now().strftime("%Y-%m-%d")
+        if missing_today:
+            QMessageBox.warning(
+                self, "缓存已清理，但缺少今日分时",
+                f"标的 [{refresh_code}] 已重新请求 TDX，但返回数据最新日期为 {last_date} {last_time}，没有今日分钟数据。\n"
+                "请检查 TDX 行情源或稍后重试；当前图表不会把旧缓存当作今日行情。"
+            )
+            return
+
+        QMessageBox.information(
+            self, "缓存清理并重拉完成",
+            f"标的 [{refresh_code}] 的 TDX 内存、RamDisk 与 SBC 状态缓存已清理。\n"
+            f"已重新载入 {len(frame):,} 根分时，最新数据 {last_date} {last_time}，收盘价 {last_close:.2f} 元。"
+        )
+
     def _on_clear_cache_clicked(self):
         """【🧹 清理缓存】清除当前标的在 TDX 与引擎内存中的错误/旧数据，并强力重置刷新"""
         c_clean = str(self.code).zfill(6)
@@ -8298,13 +8408,33 @@ class SBCIntradayChartDialog(QWidget):
         fetcher.clear_stock_cache(c_clean)
         self.engine.clear_stock_cache(c_clean)
 
+        # 清除旧画面，等待本次绕过预加载数据的 TDX 请求完成后再恢复走势。
+        self._cache_refresh_pending = True
+        self._cache_refresh_code = c_clean
+        self._last_rendered_fp = None
+        mode = getattr(self, "_current_period_mode", "1m")
+        self.canvas.set_data(pd.DataFrame(), period_mode=mode)
+        self.canvas.auction_samples = []
+        self.canvas.auction_price = 0.0
+        self.canvas.market_phase = ""
+        self.canvas.multi_vwap_snapshot = None
+        self.canvas._amplitude_history_df = None
+        self.canvas._zoom_start_idx = 0
+        self.canvas._zoom_end_idx = -1
+        self.canvas._is_right_anchored = True
+        self.canvas._visible_bar_count = None
+        self.lbl_title.setText(f"📊 {c_clean} {get_cached_stock_name(c_clean)} | 正在清缓存并重拉 TDX 分时…")
+        self.lbl_info.setText("底层行情缓存已清理，正在重新请求 TDX；完成前不显示旧图。")
+
         # 向上同步刷新主工作台
         main_win = getattr(self, "main_workbench", None)
         if main_win and hasattr(main_win, "_on_manual_refresh"):
-            main_win._on_manual_refresh()
+            try:
+                main_win._on_manual_refresh()
+            except Exception as e_refresh:
+                logger.debug(f"[SBC] 清缓存后主工作台联动刷新失败: {e_refresh}")
 
         self.reload_chart()
-        QMessageBox.information(self, "🧹 缓存已强力重置", f"标的 [{c_clean} {resolve_stock_name(c_clean)}] 的内存与磁盘行情缓存已成功强力清除！\n已自动拉取最新 TDX 分时数据并重置评级与分时走势线！")
 
     def set_custom_backtest_trades(self, trades_df: pd.DataFrame, df_kline: Optional[pd.DataFrame] = None):
         """
@@ -8876,6 +9006,12 @@ class SBCIntradayChartDialog(QWidget):
         mode = payload.get("mode", "1m")
         is_preview = bool(payload.get("is_preview"))
         is_degraded = bool(payload.get("is_degraded"))
+        cache_refresh_pending = (
+            getattr(self, "_cache_refresh_pending", False)
+            and getattr(self, "_cache_refresh_code", "") == self.code
+        )
+        if cache_refresh_pending and is_preview:
+            return
         data_fp = payload.get("data_fp")
 
         # 🚀 [阶段4 入口级脏检查] 若为定时心跳刷新，且数据与盘面指纹完全一致，短路跳过后续全部重排与重绘！
@@ -8902,6 +9038,27 @@ class SBCIntradayChartDialog(QWidget):
                     canvas.auction_price = float(payload.get("auction_samples")[-1].get("price", 0.0) or 0.0)
                 except Exception:
                     pass
+        cache_refresh_missing_today = False
+        if cache_refresh_pending and df_target is not None and not df_target.empty and mode in ("1m", "3d", "5d", "10d"):
+            if "date" in df_target.columns:
+                cache_refresh_missing_today = str(df_target.iloc[-1].get("date", ""))[:10] != datetime.now().strftime("%Y-%m-%d")
+            elif mode != "1m":
+                cache_refresh_missing_today = True
+            if cache_refresh_missing_today and not TDXGlobalCachePool.has_continuous_session():
+                cache_refresh_missing_today = False
+        if cache_refresh_pending and (is_degraded or df_target is None or df_target.empty or cache_refresh_missing_today):
+            if canvas is not None:
+                canvas.set_data(pd.DataFrame(), period_mode=mode)
+            if cache_refresh_missing_today:
+                self.lbl_title.setText(f"📊 {self.code} | TDX 重拉结果缺少今日分时")
+                self.lbl_info.setText("底层缓存已清理；TDX 返回的数据不含今天，旧图不会继续显示。")
+                payload["cache_refresh_missing_today"] = True
+                self._finish_cache_refresh(payload, success=True)
+            else:
+                self.lbl_title.setText(f"📊 {self.code} | TDX 重拉未取得有效分时")
+                self.lbl_info.setText("底层缓存已清理；本次未取得新行情，旧图不会继续显示。")
+                self._finish_cache_refresh(payload, success=False)
+            return
         if (df_target is None or df_target.empty) and canvas is not None:
             previous = getattr(canvas, "df_intraday", None)
             if (previous is not None and not previous.empty
@@ -9047,6 +9204,9 @@ class SBCIntradayChartDialog(QWidget):
             )
         except Exception as e_att:
             logger.debug(f"[SBC] attention evaluate error: {e_att}")
+
+        if cache_refresh_pending:
+            self._finish_cache_refresh(payload, success=True)
 
     def _do_ack_single_attention_banner(self):
         """单窗口收起当前已确认的 SBC 异动提醒横幅并停止外框闪烁"""
@@ -9307,6 +9467,12 @@ class SBCIntradayChartDialog(QWidget):
 
     def reload_chart(self, is_timer_tick: bool = False, force_sync: bool = False,
                      preloaded: Optional[Dict[str, Any]] = None):
+        # 清缓存后的这一轮必须直接从 TDX 拉取，不能被共享分发器的旧预加载批次覆盖。
+        if (getattr(self, "_cache_refresh_pending", False)
+                and getattr(self, "_cache_refresh_code", "") == self.code
+                and preloaded is not None):
+            return
+
         # 保持输入框与当前标的代码+名称同步 (非编辑输入状态下)
         if hasattr(self, 'txt_switch_code') and self.txt_switch_code and not self.txt_switch_code.hasFocus():
             expected_display = self._format_code_with_name(self.code)
@@ -9412,6 +9578,12 @@ class SBCIntradayChartDialog(QWidget):
                 if preview_payload is not None:
                     payload = dict(preview_payload, is_preview=False, is_degraded=True)
                     payload["data_fp"] += ("degraded",)
+                elif (getattr(self, "_cache_refresh_pending", False)
+                      and getattr(self, "_cache_refresh_code", "") == cur_code):
+                    payload = {
+                        "is_cancelled": False, "code": cur_code, "mode": mode,
+                        "df_target": pd.DataFrame(), "fetch_error": str(e),
+                    }
             finally:
                 if not isinstance(payload, dict):
                     payload = {"is_cancelled": True}
