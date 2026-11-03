@@ -5068,8 +5068,22 @@ class FusionLadderDialog(QWidget, WindowMixin):
             # 动态自定义列 (ats_col)
             if getattr(self, "extra_cols", None):
                 for idx_ec, ec in enumerate(self.extra_cols):
-                    item = self._num_item("--", None)
-                    item.setToolTip("回放档案未保存该自定义列的历史时点值；不使用当前行情补填。")
+                    if df_strat is not None and not df_strat.empty:
+                        val_txt, val_raw = self._extract_stock_custom_val(df_strat, cd, ec, custom_lookup)
+                    else:
+                        val_txt, val_raw = "--", 0.0
+                    item = self._num_item(val_txt, val_raw)
+                    if val_txt != "--":
+                        item.setToolTip(
+                            "ATS 自定义列按股票代码 {} 从当前策略 DataFrame 对齐。\n"
+                            "此值是当前策略快照，回放档案未保存 {} 的历史时点值。"
+                            .format(cd, result.day)
+                        )
+                    else:
+                        item.setToolTip(
+                            "未找到代码 {} 的 ATS 自定义列值；回放档案未保存 {} 的历史时点值。"
+                            .format(cd, result.day)
+                        )
                     tbl.setItem(i, len(self._REPLAY_BASE_HEADERS) + idx_ec, item)
             if r.get("focus_rank"):
                 self._mark_focus_row(tbl, i, (1, 2))
