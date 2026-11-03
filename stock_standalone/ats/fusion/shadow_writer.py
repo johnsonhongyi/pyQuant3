@@ -110,6 +110,7 @@ class ShadowWriter:
     def _checkpoint_pending(self):
         if not self._pending:
             return
+        os.makedirs(os.path.dirname(self.local), exist_ok=True)
         fd, temporary = tempfile.mkstemp(prefix=".shadow-sync-", dir=os.path.dirname(self.local))
         try:
             with os.fdopen(fd, "wb") as target:

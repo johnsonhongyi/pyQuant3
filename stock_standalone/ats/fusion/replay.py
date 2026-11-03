@@ -38,6 +38,7 @@ import numpy as np
 
 from ats.fusion.adapter import today_str
 from ats.fusion.engine import FusionEngine, leadership_value
+from ats.fusion.kernel import compute_tier_floor, resolve_prime_leader
 from ats.fusion.launch_signal import classify_launch
 from ats.fusion.regime import (
     MarketRegime,
@@ -852,7 +853,8 @@ class DayReplay:
                 # --- 点火强度：与"安全度"分开的弹性指标 ---
                 # 现有四轴偏"确认"（位置/承接），会把刚启动的票判成中庸；
                 # 这里单独量化"量能扩张 + 波动扩张 + 突破前高 + 加速"。
-                vol_exp = _clamp(vol_ratio, 0.3, 5.0)
+                bar_vol_ratio = vol_ratio
+                vol_exp = _clamp(bar_vol_ratio, 0.3, 5.0)
                 _rb = rng_mean20[i, t]
                 rng_now = (dh - dl) / max(1e-9, price)
                 rng_base = float(_rb) / max(1e-9, price) if _isfinite(_rb) and _rb > 0 else rng_now
@@ -878,6 +880,17 @@ class DayReplay:
                 _dc = daily_ctx.get(codes[i]) or {}
                 _ma5 = float(_dc.get("ma5", 0.0)); _ma10 = float(_dc.get("ma10", 0.0)); _ma20 = float(_dc.get("ma20", 0.0))
                 _day_open = day_open_map.get(codes[i], price)
+                _clock_time = time.localtime(int(clock[t]))
+                _minute = _clock_time.tm_hour * 60 + _clock_time.tm_min
+                _elapsed = min(120, max(0, _minute - 570)) + min(120, max(0, _minute - 780))
+                _daily_volume = float(_dc.get("vol_ma5") or 0)
+                _day_ratio = (float(mat["cum_vol"][i, t]) / _daily_volume * 240 / _elapsed
+                              if _daily_volume > 0 and _elapsed > 0 else 0)
+                if _day_ratio > 0:
+                    eff_vol_ratio = max(0.2, min(8.0, float(_day_ratio)))
+                else:
+                    eff_vol_ratio = bar_vol_ratio
+
                 ev = SignalEvent(
                     code=codes[i],
                     ts=float(clock[t]),
@@ -889,7 +902,7 @@ class DayReplay:
                     day_high=dh,
                     day_low=dl,
                     pct=float(pct[i]),
-                    vol_ratio=vol_ratio,
+                    vol_ratio=eff_vol_ratio,
                     turnover=0.0,
                     amount_wan=float(mat["cum_vol"][i, t] * price / 1e4),
                     taker_buy_ratio=max(30.0, min(85.0, taker_proxy)),
@@ -992,7 +1005,7 @@ class DayReplay:
                     price=price, day_open=_day_open,
                     ma5=_ma5, ma10=_ma10, ma20=_ma20,
                     pct=float(pct[i]), ret_std20=float(_dc.get("ret_std20", 0.0)),
-                    vol_ratio=vol_ratio, rs5=_rs5,
+                    vol_ratio=eff_vol_ratio, rs5=_rs5,
                     mkt_ret5=mkt_ret5, is_leader=bool(leader_mask[i]),
                     vwap10=_vw10,
                     vol_dry=float(_dc.get("vol_dry", 1.0) or 1.0),
@@ -1010,12 +1023,6 @@ class DayReplay:
                 patterns = list(_pat_early)
                 historical_context = dict(history.latest.get(codes[i], {})) if history is not None else {}
                 _rv3, _rv5 = rolling_vwaps(_dc, vw, float(mat["cum_vol"][i, t]))
-                _clock_time = time.localtime(int(clock[t]))
-                _minute = _clock_time.tm_hour * 60 + _clock_time.tm_min
-                _elapsed = min(120, max(0, _minute - 570)) + min(120, max(0, _minute - 780))
-                _daily_volume = float(_dc.get("vol_ma5") or 0)
-                _day_ratio = (float(mat["cum_vol"][i, t]) / _daily_volume * 240 / _elapsed
-                              if _daily_volume > 0 and _elapsed > 0 else 0)
                 if _dc.get("vwap_observed_days", 0) >= 5 and counter_reclaim(price, vw, _rv3,
                                    _rv5, float(_dc.get("close_pre1") or 0),
                                    float(pct[i]), mkt_median_pct,
@@ -1068,6 +1075,7 @@ class DayReplay:
                 )
 
                 ev.extra = dict(ev.extra or {})
+                ev.extra["bar_vol_ratio"] = round(bar_vol_ratio, 3)
                 ev.extra.update(_lead.to_dict())
                 raw_lead_label = _lead.label
                 lead_gap_min = float(_lead.lead_gap_min)
@@ -1083,29 +1091,18 @@ class DayReplay:
                 # K2 操盘手优化：与实盘 shadow.py 100% 同构判定总龙头 (排除跟风与板块唯一性)
                 prev_strong = bool(_dc.get("prev_strong_vwap") or ev.extra.get("prev_strong_vwap"))
                 today_strong = bool(float(pct[i]) > 0 and price >= vw * 0.998)
-                _is_prime = False
-                if prev_strong and today_strong:
-                    is_front = (
-                        (raw_lead_label in (LABEL_VANGUARD, LABEL_FLAG) or lead_gap_min <= 5.0)
-                        and raw_lead_label not in (LABEL_FOLLOW, "跟风", LABEL_STRIKE, "冲锋队")
-                    )
-                    if is_front:
-                        if _sector:
-                            current_prime = prime_leader_by_sector.get(_sector)
-                            if current_prime is None or current_prime == codes[i]:
-                                prime_leader_by_sector[_sector] = codes[i]
-                                _is_prime = True
-                        else:
-                            _is_prime = True
-
-                if _is_prime:
-                    ev.extra["is_prime_leader"] = True
-                    ev.extra["lead_label"] = LABEL_PRIME
-                    lead_label_final = LABEL_PRIME
-                else:
-                    ev.extra["is_prime_leader"] = False
-                    ev.extra["lead_label"] = raw_lead_label
-                    lead_label_final = raw_lead_label
+                _is_prime, lead_label_final = resolve_prime_leader(
+                    code=codes[i],
+                    sector=_sector,
+                    prev_strong=prev_strong,
+                    today_strong=today_strong,
+                    raw_lead_label=raw_lead_label,
+                    lead_gap_min=lead_gap_min,
+                    prime_leader_by_sector=prime_leader_by_sector,
+                    lock=None,
+                )
+                ev.extra["is_prime_leader"] = _is_prime
+                ev.extra["lead_label"] = lead_label_final
 
                 ev.extra["patterns"] = list(patterns)
                 # 结构时间轴状态同步进 extra，引擎据此决定"保底/降档/剔除"
@@ -1120,14 +1117,17 @@ class DayReplay:
                     vwatch.register(codes[i], _sector, float(clock[t]), price, _vw10)
 
                 _ps = pattern_score(patterns)
-                _struct_blocked = _tl.status in (STATUS_BROKEN, STATUS_EVICTED)
-                _floor = None
-                if ("十日洗盘悬空突破" in patterns or "结构预判验证" in patterns) and not _struct_blocked and self.cfg.struct_floor:
-                    _floor = 4  # 结构成立才保底；已失守/剔除的票不再享受
-                elif _is_prime:
-                    _floor = 4
-                elif self.cfg.pattern_floor:
-                    _floor = 3 if _ps >= 100 else (2 if _ps >= 70 else None)
+                _floor = compute_tier_floor(
+                    patterns=patterns,
+                    struct_status=_tl.status,
+                    is_prime=_is_prime,
+                    is_leader=bool(leader_mask[i]),
+                    lead_label=lead_label_final,
+                    ps=_ps,
+                    struct_floor_enabled=bool(self.cfg.struct_floor),
+                    pattern_floor_enabled=bool(self.cfg.pattern_floor),
+                    max_struct_floor_tier=getattr(self.engine, "max_struct_floor_tier", 4),
+                )
                 decision = self.engine.evaluate(
                     ev, regime, now=float(clock[t]), tier_floor=_floor
                 )
@@ -1359,6 +1359,7 @@ class DayReplay:
                 records.append(
                     {
                         "ts": int(clock[t]),
+                        "day": day,
                         "time": time.strftime("%H:%M", time.localtime(int(clock[t]))),
                         "code": codes[i],
                         "name": name_of(codes[i]),

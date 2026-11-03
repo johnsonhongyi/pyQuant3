@@ -14,8 +14,15 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+
+try:
+    from safe_copy import safe_deepcopy
+except Exception:
+    def safe_deepcopy(x: Any) -> Any:
+        return copy.deepcopy(x)
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +124,7 @@ class SignalEvent:
             "price": self.price,
             "vwap": self.vwap,
             "vwap_5d": self.vwap_5d,
+            "vwap_10d": self.vwap_10d,
             "sbc_supp": self.sbc_supp,
             "sbc_rev": self.sbc_rev,
             "base_support": self.base_support,
@@ -138,10 +146,74 @@ class SignalEvent:
             "sector_resonance": self.sector_resonance,
             "is_leader": self.is_leader,
             "upper_score": self.upper_score,
+            "ma5": self.ma5,
+            "ma10": self.ma10,
+            "ma20": self.ma20,
+            "ret5d": self.ret5d,
+            "ret10d": self.ret10d,
+            "ret20d": self.ret20d,
+            "days_since_high": self.days_since_high,
+            "limit_up_streak": self.limit_up_streak,
+            "dist_ma20_pct": self.dist_ma20_pct,
+            "rs5": self.rs5,
+            "rs_day": self.rs_day,
             "launch_ts": self.launch_ts,
             "freshness_s": self.freshness_s,
             "trade_date": self.trade_date,
+            "extra": safe_deepcopy(self.extra) if self.extra else {},
         }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> SignalEvent:
+        if not d:
+            return cls(code="", ts=0.0)
+        extra_val = d.get("extra")
+        extra_clean = safe_deepcopy(extra_val) if isinstance(extra_val, dict) else {}
+        return cls(
+            code=str(d.get("code") or ""),
+            ts=float(d.get("ts") or 0.0),
+            source=str(d.get("source") or ""),
+            price=float(d.get("price") or 0.0),
+            vwap=float(d.get("vwap") or 0.0),
+            vwap_5d=float(d.get("vwap_5d") or 0.0),
+            vwap_10d=float(d.get("vwap_10d") or 0.0),
+            sbc_supp=float(d.get("sbc_supp") or 0.0),
+            sbc_rev=float(d.get("sbc_rev") or 0.0),
+            base_support=float(d.get("base_support") or 0.0),
+            resistance=float(d.get("resistance") or 0.0),
+            day_high=float(d.get("day_high") or 0.0),
+            day_low=float(d.get("day_low") or 0.0),
+            pct=float(d.get("pct") or 0.0),
+            vol_ratio=float(d.get("vol_ratio") or 1.0),
+            turnover=float(d.get("turnover") or 0.0),
+            amount_wan=float(d.get("amount_wan") or 0.0),
+            taker_buy_ratio=float(d.get("taker_buy_ratio") or 50.0),
+            bid_pressure=float(d.get("bid_pressure") or 50.0),
+            structure_clarity=float(d.get("structure_clarity") or 0.0),
+            minutes_above_vwap=float(d.get("minutes_above_vwap") or 0.0),
+            slope_score=float(d.get("slope_score") or 40.0),
+            intent_score=float(d.get("intent_score") or 50.0),
+            velocity_pct=float(d.get("velocity_pct") or 0.0),
+            segment_vol_inc=float(d.get("segment_vol_inc") or 0.0),
+            sector_resonance=float(d.get("sector_resonance") or 0.0),
+            is_leader=bool(d.get("is_leader")),
+            upper_score=float(d.get("upper_score") or 0.0),
+            ma5=float(d.get("ma5") or 0.0),
+            ma10=float(d.get("ma10") or 0.0),
+            ma20=float(d.get("ma20") or 0.0),
+            ret5d=float(d.get("ret5d") or 0.0),
+            ret10d=float(d.get("ret10d") or 0.0),
+            ret20d=float(d.get("ret20d") or 0.0),
+            days_since_high=float(d.get("days_since_high") or 0.0),
+            limit_up_streak=float(d.get("limit_up_streak") or 0.0),
+            dist_ma20_pct=float(d.get("dist_ma20_pct") or 0.0),
+            rs5=float(d.get("rs5") or 0.0),
+            rs_day=float(d.get("rs_day") or 0.0),
+            launch_ts=float(d.get("launch_ts") or 0.0),
+            freshness_s=float(d.get("freshness_s") or 0.0),
+            trade_date=str(d.get("trade_date") or ""),
+            extra=extra_clean,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +248,20 @@ class AxisScores:
             "penalty": round(self.penalty, 2),
             "rar": round(self.rar, 2),
         }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> AxisScores:
+        if not d:
+            return cls()
+        return cls(
+            position=float(d.get("position") or 0.0),
+            support=float(d.get("support") or 0.0),
+            intent=float(d.get("intent") or 0.0),
+            regime=float(d.get("regime") or 0.0),
+            relative=float(d.get("relative") if d.get("relative") is not None else 50.0),
+            penalty=float(d.get("penalty") or 0.0),
+            rar=float(d.get("rar") or 0.0),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +334,18 @@ class FusionDecision:
     provisional: bool = False
     cuts: tuple = ()
 
+    # 三层档位与决策分解
+    score_tier: int = 0
+    signal_tier: int = 0
+    signal_size_pct: float = 0.0
+    portfolio_tier: int = 0
+    base_rar: float = 0.0
+    adj_rar: float = 0.0
+    floor_tier: int = 0
+    floor_source: str = ""
+    cap_tier: int = 4
+    cap_reasons: List[str] = field(default_factory=list)
+
     @property
     def actionable(self) -> bool:
         return self.tier >= 1 and not self.veto_reason
@@ -289,6 +387,13 @@ class FusionDecision:
         )
 
     def to_dict(self) -> Dict[str, Any]:
+        cuts_list = []
+        if self.cuts:
+            for item in self.cuts:
+                if isinstance(item, (list, tuple)) and len(item) == 2:
+                    cuts_list.append([round(float(item[0]), 2), int(item[1])])
+                else:
+                    cuts_list.append(item)
         return {
             "code": self.code,
             "ts": self.ts,
@@ -312,4 +417,69 @@ class FusionDecision:
             "flip_state": self.flip_state,
             "coverage": round(self.coverage, 3),
             "provisional": bool(self.provisional),
+            "score_tier": int(self.score_tier),
+            "signal_tier": int(self.signal_tier),
+            "signal_size_pct": round(float(self.signal_size_pct), 2),
+            "portfolio_tier": int(self.portfolio_tier),
+            "base_rar": round(float(self.base_rar), 2),
+            "adj_rar": round(float(self.adj_rar), 2),
+            "floor_tier": int(self.floor_tier),
+            "floor_source": str(self.floor_source),
+            "cap_tier": int(self.cap_tier),
+            "cap_reasons": list(self.cap_reasons),
+            "cuts": cuts_list,
         }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> FusionDecision:
+        if not d:
+            return cls(code="", ts=0.0)
+        axes_raw = d.get("axes")
+        axes = AxisScores.from_dict(axes_raw) if isinstance(axes_raw, dict) else AxisScores()
+        cuts_raw = d.get("cuts")
+        cuts_tuple: tuple = ()
+        if isinstance(cuts_raw, (list, tuple)):
+            cuts_items = []
+            for item in cuts_raw:
+                if isinstance(item, (list, tuple)) and len(item) == 2:
+                    cuts_items.append((float(item[0]), int(item[1])))
+                else:
+                    cuts_items.append(item)
+            cuts_tuple = tuple(cuts_items)
+
+        tier_val = int(d.get("tier") or 0)
+        return cls(
+            code=str(d.get("code") or ""),
+            ts=float(d.get("ts") or 0.0),
+            tier=tier_val,
+            tier_name=str(d.get("tier_name") or "L0 观察"),
+            rar=float(d.get("rar") or 0.0),
+            axes=axes,
+            veto_reason=str(d.get("veto_reason") or ""),
+            size_pct=float(d.get("size_pct") or 0.0),
+            temp_coef=float(d.get("temp_coef") or 0.0),
+            age_coef=float(d.get("age_coef") or 0.0),
+            age_min=float(d.get("age_min") or 0.0),
+            entry=dict(d.get("entry") or {}),
+            stop=dict(d.get("stop") or {}),
+            targets=list(d.get("targets") or []),
+            invalidate=list(d.get("invalidate") or []),
+            evidence=list(d.get("evidence") or []),
+            sources=list(d.get("sources") or []),
+            decision_id=str(d.get("decision_id") or ""),
+            regime_stage=str(d.get("regime_stage") or ""),
+            flip_state=str(d.get("flip_state") or ""),
+            coverage=float(d.get("coverage") or 0.0),
+            provisional=bool(d.get("provisional")),
+            cuts=cuts_tuple,
+            score_tier=int(d.get("score_tier") if d.get("score_tier") is not None else tier_val),
+            signal_tier=int(d.get("signal_tier") if d.get("signal_tier") is not None else tier_val),
+            signal_size_pct=float(d.get("signal_size_pct") if d.get("signal_size_pct") is not None else d.get("size_pct", 0.0)),
+            portfolio_tier=int(d.get("portfolio_tier") if d.get("portfolio_tier") is not None else tier_val),
+            base_rar=float(d.get("base_rar") if d.get("base_rar") is not None else d.get("rar", 0.0)),
+            adj_rar=float(d.get("adj_rar") if d.get("adj_rar") is not None else d.get("rar", 0.0)),
+            floor_tier=int(d.get("floor_tier") or 0),
+            floor_source=str(d.get("floor_source") or ""),
+            cap_tier=int(d.get("cap_tier") if d.get("cap_tier") is not None else 4),
+            cap_reasons=list(d.get("cap_reasons") or []),
+        )

@@ -7,6 +7,30 @@
   - **Flash（执行者）**：通过 `invoke_subagent(..., Model="flash")` 承接写代码、跑测试、批量扫描等高 Token 消耗的具体事务。
 - **动态裁量**：以质量为主、价格为辅；质量第一、效率第二。轻微修改与极高难度核心问题由 Argon 亲自操刀。
 
+## 2026-11-03 16:50 【ATS梯度信号迭代与回放一致性优化方案（三轮交叉复审定稿、P0-P2全量落地与压缩归档自动清理）】(`docs/tasks/2026-11-03_1650_ATS梯度信号迭代与回放一致性优化方案.md`, `ats/fusion/contract.py`, `ats/fusion/adapter.py`, `ats/fusion/anomaly.py`, `ats/fusion/structure_timeline.py`, `ats/fusion/config.py`, `ats/fusion/engine.py`, `ats/fusion/kernel.py`, `ats/fusion/shadow.py`, `ats/fusion/shadow_archive.py`, `ats/fusion/replay.py`, `ats/fusion/trade_sim.py`, `ats/fusion/evaluate.py`, `tests/test_fusion_p0_p1_recompute.py`, `tests/test_fusion_evaluate_p2.py`, `tests/test_fusion_shadow_archive.py`)
+- [x] **【完成 ATS 梯度（SFL）全模块代码与生产影子日志（10,085条/2,222只）深度审计与三轮交叉复审定稿】**：
+  - **三大结构性缺口与四处机制缺陷定位**：
+    1. **评分与档位脱钩**：97.8% 的 L4 由结构/总龙头保底抬升，先定档后加减分导致 `decision.rar != axes.rar`，`FusionBus` 二次无参重评且降档未同步重算执行计划；
+    2. **缺乏结果评估闭环与完整快照**：`SignalEvent.to_dict()` 与 `StructureSnapshot.to_dict()` 遗漏关键字段，`trade_sim.py` 存在穿价捏造成交、跨 bar 伪双触止损及次日开盘退出优先级倒置，`calibrate.py` 存在测试日选参泄漏；
+    3. **回放与实盘双轨分叉**：温度、涨停阈值、量比（日内累计 vs 单根 3m bar）、龙头、板块、`cuts`、保底开关等十余处口径不一；
+    4. **命中率拉低机制**：`adapter.py` 对缺失时间戳/交易日默认回填 `0.0`/今日并先于否决器污染状态机，`hi_pre1 <= 0` 短路当突破，`WAITING` 穿透生成箱体突破形态，结构保底越级豁免 `temp_cap` 与共振门槛。
+- [x] **【按 Manager-Worker（Argon + Flash）协同规范完成 P0 / P1 / P2 全链路代码落地】**：
+  - **P0 契约、前置卫生门禁、引擎与 `FusionBus` 闭环**：
+    - `contract.py` & `structure_timeline.py`：补齐 `SignalEvent` 与 `StructureSnapshot` 全字段无损 `to_dict/from_dict`，落地 `score_tier / signal_tier / portfolio_tier` 三层档位与 `base_rar / adj_rar / floor_tier / cap_tier`；
+    - `adapter.py` & `shadow.py`：新增 `ts_source / trade_date_source` 与前置数据卫生门禁 `check_data_hygiene`，阻断未验证/过期/跨日脏数据更新内部有状态组件；
+    - `anomaly.py` & `structure_timeline.py`：根治 `hi_pre1 <= 0` / `hi_10d <= 0` 缺失短路当突破及 `WAITING` 状态穿透生成突破形态的漏洞；
+    - `engine.py`：加减分移至定档之前（`decision.rar == axes.rar == adj_rar`），否决分支保留 `coverage`，`FusionBus` 直接复用单票决策并在组合降档时同步重算 `size_pct / entry / stop / targets / invalidate`。
+  - **P1 统一内核 `ats/fusion/kernel.py`、L1a/L1b 复算与回放漂移收敛**：
+    - 抽离 `resolve_prime_leader` 与 `compute_tier_floor` 供 `shadow.py` 与 `replay.py` 共用；`replay.py` 主路径量比对齐为日内累计 ÷ 5 日均量时间归一口径（`_day_ratio`），保留 `bar_vol_ratio`；
+    - 落地 `recompute_record_l1a`（单票无状态 100% 精确复算）、`recompute_sequence_l1b`（含 `seq_no` 断号、`EOF_CHECKPOINT`、截断/丢写完整性审计）、`run_l1_ablation`（单变量消融实验）与 `compute_feature_drift_report`（实盘-回放逐字段漂移报告）。
+  - **P2 真实 A 股 T+1 撮合修复与 `ats/fusion/evaluate.py` 防泄漏评估闭环**：
+    - `trade_sim.py`：消除 `fill_price < lo` 虚构穿价成交，改为 `min(price_hi, open)` 限价撮合；支持 `chronological` 时间流序选股；修复 T+1 首根 bar 开盘 VWAP 破位/跳空退出最高优先级、逐根 bar 推进（仅同根 bar 双触判保守止损）、一字跌停/停牌 `pending_exit` 受阻顺延恢复，以及 $\ge 14:57$ 日内收盘完整性校验；
+    - `evaluate.py`：冻结往返总成本 `0.15%`（净 $+3\%/-2\%$ 对应毛 $+3.15\%/-1.85\%$），落地五类互斥分母状态、可计算的 $\mathbb{E}_{\text{resolved}}[R_{\text{net}}]$、按 `label_available_ts < cutoff_ts` 防泄漏截断、以及 `day_block_bootstrap_test` 与 `check_oos_admission_gate`。
+  - **压缩归档双层自动清理 (`shadow_archive.py`)**：
+    - 在 9 天明文 `.jsonl` 校验清理（`cleanup_verified_shards`）基础上，新增 `cleanup_expired_archives(directory, today, keep_archive_days=60, max_archive_mb=300.0, min_keep_days=15)` 并接入 `register_archive_worker`：自动删除超过 60 天的 `.jsonl.gz`，且在总容量超 300MB 时从最老归档开始淘汰（强制保护近 15 天归档与尚未清理同名 `.jsonl` 的归档）。
+- [x] **【自动化测试验证全绿（28 个核心测试套件共 311 项测试 100% PASS）】**：
+  - 新增 `tests/test_fusion_p0_p1_recompute.py`（19 项）、`tests/test_fusion_evaluate_p2.py`（12 项）及 `tests/test_fusion_shadow_archive.py` 归档清理单测，连同既有融合核心测试套件共 **311 项测试全部 100% PASS**，并在生产真实影子日志上验证通过单变量消融跑批。
+
 ## 2026-11-02 19:40 【ATS打包Nuitka版本运行信号弹出后Stack Overflow栈溢出彻底修复与快照安全深拷贝治理】(`docs/tasks/2026-11-02_1940_ATS打包Nuitka版本运行信号弹出后StackOverflow修复.md`, `run_ats.py`, `ats/bounded_evaluation_store.py`, `ats/session_snapshot.py`, `ats/ui/main_window.py`, `tests/test_stack_overflow_and_cold_start_market_summary.py`)
 - [x] **【彻底查清并根除 ATS Nuitka 打包版弹出信号后触发 Windows fatal exception: stack overflow 闪退 BUG】**：
   - **用户业务与现场反馈**：“ats打包nuitka版本运行就出现 📢 [ALERT_NOTIFY] 串行轮播弹出信号 [有研硅 | 688432 ]: 逆市抗跌... Windows fatal exception: stack overflow”；

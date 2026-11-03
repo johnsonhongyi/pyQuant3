@@ -22,7 +22,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 STATUS_WAITING = "WAITING"
 STATUS_CONFIRMED = "CONFIRMED"
@@ -64,19 +64,43 @@ class StructureSnapshot:
     def blocked(self) -> bool:
         return self.status in BLOCKED_STATUS
 
-    def to_dict(self) -> Dict[str, object]:
+    def to_dict(self) -> Dict[str, Any]:
         return {
+            "code": self.code,
             "status": self.status,
+            "ts": round(float(self.ts), 3),
             "label": STATUS_LABEL.get(self.status, self.status),
             "confirm_n": int(self.confirm_n),
             "break_n": int(self.break_n),
             "confirm_ts": round(float(self.confirm_ts), 3),
             "break_ts": round(float(self.break_ts), 3),
+            "status_since": round(float(self.status_since), 3),
             "cushion_roll": round(float(self.cushion_roll), 3),
             "cushion_now": round(float(self.cushion_now), 3),
             "drawdown_pct": round(float(self.drawdown_pct), 2),
+            "high_water": round(float(self.high_water), 4),
             "reason": self.reason,
         }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> StructureSnapshot:
+        if not d:
+            return cls()
+        return cls(
+            code=str(d.get("code") or ""),
+            status=str(d.get("status") or STATUS_WAITING),
+            ts=float(d.get("ts") or 0.0),
+            confirm_n=int(d.get("confirm_n") or 0),
+            break_n=int(d.get("break_n") or 0),
+            confirm_ts=float(d.get("confirm_ts") or 0.0),
+            break_ts=float(d.get("break_ts") or 0.0),
+            status_since=float(d.get("status_since") or 0.0),
+            cushion_roll=float(d.get("cushion_roll") or 0.0),
+            cushion_now=float(d.get("cushion_now") or 0.0),
+            drawdown_pct=float(d.get("drawdown_pct") or 0.0),
+            high_water=float(d.get("high_water") or 0.0),
+            reason=str(d.get("reason") or ""),
+        )
 
 
 class StructureTimeline:
@@ -110,6 +134,23 @@ class StructureTimeline:
     def get(self, code: str) -> Optional[StructureSnapshot]:
         return self._states.get(str(code).zfill(6))
 
+    def snapshot_state(self) -> Dict[str, Any]:
+        return {
+            "day": self._day,
+            "states": {k: v.to_dict() for k, v in self._states.items()},
+            "streak": dict(self._streak),
+        }
+
+    def load_state(self, data: Dict[str, Any]) -> None:
+        if not data:
+            return
+        self._day = str(data.get("day") or "")
+        raw_states = data.get("states") or {}
+        self._states = {
+            str(k).zfill(6): StructureSnapshot.from_dict(v) for k, v in raw_states.items()
+        }
+        self._streak = {str(k).zfill(6): int(v) for k, v in (data.get("streak") or {}).items()}
+
     # ------------------------------------------------------------------
     def update(
         self,
@@ -139,8 +180,8 @@ class StructureTimeline:
         st.cushion_roll = float(cushion_roll)
         st.cushion_now = float(cushion_now)
 
-        # ---- 点火条件（随时间重算，不依赖开盘瞬间）----
-        breakout = (hi_pre1 <= 0) or (price >= hi_pre1 * 0.995)
+        # ---- 点火条件（随时间重算，不依赖开盘瞬间）：严禁 hi_pre1 <= 0 短路判定为突破 ----
+        breakout = (hi_pre1 > 0) and (price >= hi_pre1 * 0.995)
         cushion_ok = float(cushion_roll) >= self.cushion_min
         signal = bool(breakout and cushion_ok and prejudged)
 

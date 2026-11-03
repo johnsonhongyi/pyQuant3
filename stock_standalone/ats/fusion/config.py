@@ -25,9 +25,12 @@ DEFAULTS: Dict[str, Any] = {
     "log_dir": "logs/fusion_shadow",
     "max_records_per_day": 200000,
     "sample_interval_s": 3.0,
-    "weights": {"position": 0.30, "support": 0.25, "intent": 0.25, "regime": 0.20},
+    "weights": {"position": 0.25, "support": 0.20, "intent": 0.20, "regime": 0.15, "relative": 0.20},
     "tier_cuts": {"l4": 82.0, "l3": 72.0, "l2": 62.0, "l1": 50.0},
     "max_single_size_pct": 35.0,
+    "max_struct_floor_tier": 4,
+    "exempt_temp_cap_on_struct": True,
+    "use_fixed_cuts": True,
     "veto": {"stale_seconds": 20.0, "max_bias_pct": 7.0, "min_amount_wan": 3000.0},
     "penalty": {
         "chase_start_pct": 3.0,
@@ -132,4 +135,7 @@ def engine_params(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         "temp_matrix": cfg.get("temp_matrix") or {},
         "age_table": cfg.get("age_table") or [],
         "max_single_size_pct": cfg.get("max_single_size_pct", 35.0),
+        "max_struct_floor_tier": int(cfg.get("max_struct_floor_tier", 4)),
+        "exempt_temp_cap_on_struct": bool(cfg.get("exempt_temp_cap_on_struct", True)),
+        "use_fixed_cuts": bool(cfg.get("use_fixed_cuts", True)),
     }

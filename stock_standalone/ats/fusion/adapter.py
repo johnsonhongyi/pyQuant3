@@ -97,6 +97,36 @@ def is_today(ts: Optional[float] = None) -> bool:
         return False
 
 
+def is_data_hygiene_ok(
+    event: SignalEvent,
+    expected_day: str = "",
+    stale_seconds: float = 20.0,
+    require_verified_source: bool = False,
+) -> Tuple[bool, str]:
+    """前置数据卫生门禁。
+
+    返回 (is_ok, reason)。若不通过，reason 描述具体原因。
+    """
+    if event.price <= 0:
+        return False, "行情缺失(现价无效<=0)"
+    if event.vwap <= 0:
+        return False, "行情缺失(分时均价无效<=0)"
+    missing = event.extra.get("missing") or []
+    if "pct" in missing:
+        return False, "行情缺失(涨跌幅与昨收无效)"
+    if event.freshness_s > stale_seconds:
+        return False, f"数据过期({event.freshness_s:.1f}s > {stale_seconds}s)"
+    exp_day = expected_day or today_str(event.ts if event.ts > 0 else time.time())
+    if exp_day and event.trade_date and event.trade_date != exp_day:
+        return False, f"跨交易日数据({event.trade_date} != {exp_day})"
+    if require_verified_source:
+        if event.extra.get("freshness_unverified"):
+            return False, "未验证的时间戳来源"
+        if event.extra.get("trade_date_unverified"):
+            return False, "未验证的交易日来源"
+    return True, ""
+
+
 class LaunchTracker:
     """记录每个标的"本轮启动"的时刻，用于先手衰减。
 
@@ -255,11 +285,36 @@ def build_event(
     if clarity <= 0:
         missing.append("structure_clarity")
 
-    freshness = _num(_get(snap, "freshness_s"), 0.0)
-    if freshness <= 0:
-        src_ts = _first_num([(snap, "server_ts"), (snap, "ts"), (row, "server_ts")])
+    # ---- 时间戳来源检测 ----
+    ts_source = "unverified"
+    freshness_unverified = False
+    explicit_fresh = _first_raw([(snap, "freshness_s"), (row, "freshness_s")])
+    freshness = 0.0
+    if explicit_fresh is not None and str(explicit_fresh).strip() not in ("", "None", "nan"):
+        freshness = _num(explicit_fresh, 0.0)
+        ts_source = "explicit_freshness"
+    else:
+        src_ts = _first_num([(snap, "server_ts"), (row, "server_ts")])
         if src_ts > 1e9:
             freshness = max(0.0, now - src_ts)
+            ts_source = "quote_server_ts"
+        else:
+            snap_ts = _first_num([(snap, "ts"), (snap, "timestamp")])
+            if snap_ts > 1e9:
+                freshness = max(0.0, now - snap_ts)
+                ts_source = "snap_ts"
+            else:
+                row_ts = _first_num([(row, "ts"), (row, "time"), (row, "timestamp")])
+                if row_ts > 1e9:
+                    freshness = max(0.0, now - row_ts)
+                    ts_source = "row_ts"
+                elif _get(row, "bar_time") or _get(snap, "bar_time") or _get(row, "replay_bar") or _get(snap, "replay_bar"):
+                    freshness = 0.0
+                    ts_source = "replay_bar"
+                else:
+                    freshness = 0.0
+                    ts_source = "unverified"
+                    freshness_unverified = True
 
     is_leader = (
         bool(_get(snap, "is_leader"))
@@ -299,9 +354,37 @@ def build_event(
     # K3 数据源对齐：优先读 DailyContext 严格日线计算的 prev_pct，取不到再用分时快照 per1d
     prev_pct_val = _first_num([(snap, "prev_pct"), (row, "prev_pct"), (snap, "per1d"), (row, "per1d")], 0.0)
 
-    extra: Dict[str, Any] = {"missing": missing, "has_rs": has_rs, "mkt_ret5": mkt_ret5, "prev_pct": prev_pct_val,
-                             "pct_source": pct_source, "reported_pct": raw_pct if raw_pct == raw_pct else None,
-                             "quote_prev_close": prev_close if prev_close > 0 else None}
+    # ---- 交易日来源检测 ----
+    quote_day = _first_raw([(quote, "trade_date")])
+    trade_date_source = "unverified"
+    trade_date_unverified = False
+    if quote_day is not None and str(quote_day).strip() not in ("", "None", "nan"):
+        quote_day = str(quote_day)[:10]
+        trade_date_source = "quote_trade_date"
+    elif trade_date:
+        quote_day = str(trade_date)[:10]
+        trade_date_source = "caller_fallback"
+    else:
+        quote_day = today_str(now)
+        trade_date_source = "unverified"
+        trade_date_unverified = True
+
+    if len(quote_day) == 8 and quote_day.isdigit():
+        quote_day = "{}-{}-{}".format(quote_day[:4], quote_day[4:6], quote_day[6:])
+
+    extra: Dict[str, Any] = {
+        "missing": missing,
+        "has_rs": has_rs,
+        "mkt_ret5": mkt_ret5,
+        "prev_pct": prev_pct_val,
+        "pct_source": pct_source,
+        "reported_pct": raw_pct if raw_pct == raw_pct else None,
+        "quote_prev_close": prev_close if prev_close > 0 else None,
+        "ts_source": ts_source,
+        "trade_date_source": trade_date_source,
+        "freshness_unverified": freshness_unverified,
+        "trade_date_unverified": trade_date_unverified,
+    }
     from ats.fusion.context import STRUCTURE_FIELDS
     extra_keys = set(STRUCTURE_FIELDS) | {
         "lead_score",
@@ -336,13 +419,9 @@ def build_event(
         if val is not None:
             extra[k] = val
 
-    quote_day = _first_raw([(quote, "trade_date")])
-    quote_day = str(quote_day)[:10] if quote_day is not None else ""
     from ats.fusion.observation import build_observation_evidence
     extra["observation_evidence"] = build_observation_evidence(
         row, snap or {}, now, today_str(now), source, today_vwap=vwap)
-    if len(quote_day) == 8 and quote_day.isdigit():
-        quote_day = "{}-{}-{}".format(quote_day[:4], quote_day[4:6], quote_day[6:])
 
     return SignalEvent(
         code=str(code or _first_raw([(row, "code"), (snap, "code")]) or ""),
@@ -384,7 +463,7 @@ def build_event(
         dist_ma20_pct=dist_ma20_pct,
         launch_ts=float(launch_ts or 0.0),
         freshness_s=freshness,
-        trade_date=quote_day or trade_date or today_str(now),
+        trade_date=quote_day,
         rs5=rs5,
         rs_day=rs_day,
         extra=extra,

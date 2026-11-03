@@ -14,6 +14,7 @@ import zlib
 
 
 _DAY_FILE = re.compile(r"^\d{4}-\d{2}-\d{2}(?:_\d+)?\.jsonl$")
+_ARCHIVE_FILE = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:_\d+)?\.jsonl\.gz$")
 _CHUNK = 1024 * 1024
 _logger = logging.getLogger(__name__)
 _registered = set()
@@ -153,6 +154,105 @@ def cleanup_verified_shards(directory, today, keep_days=9, max_files=1, archive_
     return {"removed": removed, "errors": errors}
 
 
+def cleanup_expired_archives(
+    directory,
+    today,
+    keep_archive_days=60,
+    max_archive_mb=300.0,
+    min_keep_days=15,
+):
+    """清理过期的 .jsonl.gz 压缩归档：双重守卫（超 60 天自动删除 + 超 300MB 按最老日期淘汰）。
+
+    安全边界：
+    1. 严格限制在 directory 真实路径内，拒绝符号链接；
+    2. 优先删除早于 today - keep_archive_days（默认 60 天）的 .jsonl.gz；
+    3. 若剩余 .jsonl.gz 总大小仍超过 max_archive_mb（默认 300MB），按日期从最老到最新依次淘汰，
+       但强制保留最近 min_keep_days（默认 15 天）以内的归档不因容量淘汰被删，保障 Walk-Forward 评估窗口；
+    4. 若某 .jsonl.gz 对应的同名未压缩 .jsonl 仍存在且尚未清理，先不删该 .gz，防止原文件清理校验失去对照。
+    """
+    removed, errors = [], []
+    if not directory or not os.path.isdir(directory):
+        return {"removed": removed, "total_bytes_after": 0, "errors": errors}
+
+    root = os.path.realpath(directory)
+    today_dt = date.fromisoformat(str(today)[:10])
+    age_cutoff = (today_dt - timedelta(days=max(1, int(keep_archive_days)))).isoformat()
+    min_keep_cutoff = (today_dt - timedelta(days=max(1, int(min_keep_days)))).isoformat()
+    max_bytes = int(float(max_archive_mb) * 1024 * 1024)
+
+    entries = []
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError as exc:
+        return {"removed": removed, "total_bytes_after": 0, "errors": [{"source": directory, "error": str(exc)}]}
+
+    for name in names:
+        m = _ARCHIVE_FILE.fullmatch(name)
+        if not m:
+            continue
+        day_str = m.group(1)
+        path = os.path.join(directory, name)
+        raw_sibling = path[:-3]  # 对应 .jsonl
+        try:
+            if os.path.islink(path) or os.path.dirname(os.path.realpath(path)) != root:
+                continue
+            if not os.path.isfile(path):
+                continue
+            size = os.path.getsize(path)
+            entries.append({
+                "name": name,
+                "day": day_str,
+                "path": path,
+                "size": size,
+                "has_raw_sibling": os.path.exists(raw_sibling),
+            })
+        except OSError as exc:
+            errors.append({"source": path, "error": str(exc)})
+
+    # 按 (日期, 文件名) 升序排列（最老的排最前）
+    entries.sort(key=lambda x: (x["day"], x["name"]))
+    remaining = []
+
+    # 第一轮：按天数（> 60 天）清理过期 .gz
+    for item in entries:
+        if item["day"] < age_cutoff and not item["has_raw_sibling"]:
+            try:
+                os.unlink(item["path"])
+                removed.append(item["path"])
+            except OSError as exc:
+                errors.append({"source": item["path"], "error": str(exc)})
+                remaining.append(item)
+        else:
+            remaining.append(item)
+
+    # 第二轮：按总容量上限（> 300MB）从最老往最新淘汰（保护 min_keep_days 内的近期样本）
+    total_bytes = sum(x["size"] for x in remaining)
+    if max_bytes > 0 and total_bytes > max_bytes:
+        still_kept = []
+        for item in remaining:
+            if (
+                total_bytes > max_bytes
+                and item["day"] < min_keep_cutoff
+                and not item["has_raw_sibling"]
+            ):
+                try:
+                    os.unlink(item["path"])
+                    removed.append(item["path"])
+                    total_bytes -= item["size"]
+                except OSError as exc:
+                    errors.append({"source": item["path"], "error": str(exc)})
+                    still_kept.append(item)
+            else:
+                still_kept.append(item)
+        remaining = still_kept
+
+    return {
+        "removed": removed,
+        "total_bytes_after": sum(x["size"] for x in remaining),
+        "errors": errors,
+    }
+
+
 def archive_day(source, before_day, archive_directory=None):
     """归档已结束日期，允许从 RAMDisk 直接压缩到已有落盘目录。"""
     name = os.path.basename(source)
@@ -279,6 +379,10 @@ def register_archive_worker(directory):
                 if ram and os.path.isdir(ram):
                     cleanup = cleanup_verified_shards(ram, day, archive_directory=directory)
                     result["errors"].extend(cleanup["errors"])
+                gz_cleanup = cleanup_expired_archives(
+                    directory, day, keep_archive_days=60, max_archive_mb=300.0
+                )
+                result["errors"].extend(gz_cleanup["errors"])
                 for error in result["errors"]:
                     _logger.warning("梯度历史归档失败，源文件保留: %s", error)
             except Exception:

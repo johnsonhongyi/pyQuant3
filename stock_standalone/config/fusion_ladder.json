@@ -7,10 +7,11 @@
   "max_records_per_day": 200000,
   "sample_interval_s": 3.0,
   "weights": {
-    "position": 0.3,
-    "support": 0.25,
-    "intent": 0.25,
-    "regime": 0.2
+    "position": 0.25,
+    "support": 0.20,
+    "intent": 0.20,
+    "regime": 0.15,
+    "relative": 0.20
   },
   "tier_cuts": {
     "l4": 82.0,
@@ -19,6 +20,9 @@
     "l1": 50.0
   },
   "max_single_size_pct": 35.0,
+  "max_struct_floor_tier": 4,
+  "exempt_temp_cap_on_struct": true,
+  "use_fixed_cuts": true,
   "veto": {
     "stale_seconds": 20.0,
     "max_bias_pct": 7.0,

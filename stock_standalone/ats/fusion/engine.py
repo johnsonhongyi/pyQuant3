@@ -24,7 +24,7 @@ import time
 
 import numpy as np
 from dataclasses import dataclass, field, replace
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ats.fusion.contract import AxisScores, FusionDecision, SignalEvent, TierSpec
 from ats.fusion.regime import (
@@ -267,8 +267,6 @@ def score_position(event: SignalEvent) -> tuple:
         s_room = 0.60  # 无阻力数据，给中性值，不奖不罚
 
     pos = event.pos_in_range()
-    # 注意：突破型龙头本来就贴着日内高点，位置轴不该因此重罚——
-    # 追高风险由 penalty 里的"偏离均价"负责，避免同一件事被扣两次。
     s_pos = _band(pos, 0.20, 0.80, 0.02, 0.95)
 
     s_multi = 0.5
@@ -286,13 +284,7 @@ def score_position(event: SignalEvent) -> tuple:
 
 
 def score_support(event: SignalEvent, missing: Optional[frozenset] = None) -> tuple:
-    """承接质量：拉上去有没有人接。
-
-    缺失处理（关键）：实盘链路目前拿不到外盘占比 / 五档买压 / 结构清晰度，
-    旧实现把它们当 0 分计入加权，导致本轴被结构性锁死在 35 分左右，
-    RAR 永远够不到 L2 以上——这就是"只有 L0"的根因。
-    现在缺失项直接从加权中剔除并按剩余权重归一，同时由 evaluate 记录覆盖率。
-    """
+    """承接质量：拉上去有没有人接。"""
     missing = missing or frozenset()
     notes: List[str] = []
 
@@ -301,7 +293,6 @@ def score_support(event: SignalEvent, missing: Optional[frozenset] = None) -> tu
     s_clarity = _clip(event.structure_clarity) / 100.0
     s_minutes = _band(event.minutes_above_vwap, 20.0, 240.0, 0.0, 300.0)
     if event.minutes_above_vwap <= 0:
-        # 字段缺失时给中性偏低值：缺失不等于"刚站上均价"
         s_minutes = 0.35
 
     if event.taker_buy_ratio >= 60:
@@ -328,13 +319,9 @@ def score_support(event: SignalEvent, missing: Optional[frozenset] = None) -> tu
         return 50.0, notes
     return _clip(100.0 * acc / w_sum), notes
 
-def score_intent(event: SignalEvent, missing: Optional[frozenset] = None) -> tuple:
-    """意愿强度：拉升是否明确且持续。
 
-    注意这里不用"涨幅"作为主变量——涨幅是结果，不是意愿。
-    意愿由攻角、主力意图分、净拉升速度、增量量能共同刻画。
-    缺失的攻角/意图分按剩余权重归一（同上，避免缺失即 0 分）。
-    """
+def score_intent(event: SignalEvent, missing: Optional[frozenset] = None) -> tuple:
+    """意愿强度：拉升是否明确且持续。"""
     missing = missing or frozenset()
     notes: List[str] = []
 
@@ -342,7 +329,7 @@ def score_intent(event: SignalEvent, missing: Optional[frozenset] = None) -> tup
     s_intent = _clip((event.intent_score - 15.0) / 85.0, 0.0, 1.0)
     s_vel = _band(event.velocity_pct, 0.6, 6.0, 0.0, 9.0)
     if event.velocity_pct <= 0 and event.segment_vol_inc <= 0:
-        s_vel = 0.35   # 无分段数据：中性偏低，而不是当作"零拉升"
+        s_vel = 0.35
     s_vol = _band(event.vol_ratio, 1.6, 4.0, 0.9, 6.0)
 
     if event.slope_score >= 70:
@@ -397,7 +384,7 @@ def score_regime(event: SignalEvent, regime: Optional[MarketRegime]) -> tuple:
 
     s_sector = _clip(event.sector_resonance) / 100.0
     if event.sector_resonance <= 0:
-        s_sector = 0.50   # 板块数据缺失 -> 中性，不惩罚也不奖励
+        s_sector = 0.50
     else:
         if event.sector_resonance >= 60:
             notes.append("板块共振{:.0f}".format(event.sector_resonance))
@@ -410,26 +397,21 @@ def score_regime(event: SignalEvent, regime: Optional[MarketRegime]) -> tuple:
 
 
 def multiday_adjust(event: SignalEvent) -> float:
-    """跨日连续性修正（±10）：让"第几根"影响结论，而不是每天从零开始。
-
-    其中包含"饥饿度"：连续冰点/低温越久，第一个启动越值钱
-    （"饿了好几天，第一个包子永远最香"）。
-    """
+    """跨日连续性修正（±10）。"""
     adj = 0.0
     if event.limit_up_streak >= 3:
-        adj -= 6.0            # 连板高位接力，T+1 风险大
+        adj -= 6.0
     elif event.limit_up_streak >= 1:
-        adj += 3.0            # 首板/二板：有资金记忆
+        adj += 3.0
     if event.days_since_high == 0:
-        adj += 4.0            # 昨日刚创 20 日新高
+        adj += 4.0
     elif event.days_since_high >= 15:
-        adj -= 3.0            # 远离高点，趋势未修复
+        adj -= 3.0
     if event.ret20d > 15.0:
-        adj -= 4.0            # 20 日已透支
+        adj -= 4.0
     elif 0.0 < event.ret20d <= 8.0:
-        adj += 2.0            # 温和上行
+        adj += 2.0
 
-    # 饥饿度：1.0~1.5 -> 0~+6 分；常温不加不减
     hunger = float(event.extra.get("hunger", 1.0) or 1.0)
     if hunger > 1.0:
         adj += min(6.0, (hunger - 1.0) * 12.0)
@@ -437,28 +419,14 @@ def multiday_adjust(event: SignalEvent) -> float:
 
 
 def leadership_value(temp: float, consensus: float) -> float:
-    """带头价值：温度越低越值钱，趋同越高越没意义。
-
-    用户原话：
-        "市场温度低的时候，带头作用价值度很高——人没有反应过来，出现的才有价值；
-         大家都已经异口同声趋同了，那时候出现的都是诱多，跟单容易被埋。"
-
-    所以"带头"不是一个固定加分，而是一个**随环境衰减**的量：
-        低温(<=28℃) + 低趋同(<=20%) -> 1.00（真正没人反应）
-        高温(>=58℃) + 高趋同(>=80%) -> 0.15（人尽皆知的诱多）
-    """
+    """带头价值：温度越低越值钱，趋同越高越没意义。"""
     temp_f = _clip((58.0 - float(temp)) / 30.0, 0.25, 1.0)
     cons_f = _clip(1.0 - 0.70 * float(consensus), 0.25, 1.0)
-    # 下限 0.35：带头永远不是负分，只是"很便宜"；上限 1.0
     return float(0.35 + 0.65 * temp_f * cons_f)
 
 
 def lead_adjust(event: SignalEvent) -> float:
-    """领先度修正（±7）：排头兵加分，跟风扣分。
-
-    用户："跟风的都是没有导向性的，要的就是排头兵、冲锋队、夺旗的生力军。"
-    领先度由 vanguard.SectorClock 给出（板块内第几个启动 / 落后首动多久 / 是否夺旗）。
-    """
+    """领先度修正（±7）：排头兵加分，跟风扣分。"""
     score = event.extra.get("lead_score")
     if score is None:
         return 0.0
@@ -466,11 +434,7 @@ def lead_adjust(event: SignalEvent) -> float:
 
 
 def score_relative(event: SignalEvent, regime: Optional[MarketRegime] = None) -> tuple:
-    """相对强度（逆势异动）：大盘在跌、别人在跌，它在涨。
-
-    这是用户反复强调的"异动"本质：不是绝对涨幅，而是**相对全池的超额**。
-    没有相对强度数据时返回中性 50，不奖不罚。
-    """
+    """相对强度（逆势异动）：大盘在跌、别人在跌，它在涨。"""
     if not event.extra.get("has_rs"):
         return 50.0, []
 
@@ -493,14 +457,12 @@ def score_relative(event: SignalEvent, regime: Optional[MarketRegime] = None) ->
     else:
         base = 25.0
 
-    # 逆势加成：全池在跌而它跑赢
     if mkt < -0.3 and rs > 0.5:
         base = min(100.0, base + 8.0)
         notes.append("逆势超额{:+.1f}%(全池{:+.1f}%)".format(rs, mkt))
     elif rs >= 1.5:
         notes.append("相对强度{:+.1f}%".format(rs))
 
-    # 带头价值衰减：温度越高、趋同越强，"带头"越可能是诱多
     if regime is not None and rs > 0.5:
         cons = float(event.extra.get("consensus", 0.0) or 0.0)
         lv = leadership_value(regime.temp, cons)
@@ -514,7 +476,7 @@ def score_relative(event: SignalEvent, regime: Optional[MarketRegime] = None) ->
 
 
 def penalty_of(event: SignalEvent, regime: Optional[MarketRegime], params: Optional[Dict[str, Any]] = None) -> tuple:
-    """风险惩罚：这些不是"缺点"，是会让你亏钱的东西。"""
+    """风险惩罚：解决流动性惩罚读参等问题。"""
     p_cfg = dict(DEFAULT_PENALTY)
     p_cfg.update(params or {})
     notes: List[str] = []
@@ -538,7 +500,8 @@ def penalty_of(event: SignalEvent, regime: Optional[MarketRegime], params: Optio
         p += p_cfg["overheat_penalty"]
         notes.append("过热期非龙头")
 
-    if 0 < event.amount_wan < 3000:
+    min_amt = float(p_cfg.get("min_amount_wan", 3000.0))
+    if 0 < event.amount_wan < min_amt:
         p += p_cfg["illiquid_penalty"]
         notes.append("成交额不足{:.0f}万".format(event.amount_wan))
 
@@ -550,7 +513,6 @@ def penalty_of(event: SignalEvent, regime: Optional[MarketRegime], params: Optio
         gap_p = (1.0 - close_pre1_val / vwap10_val) * 100.0
         notes.append("水下结构诱多(昨收距10V-{:.1f}%)".format(gap_p))
 
-    # 时间结构滞后惩罚 (同板块滞后跟风冲高回落风险，如中国卫通、航天环宇冲高回落套人)
     lead_gap_v = float(event.extra.get("lead_gap_min") or 0.0)
     is_prime_v = bool(event.extra.get("is_prime_leader") or event.extra.get("prev_strong_vwap"))
     if not is_prime_v and lead_gap_v >= 10.0 and event.pct >= 4.0:
@@ -570,11 +532,7 @@ def veto_of(
     today: str = "",
     params: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """硬否决：直接 L0，不参与打分。
-
-    刻意保持"少而硬"：只有不可修复的风险才进这里，
-    其余通过 penalty 与级别上限表达，避免又退化成单阈值。
-    """
+    """硬否决：直接 L0，不参与打分。"""
     v_cfg = dict(DEFAULT_VETO)
     v_cfg.update(params or {})
 
@@ -591,11 +549,10 @@ def veto_of(
         return "跌破底台{:.2f}".format(event.base_support)
     if event.sbc_supp > 0 and event.price < event.sbc_supp * 0.995:
         return "跌破SBC支撑{:.2f}".format(event.sbc_supp)
-    # 预先提取关键结构特征标量
+
     vwap10_val = float(event.vwap_10d or event.extra.get("vwap10") or 0.0)
     day_high_val = max(float(event.day_high or 0.0), float(event.extra.get("day_high") or 0.0), float(event.price))
 
-    # 操盘手硬约束 6 (具体排最前)：开盘低开破位 / 均线空头排列诱多，一票否决！(佰维存储 688525 案例，兼容 vwap3/v3)
     v3_val = float(event.extra.get("vwap3") or event.extra.get("v3") or 0.0)
     if v3_val > 0 and vwap10_val > 0 and v3_val < vwap10_val * 0.985 and not event.is_leader:
         if event.price < vwap10_val:
@@ -604,20 +561,17 @@ def veto_of(
     if close_pre1_val > 0 and event.price < close_pre1_val * 0.98 and event.price < event.vwap and not event.is_leader:
         return "低开破位杀跌(跌破昨收2%且水下运行·禁止接飞刀)"
 
-    # 操盘手硬约束 4：多周期 VWAP 严重水下且未站上 3V/10V 的弱势反抽，坚决一票否决！(光迅科技 002281 案例)
     underwater_depth = float(event.extra.get("underwater_depth_pct") or 0.0)
     multi_ready = bool(event.extra.get("vwap_multi_cycle_ready"))
     if underwater_depth >= 3.0 and not multi_ready and not event.is_leader and not ("一阳穿三线" in (event.extra.get("patterns") or ())):
         return "多周期VWAP严重水下(距10V-{:.1f}%·反抽诱多)".format(underwater_depth)
 
-    # 操盘手硬约束 3：走弱标的反弹至 10 日 VWAP 压力区是止损点，坚决拦截买入！(华虹宏力、迈为股份案例)
     is_weak_val = bool(event.extra.get("is_underwater_weak"))
     if is_weak_val and vwap10_val > 0 and event.price < vwap10_val * 1.005:
         drawdown_pct = ((day_high_val - event.price) / day_high_val * 100.0) if day_high_val > 0 else 0.0
         if drawdown_pct >= 0.8:
             return "走弱反弹至10日VWAP压力区(是止损点不是买点)"
 
-    # 操盘手硬约束 5：不过前高阻力位是卖点/止损点，坚决拦截买入！(蓝色光标 300058 案例)
     hi_10d_val = float(event.extra.get("hi_10d") or 0.0)
     if hi_10d_val > 0 and event.price < hi_10d_val:
         near_hi = (hi_10d_val - day_high_val) / hi_10d_val * 100.0 <= 1.5
@@ -625,13 +579,11 @@ def veto_of(
         if near_hi and (drawdown_pct >= 1.0 or event.price < event.vwap):
             return "受阻10日前高压力区(前高{:.2f}·不过前高是卖点)".format(hi_10d_val)
 
-    # 操盘手硬约束 2：10日均价水下冲高回落一票否决 (Price < V10 且从日内最高点回撤 >= 1.5%)
     if vwap10_val > 0 and event.price < vwap10_val:
         drawdown_pct = ((day_high_val - event.price) / day_high_val * 100.0) if day_high_val > 0 else 0.0
         if drawdown_pct >= 1.5:
             return "10日VWAP水下冲高回落(回撤{:.1f}%)".format(drawdown_pct)
 
-    # V2 操盘手兜底约束：下跌结构涨不过 VWAP (泛化水下运行作为最后兜底)
     if event.price < event.vwap * 0.998:
         return "水下运行(现价{:.2f}低于均价{:.2f})".format(event.price, event.vwap)
     if event.bias_pct() > v_cfg["max_bias_pct"]:
@@ -661,8 +613,10 @@ class FusionEngine:
         self.today = today
         self.params: Dict[str, Any] = dict(params or {})
         self.max_single_size_pct = float(self.params.get("max_single_size_pct", max_single_size_pct))
-        # 结构验证/箱体悬空是否直通 L4（默认开）。关掉仅用于 A/B 对照，不改变评分逻辑。
         self.struct_floor = bool(self.params.get("struct_floor", True))
+        self.max_struct_floor_tier = int(self.params.get("max_struct_floor_tier", 4))
+        self.exempt_temp_cap_on_struct = bool(self.params.get("exempt_temp_cap_on_struct", True))
+        self.use_fixed_cuts = bool(self.params.get("use_fixed_cuts", True))
 
         self.weights = dict(DEFAULT_WEIGHTS)
         self.weights.update(self.params.get("weights") or {})
@@ -689,12 +643,10 @@ class FusionEngine:
             return 4, 1.0
         cap, coef = self.temp_matrix.get(regime.stage, (4, 1.0))
 
-        # 过热期龙头单独放行一档，但仓位仍压低
         if regime.stage == STAGE_OVERHEAT and event.is_leader:
             cap = 3
             coef = 0.60
 
-        # 翻转状态对级别与系数做微调：这是"提前量"的唯一入口
         if regime.flip_state == FLIP_ARMED:
             cap = min(4, cap + 1)
             coef = min(1.0, coef + 0.10)
@@ -718,9 +670,9 @@ class FusionEngine:
                 return age_min, cap, coef
         return age_min, 0, 0.0
 
-    def _entry_plan(self, tier: int, event: SignalEvent) -> Dict[str, Any]:
+    def _entry_plan(self, tier: int, event: Optional[SignalEvent]) -> Dict[str, Any]:
         spec = LADDER.get(tier)
-        if spec is None or tier <= 0:
+        if spec is None or tier <= 0 or event is None:
             return {}
         price, vwap = event.price, event.vwap
 
@@ -748,8 +700,10 @@ class FusionEngine:
             "max_bias_pct": spec.max_bias_pct,
         }
 
-    def _stop_plan(self, tier: int, event: SignalEvent) -> Dict[str, Any]:
+    def _stop_plan(self, tier: int, event: Optional[SignalEvent]) -> Dict[str, Any]:
         """按档位选止损锚：越激进越贴结构，越试探越留容错。"""
+        if event is None or tier <= 0:
+            return {}
         price = event.price
         if tier >= 4:
             anchor = event.base_support * 0.995 if event.base_support > 0 else _stop_anchor(event)
@@ -781,46 +735,8 @@ class FusionEngine:
     ) -> FusionDecision:
         now = float(now if now is not None else (event.ts or time.time()))
 
-        veto = veto_of(event, regime, self.today, self.veto_params)
-        if veto:
-            return FusionDecision(
-                code=event.code,
-                ts=now,
-                tier=0,
-                tier_name="L0 观察",
-                veto_reason=veto,
-                sources=[event.source] if event.source else [],
-                decision_id="{}:{}".format(event.code, int(now * 1000)),
-                regime_stage=regime.stage if regime else "",
-                flip_state=regime.flip_state if regime else "",
-                evidence=[veto],
-            )
-
+        # 数据覆盖率前置全量计算（解决 E7：否决分支 coverage=0 的缺陷）
         missing = frozenset(event.extra.get("missing") or ())
-        p, n_pos = score_position(event)
-        s, n_sup = score_support(event, missing)
-        i, n_itn = score_intent(event, missing)
-        r, n_reg = score_regime(event, regime)
-        rel, n_rel = score_relative(event, regime)
-        pen, n_pen = penalty_of(event, regime, self.penalty_params)
-
-        w = dict(self.weights)
-        if not event.extra.get("has_rs"):
-            # 没有相对强度数据时，按剩余轴重新归一，避免"缺数据反而加分"
-            w.pop("relative", None)
-        w_sum = sum(w.get(k, 0.0) for k in ("position", "support", "intent", "regime", "relative")) or 1.0
-        rar = (
-            w.get("position", 0.0) * p
-            + w.get("support", 0.0) * s
-            + w.get("intent", 0.0) * i
-            + w.get("regime", 0.0) * r
-            + w.get("relative", 0.0) * rel
-        ) / w_sum - pen + multiday_adjust(event) + lead_adjust(event)
-        rar = _clip(rar, 0.0, 100.0)
-        axes = AxisScores(position=p, support=s, intent=i, regime=r, relative=rel, penalty=pen, rar=rar)
-
-        # 数据覆盖率：只有真实数据参与加权的比例，用于标注"结论可信度"。
-        # 缺失轴不再按 0 分拉低分数，但必须让下游知道这次结论建立在部分数据上。
         avail = {
             "position": 1.0 if event.price > 0 else 0.0,
             "support": _axis_availability(_SUPPORT_PARTS, missing),
@@ -830,13 +746,61 @@ class FusionEngine:
         }
         w_all = sum(self.weights.get(k, 0.0) for k in avail) or 1.0
         coverage = sum(self.weights.get(k, 0.0) * v for k, v in avail.items()) / w_all
-
+        provisional = bool(coverage < 0.80)
         used_cuts = tuple(cuts) if cuts else self.cuts
-        tier = tier_of(rar, used_cuts)
 
-        # V2: 识别 PATTERN_BOX10_VWAP_HOVER (十日洗盘悬空突破) 与 PATTERN_STRUCTURE_CONFIRM (结构预判验证)
+        veto = veto_of(event, regime, self.today, self.veto_params)
+        if veto:
+            return FusionDecision(
+                code=event.code,
+                ts=now,
+                tier=0,
+                tier_name="L0 观察",
+                rar=0.0,
+                axes=AxisScores(rar=0.0),
+                veto_reason=veto,
+                size_pct=0.0,
+                sources=[event.source] if event.source else [],
+                decision_id="{}:{}".format(event.code, int(now * 1000)),
+                regime_stage=regime.stage if regime else "",
+                flip_state=regime.flip_state if regime else "",
+                coverage=round(coverage, 3),
+                provisional=provisional,
+                cuts=used_cuts,
+                evidence=[veto],
+                score_tier=0,
+                signal_tier=0,
+                signal_size_pct=0.0,
+                portfolio_tier=0,
+                base_rar=0.0,
+                adj_rar=0.0,
+                floor_tier=0,
+                floor_source="",
+                cap_tier=0,
+                cap_reasons=[veto],
+            )
+
+        p, n_pos = score_position(event)
+        s, n_sup = score_support(event, missing)
+        i, n_itn = score_intent(event, missing)
+        r, n_reg = score_regime(event, regime)
+        rel, n_rel = score_relative(event, regime)
+        pen, n_pen = penalty_of(event, regime, self.penalty_params)
+
+        w = dict(self.weights)
+        if not event.extra.get("has_rs"):
+            w.pop("relative", None)
+        w_sum = sum(w.get(k, 0.0) for k in ("position", "support", "intent", "regime", "relative")) or 1.0
+        raw_rar = (
+            w.get("position", 0.0) * p
+            + w.get("support", 0.0) * s
+            + w.get("intent", 0.0) * i
+            + w.get("regime", 0.0) * r
+            + w.get("relative", 0.0) * rel
+        ) / w_sum - pen + multiday_adjust(event) + lead_adjust(event)
+        base_rar = _clip(raw_rar, 0.0, 100.0)
+
         _ev_pats = event.extra.get("patterns") or getattr(event, "patterns", None) or ()
-        # 结构时间轴状态：BROKEN/EVICTED 一律撤销结构保底（价格变了，结论必须跟着变）
         _struct_status = str(event.extra.get("struct_status") or "")
         _struct_blocked = _struct_status in ("BROKEN", "EVICTED")
         has_box10_hover = bool(
@@ -849,12 +813,9 @@ class FusionEngine:
             )
         )
 
-        # 结构验证与板块总龙头加成 (电科蓝天 688818 典型特征：昨日单日强势 VWAP 突破带动全板块)
-        # K2 操盘手优化：总龙头必须是【昨日放量大突破 + 今日连阳续强且站在VWAP之上 + 客观非跟风/滞后】
         lead_lbl_v = str(event.extra.get("lead_label") or "")
         lead_gap_v = float(event.extra.get("lead_gap_min") or 0.0)
         today_continue_strong = bool(event.pct > 0 and event.price >= event.vwap * 0.998)
-        # 严格检查：必须 extra["is_prime_leader"] 为 True，且今日续强，且绝对不能是跟风或落后超 5 分钟
         is_prime_leader = bool(
             event.extra.get("is_prime_leader")
             and today_continue_strong
@@ -862,78 +823,117 @@ class FusionEngine:
             and lead_gap_v <= 5.0
         )
         is_struct_confirmed = bool("结构预判验证" in _ev_pats or event.extra.get("structure_confirmed"))
+
+        # 定档前加减分（彻底解决 E1 缺陷与 decision.rar != axes.rar）：
+        adj_rar = base_rar
         if is_prime_leader:
-            rar = min(100.0, rar + 12.0)
+            adj_rar = min(100.0, adj_rar + 12.0)
         elif bool(event.extra.get("prev_strong_vwap")):
-            # 昨日强势但今日分歧震荡 (未连阳续强)：不保底 L4，仅给予结构加分 +8
-            rar = min(100.0, rar + 8.0)
+            adj_rar = min(100.0, adj_rar + 8.0)
         elif is_struct_confirmed:
-            rar = min(100.0, rar + 8.0)
+            adj_rar = min(100.0, adj_rar + 8.0)
 
-        # 结构失守/剔除：价格已经走坏，分数必须同步回落，而不是靠昨天的结构吃老本
         if _struct_status == "BROKEN":
-            rar = max(0.0, rar - 6.0)
+            adj_rar = max(0.0, adj_rar - 6.0)
         elif _struct_status == "EVICTED":
-            rar = max(0.0, rar - 12.0)
+            adj_rar = max(0.0, adj_rar - 12.0)
 
-        # ---- 形态/结构保底：只允许越过 RAR 分档，绝不越过任何风控上限 ----
-        # 旧实现把 tier_floor 放在所有封顶之后做 max()，导致结构票可以顶掉
-        # 温度封顶、老化衰减、滞后压制、L4 门槛甚至组合预算（rebalance 因此死循环）。
-        # 现在改为"先抬到保底档，再统一被风控 min 下去"。
+        rar = adj_rar
+        axes = AxisScores(position=p, support=s, intent=i, regime=r, relative=rel, penalty=pen, rar=rar)
+
+        score_tier = tier_of(rar, used_cuts)
+        tier = score_tier
+
+        # ---- 形态/结构保底 ----
         _floor_cand = int(tier_floor or 0)
+        floor_source = "caller_tier_floor" if _floor_cand > 0 else ""
         if has_box10_hover and not _struct_blocked and self.struct_floor:
-            _floor_cand = max(_floor_cand, 4)
+            if self.max_struct_floor_tier > _floor_cand:
+                _floor_cand = self.max_struct_floor_tier
+                floor_source = "box10_hover_break" if event.extra.get("box10_hover_break") else "struct_confirm"
         if is_prime_leader and not _struct_blocked:
-            _floor_cand = max(_floor_cand, 4)
-        if _floor_cand > 0 and not _struct_blocked:
-            tier = max(tier, _floor_cand)
+            if self.max_struct_floor_tier > _floor_cand:
+                _floor_cand = self.max_struct_floor_tier
+                floor_source = "prime_leader"
+
+        floor_tier = _floor_cand if not _struct_blocked else 0
+        if floor_tier > 0:
+            tier = max(tier, floor_tier)
+
+        cap_reasons: List[str] = []
+        cap_tier = 4
 
         temp_cap, temp_coef = self._temp_cap(regime, event)
         if ((has_box10_hover and self.struct_floor) or is_prime_leader) and not _struct_blocked:
-            temp_cap = max(temp_cap, 4)  # 豁免早盘 STAGE_COLD 封顶（结构成立且未失守才豁免）
+            if self.exempt_temp_cap_on_struct:
+                temp_cap = max(temp_cap, 4)
+        if temp_cap < 4:
+            cap_reasons.append(f"temp_cap_{regime.stage if regime else ''}_{temp_cap}")
+            cap_tier = min(cap_tier, temp_cap)
+
         age_min, age_cap, age_coef = self._age(event, now)
+        if age_cap < 4:
+            cap_reasons.append(f"age_cap_{age_min:.0f}m_{age_cap}")
+            cap_tier = min(cap_tier, age_cap)
+
         tier = min(tier, temp_cap, age_cap)
 
-        # 操盘手防追涨铁闸 1：深水下非龙头一律封顶 L2 试仓，禁止参与主攻
+        # 操盘手防追涨铁闸 1：深水下非龙头一律封顶 L2 试仓
         close_pre1_v = float(event.extra.get("close_pre1") or 0.0)
         vwap10_v = float(event.vwap_10d or event.extra.get("vwap10") or 0.0)
         if close_pre1_v > 0 and vwap10_v > 0 and close_pre1_v < vwap10_v * 0.96 and not event.is_leader and not ("一阳穿三线" in _ev_pats):
+            if tier > 2:
+                cap_reasons.append("deep_water_cap_l2")
+                cap_tier = min(cap_tier, 2)
             tier = min(tier, 2)
 
-        # 操盘手防追涨铁闸 2：龙头永远强于其他！同板块滞后跟风标的 (落后龙头 >= 10min) 坚决禁止给 L4 主攻
-        lead_gap_v = float(event.extra.get("lead_gap_min") or 0.0)
-        lead_lbl_v = str(event.extra.get("lead_label") or "")
+        # 操盘手防追涨铁闸 2：龙头永远强于其他！同板块滞后跟风标的坚决禁止给 L4
         if not is_prime_leader and lead_gap_v >= 10.0 and lead_lbl_v in ("冲锋队", "跟风", "无导向"):
             if tier >= 4:
                 tier = 3
+                cap_reasons.append("lagging_follower_cap_l3")
+                cap_tier = min(cap_tier, 3)
             if lead_gap_v >= 25.0:
                 tier = min(tier, 2)
+                cap_reasons.append("lagging_follower_cap_l2")
+                cap_tier = min(cap_tier, 2)
 
         # L4 额外门槛：必须是龙头或强共振，且结构清晰度达标
-        # (十日洗盘悬空突破/结构预判验证/板块总龙头 直接豁免板块滞后)
         if tier >= 4 and not (
             event.is_leader or event.sector_resonance >= 60.0 or has_box10_hover or is_prime_leader
         ):
             tier = 3
+            cap_reasons.append("l4_requires_leader_or_resonance")
+            cap_tier = min(cap_tier, 3)
         if tier >= 3 and event.structure_clarity > 0 and event.structure_clarity < 60.0:
             tier = min(tier, 2)
-        if tier_cap is not None:
-            tier = max(0, min(tier, int(tier_cap)))
+            cap_reasons.append("low_clarity_cap_l2")
+            cap_tier = min(cap_tier, 2)
 
-        # 结构失守/剔除的降级：
-        #   失守 → 最多 L2 试仓（等它重新站回来）；剔除 → 最多 L1 观察（当日不再当机会）。
-        #   这就是"不及预期就剔除出去，直到重新符合条件"的执行端落点。
-        #   判据直接用状态本身：时间轴只会从 CONFIRMED 掉到 BROKEN/EVICTED，
-        #   而 CONFIRMED 已要求"结构底色"，因此状态即证据，不再二次判断 is_structure_prejudged
-        #   （否则 close_over_vwap10 型候选会漏降档，实测确有 1 条 EVICTED 拿到 L2）。
+        if tier_cap is not None:
+            tc = int(tier_cap)
+            if tier > tc:
+                cap_reasons.append(f"caller_tier_cap_{tc}")
+                cap_tier = min(cap_tier, tc)
+            tier = max(0, min(tier, tc))
+
+        # 结构失守/剔除的降级
         if _struct_status == "EVICTED":
+            if tier > 1:
+                cap_reasons.append("struct_evicted_cap_l1")
+                cap_tier = min(cap_tier, 1)
             tier = min(tier, 1)
         elif _struct_status == "BROKEN":
+            if tier > 2:
+                cap_reasons.append("struct_broken_cap_l2")
+                cap_tier = min(cap_tier, 2)
             tier = min(tier, 2)
 
+        signal_tier = tier
         spec = LADDER[tier]
         size = spec.base_size_pct * temp_coef * age_coef
         size = min(self.max_single_size_pct, round(max(0.0, size), 1))
+        signal_size_pct = size
 
         invalidate: List[str] = []
         stop_plan = self._stop_plan(tier, event)
@@ -952,7 +952,6 @@ class FusionEngine:
             targets.append({"price": round(max(r1, event.price * 1.06), 3), "action": "清仓"})
 
         struct_evs: List[str] = []
-        # 结构时间轴优先展示：操盘手要能看到"它现在到底还成不成立"，而不是只看到昨天的标签
         if _struct_status == "EVICTED":
             struct_evs.append("🚫结构剔除(失守{}次·当日不再主攻)".format(int(event.extra.get("struct_break_n") or 0)))
         elif _struct_status == "BROKEN":
@@ -999,8 +998,18 @@ class FusionEngine:
             regime_stage=regime.stage if regime else "",
             flip_state=regime.flip_state if regime else "",
             coverage=round(coverage, 3),
-            provisional=bool(coverage < 0.80),
+            provisional=provisional,
             cuts=used_cuts,
+            score_tier=score_tier,
+            signal_tier=signal_tier,
+            signal_size_pct=signal_size_pct,
+            portfolio_tier=tier,
+            base_rar=base_rar,
+            adj_rar=adj_rar,
+            floor_tier=floor_tier,
+            floor_source=floor_source,
+            cap_tier=cap_tier,
+            cap_reasons=cap_reasons,
         )
 
 
@@ -1008,16 +1017,7 @@ class FusionEngine:
 # 收敛：同一标的只留一条，按级别排序
 # ---------------------------------------------------------------------------
 class FusionBus:
-    """跨来源收敛 + 组合级配额。
-
-    现状问题：一个票被 5 个模块报警就播 5 条，用户无法判断哪条更重要。
-    这里以 code 为键只保留一条决策，来源合并进 sources[]，
-    对外只输出"按级别 + RAR 排序的 TopN"。
-
-    组合配额（rebalance）解决翻转日的另一个问题：
-    单票评分是独立算的，温度一翻转可能同时冒出 5 只 L4，每只 30%，
-    合计 150%——仓位梯度必须再加一层"总预算与头部数量"约束。
-    """
+    """跨来源收敛 + 组合级配额。"""
 
     def __init__(
         self,
@@ -1029,17 +1029,33 @@ class FusionBus:
         self._decisions: Dict[str, FusionDecision] = {}
         self._events: Dict[str, SignalEvent] = {}
         self._regimes: Dict[str, Optional[MarketRegime]] = {}
+        self._cuts: Dict[str, Optional[tuple]] = {}
+        self._tier_floors: Dict[str, Optional[int]] = {}
         self.max_l4 = int(max_l4)
         self.max_total_pct = float(max_total_pct)
         self._portfolio: List[FusionDecision] = []
 
-    def update(self, event: SignalEvent, regime: Optional[MarketRegime] = None) -> FusionDecision:
-        decision = self.engine.evaluate(event, regime)
+    def update(
+        self,
+        event: SignalEvent,
+        regime: Optional[MarketRegime] = None,
+        decision: Optional[FusionDecision] = None,
+        cuts: Optional[tuple] = None,
+        tier_floor: Optional[int] = None,
+    ) -> FusionDecision:
+        """更新/注册单标的决策。若已传 decision 则直接复用，避免二次无参重评。"""
+        self._cuts[event.code] = cuts
+        self._tier_floors[event.code] = tier_floor
+        if decision is not None:
+            new_decision = decision
+        else:
+            new_decision = self.engine.evaluate(event, regime, cuts=cuts, tier_floor=tier_floor)
+
         prev = self._decisions.get(event.code)
-        if prev is None or decision.ts >= prev.ts:
+        if prev is None or new_decision.ts >= prev.ts:
             if prev is not None:
-                decision.sources = list(dict.fromkeys(list(prev.sources) + list(decision.sources)))
-            self._decisions[event.code] = decision
+                new_decision.sources = list(dict.fromkeys(list(prev.sources) + list(new_decision.sources)))
+            self._decisions[event.code] = new_decision
             self._events[event.code] = event
             self._regimes[event.code] = regime
         else:
@@ -1047,23 +1063,47 @@ class FusionBus:
                 prev.sources = list(dict.fromkeys(prev.sources + [event.source]))
         return self._decisions[event.code]
 
-    def _force_downgrade(self, d: FusionDecision) -> FusionDecision:
-        """强制降一档（不再走评分），保证组合预算一定收敛。
-
-        结构保底会在 evaluate 内部把档位顶回保底值，单靠 tier_cap 无法降档；
-        这里直接改档位与仓位，避免 rebalance 陷入死循环。
-        """
+    def _force_downgrade(self, d: FusionDecision, ev: Optional[SignalEvent] = None) -> FusionDecision:
+        """强制降一档并重算执行计划，保证组合预算一定收敛。"""
         nt = max(0, int(d.tier) - 1)
         spec = LADDER[nt]
         size = spec.base_size_pct * float(d.temp_coef or 1.0) * float(d.age_coef or 1.0)
         size = min(float(self.engine.max_single_size_pct), round(max(0.0, size), 1))
-        return replace(d, tier=nt, tier_name=spec.name, size_pct=size)
+
+        entry = self.engine._entry_plan(nt, ev) if (ev and nt > 0) else {}
+        stop_plan = self.engine._stop_plan(nt, ev) if (ev and nt > 0) else {}
+
+        targets: List[Dict[str, Any]] = []
+        if nt > 0 and ev and ev.price > 0:
+            r1 = ev.resistance if ev.resistance > ev.price else ev.price * 1.03
+            targets.append({"price": round(r1, 3), "action": "减半"})
+            targets.append({"price": round(max(r1, ev.price * 1.06), 3), "action": "清仓"})
+
+        invalidate: List[str] = []
+        if stop_plan:
+            invalidate.append("跌破{:.2f}".format(stop_plan["price"]))
+        if nt > 0:
+            invalidate.append("{:.0f}min未成交撤单".format(spec.expire_min))
+            invalidate.append("温度退潮/炸板率>30%")
+            if nt >= 3:
+                invalidate.append("外盘回落<50%承接转弱")
+
+        return replace(
+            d,
+            tier=nt,
+            portfolio_tier=nt,
+            tier_name=spec.name,
+            size_pct=size,
+            entry=entry,
+            stop=stop_plan,
+            targets=targets,
+            invalidate=invalidate,
+        )
 
     def rebalance(self, max_l4: Optional[int] = None, max_total_pct: Optional[float] = None) -> List[FusionDecision]:
         """按级别 + RAR 重新分配组合预算：限制 L4 数量与总仓位。
 
-        超额时不是"全部砍掉"，而是逐级降档（L4->L3->L2...），
-        保证强弱顺序不变、梯度不塌陷。
+        超额时逐级降档，保证计划与档位自洽。
         """
         cap_l4 = self.max_l4 if max_l4 is None else int(max_l4)
         budget = self.max_total_pct if max_total_pct is None else float(max_total_pct)
@@ -1076,26 +1116,39 @@ class FusionBus:
         for base in ranked:
             ev = self._events.get(base.code)
             rg = self._regimes.get(base.code)
+            cached_cuts = self._cuts.get(base.code)
             decision = base
 
             if decision.tier >= 4 and l4_used >= cap_l4:
-                decision = self.engine.evaluate(ev, rg, now=base.ts, tier_cap=3) if ev else decision
+                if ev:
+                    nxt = self.engine.evaluate(ev, rg, now=base.ts, tier_cap=3, cuts=cached_cuts, tier_floor=0)
+                    decision = replace(
+                        nxt,
+                        score_tier=base.score_tier,
+                        signal_tier=base.signal_tier,
+                        signal_size_pct=base.signal_size_pct,
+                        portfolio_tier=nxt.tier,
+                    )
 
-            # 降档收敛：必须有硬上界。
-            # 旧实现只判断 "total + size > budget"，而结构保底会把 tier 顶回 4，
-            # 于是 evaluate 永远返回同一档 → while 死循环（实测 8s 未返回）。
             _guard = 0
             while ev is not None and decision.tier > 0 and total + decision.size_pct > budget:
                 _guard += 1
                 if _guard > 6:
-                    decision = self._force_downgrade(decision)
+                    decision = self._force_downgrade(decision, ev)
                     break
-                nxt = self.engine.evaluate(ev, rg, now=base.ts, tier_cap=decision.tier - 1)
+                nxt = self.engine.evaluate(
+                    ev, rg, now=base.ts, tier_cap=decision.tier - 1, cuts=cached_cuts, tier_floor=0
+                )
                 if nxt.tier >= decision.tier:
-                    # 保底把档位顶回来了：强制降一档，保证组合预算一定收敛
-                    decision = self._force_downgrade(nxt)
+                    decision = self._force_downgrade(decision, ev)
                 else:
-                    decision = nxt
+                    decision = replace(
+                        nxt,
+                        score_tier=base.score_tier,
+                        signal_tier=base.signal_tier,
+                        signal_size_pct=base.signal_size_pct,
+                        portfolio_tier=nxt.tier,
+                    )
 
             if decision.tier >= 4:
                 l4_used += 1
@@ -1129,4 +1182,6 @@ class FusionBus:
         self._decisions.clear()
         self._events.clear()
         self._regimes.clear()
+        self._cuts.clear()
+        self._tier_floors.clear()
         self._portfolio.clear()
