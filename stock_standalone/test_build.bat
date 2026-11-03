@@ -26,6 +26,7 @@ echo [3/4] Compiling test_onefile_ini.py with Nuitka...
 echo.
 python -m nuitka ^
     --onefile ^
+    --onefile-cache-mode=temporary ^
     --clang ^
     --include-data-files=JohnsonUtil/global.ini=JohnsonUtil/global.ini ^
     test_onefile_ini.py
