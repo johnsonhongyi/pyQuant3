@@ -10,6 +10,7 @@ ats/ui/intraday_strategy_dialog.py — ATS 分时阶梯交易策略 & 频准激�
 6. Tab 3 为频准激光 8/18 专属盯盘模板、综合加权汇总表与 7 条实盘法则；
 7. 基于 QMainWindow 独立窗口运行，支持窗口置顶 (StayOnTop) 与 TDX 1 秒极速直连。
 """
+from safe_copy import safe_deepcopy
 
 import sys
 import os
@@ -11037,7 +11038,6 @@ def rearrange_all_sbc_windows(parent_win=None):
     logger.info(f"🪟 [SBC窗口重排] 跨进程共 {len(active_proxies)} 个窗口已在 {len(screen_map)} 个屏幕平铺完成")
 
 
-import copy
 
 
 class IntradayStrategyEditDialog(QDialog):
@@ -11300,7 +11300,7 @@ class IntradayStrategyEditDialog(QDialog):
             QMessageBox.warning(self, "错误", "未找到要克隆的目标策略。")
             return
 
-        cloned_strat = copy.deepcopy(target_st)
+        cloned_strat = safe_deepcopy(target_st)
         ts_suffix = str(int(time.time()))[-4:]
         cloned_strat["id"] = f"{target_st.get('id', 'strat')}_copy_{ts_suffix}"
         cloned_strat["name"] = f"{target_st.get('name', '策略')} (副本)"

@@ -1,9 +1,15 @@
 """Desktop Codex app-server + existing linkage HMAC pull agent; paper research only."""
+try:
+    from safe_copy import safe_deepcopy
+except ModuleNotFoundError:
+    import sys
+    from pathlib import Path as _Path
+    sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+    from safe_copy import safe_deepcopy
 import argparse
 from collections import deque
 from contextlib import closing
 import configparser
-import copy
 import hashlib
 import hmac
 import http.client
@@ -112,7 +118,7 @@ else:
 
 
 def research_schema(context):
-    schema=copy.deepcopy(RESPONSE_SCHEMA)
+    schema=safe_deepcopy(RESPONSE_SCHEMA)
     symbols=[s['symbol'] for s in context.get('stocks',[])]
     if symbols:
         schema['properties']['plans']['items']['properties']['symbol']['enum']=symbols

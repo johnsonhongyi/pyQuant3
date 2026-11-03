@@ -153,4 +153,8 @@ class SingleFlight:
             from ats.bounded_evaluation_store import safe_deepcopy
             return safe_deepcopy(state['result'])
         except Exception:
-            return copy.deepcopy(state['result'])
+            # Never retry an unbounded recursive deepcopy on a failed safe copy.
+            try:
+                return copy.copy(state['result'])
+            except Exception:
+                return state['result']

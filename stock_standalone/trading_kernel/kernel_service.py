@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
+from safe_copy import safe_deepcopy
 
 from dataclasses import asdict
 from datetime import datetime
@@ -391,12 +392,11 @@ class TradingKernelService:
         return payload
 
     def _write_reconciliation_archive(self, path, payload):
-        import copy
         import os
         from ats.storage_archive import write_json_gzip, append_jsonl_gzip
         previous = getattr(self, '_reconciliation_history_payload', None)
         day = str(payload['generated_at'])[:10]
-        projection = copy.deepcopy(payload)
+        projection = safe_deepcopy(payload)
         projection.pop('generated_at', None)
         projection.pop('reason', None)
         projection['reconciliation'].pop('generated_at', None)

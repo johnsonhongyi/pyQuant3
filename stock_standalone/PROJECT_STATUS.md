@@ -6,6 +6,9 @@
 ---
 
 ### Completed Work
+- [x] 2026-11-03：按用户要求保留 Nuitka ATS onefile 固定共享解包目录 `{TEMP}\ATS_Nuitka`，不使用 PID/TIME 隔离；生产 Python 代码中的标准库 `copy.deepcopy` 调用已统一迁移到深度上限 `safe_deepcopy`，包含 NextDayWatch manifest 路径。当前 09:32 栈溢出没有对应 ATS_Terminal 转储，本次未打包验证；详见同日记录。
+- [x] 2026-11-03：ATS 融合梯度 A/B 早盘候选已接入实际分钟 VWAP 斜率、早盘时段和 L2+ 风险许可，并完成指定 PKL 最近五个交易日全量候选回放；6 条提示后验 3 命中/3 未达标，结构机会召回 3/109，仍仅限人工观察。新增信号回归 10 项通过；融合梯度搜索测试分批 5+1 项通过。真实 Toast/语音硬件链路尚未验收；保留 `global.ini`，未打包未提交。细节见 `docs/20261103_ats_launch_progress.md`。
+- [x] 2026-11-03 晨间复核：10 文件 94 项回归重新通过；搜索专项 4 项旧断言定位为测试排序行号假设，隔离用户窗口配置并修复样本行序，分批 5+1 项通过，但整批曾发生 Qt access violation。三分钟 PKL（约 5579 股、六日）回放 10/30 与 11/02 既有梯度成功，A/B 新形态尚未接入 DayReplay，且缺早盘时间门禁；真实语音/Toast 与实盘数据覆盖未验收。详见 `docs/20261103_ats_launch_progress.md`。
 - [x] 2026-09-21：完成 P1-00 现有退出与潮汐参数统一配置化与 SSOT 对齐落地；`config/vwap_trading_rules.json` 沉淀 `trade_plan_defaults` 与 `subnew_tide_thresholds`，`ats/vwap_rule_model.py` 增加模型校验与快照导出，`ProactiveExitEngine` 与 `SubnewTideStateMachine` 无缝解耦，单元测试 5/5 绿灯，关联回归 56/56 绿灯。
 - [x] 2026-09-21：更新 `design/新股检测中心和集中交易指挥室升级交易方案2.md`，以现有代码为唯一基线，校正退出参数、测试数量、已完成 P2 状态、SBC 实际路径、后续工期与验收顺序；本次仅更新计划，未执行编码。
 - [x] 2026-09-21：补齐潮汐 `T1_CLIMAX_DISTRIBUTION` / `T10_MAIN_UP` 可达性及交易闭环：T1 买入/轮动绝对拦截、非核心退出与 SSS 龙头减半；T10 SSS Rank 1 龙头 Layer 1/5 保护及严格换马门槛；7 个关联测试文件合计 86 passed。

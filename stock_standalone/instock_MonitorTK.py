@@ -1,3 +1,4 @@
+from safe_copy import safe_deepcopy
 import os
 import sys
 os.environ["QT_LOGGING_RULES"] = "qt.qpa.window=false"
@@ -4038,8 +4039,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if selector is None:
                 logger.warning(f"[EOD-PULSE] pending: selector unavailable for {today}")
                 return False
-            import copy
-            monitored = copy.deepcopy(getattr(getattr(self, 'live_strategy', None), '_monitored_stocks', {}) or {})
+            monitored = safe_deepcopy(getattr(getattr(self, 'live_strategy', None), '_monitored_stocks', {}) or {})
             if not monitored:
                 from sys_utils import get_conf_path
                 config_path = get_conf_path("voice_alert_config.json") or "voice_alert_config.json"

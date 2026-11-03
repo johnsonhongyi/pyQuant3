@@ -7,6 +7,12 @@ and can be rolled back automatically after a drawdown.
 """
 import json
 from pathlib import Path
+try:
+    from safe_copy import safe_deepcopy
+except ModuleNotFoundError:
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from safe_copy import safe_deepcopy
 
 SPEC = {
     "execution.regime_policy.cautious.min_score": {"min": 62, "max": 78, "step": 2, "kind": "score"},
@@ -79,8 +85,7 @@ def _set(cfg, dotted, value):
 
 def apply_overrides(cfg, params):
     """Merge a validated overlay into a copy of the frozen config."""
-    import copy
-    merged = copy.deepcopy(cfg)
+    merged = safe_deepcopy(cfg)
     for key, value in (params.get("overrides") or {}).items():
         rule = SPEC.get(key)
         if not rule or isinstance(value, bool) or _num(value) is None:

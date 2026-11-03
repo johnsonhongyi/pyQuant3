@@ -4,6 +4,7 @@ Stock Live Strategy & Alert System
 高性能实时股票跟踪与语音报警模块
 """
 from __future__ import annotations
+from safe_copy import safe_deepcopy
 import threading
 import time
 import os
@@ -12,7 +13,6 @@ import datetime
 import multiprocessing as mp
 import pandas as pd
 import numpy as np
-import copy
 from collections import deque
 import re
 import socket
@@ -429,7 +429,7 @@ class StockLiveStrategy:
                 for row_index, value in enumerate(snapshot.iloc[:, col_index].to_numpy(copy=False)):
                     if (type(value) not in immutable and
                             not (isinstance(value, np.generic) and not value.dtype.hasobject)):
-                        snapshot.iat[row_index, col_index] = copy.deepcopy(value)
+                        snapshot.iat[row_index, col_index] = safe_deepcopy(value)
             return snapshot
         except Exception:
             logger.exception("Strategy scan snapshot failed; task deferred")

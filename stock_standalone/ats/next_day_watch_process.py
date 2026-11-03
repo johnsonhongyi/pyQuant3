@@ -51,10 +51,10 @@ def _accept_manifest(root, manifest):
     if any(previous == manifest for previous in seen):
         return
     from next_day_anomaly_watch import _atomic_json, _read_json
-    import copy
+    from ats.bounded_evaluation_store import safe_deepcopy
     path = os.path.join(root, 'datacsv', 'next_day_anomaly_watch_%s.json' % day)
     current = _read_json(path, {})
-    seen.append(copy.deepcopy(manifest))
+    seen.append(safe_deepcopy(manifest))
     del seen[:-8]
     if len(_imported_manifests) > 8:
         _imported_manifests.pop(next(iter(_imported_manifests)))

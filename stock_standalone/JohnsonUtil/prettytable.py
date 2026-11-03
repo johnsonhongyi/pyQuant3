@@ -1,5 +1,12 @@
 # -*- coding: UTF-8 -*-
 #!/usr/bin/env python
+try:
+    from safe_copy import safe_deepcopy
+except ModuleNotFoundError:
+    import os
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from safe_copy import safe_deepcopy
 #
 # Copyright (c) 2009-2013, Luke Maurits <luke@maurits.id.au>
 # All rights reserved.
@@ -34,7 +41,6 @@
 
 __version__ = "0.7.2"
 
-import copy
 import csv
 import itertools
 import random
@@ -937,7 +943,7 @@ class PrettyTable(object):
     ##############################
 
     def copy(self):
-        return copy.deepcopy(self)
+        return safe_deepcopy(self)
 
     ##############################
     # MISC PRIVATE METHODS       #
@@ -990,7 +996,7 @@ class PrettyTable(object):
         options - dictionary of option settings."""
 
         # Make a copy of only those rows in the slice range
-        rows = copy.deepcopy(self._rows[options["start"]:options["end"]])
+        rows = safe_deepcopy(self._rows[options["start"]:options["end"]])
         # Sort if necessary
         if options["sortby"]:
             sortindex = self._field_names.index(options["sortby"])

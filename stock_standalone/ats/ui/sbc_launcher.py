@@ -8,6 +8,7 @@ SBC Process Launcher & Lifecycle Manager
 3. 【单实例激活唤醒】同一标的代码若已在子进程运行中，直接通过 Win32 API 唤醒并置顶其窗口；
 4. 【统一关闭与孤儿守护】在 ATS 退出 (closeEvent 与 atexit) 时自动统一终止所有 SBC 子进程，绝不残留后台孤儿进程。
 """
+from safe_copy import safe_deepcopy
 
 import os
 import json
@@ -245,8 +246,7 @@ class SBCProcessManager:
             import run_sbc
             snapshots = run_sbc.get_launcher_history_snapshots()
             if 1 <= snapshot_idx <= len(snapshots):
-                import copy
-                snapshot_data = copy.deepcopy(snapshots[snapshot_idx - 1])
+                snapshot_data = safe_deepcopy(snapshots[snapshot_idx - 1])
         if self._closing_holdings is not None and self._closing_holdings.is_alive():
             self._pending_holdings_launch = (snapshot_idx, snapshot_data)
             if not self._restart_timer_pending:

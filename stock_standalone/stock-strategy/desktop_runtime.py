@@ -1,4 +1,11 @@
 """Discover running packaged TK/ATS and their shared persisted IPC directory."""
+try:
+    from safe_copy import safe_deepcopy
+except ModuleNotFoundError:
+    import sys
+    from pathlib import Path as _Path
+    sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+    from safe_copy import safe_deepcopy
 import json
 import os
 from pathlib import Path
@@ -8,7 +15,6 @@ import hashlib
 import sqlite3
 import time
 import threading
-import copy
 from contextlib import closing
 
 
@@ -111,7 +117,7 @@ class DesktopRuntimeProbe:
             if self.stop.wait(self.interval):return
 
     def snapshot(self):
-        with self.lock:return copy.deepcopy(self.value)
+        with self.lock:return safe_deepcopy(self.value)
 
     def close(self):
         self.stop.set()

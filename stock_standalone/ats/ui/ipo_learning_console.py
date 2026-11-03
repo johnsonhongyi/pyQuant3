@@ -2,6 +2,7 @@
 """IPO/LLM learning monitor; runtime is read-only and reviews are audited."""
 
 from __future__ import annotations
+from safe_copy import safe_deepcopy
 
 from sys_utils import safe_resolve_path
 from ats.ui.responsive_flow import ResponsiveFlow
@@ -15,7 +16,6 @@ import re
 import sqlite3
 import threading
 import time
-import copy
 import hashlib
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -1756,9 +1756,9 @@ def _collect_snapshot(root: Path) -> Dict[str, Any]:
                 gate_context_status = (
                     "PROVIDER_CONFIGURED" if provider_configured else "PROVIDER_UNCONFIGURED"
                 )
-                live_logs = copy.deepcopy(logs_ref)
-                live_pending = copy.deepcopy(pending_refs)
-                market_context = copy.deepcopy(market_ref)
+                live_logs = safe_deepcopy(logs_ref)
+                live_pending = safe_deepcopy(pending_refs)
+                market_context = safe_deepcopy(market_ref)
                 operation_states = operation_machine.snapshot() if operation_machine else []
             else:
                 gate_context_status = "READ_BUSY"
@@ -3562,7 +3562,7 @@ class IPOLearningConsole(QWidget):
     def _table_changed(self, key: str, payload: Any) -> bool:
         if key in self._table_payloads and self._table_payloads[key] == payload:
             return False
-        self._table_payloads[key] = copy.deepcopy(payload)
+        self._table_payloads[key] = safe_deepcopy(payload)
         return True
 
     def _render_snapshot(self, snapshot: Dict[str, Any]) -> None:
@@ -4961,8 +4961,8 @@ class IPOLearningConsole(QWidget):
                     item for item in trading_center._signal_iteration_log
                     if isinstance(item, dict) and item.get("directive_id") == request_id
                 ), None)
-                directive = copy.deepcopy(directive) if directive is not None else None
-                log_item = copy.deepcopy(log_item) if log_item is not None else None
+                directive = safe_deepcopy(directive) if directive is not None else None
+                log_item = safe_deepcopy(log_item) if log_item is not None else None
             from ats.ui.ipo_arbitration_detail_dialog import IPOArbitrationDetailDialog
             IPOArbitrationDetailDialog.show_or_update(
                 code, directive_obj=directive,

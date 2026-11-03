@@ -4,8 +4,8 @@ Acts as the Single Source of Truth (SSOT) for reading, validating, cloning,
 and atomically saving next-session candidate strategy configurations.
 """
 from __future__ import annotations
+from safe_copy import safe_deepcopy
 
-import copy
 import hashlib
 import json
 import os
@@ -150,7 +150,7 @@ class NextDayWatchConfigManager:
         if target is None:
             return False, config, f"Strategy '{strategy_id}' not found"
 
-        new_strat = copy.deepcopy(target)
+        new_strat = safe_deepcopy(target)
         new_strat["version"] = max_ver + 1
         new_strat["enabled"] = True
 
@@ -159,7 +159,7 @@ class NextDayWatchConfigManager:
             if s.get("strategy_id") == strategy_id:
                 s["enabled"] = False
 
-        new_config = copy.deepcopy(config)
+        new_config = safe_deepcopy(config)
         new_config["strategies"].append(new_strat)
         return True, new_config, f"Strategy '{strategy_id}' cloned as version {new_strat['version']}"
 

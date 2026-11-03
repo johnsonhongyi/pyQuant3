@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from safe_copy import safe_deepcopy
 import sys
 import os
 # # 🚀 [IPC/FIXED] 智能兼容 Nuitka / PyInstaller 编译环境，物理提取真实软件根目录加入 sys.path，彻底根治跨进程/多进程运行时 scratch 导入失败
@@ -14969,7 +14970,6 @@ class MainWindow(QMainWindow, WindowMixin):
                 
                 # [NEW] 提取 SBC 实时信号展示在分时图，并进行 timestamp 精确对齐
                 if hasattr(self, 'all_today_sbc_signals') and getattr(self, 'all_today_sbc_signals'):
-                    import copy
                     # 建立分时图 timestamp -> index 索引映射
                     time_to_idx = {}
                     if tick_df is not None and not tick_df.empty:
@@ -14985,7 +14985,7 @@ class MainWindow(QMainWindow, WindowMixin):
                     for sig in getattr(self, 'all_today_sbc_signals'):
                         if getattr(sig, 'is_kline', False):
                             continue # 避开 K线层投影信号
-                        tick_sig = copy.deepcopy(sig)
+                        tick_sig = safe_deepcopy(sig)
                         s_ts = str(getattr(tick_sig, 'timestamp', ''))
                         matched_idx = -1
                         if s_ts in time_to_idx: matched_idx = time_to_idx[s_ts]

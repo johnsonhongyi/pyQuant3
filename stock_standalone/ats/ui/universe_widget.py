@@ -4,6 +4,7 @@ ATS Universe Widget
 Visualizes the multi-tier stock universe pools: Radar, Watchlist, and Trading.
 Provides a tree structure with real-time mockup data.
 """
+from safe_copy import safe_deepcopy
 
 import threading
 
@@ -1090,8 +1091,7 @@ class UniverseTreeWidget(QWidget):
 
                 act = menu_snap.addAction(label)
                 def _make_trigger(idx, snapshot):
-                    import copy
-                    selected = copy.deepcopy(snapshot)
+                    selected = safe_deepcopy(snapshot)
                     c_list = selected.get("codes", [])
                     def _do_switch():
                         logger.info(f"[UniverseWidget] 操盘手点击加载历史快照 {idx}: {c_list}")

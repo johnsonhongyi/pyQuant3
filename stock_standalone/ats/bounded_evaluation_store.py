@@ -1,5 +1,4 @@
 """Bound diagnostic checkpoints and coalesce noncritical evaluation writes."""
-import copy
 import gzip
 import json
 import os
@@ -8,65 +7,7 @@ import threading
 import time
 from collections import OrderedDict
 from ats.archive_policy import ARCHIVE_INTERVAL, archive_window
-
-def safe_deepcopy(x, memo=None, max_depth=100, _current_depth=0):
-    """
-    带栈深度保护的快速/安全深拷贝 (SSOT):
-    1. 针对归档系统常见的 dict, list, tuple, str, int, float 等高频结构做深度控制；
-    2. 若递归深度超过 max_depth，自动转为浅拷贝或截断，坚决阻止无限递归引发 Windows fatal exception: stack overflow；
-    3. 支持标准 memo 字典防循环引用。
-    """
-    if memo is None:
-        memo = {}
-    d = id(x)
-    if d in memo:
-        return memo[d]
-
-    if _current_depth > max_depth:
-        if isinstance(x, dict):
-            return dict(x)
-        elif isinstance(x, list):
-            return list(x)
-        elif isinstance(x, tuple):
-            return tuple(x)
-        elif isinstance(x, set):
-            return set(x)
-        return x
-
-    cls = type(x)
-    if cls in (int, float, str, bool, bytes, type(None)):
-        return x
-
-    if cls is list:
-        y = []
-        memo[d] = y
-        for item in x:
-            y.append(safe_deepcopy(item, memo, max_depth, _current_depth + 1))
-        return y
-
-    if cls is dict:
-        y = {}
-        memo[d] = y
-        for k, v in x.items():
-            y[safe_deepcopy(k, memo, max_depth, _current_depth + 1)] = safe_deepcopy(v, memo, max_depth, _current_depth + 1)
-        return y
-
-    if cls is tuple:
-        y = tuple(safe_deepcopy(item, memo, max_depth, _current_depth + 1) for item in x)
-        memo[d] = y
-        return y
-
-    if cls is set:
-        y = set(safe_deepcopy(item, memo, max_depth, _current_depth + 1) for item in x)
-        memo[d] = y
-        return y
-
-    # 对未知复杂自定义对象，仍进行深度保护
-    try:
-        # 在受控栈保护下调用标准 deepcopy
-        return copy.deepcopy(x, memo)
-    except (RecursionError, Exception):
-        return x
+from safe_copy import safe_deepcopy
 
 CHECKPOINT_LIMIT = 64
 WRITE_INTERVAL = ARCHIVE_INTERVAL

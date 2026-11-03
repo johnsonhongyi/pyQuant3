@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
+from safe_copy import safe_deepcopy
 import math
 from typing import Any, Dict, Optional, Tuple
 
@@ -19,7 +19,7 @@ def migrate_reconciliation_snapshot(payload: Any) -> Tuple[Optional[Dict[str, An
     if version not in {"1.0", "2.0"}:
         return None, "UNSUPPORTED_SNAPSHOT_VERSION:%s" % version
 
-    data = deepcopy(payload)
+    data = safe_deepcopy(payload)
     if not isinstance(data.get("positions", {}), dict):
         return None, "INVALID_POSITIONS"
     if not isinstance(data.get("orders", []), list):

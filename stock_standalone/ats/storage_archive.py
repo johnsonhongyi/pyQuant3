@@ -1,4 +1,5 @@
 """Verified streaming compression before replacing or removing diagnostic files."""
+from safe_copy import safe_deepcopy
 import gzip
 import hashlib
 import os
@@ -247,7 +248,6 @@ def _trace_code(path, interval, code):
 def load_latest_trace(path, code):
     """Run on a worker; reuse the archive index for each 30-minute interval."""
     import time
-    import copy
     from ats.bounded_evaluation_store import evaluation_store
     interval = int(time.monotonic() // 1800)
     result = _trace_index(path, interval).get(str(code).strip())
@@ -257,4 +257,4 @@ def load_latest_trace(path, code):
         current = record.get('signal', {}).get('code') or record.get('intent', {}).get('code')
         if str(current).strip() == str(code).strip():
             result = record
-    return copy.deepcopy(result)
+    return safe_deepcopy(result)

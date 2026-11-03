@@ -7,7 +7,7 @@ import json
 import hashlib
 import math
 import re
-from copy import deepcopy
+from safe_copy import safe_deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, Mapping, Sequence
 
@@ -71,8 +71,8 @@ _AGENT_PAYLOAD_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "properties": {
             "sentiment_score": {"type": "number", "minimum": 0, "maximum": 100},
             "stage_hint": {"type": "string", "enum": list(_STAGE_HINTS)},
-            "catalysts": {"type": "array", "items": deepcopy(_EVIDENCE_ITEM_SCHEMA), "maxItems": 20},
-            "risk_warnings": {"type": "array", "items": deepcopy(_EVIDENCE_ITEM_SCHEMA), "maxItems": 20},
+            "catalysts": {"type": "array", "items": safe_deepcopy(_EVIDENCE_ITEM_SCHEMA), "maxItems": 20},
+            "risk_warnings": {"type": "array", "items": safe_deepcopy(_EVIDENCE_ITEM_SCHEMA), "maxItems": 20},
         },
         "required": ["sentiment_score", "stage_hint", "catalysts", "risk_warnings"],
         "additionalProperties": False,
@@ -140,7 +140,7 @@ def payload_schema(
     """Return a defensive copy of the strict schema sent to a Provider."""
     if agent_type not in AGENT_TYPES:
         raise AgentContractError("unknown agent_type")
-    schema = deepcopy(_AGENT_PAYLOAD_SCHEMAS[agent_type])
+    schema = safe_deepcopy(_AGENT_PAYLOAD_SCHEMAS[agent_type])
     if evidence_ids is not None and agent_type == "MARKET_REGIME":
         if (
             isinstance(evidence_ids, (str, bytes))

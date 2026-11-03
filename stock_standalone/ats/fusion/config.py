@@ -8,8 +8,8 @@
 """
 
 from __future__ import annotations
+from safe_copy import safe_deepcopy
 
-import copy
 import json
 import logging
 import os
@@ -91,13 +91,13 @@ def load_config(path: Optional[str] = None, use_cache: bool = True) -> Dict[str,
         mtime = os.path.getmtime(path)
         size = os.path.getsize(path)
     except OSError:
-        return copy.deepcopy(DEFAULTS)
+        return safe_deepcopy(DEFAULTS)
 
     key = (path, mtime, size)
     if use_cache:
         with _LOCK:
             if _CACHE is not None and _CACHE_KEY == key:
-                return copy.deepcopy(_CACHE)
+                return safe_deepcopy(_CACHE)
 
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -107,10 +107,10 @@ def load_config(path: Optional[str] = None, use_cache: bool = True) -> Dict[str,
         merged = _deep_merge(DEFAULTS, raw)
     except Exception as exc:
         logger.warning("[fusion] 配置加载失败，使用默认值: %s", exc)
-        return copy.deepcopy(DEFAULTS)
+        return safe_deepcopy(DEFAULTS)
 
     with _LOCK:
-        globals()["_CACHE"] = copy.deepcopy(merged)
+        globals()["_CACHE"] = safe_deepcopy(merged)
         globals()["_CACHE_KEY"] = key
     return merged
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from sys_utils import safe_resolve_path
 
-from copy import deepcopy
+from safe_copy import safe_deepcopy
 from datetime import datetime, timezone
 import json
 import os
@@ -93,7 +93,7 @@ class LLMControlThread(threading.Thread):
         if not isinstance(request, Mapping):
             return False
         try:
-            command = {"request": deepcopy(dict(request)), "queued_at": time.monotonic()}
+            command = {"request": safe_deepcopy(dict(request)), "queued_at": time.monotonic()}
             self._commands.put_nowait(command)
             return True
         except (queue.Full, TypeError, ValueError, RecursionError):

@@ -22,6 +22,7 @@ ats/strategy/ipo_trading_center.py
 5. 【持续跟随市场切换的跟随交易 (换马调仓)】：
    - 持仓走平滞涨、池中冒出超级领头羊时，果断弃弱留强、切换跟随。
 """
+from safe_copy import safe_deepcopy
 
 import os
 import sys
@@ -30,7 +31,6 @@ import math
 import logging
 import threading
 import json
-import copy
 import datetime
 import inspect
 import hashlib
@@ -874,7 +874,7 @@ class IPOTradingCenter:
     def get_reconciliation_mismatches(self) -> Dict[str, Dict[str, Any]]:
         """获取逐代码冲突及 TK PAPER 账户级对账阻断快照。"""
         with self._lock:
-            mismatches = copy.deepcopy(self._reconciliation_mismatches)
+            mismatches = safe_deepcopy(self._reconciliation_mismatches)
             paper_report = getattr(self, "_paper_reconciliation", None)
             if self._auto_load_ledger and (
                 not isinstance(paper_report, dict)
@@ -1357,7 +1357,7 @@ class IPOTradingCenter:
             "time_str": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now_ts)),
             "action": directive.action,
             "directive_id": directive.directive_id,
-            "audit_envelope": copy.deepcopy(directive.audit_envelope),
+            "audit_envelope": safe_deepcopy(directive.audit_envelope),
             "code": directive.code,
             "name": directive.name,
             "price": directive.price,
@@ -1846,7 +1846,7 @@ class IPOTradingCenter:
                             "BLOCK" if block_gate == gate_index and decision == "BLOCK" else
                             "PENDING"
                         )
-                    gate_detail = copy.deepcopy(getattr(passport, "diagnostics", {}) or {})
+                    gate_detail = safe_deepcopy(getattr(passport, "diagnostics", {}) or {})
                     if not isinstance(gate_detail, dict):
                         gate_detail = {}
                     gate_detail["gates"] = gate_states
@@ -4280,7 +4280,7 @@ class IPOTradingCenter:
                     old_pos.realized_pnl_amount = round(pnl_amt, 2)
                     old_pos.exit_reason = f"全仓轮动换马接力新龙头 [{directive.name}({code})]"
                     old_pos.status = "CLOSED"
-                    self._closed_positions.insert(0, copy.deepcopy(old_pos))
+                    self._closed_positions.insert(0, safe_deepcopy(old_pos))
                     if len(self._closed_positions) > 200:
                         self._closed_positions = self._closed_positions[:200]
                     old_pos.shares = 0
@@ -4341,7 +4341,7 @@ class IPOTradingCenter:
                     directive.audit_envelope["qty"] = sell_shares
                 pos.last_action = directive.action
                 pos.last_action_time = t_str
-                pre_sell_snapshot = copy.deepcopy(pos)
+                pre_sell_snapshot = safe_deepcopy(pos)
                 pos.shares -= sell_shares
                 pos.available_shares = max(0, min(pos.available_shares - sell_shares, pos.shares))
                 watch = self.exit_engine.get_position(code)
@@ -4394,7 +4394,7 @@ class IPOTradingCenter:
                 "time_str": f"{today_str} {t_str}",
                 "action": directive.action,
                 "directive_id": directive.directive_id,
-                "audit_envelope": copy.deepcopy(directive.audit_envelope),
+                "audit_envelope": safe_deepcopy(directive.audit_envelope),
                 "code": directive.code,
                 "name": directive.name,
                 "price": directive.price,

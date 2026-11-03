@@ -1,7 +1,13 @@
 """Bounded transport buffers and network work outside the Codex event consumer."""
+try:
+    from safe_copy import safe_deepcopy
+except ModuleNotFoundError:
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from safe_copy import safe_deepcopy
 from collections import deque
 from contextlib import closing
-import copy
 import json
 import queue
 import sqlite3
@@ -156,7 +162,7 @@ class ProgressPublisher:
     def publish(self, result):
         self.check()
         with self.condition:
-            self.latest = copy.deepcopy(result)
+            self.latest = safe_deepcopy(result)
             self.condition.notify()
 
     def check(self):
