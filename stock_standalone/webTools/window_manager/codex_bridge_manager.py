@@ -1231,9 +1231,16 @@ class BridgeController:
             creationflags = (getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
                              | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
                              | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
-        worker_env = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1",
-                      "PYQUANT3_CODEX_BRIDGE_WORKER": "1",
-                      "PYQUANT3_CODEX_BRIDGE_ARGS": json.dumps(arguments)} if getattr(sys, "frozen", False) else None
+        worker_env = ({**os.environ,
+                       "PYQUANT3_CODEX_BRIDGE_WORKER": "1",
+                       "PYQUANT3_CODEX_BRIDGE_ARGS": json.dumps(arguments)}
+                      if getattr(sys, "frozen", False) else None)
+        if worker_env is not None:
+            if self.stop_on_manager_exit_enabled(mode):
+                # The manager stops this bridge before its onefile parent cleans up.
+                worker_env.pop("PYINSTALLER_RESET_ENVIRONMENT", None)
+            else:
+                worker_env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
         output_path = self.runtime_root / "agent-output.txt"
         with output_path.open("ab") as output:
             process = subprocess.Popen(
