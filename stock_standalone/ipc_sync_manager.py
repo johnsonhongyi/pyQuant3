@@ -107,7 +107,11 @@ class IPCSyncManager:
         self.log_info(f"启动同步管理器，监听本地端口: {self.port}")
 
     def stop(self):
-        """安全停止监听"""
+        """安全停止监听并向主程序注销订阅"""
+        try:
+            self.unsubscribe_stream()
+        except Exception:
+            pass
         self._listener_running = False
         self.is_bound = False
         self._bind_event.clear()

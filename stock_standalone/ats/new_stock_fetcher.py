@@ -648,7 +648,7 @@ class NewStockFetcher:
             tdx_fetcher = TDXRealtimeFetcher.get_instance()
             
             # 1. 批量快速获取全部已上市标的的真实流通股本与总股本
-            shares_dict = tdx_fetcher.get_batch_finance_shares(codes_to_query) if codes_to_query else {}
+            shares_dict = (tdx_fetcher.get_batch_finance_shares(codes_to_query) if codes_to_query else {}) or {}
 
             chunk_size = 40
             for i in range(0, len(codes_to_query), chunk_size):

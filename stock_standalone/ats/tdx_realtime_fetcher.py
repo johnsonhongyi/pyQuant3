@@ -2674,6 +2674,17 @@ class TDXRealtimeFetcher:
             else:
                 missing.append(c_clean)
 
+        if missing:
+            for c_clean in missing:
+                try:
+                    lt = self.get_circulation_shares(c_clean)
+                    zg = self.get_total_shares(c_clean)
+                    res[c_clean] = (lt, zg)
+                except Exception:
+                    res[c_clean] = (150000000.0, 150000000.0)
+
+        return res
+
     def resolve_symbol_name(self, code: str) -> str:
         """
         根据代码高精度解析标的名称（包含内置大盘指数、科创50别名 999688、北证50等）

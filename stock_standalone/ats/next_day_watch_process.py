@@ -232,7 +232,13 @@ def _worker_entry(connection, root):
             flush_pending_evaluations()
         except Exception:
             logger.exception("Next-day final persistence failed")
-        connection.close()
+        try:
+            connection.close()
+        except Exception:
+            pass
+        from sys_utils import is_packaged_env
+        if is_packaged_env():
+            os._exit(0)
 
 
 class NextDayWatchProcess:

@@ -2570,7 +2570,13 @@ def _source_acquisition_process(root: str, ticker: str, collect_labels: bool, ch
         channel.send(result)
         _print_source_cycle_summary(result)
     finally:
-        channel.close()
+        try:
+            channel.close()
+        except Exception:
+            pass
+        from sys_utils import is_packaged_env
+        if is_packaged_env():
+            os._exit(0)
 
 
 class _SourceAcquisitionWorker(QThread):

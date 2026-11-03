@@ -683,11 +683,11 @@ class LimitUpEngine:
                 fetcher = TDXRealtimeFetcher.get_instance()
                 
                 # 批量获取五档盘口
-                quotes = fetcher.get_security_quotes_safe(target_codes_for_l2)
-                quote_map = {str(q.get("code", "")).strip().zfill(6): q for q in quotes if q.get("code")}
+                quotes = fetcher.get_security_quotes_safe(target_codes_for_l2) or []
+                quote_map = {str(q.get("code", "")).strip().zfill(6): q for q in quotes if q and q.get("code")}
 
                 # 批量拉取真实流通股本与总股本字典 {code: (liutong_shares, total_shares)}
-                shares_map = fetcher.get_batch_finance_shares(target_codes_for_l2)
+                shares_map = fetcher.get_batch_finance_shares(target_codes_for_l2) or {}
 
                 for r in records:
                     c = r["code"]

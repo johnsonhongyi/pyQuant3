@@ -917,6 +917,30 @@ class AlertNotifier(QObject if HAS_PYQT else object):
         reason = str(message).strip()
         return self.notify_special_signal(code=code, name=name, reason=reason, score=score, parent=parent, source=source)
 
+    def notify_info(self, title, message, parent=None, duration_ms=6000):
+        """显示普通信息 Toast，不记为交易信号，也不触发语音或交易中心。"""
+        if getattr(self, '_shutting_down', False):
+            return
+        try:
+            duration_ms = max(1500, min(15000, int(duration_ms)))
+        except (TypeError, ValueError, OverflowError):
+            duration_ms = 6000
+        item = {
+            'type': 'info',
+            'title': str(title).strip(),
+            'message': str(message).strip(),
+            'parent': parent,
+            'duration_ms': duration_ms,
+        }
+
+        if HAS_PYQT and QApplication.instance():
+            app = QApplication.instance()
+            from PyQt6.QtCore import QThread
+            if QThread.currentThread() != app.thread():
+                self.sig_notify_request.emit(item)
+                return
+        self._enqueue_notification_item(item)
+
     def notify_trading_signal(
         self,
         code: str,
@@ -1088,7 +1112,7 @@ class AlertNotifier(QObject if HAS_PYQT else object):
         """在 Qt 主线程中安全压入通知队列并启动串行轮播处理 (带队列内单股防重复保护)"""
         if getattr(self, '_shutting_down', False):
             return
-        if item.get('type') == 'market_volume':
+        if item.get('type') in ('market_volume', 'info'):
             self._notify_queue.append(item)
             self._process_queue()
             return
@@ -1130,6 +1154,44 @@ class AlertNotifier(QObject if HAS_PYQT else object):
         self._is_busy = True
         self._busy_start_mono = now_mono
         item = self._notify_queue.popleft()
+
+        if item.get('type') == 'info':
+            title = item.get('title', '')
+            message = item.get('message', '')
+            parent = item.get('parent')
+            shown = False
+
+            if self.is_toast_enabled() and HAS_PYQT and QApplication.instance():
+                try:
+                    target_p = parent if parent else QApplication.activeWindow()
+                    self._current_toast = InAppToastWidget(title, message, code='', parent=target_p)
+                    shown = True
+                except Exception as exc:
+                    logger.warning(f"InAppToastWidget info failed: {exc}")
+
+            if self.is_toast_enabled() and not shown and self.tray_icon and HAS_PYQT:
+                try:
+                    if not self.tray_icon.isVisible():
+                        self.tray_icon.show()
+                    self.tray_icon.showMessage(
+                        title, message, QSystemTrayIcon.MessageIcon.Information,
+                        int(item.get('duration_ms', 6000))
+                    )
+                    shown = True
+                except Exception as exc:
+                    logger.warning(f"ShowMessage info failed: {exc}")
+
+            if shown and HAS_PYQT and QApplication.instance():
+                QTimer.singleShot(int(item.get('duration_ms', 6000)), self._on_current_item_finished)
+            elif shown:
+                import threading
+                threading.Timer(
+                    int(item.get('duration_ms', 6000)) / 1000.0,
+                    self._on_current_item_finished
+                ).start()
+            else:
+                self._on_current_item_finished()
+            return
 
         # ── 市场成交额定时播报专属分支 ──
         if item.get('type') == 'market_volume':

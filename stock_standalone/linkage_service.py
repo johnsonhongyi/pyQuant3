@@ -153,6 +153,7 @@ class LinkageManagerProxy:
         return cls._instance
 
     def _init(self):
+        self._closing = False
         _multiprocessingQueue = getattr(cct, "multiprocessingQueue", 300) if cct is not None else 300
         self.queue = multiprocessing.Queue(maxsize=_multiprocessingQueue)
         self.last_active_val = multiprocessing.Value('d', time.time()) # 心跳监视
@@ -169,6 +170,8 @@ class LinkageManagerProxy:
 
     def _ensure_alive(self):
         """确保后台进程存活且未卡死，若死亡或挂起则拉起"""
+        if getattr(self, "_closing", False):
+            return False
         now = time.time()
         is_dead = self.process is None or not self.process.is_alive()
         is_hung = False
@@ -235,16 +238,46 @@ class LinkageManagerProxy:
             pass
 
     def stop(self):
+        self._closing = True
+        task_queue = getattr(self, "queue", None)
+        terminated = False
+        join_feeder = False
         try:
-            try:
-                self.queue.put_nowait("EXIT")
-            except queue.Full:
-                pass
-            self.process.join(timeout=0.5)
-            if self.process.is_alive():
-                self.process.terminate()
-                self.process.join(timeout=0.2)
-        except: pass
+            if task_queue is not None:
+                try:
+                    task_queue.put_nowait("EXIT")
+                except (queue.Full, ValueError, OSError):
+                    pass
+            process = getattr(self, "process", None)
+            if process is not None:
+                process.join(timeout=0.5)
+                if process.is_alive():
+                    terminated = True
+                    process.terminate()
+                    process.join(timeout=0.2)
+                    if process.is_alive() and hasattr(process, "kill"):
+                        process.kill()
+                        process.join(timeout=0.2)
+                else:
+                    join_feeder = process.exitcode == 0
+        except Exception:
+            pass
+        finally:
+            if task_queue is not None:
+                if terminated or not join_feeder:
+                    try:
+                        task_queue.cancel_join_thread()
+                    except Exception:
+                        pass
+                try:
+                    task_queue.close()
+                except Exception:
+                    pass
+                if join_feeder and not terminated:
+                    try:
+                        task_queue.join_thread()
+                    except Exception:
+                        pass
 
 global_manager = None
 _manager_lock = threading.Lock()
