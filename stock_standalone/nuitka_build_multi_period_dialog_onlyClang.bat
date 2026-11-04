@@ -266,6 +266,9 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --no-pyi-file ^
     --lto=no ^
     --jobs=8 ^
+    --python-flag=no_asserts ^
+    --no-deployment-flag=excluded-module-usage ^
+    --user-plugin="%~dp0tools\nuitka_smart_optimizer_plugin.py" ^
     --nofollow-import-to=scipy ^
     --nofollow-import-to=matplotlib ^
     --nofollow-import-to=tkinter.test ^

@@ -285,6 +285,9 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --no-pyi-file ^
     --lto=no ^
     --jobs=8 ^
+    --python-flag=no_asserts ^
+    --no-deployment-flag=excluded-module-usage ^
+    --user-plugin="%~dp0tools\nuitka_smart_optimizer_plugin.py" ^
     --nofollow-import-to=scipy ^
     --nofollow-import-to=matplotlib ^
     --nofollow-import-to=tkinter.test ^
@@ -314,6 +317,30 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --nofollow-import-to=boto3 ^
     --nofollow-import-to=botocore ^
     --nofollow-import-to=pytest ^
+    --nofollow-import-to=jedi ^
+    --nofollow-import-to=notebook ^
+    --nofollow-import-to=doctest ^
+    --nofollow-import-to=win32ui ^
+    --nofollow-import-to=bokeh ^
+    --nofollow-import-to=seaborn ^
+    --nofollow-import-to=flask ^
+    --nofollow-import-to=django ^
+    --nofollow-import-to=sqlalchemy ^
+    --nofollow-import-to=pyecharts ^
+    --nofollow-import-to=zmq ^
+    --nofollow-import-to=tornado ^
+    --nofollow-import-to=PyQt6.QtPositioning ^
+    --nofollow-import-to=PyQt6.QtSensors ^
+    --nofollow-import-to=PyQt6.QtWebChannel ^
+    --nofollow-import-to=PyQt6.QtWebSockets ^
+    --nofollow-import-to=PyQt6.QtOpenGL ^
+    --nofollow-import-to=PyQt6.QtOpenGLWidgets ^
+    --nofollow-import-to=PyQt6.QtQuickWidgets ^
+    --nofollow-import-to=PyQt6.QtQuick3D ^
+    --nofollow-import-to=PyQt6.QtRemoteObjects ^
+    --nofollow-import-to=PyQt5 ^
+    --nofollow-import-to=PySide2 ^
+    --nofollow-import-to=PySide6 ^
     --noinclude-dlls=Qt6WebEngineCore.dll ^
     --noinclude-dlls=Qt6WebEngineWidgets.dll ^
     --noinclude-dlls=Qt6Pdf.dll ^
@@ -322,11 +349,16 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --noinclude-dlls=Qt6VirtualKeyboard.dll ^
     --noinclude-dlls=Qt6Multimedia.dll ^
     --noinclude-dlls=Qt6Bluetooth.dll ^
+    --noinclude-dlls=Qt6OpenGL.dll ^
+    --noinclude-dlls=Qt6OpenGLWidgets.dll ^
     --noinclude-dlls=Qt6Network.dll ^
     --noinclude-dlls=Qt6Svg.dll ^
     --noinclude-dlls=Qt6Sql.dll ^
     --noinclude-dlls=Qt6Test.dll ^
     --noinclude-dlls=Qt6Xml.dll ^
+    --noinclude-dlls=opengl32sw.dll ^
+    --noinclude-dlls=mfc140u.dll ^
+    --noinclude-dlls=mfc140.dll ^
     --include-data-file="%CSV_PATH%=a_trade_calendar\a_trade_calendar.csv" ^
     --include-data-file=config\multi_period_help.md=config\multi_period_help.md ^
     --include-data-file=config\multi_period_strategies.json=config\multi_period_strategies.json ^
@@ -334,7 +366,7 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --include-data-file=MonitorTK.ico=MonitorTK.ico ^
     --include-data-file=window_config.json=window_config.json ^
     --include-data-file=webTools\window_manager\window_layout_config.json=webTools\window_manager\window_layout_config.json ^
-    --include-data-file=JohnsonUtil\global.ini=global.ini ^
+    --include-data-file=JohnsonUtil\global.ini=JohnsonUtil\global.ini ^
     --include-data-file="%~dp0system_linkage.key=system_linkage.key" ^
     --include-data-file=scale2_window_config.json=scale2_window_config.json ^
     --include-data-file=monitor_category_list.json=monitor_category_list.json ^

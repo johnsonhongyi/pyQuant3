@@ -36,7 +36,7 @@ a = Analysis(
         'ats.swing_tracker', 'ats.backtest_engine', 'ats.trade_journal',
         'ats.ui.main_window', 'ats.ui.chart_widgets', 'ats.ui.universe_widget',
         'ats.ui.heatmap_widget', 'ats.ui.swing_table', 'ats.ui.trade_flow',
-        'configobj', 'JSONData', 'JSONData.sina_data', 'tables', 'h5py',
+        'configobj', 'JSONData', 'JSONData.sina_data', 'tables',
         'JSONData.tdx_hdf5_api', 'JSONData.realdatajson', 'JSONData.wencaiData',
         'JSONData.tdxbk', 'JohnsonUtil.johnson_cons', 'tushare', 'pandas_ta',
         'JohnsonUtil.commonTips','talib.stream', 'talib.abstract', 'talib',
@@ -54,9 +54,9 @@ a = Analysis(
         'PyQt6.QtQuick3D', 'PyQt6.QtRemoteObjects',
         'PyQt5', 'PySide2', 'PySide6',
         'matplotlib', 'scipy', 'jedi', 'IPython', 'notebook',
-        'lxml', 'cryptography',
+        'cryptography',
         'numba', 'llvmlite', 'botocore', 'boto3',
-        'bokeh', 'seaborn', 'flask', 'django', 'sqlalchemy', 'pyecharts', 'zmq', 'tornado'
+        'bokeh', 'seaborn', 'flask', 'django', 'sqlalchemy', 'pyecharts', 'zmq', 'tornado', 'h5py'
     ],
     noarchive=False,
     optimize=1,

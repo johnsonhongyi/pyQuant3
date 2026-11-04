@@ -88,7 +88,7 @@ a = Analysis(
         'PyQt6.QtQuick3D', 'PyQt6.QtRemoteObjects',
         'PyQt5', 'PySide2', 'PySide6',
         'matplotlib', 'scipy', 'jedi', 'IPython', 'notebook',
-        'lxml', 'cryptography',
+        'cryptography',
         'numba', 'llvmlite', 'botocore', 'boto3',
         # 严禁将 Tkinter 主控及日历国际化多国语言包卷入 ATS 终端
         'instock_MonitorTK', 'tkcalendar', 'babel', 'prompt_toolkit'
