@@ -3439,6 +3439,24 @@ def bring_all_monitors_to_front(event=None):
         logger.info(f"已将 {count} 个监控窗口带到最前显示 (无置顶/无重排)")
 
 
+def trigger_rearrange_hotkey(event=None):
+    """
+    [🚀 新增] 按 Alt+F 快捷键执行监控小窗口智能重排
+    """
+    try:
+        fn = globals().get("rearrange_monitors_per_screen")
+        if callable(fn):
+            fn()
+            logger.info("🚀 已通过快捷键 Alt+F 触发监控小窗口重排")
+            try:
+                if 'root' in globals() and root and root.winfo_exists():
+                    toast_message(root, "🚀 已通过 Alt+F 重新排列监控窗口")
+            except Exception:
+                pass
+    except Exception as e:
+        logger.error(f"Alt+F 触发重排失败: {e}")
+
+
 def rearrange_monitor_windows_grid():
     """一键自动网格排列所有监控窗口"""
     global monitor_windows
@@ -5505,7 +5523,7 @@ def show_rearrange_context_menu(event):
     menu = tk.Menu(root, tearoff=0)
     menu.add_command(label="⚙️ 编辑重排过滤策略 (自定义)...", command=lambda: open_rearrange_policy_dialog(root))
     m_count_str = f" [已识别 {len(MONITORS)} 屏均匀分布]" if len(MONITORS) > 1 else ""
-    menu.add_command(label=f"🚀 立即执行重排 (F6){m_count_str}", command=lambda: rearrange_monitors_per_screen())
+    menu.add_command(label=f"🚀 立即执行重排 (Alt+F / F6){m_count_str}", command=lambda: rearrange_monitors_per_screen())
     menu.add_command(label="🔔 测试实时弹出与报警 (模拟扫描)", command=lambda: test_realtime_popup_scan(root))
     menu.add_separator()
 
@@ -10533,6 +10551,11 @@ def create_monitor_window(stock_info):
     monitor_tree.bind("<Key-q>", bring_all_monitors_to_front)
     monitor_tree.bind("<Key-Q>", bring_all_monitors_to_front)
 
+    # [🚀 新增] 监控子窗口与表格绑定 Alt+F 键：执行监控小窗口智能重排
+    for seq in ("<Alt-f>", "<Alt-F>", "<Alt-Key-f>", "<Alt-Key-F>"):
+        monitor_win.bind(seq, trigger_rearrange_hotkey)
+        monitor_tree.bind(seq, trigger_rearrange_hotkey)
+
     # [🚀 修复] 成功创建监控窗口后触发延迟保存
     schedule_save_positions()
 
@@ -15161,6 +15184,11 @@ if __name__ == "__main__":
     root.bind("<Key-Q>", bring_all_monitors_to_front)
     tree.bind("<Key-q>", bring_all_monitors_to_front)
     tree.bind("<Key-Q>", bring_all_monitors_to_front)
+
+    # [🚀 新增] 主窗口与主表绑定 Alt+F 键：执行监控小窗口智能重排
+    for seq in ("<Alt-f>", "<Alt-F>", "<Alt-Key-f>", "<Alt-Key-F>"):
+        root.bind(seq, trigger_rearrange_hotkey)
+        tree.bind(seq, trigger_rearrange_hotkey)
 
     # 设置你希望任务每天执行的时间（例如：每天 23:00）
     target_hour = 15

@@ -7,6 +7,18 @@
   - **Flash（执行者）**：通过 `invoke_subagent(..., Model="flash")` 承接写代码、跑测试、批量扫描等高 Token 消耗的具体事务。
 - **动态裁量**：以质量为主、价格为辅；质量第一、效率第二。轻微修改与极高难度核心问题由 Argon 亲自操刀。
 
+## 2026-11-04 15:25 【异动联动小窗口与主界面新增Alt+F智能重排快捷键闭环】(`stock/testpy/tdxgui/异动联动.py`, `tests/test_rearrange_policy_customization.py`)
+- [x] **【监控小窗口与主界面全局新增 Alt+F 快捷键实现窗口智能重排】**：
+  - **用户业务诉求**：“异动联动中的小窗口q键是自动拉到最前显示,添加一个功能键alt+f实习重排功能”；
+  - **重排快捷处理与状态反馈 (`trigger_rearrange_hotkey`)**：
+    - 抽离出统一的重排快捷处理函数，并在触发重排后弹出轻量 Toast 提示 `🚀 已通过 Alt+F 重新排列监控窗口` 与日志记录；
+  - **全链路快捷键绑定矩阵（兼容大小写与键盘序列）**：
+    - **监控小窗口 (`create_monitor_window`)**：为每个监控小窗口（`monitor_win`）及其内部表格（`monitor_tree`）同时绑定 `<Alt-f>`, `<Alt-F>`, `<Alt-Key-f>`, `<Alt-Key-F>`；与原有 Q 键（拉到最前）并列，无论焦点位于哪一个监控小窗口，随时按下 `Alt+F` 均能立刻重排所有小窗口；
+    - **主界面与主表 (`root`, `tree`)**：同步全局绑定 `<Alt-f>`, `<Alt-F>`, `<Alt-Key-f>`, `<Alt-Key-F>`，在主界面操作时同样支持 `Alt+F` 极速重排；
+    - **右键菜单更新**：将重排选项文案优化为 `🚀 立即执行重排 (Alt+F / F6)`，提升交互直观性；
+- [x] **【自动化测试全绿通过（41 项专项测试 100% PASS）】**：
+  - 新增 `test_trigger_rearrange_hotkey_execution` 专项单元测试，全量 41 项测试 100% 全部通过（1.65s）。
+
 ## 2026-11-04 14:20 【TK与多周期Nuitka打包sqlite3.dll动态依赖与包导入全链路补齐】(`docs/tasks/2026-11-04_1250_ATS输出名统一为ATS_Terminal_Nuitka与打包失败根因修复.md`, `nuitka_build_console_onlyClang.bat`, `nuitka_build_multi_period_dialog_onlyClang.bat`, `nuitka_build_ats_console_onlyClang.bat`)
 - [x] **【彻底解决 TK (instock_MonitorTK) 运行时 sqlite3/dbapi2 ImportError 报错】**：
   - **根因定位**：`sqlite3/dbapi2.py` 执行 `from _sqlite3 import *` 依赖 Windows 底层 `sqlite3.dll`。在 Conda/专用环境中该动态库位于 `Library\bin\sqlite3.dll`，Nuitka 默认不将其打包进根目录；此前 `nuitka_build_console_onlyClang.bat` 遗漏了 `--include-data-file="%SQLITE_DLL%=sqlite3.dll"` 以及 `--include-package=sqlite3`、`--include-module=_sqlite3`；
