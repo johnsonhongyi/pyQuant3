@@ -7,6 +7,19 @@
   - **Flash（执行者）**：通过 `invoke_subagent(..., Model="flash")` 承接写代码、跑测试、批量扫描等高 Token 消耗的具体事务。
 - **动态裁量**：以质量为主、价格为辅；质量第一、效率第二。轻微修改与极高难度核心问题由 Argon 亲自操刀。
 
+## 2026-11-04 19:20 【异动联动全面对齐TK/ATS打包路径功能与Nuitka Onefile持久化自愈】(stock/testpy/tdxgui/sys_utils.py, stock/testpy/tdxgui/异动联动.py, stock/testpy/tdxgui/history_manager.py, stock/testpy/tdxgui/gui_utils.py, stock/testpy/tdxgui/SendTDXTools.py, stock/testpy/tdxgui/LoggerFactory.py, stock/testpy/tdxgui/test_nuitka_path_alignment.py)
+- [x] **【彻底解决 Nuitka Onefile 下路径被劫持至 Temp 导致配置/分组/过滤历史全部丢失（图2空白）问题】**：
+  - **原因定位**：
+    1. 异动联动原先在 异动联动.py 内部硬编码了 _get_win32_exe_path() 调用 GetModuleFileNameW(None)，在 Nuitka Onefile 模式下该 API 返回的是被解压到 Temp 临时目录的内部 Payload，导致 BASE_DIR 错误指向 C:\Temp\stockAlerts_Nuitka；
+    2. stock/testpy/tdxgui 目录下原先缺失 sys_utils.py，导致 gui_utils.py 内部从 sys_utils 导入失败，静默回退到 __file__ 临时目录；
+    3. window_config.json（保存用户自定义异动分组如【高开异动】）与 query_history.json（保存过滤历史下拉公式）在临时目录中根本不存在，且退出时临时目录被清理，导致出现图 2 所示的分组只剩【全部】、过滤下拉框空空如也的严重故障；
+  - **全面对齐 TK / ATS 成熟打包路径体系**：
+    - 新增同源移植的 stock/testpy/tdxgui/sys_utils.py：优先通过 Nuitka 权威环境变量 NUITKA_ONEFILE_BINARY 提取物理可执行程序所在根目录，具备深度过滤 _is_inside_temp_dir（阻断 stockalerts_nuitka, onefile_, 	emp, _meipass 等任何临时目录劫持）；
+    - 实现 get_conf_path() 智能自愈机制：优先读取真实物理磁盘配置；物理磁盘缺失种子配置文件时，自动从包内（NUITKA_ONEFILE_DIRECTORY）自愈释放一份至物理磁盘；用户后续对 window_config.json 与 query_history.json 的修改 100% 持久化到物理磁盘；
+    - 全面改造 异动联动.py、history_manager.py、gui_utils.py、SendTDXTools.py、LoggerFactory.py：统一收敛至 get_app_root() 锚定物理目录，并在主入口执行 os.chdir(BASE_DIR)；
+  - **自动化测试全绿**：
+    - 新增 stock/testpy/tdxgui/test_nuitka_path_alignment.py，全真模拟 Nuitka Onefile 环境，验证物理路径提取、配置与历史文件路径定位、临时目录阻断，测试 100% PASS。
+
 ## 2026-11-04 18:10 【异动联动Nuitka轻量极速重构与sqlite3冲突/tables冗余彻底清除】(stock/testpy/tdxgui/build_nuitka_clang.bat, stockAlerts-nuitka-to-exe.cmd, <USER_HOME>\stockAlerts-nuitka-to-exe.cmd)
 - [x] **【彻底解决打包慢（13分钟）与 sqlite3.dll 冲突崩溃】**：
   - **原因定位**：异动联动是纯 Tkinter + pandas 盘口工具，完全不使用 	ables (PyTables) 与 sqlite3。此前的脚本照搬了 ATS 终端的重型参数 --include-package=tables 与手动注入 sqlite3.dll 数据文件，导致两大致命问题：

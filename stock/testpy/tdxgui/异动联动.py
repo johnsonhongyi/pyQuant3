@@ -50,62 +50,13 @@ ui_update_lock = threading.Lock()
 worker_pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 from history_manager import QueryHistoryManager
 
-# --- Win32 API 用于获取 EXE 原始路径 (仅限 Windows) ---
-def _get_win32_exe_path():
-    """
-    使用 Win32 API 获取当前进程的主模块路径。
-    这在 Nuitka/PyInstaller 的 Onefile 模式下能可靠地返回原始 EXE 路径。
-    """
-    # 假设是 32767 字符的路径长度是足够的
-    MAX_PATH_LENGTH = 32767 
-    buffer = ctypes.create_unicode_buffer(MAX_PATH_LENGTH)
-    
-    # 调用 GetModuleFileNameW(HMODULE hModule, LPWSTR lpFilename, DWORD nSize)
-    # 传递 NULL 作为 hModule 获取当前进程的可执行文件路径
-    ctypes.windll.kernel32.GetModuleFileNameW(
-        None, buffer, MAX_PATH_LENGTH
-    )
-    return os.path.dirname(os.path.abspath(buffer.value))
-
-def get_base_path():
-    """
-    获取程序基准路径。在 Windows 打包环境 (Nuitka/PyInstaller) 中，
-    使用 Win32 API 优先获取真实的 EXE 目录。
-    """
-    
-    # 检查是否为 Python 解释器运行
-    is_interpreter = os.path.basename(sys.executable).lower() in ('python.exe', 'pythonw.exe')
-    
-    # 1. 普通 Python 脚本模式
-    if is_interpreter and not getattr(sys, "frozen", False):
-        # 只有当它是 python.exe 运行 且 没有 frozen 标志时，才进入脚本模式
-        try:
-            # 此时 __file__ 是可靠的
-            path = os.path.dirname(os.path.abspath(__file__))
-            return path
-        except NameError:
-             pass # 忽略交互模式
-    
-    # 2. Windows 打包模式 (Nuitka/PyInstaller EXE 模式)
-    if sys.platform.startswith('win'):
-        try:
-            # 无论是否 Onefile，Win32 API 都会返回真实 EXE 路径
-            real_path = _get_win32_exe_path()
-            if real_path != os.path.dirname(os.path.abspath(sys.executable)):
-                 return real_path
-            if not is_interpreter:
-                 return real_path
-        except Exception:
-            pass 
-
-    # 3. 最终回退
-    if getattr(sys, "frozen", False) or not is_interpreter:
-        return os.path.dirname(os.path.abspath(sys.executable))
-
-    # 4. 极端脚本回退
-    return os.path.dirname(os.path.abspath(sys.argv[0]))
+from sys_utils import get_app_root, get_base_path, get_conf_path, is_packaged_env
 
 BASE_DIR = get_base_path()
+try:
+    os.chdir(BASE_DIR)
+except Exception:
+    pass
 monitor_windows = {}  # 存储监控窗口实例
 
 WINDOW_GEOMETRIES = {}
@@ -499,16 +450,16 @@ class SafeHDFStore(HDFStore):
 
 
 BASE_DIR = get_base_path()
-code_file_name= os.path.join(BASE_DIR, "code_ths_other.json")
-MONITOR_LIST_FILE =  os.path.join(BASE_DIR, "monitor_list.json")
-CONFIG_FILE =  os.path.join(BASE_DIR, "window_config.json")
-ALERTS_FILE =  os.path.join(BASE_DIR, "alerts.json")
-CUSTOM_FOCUS_FILE = os.path.join(BASE_DIR, "custom_focus_stocks.json")
+code_file_name = get_conf_path("code_ths_other.json", BASE_DIR)
+MONITOR_LIST_FILE = get_conf_path("monitor_list.json", BASE_DIR)
+CONFIG_FILE = get_conf_path("window_config.json", BASE_DIR)
+ALERTS_FILE = get_conf_path("alerts.json", BASE_DIR)
+CUSTOM_FOCUS_FILE = get_conf_path("custom_focus_stocks.json", BASE_DIR)
 custom_focus_stocks = set()  # 专属关注的股票代码集合 (6位字符串)
 ARCHIVE_DIR = os.path.join(BASE_DIR, "archives")
 DARACSV_DIR = os.path.join(BASE_DIR, "datacsv")
-SEARCH_HISTORY_FILE: str = os.path.join(BASE_DIR, "query_history.json")
-filterCONFIG_FILE = os.path.join(BASE_DIR,"filter_stock_codes.json")  # 可以放开机自动加载的 code_list
+SEARCH_HISTORY_FILE: str = get_conf_path("query_history.json", BASE_DIR)
+filterCONFIG_FILE = get_conf_path("filter_stock_codes.json", BASE_DIR)  # 可以放开机自动加载的 code_list
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
 os.makedirs(DARACSV_DIR, exist_ok=True)
 

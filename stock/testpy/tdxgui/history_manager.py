@@ -50,6 +50,12 @@ class QueryHistoryManager:
         auto_run=True 时直接打开编辑窗口
         """
         self.root = root
+        try:
+            from sys_utils import get_conf_path
+            if history_file and not os.path.isabs(history_file):
+                history_file = get_conf_path(history_file)
+        except Exception:
+            pass
         self.history_file = history_file
         self.df_all = df_all
         self.search_var1 = search_var1
@@ -1297,7 +1303,11 @@ def run_manager_process(history_path=None, df_all=None):
     except ImportError:
         # Fallback if config module not found
         if history_path is None:
-            history_path = "query_history.json"
+            try:
+                from sys_utils import get_conf_path
+                history_path = get_conf_path("query_history.json")
+            except Exception:
+                history_path = "query_history.json"
     
     # [FIX] High DPI Awareness for Windows EXEs
     try:

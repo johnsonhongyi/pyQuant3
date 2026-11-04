@@ -17,15 +17,12 @@ codelist = []
 ths_code=[]
 
 def get_base_path():
-    """
-    プログラム実行時のベースパスを取得する。
-    PyInstallerでexe化された場合でも、実行ファイルのディレクトリを返す。
-    """
-    if getattr(sys, 'frozen', False):
-        # PyInstallerでexe化された場合
-        return os.path.dirname(os.path.abspath(sys.executable))
-    else:
-        # 通常の.pyファイルとして実行された場合
+    try:
+        from sys_utils import get_app_root
+        return get_app_root()
+    except Exception:
+        if getattr(sys, 'frozen', False):
+            return os.path.dirname(os.path.abspath(sys.executable))
         return os.path.dirname(os.path.abspath(__file__))
 # 导入通达信联动代码中的相关类和函数
 # from 通达信联动代码 import TdxStockSenderApp, HistoryRecord
