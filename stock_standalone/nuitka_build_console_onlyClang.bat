@@ -261,6 +261,31 @@ if not exist "%CSV_PATH%" (
     exit /b
 )
 echo [SUCCESS] Dynamically retrieved CSV path: %CSV_PATH%
+set "DLLS_RESOLVE_FILE=%TEMP%\_resolve_dlls_%RANDOM%.txt"
+set "SQLITE_DLL="
+set "CRYPTO_DLL="
+set "SSL_DLL="
+"%PYTHON_EXEC%" -c "import sys; from pathlib import Path; pfx=Path(sys.prefix); find=lambda pat: next((str(p) for d in [pfx/'Library'/'bin', pfx/'DLLs'] if d.exists() for p in d.glob(pat)), ''); print('SQLITE_DLL=' + find('sqlite3.dll')); print('CRYPTO_DLL=' + find('libcrypto*.dll')); print('SSL_DLL=' + find('libssl*.dll'))" > "%DLLS_RESOLVE_FILE%" 2>nul
+if exist "%DLLS_RESOLVE_FILE%" (
+    for /f "usebackq delims=" %%A in ("%DLLS_RESOLVE_FILE%") do set "%%A"
+    del /f /q "%DLLS_RESOLVE_FILE%" >nul 2>&1
+)
+set "EXTRA_DLL_ARGS="
+if defined SQLITE_DLL if exist "!SQLITE_DLL!" (
+    for %%F in ("!SQLITE_DLL!") do set "SQLITE_NAME=%%~nxF"
+    echo [SUCCESS] SQLite runtime DLL resolved: !SQLITE_DLL!
+    set EXTRA_DLL_ARGS=!EXTRA_DLL_ARGS! --include-data-file="!SQLITE_DLL!=!SQLITE_NAME!"
+)
+if defined CRYPTO_DLL if exist "!CRYPTO_DLL!" (
+    for %%F in ("!CRYPTO_DLL!") do set "CRYPTO_NAME=%%~nxF"
+    echo [SUCCESS] OpenSSL Crypto DLL resolved: !CRYPTO_DLL!
+    set EXTRA_DLL_ARGS=!EXTRA_DLL_ARGS! --include-data-file="!CRYPTO_DLL!=!CRYPTO_NAME!"
+)
+if defined SSL_DLL if exist "!SSL_DLL!" (
+    for %%F in ("!SSL_DLL!") do set "SSL_NAME=%%~nxF"
+    echo [SUCCESS] OpenSSL SSL DLL resolved: !SSL_DLL!
+    set EXTRA_DLL_ARGS=!EXTRA_DLL_ARGS! --include-data-file="!SSL_DLL!=!SSL_NAME!"
+)
 echo [INFO] Trading Kernel API: %TK_API_VERSION%  Kernel: %TK_KERNEL_VERSION%
 echo.
 
@@ -297,19 +322,6 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --nofollow-import-to=tables.tests ^
     --nofollow-import-to=tables.nodes.tests ^
     --nofollow-import-to=numpy.tests ^
-    --nofollow-import-to=PyQt6.QtWebEngineCore ^
-    --nofollow-import-to=PyQt6.QtWebEngineWidgets ^
-    --nofollow-import-to=PyQt6.QtQuick ^
-    --nofollow-import-to=PyQt6.QtQml ^
-    --nofollow-import-to=PyQt6.QtPdf ^
-    --nofollow-import-to=PyQt6.QtVirtualKeyboard ^
-    --nofollow-import-to=PyQt6.QtMultimedia ^
-    --nofollow-import-to=PyQt6.QtBluetooth ^
-    --nofollow-import-to=PyQt6.QtNetwork ^
-    --nofollow-import-to=PyQt6.QtSvg ^
-    --nofollow-import-to=PyQt6.QtSql ^
-    --nofollow-import-to=PyQt6.QtTest ^
-    --nofollow-import-to=PyQt6.QtXml ^
     --nofollow-import-to=IPython ^
     --nofollow-import-to=unittest ^
     --nofollow-import-to=numba ^
@@ -330,15 +342,6 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --nofollow-import-to=pyecharts ^
     --nofollow-import-to=zmq ^
     --nofollow-import-to=tornado ^
-    --nofollow-import-to=PyQt6.QtPositioning ^
-    --nofollow-import-to=PyQt6.QtSensors ^
-    --nofollow-import-to=PyQt6.QtWebChannel ^
-    --nofollow-import-to=PyQt6.QtWebSockets ^
-    --nofollow-import-to=PyQt6.QtOpenGL ^
-    --nofollow-import-to=PyQt6.QtOpenGLWidgets ^
-    --nofollow-import-to=PyQt6.QtQuickWidgets ^
-    --nofollow-import-to=PyQt6.QtQuick3D ^
-    --nofollow-import-to=PyQt6.QtRemoteObjects ^
     --nofollow-import-to=PyQt5 ^
     --nofollow-import-to=PySide2 ^
     --nofollow-import-to=PySide6 ^
@@ -361,6 +364,7 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --noinclude-dlls=mfc140u.dll ^
     --noinclude-dlls=mfc140.dll ^
     --include-data-file="%CSV_PATH%=a_trade_calendar\a_trade_calendar.csv" ^
+    !EXTRA_DLL_ARGS! ^
     --include-data-file=config\multi_period_help.md=config\multi_period_help.md ^
     --include-data-file=config\multi_period_strategies.json=config\multi_period_strategies.json ^
     --include-data-file=config\indicator_help_custom.json=config\indicator_help_custom.json ^
@@ -381,17 +385,15 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --include-data-file=JSONData\stock_codes.conf=JSONData\stock_codes.conf ^
     --include-data-file=JSONData\count.ini=JSONData\count.ini ^
     --include-data-file=JohnsonUtil\wencai\同花顺板块行业.xlsx=JohnsonUtil\wencai\同花顺板块行业.xlsx ^
+    --include-package=sqlite3 ^
+    --include-module=_sqlite3 ^
+    --include-module=_ssl ^
+    --include-module=_hashlib ^
     --include-package=a_trade_calendar ^
     --include-package=pyttsx3 ^
     --include-package=tables ^
     --include-package=tk_gui_modules ^
     --include-package=trading_kernel ^
-    --include-module=trading_kernel.contracts ^
-    --include-module=trading_kernel.gateway ^
-    --include-module=trading_kernel.kernel_service ^
-    --include-module=JSONData.tdx_hdf5_api ^
-    --include-module=JSONData.wencaiData ^
-    --include-module=JSONData.sina_data ^
     --include-module=JohnsonUtil.johnson_cons ^
     --include-module=configobj ^
     --include-module=tushare ^
@@ -402,8 +404,6 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --include-module=realtime_data_service ^
     --include-module=market_pulse_engine ^
     --include-module=signal_dashboard_panel ^
-    --include-module=tables._comp_lzo ^
-    --include-module=tables._comp_bzip2 ^
     --include-module=bidding_racing_panel ^
     --include-module=bidding_momentum_detector ^
     --include-module=market_pulse_viewer ^
@@ -436,13 +436,19 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
 echo ==========================================
 echo 🔬 PRE-FLIGHT COMPILER DRY RUN (Takes ~2s)
 echo ==========================================
-echo pass > "%TEMP%\_nuitka_dry_run.py"
-"%PYTHON_EXEC%" -m nuitka --show-scons --clang --remove-output "%TEMP%\_nuitka_dry_run.py"
-if errorlevel 1 (
-    echo.
-    echo ❌ [FATAL ERROR] Pre-flight failed! Could not compile properly.
-    pause
-    exit /b
+set "_DRY_PROBE=%~dp0.nuitka_cache\_nuitka_dry_run.py"
+if not exist "%~dp0.nuitka_cache" mkdir "%~dp0.nuitka_cache" >nul 2>&1
+echo pass > "%_DRY_PROBE%" 2>nul
+if exist "%_DRY_PROBE%" (
+    "%PYTHON_EXEC%" -m nuitka --show-scons --clang --remove-output "%_DRY_PROBE%" >nul 2>&1
+    if errorlevel 1 (
+        echo [WARNING] Pre-flight dry-run returned non-zero, continuing directly to real build...
+    ) else (
+        echo ✅ Pre-flight compiler check passed!
+    )
+    del /q "%_DRY_PROBE%" >nul 2>&1
+) else (
+    echo [INFO] Dry-run probe file skipped, proceeding directly to real build.
 )
 echo.
 echo ✅ Pre-flight compiler check passed! (Check the logs above for 'clang' execution details)

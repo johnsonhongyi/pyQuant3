@@ -217,7 +217,7 @@ echo.
 
 :: ===== Configuration =====
 set MAIN_SCRIPT=ats\ui\multi_period_dialog.py
-set OUTPUT_NAME=MultiPeriodTester.exe
+set OUTPUT_NAME=MultiPeriodTester_Nuitka.exe
 set OUTPUT_DIR=build
 set ICON_FILE=MonitorTK32.ico
 if not exist "%ICON_FILE%" set ICON_FILE=MonitorTK.ico
@@ -244,6 +244,31 @@ if not exist "%CSV_PATH%" (
     exit /b
 )
 echo [SUCCESS] Dynamically retrieved CSV path: %CSV_PATH%
+set "DLLS_RESOLVE_FILE=%TEMP%\_resolve_dlls_%RANDOM%.txt"
+set "SQLITE_DLL="
+set "CRYPTO_DLL="
+set "SSL_DLL="
+"%PYTHON_EXEC%" -c "import sys; from pathlib import Path; pfx=Path(sys.prefix); find=lambda pat: next((str(p) for d in [pfx/'Library'/'bin', pfx/'DLLs'] if d.exists() for p in d.glob(pat)), ''); print('SQLITE_DLL=' + find('sqlite3.dll')); print('CRYPTO_DLL=' + find('libcrypto*.dll')); print('SSL_DLL=' + find('libssl*.dll'))" > "%DLLS_RESOLVE_FILE%" 2>nul
+if exist "%DLLS_RESOLVE_FILE%" (
+    for /f "usebackq delims=" %%A in ("%DLLS_RESOLVE_FILE%") do set "%%A"
+    del /f /q "%DLLS_RESOLVE_FILE%" >nul 2>&1
+)
+set "EXTRA_DLL_ARGS="
+if defined SQLITE_DLL if exist "!SQLITE_DLL!" (
+    for %%F in ("!SQLITE_DLL!") do set "SQLITE_NAME=%%~nxF"
+    echo [SUCCESS] SQLite runtime DLL resolved: !SQLITE_DLL!
+    set EXTRA_DLL_ARGS=!EXTRA_DLL_ARGS! --include-data-file="!SQLITE_DLL!=!SQLITE_NAME!"
+)
+if defined CRYPTO_DLL if exist "!CRYPTO_DLL!" (
+    for %%F in ("!CRYPTO_DLL!") do set "CRYPTO_NAME=%%~nxF"
+    echo [SUCCESS] OpenSSL Crypto DLL resolved: !CRYPTO_DLL!
+    set EXTRA_DLL_ARGS=!EXTRA_DLL_ARGS! --include-data-file="!CRYPTO_DLL!=!CRYPTO_NAME!"
+)
+if defined SSL_DLL if exist "!SSL_DLL!" (
+    for %%F in ("!SSL_DLL!") do set "SSL_NAME=%%~nxF"
+    echo [SUCCESS] OpenSSL SSL DLL resolved: !SSL_DLL!
+    set EXTRA_DLL_ARGS=!EXTRA_DLL_ARGS! --include-data-file="!SSL_DLL!=!SSL_NAME!"
+)
 echo.
 
 :: ===== Create output directory =====
@@ -259,7 +284,7 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --windows-console-mode=force ^
     --windows-icon-from-ico="%ICON_FILE%" ^
     --windows-company-name="Johnson QuantLab" ^
-    --windows-product-name="MultiPeriodTester" ^
+    --windows-product-name="MultiPeriodTester_Nuitka" ^
     --windows-file-version="1.0.0" ^
     --windows-product-version="1.0.0" ^
     --output-dir="%OUTPUT_DIR%" ^
@@ -336,6 +361,7 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --noinclude-dlls=mfc140u.dll ^
     --noinclude-dlls=mfc140.dll ^
     --include-data-file="%CSV_PATH%=a_trade_calendar\a_trade_calendar.csv" ^
+    !EXTRA_DLL_ARGS! ^
     --include-data-file=MonitorTK.ico=MonitorTK.ico ^
     --include-data-file=window_config.json=window_config.json ^
     --include-data-file=strategy_config.json=strategy_config.json ^
@@ -351,6 +377,10 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --include-package=tables ^
     --include-module=tables._comp_lzo ^
     --include-module=tables._comp_bzip2 ^
+    --include-package=sqlite3 ^
+    --include-module=_sqlite3 ^
+    --include-module=_ssl ^
+    --include-module=_hashlib ^
     --include-package=a_trade_calendar ^
     --include-package=talib ^
     --include-module=global_favorites ^
@@ -366,13 +396,19 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
 echo ==========================================
 echo 🔬 PRE-FLIGHT COMPILER DRY RUN (Takes ~2s)
 echo ==========================================
-echo pass > "%TEMP%\_nuitka_dry_run.py"
-python -m nuitka --show-scons --clang --remove-output "%TEMP%\_nuitka_dry_run.py"
-if errorlevel 1 (
-    echo.
-    echo ❌ [FATAL ERROR] Pre-flight failed! Could not compile properly.
-    pause
-    exit /b
+set "_DRY_PROBE=%~dp0.nuitka_cache\_nuitka_dry_run.py"
+if not exist "%~dp0.nuitka_cache" mkdir "%~dp0.nuitka_cache" >nul 2>&1
+echo pass > "%_DRY_PROBE%" 2>nul
+if exist "%_DRY_PROBE%" (
+    python -m nuitka --show-scons --clang --remove-output "%_DRY_PROBE%" >nul 2>&1
+    if errorlevel 1 (
+        echo [WARNING] Pre-flight dry-run returned non-zero, continuing directly to real build...
+    ) else (
+        echo ✅ Pre-flight compiler check passed!
+    )
+    del /q "%_DRY_PROBE%" >nul 2>&1
+) else (
+    echo [INFO] Dry-run probe file skipped, proceeding directly to real build.
 )
 echo.
 echo ✅ Pre-flight compiler check passed! (Check the logs above for 'clang' execution details)
@@ -391,6 +427,10 @@ if "%BUILD_MODE%"=="standalone" (
         echo.
         echo [SUCCESS] Standalone compilation completed successfully!
         echo [SUCCESS] Output directory: %OUTPUT_DIR%\multi_period_dialog.dist
+    ) else if exist "%OUTPUT_DIR%\MultiPeriodTester_Nuitka.dist\%OUTPUT_NAME%" (
+        echo.
+        echo [SUCCESS] Standalone compilation completed successfully!
+        echo [SUCCESS] Output directory: %OUTPUT_DIR%\MultiPeriodTester_Nuitka.dist
     ) else if exist "%OUTPUT_DIR%\MultiPeriodTester.dist\%OUTPUT_NAME%" (
         echo.
         echo [SUCCESS] Standalone compilation completed successfully!

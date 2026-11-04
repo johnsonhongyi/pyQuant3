@@ -317,7 +317,7 @@ def main():
         else:
             target_path = Path(args.target).resolve()
     else:
-        # 两者均未显式指定，默认 ATS_Terminal.exe
+        # 两者均未显式指定，默认 PyInstaller 产物 dist/ATS_Terminal.exe
         target_path = Path("dist/ATS_Terminal.exe").resolve()
 
     try:

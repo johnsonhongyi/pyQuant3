@@ -238,7 +238,7 @@ set "MOD=%~1"
 if "!MOD!"=="ats" (
     set "TARGET_SCRIPT=!CMD_BASE_DIR!\nuitka_build_ats_console_onlyClang.bat"
     set "MOD_TITLE=ATS 操盘终端"
-    set "TARGET_EXE=ATS_Terminal.exe"
+    set "TARGET_EXE=ATS_Terminal_Nuitka.exe"
 )
 if "!MOD!"=="tk" (
     set "TARGET_SCRIPT=!CMD_BASE_DIR!\nuitka_build_console_onlyClang.bat"
@@ -248,7 +248,7 @@ if "!MOD!"=="tk" (
 if "!MOD!"=="multi" (
     set "TARGET_SCRIPT=!CMD_BASE_DIR!\nuitka_build_multi_period_dialog_onlyClang.bat"
     set "MOD_TITLE=多周期策略窗口"
-    set "TARGET_EXE=MultiPeriodTester.exe"
+    set "TARGET_EXE=MultiPeriodTester_Nuitka.exe"
 )
 
 set "EXE_PATH=!BUILD_DIR!\!TARGET_EXE!"
@@ -340,21 +340,29 @@ goto :eof
 :: 内部辅助子例程: 时间差计算
 :: ================================================================================
 :CALC_TIME_DIFF
+set "c_sh=0" & set "c_sm=0" & set "c_ss=0" & set "c_sc=0"
+set "c_eh=0" & set "c_em=0" & set "c_es=0" & set "c_ec=0"
 for /F "tokens=1-4 delims=:.," %%a in ("%~1") do (
    set /A "c_sh=1%%a-100", "c_sm=1%%b-100", "c_ss=1%%c-100", "c_sc=1%%d-100"
-)
+) 2>nul
 for /F "tokens=1-4 delims=:.," %%a in ("%~2") do (
    set /A "c_eh=1%%a-100", "c_em=1%%b-100", "c_es=1%%c-100", "c_ec=1%%d-100"
-)
-set /A "c_start_cs=(c_sh*360000)+(c_sm*6000)+(c_ss*100)+c_sc"
-set /A "c_end_cs=(c_eh*360000)+(c_em*6000)+(c_es*100)+c_ec"
+) 2>nul
+set /A "c_start_cs=(c_sh*360000)+(c_sm*6000)+(c_ss*100)+c_sc" 2>nul
+set /A "c_end_cs=(c_eh*360000)+(c_em*6000)+(c_es*100)+c_ec" 2>nul
+if not defined c_start_cs set "c_start_cs=0"
+if not defined c_end_cs set "c_end_cs=0"
 if !c_end_cs! LSS !c_start_cs! (
    set /A "c_end_cs+=8640000"
 )
-set /A "c_diff_cs=c_end_cs-c_start_cs"
-set /A "DIFF_TOTAL_SEC=c_diff_cs/100"
-set /A "DIFF_MIN=DIFF_TOTAL_SEC/60"
-set /A "DIFF_SEC=DIFF_TOTAL_SEC%%60"
+set /A "c_diff_cs=c_end_cs-c_start_cs" 2>nul
+if not defined c_diff_cs set "c_diff_cs=0"
+set /A "DIFF_TOTAL_SEC=c_diff_cs/100" 2>nul
+if not defined DIFF_TOTAL_SEC set "DIFF_TOTAL_SEC=0"
+set /A "DIFF_MIN=DIFF_TOTAL_SEC/60" 2>nul
+if not defined DIFF_MIN set "DIFF_MIN=0"
+set /A "DIFF_SEC=DIFF_TOTAL_SEC%%60" 2>nul
+if not defined DIFF_SEC set "DIFF_SEC=0"
 if !DIFF_MIN! GTR 0 (
     set "DIFF_FORMATTED=!DIFF_MIN!分!DIFF_SEC!秒"
 ) else (
@@ -371,12 +379,14 @@ if not exist "%~1" (
     goto :eof
 )
 set "size_bytes=%~z1"
+if not defined size_bytes set "size_bytes=0"
+if "!size_bytes!"=="" set "size_bytes=0"
 if !size_bytes! GTR 1048576 (
-    set /A "size_mb=size_bytes/1048576"
-    set /A "size_dec=(size_bytes%%1048576)*10/1048576"
+    set /A "size_mb=size_bytes/1048576" 2>nul
+    set /A "size_dec=(size_bytes%%1048576)*10/1048576" 2>nul
     set "RET_FILE_SIZE=!size_mb!.!size_dec! MB"
 ) else if !size_bytes! GTR 1024 (
-    set /A "size_kb=size_bytes/1024"
+    set /A "size_kb=size_bytes/1024" 2>nul
     set "RET_FILE_SIZE=!size_kb! KB"
 ) else (
     set "RET_FILE_SIZE=!size_bytes! B"

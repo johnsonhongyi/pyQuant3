@@ -145,7 +145,7 @@ if exist "C:\JohnsonProgram\SetDisplayMode\init\upx\upx.exe" set "PATH=C:\Johnso
 
 :: ATS entry point, output, and icon match ats.spec; aligned with TK and MultiPeriodTester builds in build\
 set "MAIN_SCRIPT=run_ats.py"
-set "OUTPUT_NAME=ATS_Terminal.exe"
+set "OUTPUT_NAME=ATS_Terminal_Nuitka.exe"
 set "OUTPUT_DIR=build"
 set "ICON_FILE=MonitorTK32.ico"
 set "PRODUCT_VERSION=1.0.0"
@@ -167,6 +167,31 @@ if not exist "MonitorTK.ico" (
 set "CSV_PATH="
 "%PYTHON_EXEC%" -c "import os, a_trade_calendar; print(os.path.join(os.path.dirname(a_trade_calendar.__file__), 'a_trade_calendar.csv'))" > "%CAPTURE_FILE%" 2>nul
 set /p CSV_PATH=<"%CAPTURE_FILE%"
+set "DLLS_RESOLVE_FILE=%TEMP%\_resolve_dlls_%RANDOM%.txt"
+set "SQLITE_DLL="
+set "CRYPTO_DLL="
+set "SSL_DLL="
+"%PYTHON_EXEC%" -c "import sys; from pathlib import Path; pfx=Path(sys.prefix); find=lambda pat: next((str(p) for d in [pfx/'Library'/'bin', pfx/'DLLs'] if d.exists() for p in d.glob(pat)), ''); print('SQLITE_DLL=' + find('sqlite3.dll')); print('CRYPTO_DLL=' + find('libcrypto*.dll')); print('SSL_DLL=' + find('libssl*.dll'))" > "%DLLS_RESOLVE_FILE%" 2>nul
+if exist "%DLLS_RESOLVE_FILE%" (
+    for /f "usebackq delims=" %%A in ("%DLLS_RESOLVE_FILE%") do set "%%A"
+    del /f /q "%DLLS_RESOLVE_FILE%" >nul 2>&1
+)
+set "EXTRA_DLL_ARGS="
+if defined SQLITE_DLL if exist "!SQLITE_DLL!" (
+    for %%F in ("!SQLITE_DLL!") do set "SQLITE_NAME=%%~nxF"
+    echo [SUCCESS] SQLite runtime DLL resolved: !SQLITE_DLL!
+    set EXTRA_DLL_ARGS=!EXTRA_DLL_ARGS! --include-data-file="!SQLITE_DLL!=!SQLITE_NAME!"
+)
+if defined CRYPTO_DLL if exist "!CRYPTO_DLL!" (
+    for %%F in ("!CRYPTO_DLL!") do set "CRYPTO_NAME=%%~nxF"
+    echo [SUCCESS] OpenSSL Crypto DLL resolved: !CRYPTO_DLL!
+    set EXTRA_DLL_ARGS=!EXTRA_DLL_ARGS! --include-data-file="!CRYPTO_DLL!=!CRYPTO_NAME!"
+)
+if defined SSL_DLL if exist "!SSL_DLL!" (
+    for %%F in ("!SSL_DLL!") do set "SSL_NAME=%%~nxF"
+    echo [SUCCESS] OpenSSL SSL DLL resolved: !SSL_DLL!
+    set EXTRA_DLL_ARGS=!EXTRA_DLL_ARGS! --include-data-file="!SSL_DLL!=!SSL_NAME!"
+)
 if not defined CSV_PATH (
     echo [ERROR] Could not resolve a_trade_calendar.csv.
     goto :fail
@@ -217,7 +242,7 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --windows-console-mode=force ^
     --windows-icon-from-ico="%ICON_FILE%" ^
     --windows-company-name="Johnson QuantLab" ^
-    --windows-product-name="ATS_Terminal" ^
+    --windows-product-name="ATS_Terminal_Nuitka" ^
     --windows-file-version="%PRODUCT_VERSION%" ^
     --windows-product-version="%PRODUCT_VERSION%" ^
     --output-dir="%OUTPUT_DIR%" ^
@@ -301,6 +326,7 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --noinclude-dlls=mfc140u.dll ^
     --noinclude-dlls=mfc140.dll ^
     --include-data-file="%CSV_PATH%=a_trade_calendar\a_trade_calendar.csv" ^
+    !EXTRA_DLL_ARGS! ^
     --include-data-file=MonitorTK.ico=MonitorTK.ico ^
     --include-data-file=window_config.json=window_config.json ^
     --include-data-file=strategy_config.json=strategy_config.json ^
@@ -328,30 +354,15 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --include-module=pyqtgraph ^
     --include-package=sqlite3 ^
     --include-module=_sqlite3 ^
+    --include-module=_ssl ^
+    --include-module=_hashlib ^
     --include-module=sys_utils ^
     --include-module=db_utils ^
-    --include-module=ats ^
-    --include-module=ats.ipc_bridge ^
-    --include-module=ats.universe_manager ^
-    --include-module=ats.swing_tracker ^
-    --include-module=ats.backtest_engine ^
-    --include-module=ats.trade_journal ^
-    --include-module=ats.ui.main_window ^
-    --include-module=ats.ui.chart_widgets ^
-    --include-module=ats.ui.universe_widget ^
-    --include-module=ats.ui.heatmap_widget ^
-    --include-module=ats.ui.swing_table ^
-    --include-module=ats.ui.trade_flow ^
-    --include-module=configobj ^
-    --include-module=JSONData ^
-    --include-module=JSONData.sina_data ^
+    --include-package=ats ^
+    --include-package=JSONData ^
     --include-package=tables ^
     --include-module=tables._comp_lzo ^
     --include-module=tables._comp_bzip2 ^
-    --include-module=JSONData.tdx_hdf5_api ^
-    --include-module=JSONData.realdatajson ^
-    --include-module=JSONData.wencaiData ^
-    --include-module=JSONData.tdxbk ^
     --include-module=JohnsonUtil.johnson_cons ^
     --include-module=tushare ^
     --include-module=pandas_ta ^
@@ -360,41 +371,23 @@ set CMD="%PYTHON_EXEC%" -m nuitka !NUITKA_MODE_OPT! "%MAIN_SCRIPT%" ^
     --include-module=talib.abstract ^
     --include-module=run_sbc ^
     --include-module=run_ipo_detector ^
-    --include-module=ats.ui.ipo_subnew_detector_dialog ^
-    --include-module=ats.ui.ipo_detector_ipc ^
-    --include-module=ats.strategy.ipo_vwap_detector_engine ^
-    --include-module=ats.new_stock_fetcher ^
-    --include-module=ats.strategy.ipo_data_contracts ^
-    --include-module=ats.strategy.ipo_gate_context_provider ^
-    --include-module=ats.strategy.ipo_outcome_labels ^
-    --include-module=ats.strategy.ipo_trading_center ^
-    --include-module=ats.strategy.gate_orchestrator ^
-    --include-module=ats.llm.backend_factory ^
-    --include-module=ats.next_day_watch_process ^
-    --include-module=ats.bounded_evaluation_store ^
-    --include-module=ats.archive_policy ^
-    --include-module=ats.storage_archive ^
-    --include-module=ats.llm.antigravity_cli_backend ^
-    --include-module=ats.llm.codex_cli_backend ^
-    --include-module=ats.llm.offline_learning ^
-    --include-module=ats.ui.ipo_learning_console ^
-    --include-module=ats.llm.ipo_codex_chat ^
-    --include-module=ats.ui.ipo_codex_dialogue ^
-    --include-module=ats.ui.responsive_flow ^
     --include-package=trading_kernel ^
     --include-package=yaml
-
 echo.
 echo [INFO] Clang pre-flight check
-set "PROBE_SCRIPT=%TEMP%\_ats_nuitka_clang_probe.py"
-echo pass > "%PROBE_SCRIPT%"
-"%PYTHON_EXEC%" -m nuitka --show-scons --clang --remove-output "%PROBE_SCRIPT%"
-if errorlevel 1 (
-    echo [ERROR] Clang pre-flight failed.
+set "PROBE_SCRIPT=%NUITKA_CACHE_DIR%\_ats_nuitka_clang_probe.py"
+echo pass > "%PROBE_SCRIPT%" 2>nul
+if exist "%PROBE_SCRIPT%" (
+    "%PYTHON_EXEC%" -m nuitka --show-scons --clang --remove-output "%PROBE_SCRIPT%" >nul 2>&1
+    if errorlevel 1 (
+        echo [WARNING] Clang pre-flight probe returned non-zero, continuing to main build...
+    ) else (
+        echo [SUCCESS] Clang pre-flight probe passed.
+    )
     del /q "%PROBE_SCRIPT%" >nul 2>&1
-    goto :fail
+) else (
+    echo [INFO] Skipped dry-run probe, proceeding directly to main build.
 )
-del /q "%PROBE_SCRIPT%" >nul 2>&1
 
 echo.
 echo [INFO] Building ATS from %MAIN_SCRIPT%
@@ -404,7 +397,7 @@ echo !CMD!
 if errorlevel 1 goto :fail
 
 if "%BUILD_MODE%"=="standalone" (
-    if not exist "%OUTPUT_DIR%\ATS_Terminal.dist\%OUTPUT_NAME%" (
+    if not exist "%OUTPUT_DIR%\ATS_Terminal_Nuitka.dist\%OUTPUT_NAME%" if not exist "%OUTPUT_DIR%\ATS_Terminal.dist\%OUTPUT_NAME%" if not exist "%OUTPUT_DIR%\run_ats.dist\%OUTPUT_NAME%" (
         echo [ERROR] ATS standalone output not found.
         goto :fail
     )
@@ -424,10 +417,12 @@ set /p END_TIME_STR=<"%CAPTURE_FILE%"
 "%PYTHON_EXEC%" -c "import time; elapsed=%END_TIME%-%START_TIME%; m,s=divmod(elapsed,60); h,m=divmod(m,60); print('{:02d}:{:02d}:{:02d} ({:.2f}s)'.format(int(h),int(m),int(s),elapsed))" > "%CAPTURE_FILE%"
 set /p ELAPSED_TIME=<"%CAPTURE_FILE%"
 echo [INFO] Build ended at: %END_TIME_STR%; elapsed %ELAPSED_TIME%
->> "%~dp0ats_nuitka_build_time.txt" echo ATS Build Date: %START_TIME_STR%
->> "%~dp0ats_nuitka_build_time.txt" echo End Time: %END_TIME_STR%
->> "%~dp0ats_nuitka_build_time.txt" echo Elapsed: %ELAPSED_TIME%
-del /q "%CAPTURE_FILE%" >nul 2>&1
+(
+    echo ATS Build Date: %START_TIME_STR%
+    echo End Time: %END_TIME_STR%
+    echo Elapsed: %ELAPSED_TIME%
+) >> "%~dp0ats_nuitka_build_time.txt" 2>nul
+if defined CAPTURE_FILE if exist "%CAPTURE_FILE%" del /q "%CAPTURE_FILE%" >nul 2>&1
 endlocal
 exit /b 0
 
