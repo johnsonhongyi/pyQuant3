@@ -1,194 +1,230 @@
 @echo off
-title 🧠 Nuitka CLANG ONLY FIXED (v4 compatible)
+title Nuitka 异动联动 本地极速构建助手
 chcp 65001 >nul
 setlocal enabledelayedexpansion
 
 echo ==========================================
-echo 🧠 Nuitka CLANG ONLY FINAL FIX
+echo Nuitka 异动联动 本地极速构建 (Local MinGW + Cache)
 echo ==========================================
 echo.
 
-:: =========================================
-:: 1. 保留 Python + LLVM，不破坏 PATH
-:: =========================================
+set "DRY_RUN=0"
+if /i "%~1"=="--dry-run" set "DRY_RUN=1"
+if /i "%~2"=="--dry-run" set "DRY_RUN=1"
+
+rem 1. 备份原 PATH
 set "OLD_PATH=%PATH%"
-set "CLANG_PATH=<USER_HOME>\scoop\apps\llvm\current\bin"
 
-set "PATH=%CLANG_PATH%;%PATH%"
-
-echo 🧹 Cleaning all potential GCC paths from PATH to force Clang-only...
-set "PATH=%PATH:D:\mingw64\bin;=%"
-set "PATH=%PATH:D:\mingw64;=%"
+rem 2. 清理可能干扰 Scons 的 sh.exe (如 scoop, Git sh 等)
+set "PATH=%PATH:C:\Program Files\Git\bin;=%"
+set "PATH=%PATH:C:\Program Files\Git\usr\bin;=%"
+set "PATH=%PATH:<USER_HOME>\scoop\shims;=%"
 set "PATH=%PATH:<USER_HOME>\anaconda3\Library\usr\bin;=%"
 set "PATH=%PATH:<USER_HOME>\anaconda3\Library\mingw-w64\bin;=%"
-set "PATH=%PATH:<USER_HOME>\scoop\shims;=%"
 
-echo 🧹 PATH READY. Current PATH clean of GCC.
-echo.
-
-:: =========================================
-:: 2. clang 检查
-:: =========================================
-set "CLANG_CHECK_EXE=%CLANG_PATH%\clang.exe"
-
-if not exist "%CLANG_CHECK_EXE%" (
-    echo ❌ clang not found
-    pause
-    exit /b
+rem 3. 智能解析本地已存在的 GCC/MinGW 编译器 (零下载、秒级命中)
+set "LOCAL_GCC_DIR="
+if exist "E:\Program\LocalTemp\Nuitka\Nuitka\Cache\downloads\gcc\x86_64\14.2.0posix-19.1.1-12.0.0-msvcrt-r2\mingw64\bin\gcc.exe" (
+    set "LOCAL_GCC_DIR=E:\Program\LocalTemp\Nuitka\Nuitka\Cache\downloads\gcc\x86_64\14.2.0posix-19.1.1-12.0.0-msvcrt-r2\mingw64\bin"
+    echo [SUCCESS] Local Nuitka-Dedicated GCC 14.2.0 resolved: !LOCAL_GCC_DIR!
+) else if exist "%LOCALAPPDATA%\Nuitka\Nuitka\Cache\downloads\gcc\x86_64\14.2.0posix-19.1.1-12.0.0-msvcrt-r2\mingw64\bin\gcc.exe" (
+    set "LOCAL_GCC_DIR=%LOCALAPPDATA%\Nuitka\Nuitka\Cache\downloads\gcc\x86_64\14.2.0posix-19.1.1-12.0.0-msvcrt-r2\mingw64\bin"
+    echo [SUCCESS] AppData Nuitka-Dedicated GCC 14.2.0 resolved: !LOCAL_GCC_DIR!
+) else if exist "D:\mingw64\bin\gcc.exe" (
+    set "LOCAL_GCC_DIR=D:\mingw64\bin"
+    echo [SUCCESS] Standalone System GCC resolved: !LOCAL_GCC_DIR!
 )
 
-echo 🧪 clang OK: %CLANG_CHECK_EXE%
-echo.
+if defined LOCAL_GCC_DIR (
+    set "PATH=!LOCAL_GCC_DIR!;!PATH!"
+)
 
-:: =========================================
-:: 2.5 GCC 泄露拦截断言 - 极速拦截
-:: =========================================
-echo 🛡️ Asserting GCC-free environment...
 where gcc >nul 2>&1
-if not errorlevel 1 (
-    echo.
-    echo ❌ [FATAL ERROR] GCC still detected in active PATH:
-    where gcc
-    echo ❌ [FATAL ERROR] Strict Clang-Only build aborted to prevent silent GCC fallback!
-    echo.
+if errorlevel 1 (
+    echo [ERROR] No local GCC compiler found! Please check D:\mingw64\bin.
     pause
-    exit /b
+    exit /b 1
 )
-echo 🛡️ GCC check passed. No GCC visible in PATH.
+for /f "delims=" %%g in ('where gcc') do (
+    echo [SUCCESS] Active C Compiler: %%g
+    goto :gcc_checked
+)
+:gcc_checked
 echo.
 
-rem Let Nuitka Scons automatically detect and use the native MSVC clang-cl
-rem DO NOT override CC/CXX here, as it breaks Scons Windows parsing.
-set "CC="
-set "CXX="
+rem 4. 共享复用本地编译与工具链缓存 (完全复用本地 ccache/downloads，杜绝重复下载)
+set "TEMP=C:\Temp"
+set "TMP=C:\Temp"
+if not exist "C:\Temp" mkdir "C:\Temp" >nul 2>&1
 
-:: =========================================
-:: 3. Python
-:: =========================================
-if defined VIRTUAL_ENV (
-    set "PYTHON_EXEC=%VIRTUAL_ENV%\Scripts\python.exe"
+set "NUITKA_CACHE_DIR="
+if exist "E:\Program\LocalTemp\Nuitka\Nuitka\Cache" (
+    set "NUITKA_CACHE_DIR=E:\Program\LocalTemp\Nuitka\Nuitka\Cache"
+) else (
+    set "NUITKA_CACHE_DIR=%LOCALAPPDATA%\Nuitka\Nuitka\Cache"
+)
+echo [SUCCESS] TEMP=%TEMP%, NUITKA_CACHE_DIR=%NUITKA_CACHE_DIR%
+echo.
+
+rem 5. Python 环境检测 (优先 nuitka_env 与 tk_nuitka_env)
+set "PYTHON_EXEC="
+if exist "%USERPROFILE%\anaconda3\envs\nuitka_env\python.exe" (
+    set "PYTHON_EXEC=%USERPROFILE%\anaconda3\envs\nuitka_env\python.exe"
+    echo [SUCCESS] Dedicated Nuitka environment detected: %USERPROFILE%\anaconda3\envs\nuitka_env
+) else if exist "%USERPROFILE%\anaconda3\envs\tk_nuitka_env\python.exe" (
+    set "PYTHON_EXEC=%USERPROFILE%\anaconda3\envs\tk_nuitka_env\python.exe"
+    echo [SUCCESS] Dedicated Nuitka environment detected: %USERPROFILE%\anaconda3\envs\tk_nuitka_env
 ) else (
     for /f "delims=" %%i in ('where python 2^>nul') do (
         set "PYTHON_EXEC=%%i"
-        goto :pyok
+        goto :py_resolved
     )
 )
 
-:pyok
-if "%PYTHON_EXEC%"=="" (
-    echo ❌ Python not found
+:py_resolved
+if not defined PYTHON_EXEC (
+    echo [ERROR] Python executable not found!
     pause
-    exit /b
+    exit /b 1
 )
 
-echo 🐍 Python: %PYTHON_EXEC%
-echo.
+rem 6. 项目配置与命名对齐 (Nuitka 专享 _Nuitka 后缀，避免覆盖 PyInstaller 版本)
+set "MAIN_SCRIPT=异动联动.py"
+set "OUTPUT_NAME=异动联动_Nuitka.exe"
+set "OUTPUT_DIR=build"
+set "ICON_FILE=app.ico"
+if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%" >nul 2>&1
 
-:: =========================================
-:: 4. 项目配置
-:: =========================================
-set MAIN_SCRIPT=异动联动.py
-set OUTPUT_NAME=异动联动.exe
-set OUTPUT_DIR=build
-set ICON_FILE=app.ico
+rem 7. 动态安全获取 CSV 路径 (交易日历)
+set "CSV_PATH="
+set "CSV_CAPTURE=%TEMP%\_csv_path_%RANDOM%.txt"
+"%PYTHON_EXEC%" -c "import os, a_trade_calendar; print(os.path.join(os.path.dirname(a_trade_calendar.__file__), 'a_trade_calendar.csv'))" > "%CSV_CAPTURE%" 2>nul
+if exist "%CSV_CAPTURE%" (
+    set /p CSV_PATH=<"%CSV_CAPTURE%"
+    del /f /q "%CSV_CAPTURE%" >nul 2>&1
+)
 
-:: =========================================
-:: 5. CSV 路径
-:: =========================================
-for /f "usebackq delims=" %%i in (`
-%PYTHON_EXEC% -c "import os,a_trade_calendar; print(os.path.join(os.path.dirname(a_trade_calendar.__file__), 'a_trade_calendar.csv'))"
-`) do set CSV_PATH=%%i
-
-if "%CSV_PATH%"=="" (
-    echo ❌ CSV_PATH empty
+if not defined CSV_PATH (
+    echo [ERROR] Could not resolve a_trade_calendar.csv.
     pause
-    exit /b
+    exit /b 1
 )
-
-echo ✅ CSV: %CSV_PATH%
-echo.
-
-:: =========================================
-:: 0. Activate Visual Studio Native Environment for full MSVC+Clang-CL
-:: =========================================
-set "VS_VARS=D:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat"
-if exist "%VS_VARS%" (
-    echo [INFO] Activating Native Visual Studio Environment for Full Clang-CL mode...
-    call "%VS_VARS%" >nul
-    echo [SUCCESS] MSVC Native Linker and Environment loaded!
-    echo.
-)
-
-:: =========================================
-:: 6. Nuitka CLANG ONLY (NO clang-path !!!)
-:: =========================================
-set CMD=%PYTHON_EXEC% -m nuitka ^
---onefile ^
---clang ^
---show-scons ^
---assume-yes-for-downloads ^
---enable-plugin=tk-inter ^
---output-dir="%OUTPUT_DIR%" ^
---output-filename="%OUTPUT_NAME%" ^
---windows-icon-from-ico="%ICON_FILE%" ^
---windows-console-mode=disable ^
---jobs=4 ^
---remove-output ^
---lto=no ^
---include-data-file="%CSV_PATH%=a_trade_calendar\a_trade_calendar.csv" ^
---nofollow-import-to=configobj ^
---nofollow-import-to=tqdm ^
---nofollow-import-to=chardet ^
---nofollow-import-to=ta_lib ^
---nofollow-import-to=pandas_ta ^
---nofollow-import-to=tushare ^
---nofollow-import-to=lxml ^
---nofollow-import-to=aiohttp ^
---nofollow-import-to=screeninfo ^
---nofollow-import-to=PyQt5 ^
---nofollow-import-to=pyqtgraph ^
---nofollow-import-to=prompt_toolkit ^
-"%MAIN_SCRIPT%"
-
-echo ==========================================
-echo 🔬 PRE-FLIGHT COMPILER DRY RUN (Takes ~2s)
-echo ==========================================
-echo pass > "%TEMP%\_nuitka_dry_run.py"
-%PYTHON_EXEC% -m nuitka --show-scons --clang --remove-output "%TEMP%\_nuitka_dry_run.py"
-if errorlevel 1 (
-    echo.
-    echo ❌ [FATAL ERROR] Pre-flight failed! Could not compile properly.
+if not exist "%CSV_PATH%" (
+    echo [ERROR] CSV file not found: %CSV_PATH%
     pause
-    exit /b
+    exit /b 1
 )
-echo.
-echo ✅ Pre-flight compiler check passed! (Check the logs above for 'clang' execution details)
-echo.
-
-echo ==========================================
-echo 🚀 BUILD START
-echo ==========================================
+echo [SUCCESS] Dynamically retrieved CSV path: %CSV_PATH%
 echo.
 
-call %CMD%
-
-:: =========================================
-:: 7. RESULT
-:: =========================================
-if exist "%OUTPUT_DIR%\%OUTPUT_NAME%" (
-    echo.
-    echo ✅ BUILD SUCCESS
-    echo 📦 OUTPUT READY
+rem 8. 智能编译优化插件检查 (跳过第三方大包的 C 编译，极大缩短构建时间)
+set "SMART_OPT_PLUGIN=D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock_standalone\tools\nuitka_smart_optimizer_plugin.py"
+set "PLUGIN_ARG="
+if exist "!SMART_OPT_PLUGIN!" (
+    echo [SUCCESS] Nuitka Smart Optimizer Plugin detected: !SMART_OPT_PLUGIN!
+    set PLUGIN_ARG=--user-plugin="!SMART_OPT_PLUGIN!" --no-deployment-flag=excluded-module-usage
 ) else (
-    echo ❌ BUILD FAILED
+    echo [INFO] Smart Optimizer Plugin not found, proceeding standard mode.
 )
 
-:: =========================================
-:: 8. RESTORE
-:: =========================================
+rem 9. 额外数据文件检查 (globalYD.ini, code_ths_other.json, app.ico)
+set "EXTRA_DATA_ARGS="
+if exist "globalYD.ini" (
+    set EXTRA_DATA_ARGS=!EXTRA_DATA_ARGS! --include-data-file=globalYD.ini=globalYD.ini
+)
+if exist "code_ths_other.json" (
+    set EXTRA_DATA_ARGS=!EXTRA_DATA_ARGS! --include-data-file=code_ths_other.json=code_ths_other.json
+)
+set "ICON_ARG="
+if exist "%ICON_FILE%" (
+    set ICON_ARG=--windows-icon-from-ico="%ICON_FILE%"
+)
+
+rem 10. 构建 Nuitka 编译命令 (轻量极速，剔除非异动依赖的 tables/sqlite3/heavy libs)
+set CMD="%PYTHON_EXEC%" -m nuitka ^
+    --onefile ^
+    --onefile-tempdir-spec="{TEMP}\stockAlerts_Nuitka" ^
+    --assume-yes-for-downloads ^
+    --enable-plugin=tk-inter ^
+    --windows-console-mode=disable ^
+    !ICON_ARG! ^
+    --windows-company-name="Johnson QuantLab" ^
+    --windows-product-name="异动联动_Nuitka" ^
+    --windows-file-version="1.0.0" ^
+    --windows-product-version="1.0.0" ^
+    --output-dir="%OUTPUT_DIR%" ^
+    --output-filename="%OUTPUT_NAME%" ^
+    --lto=no ^
+    --jobs=8 ^
+    --python-flag=no_asserts ^
+    !PLUGIN_ARG! ^
+    --nofollow-import-to=scipy ^
+    --nofollow-import-to=matplotlib ^
+    --nofollow-import-to=PyQt5 ^
+    --nofollow-import-to=PyQt6 ^
+    --nofollow-import-to=PySide2 ^
+    --nofollow-import-to=PySide6 ^
+    --nofollow-import-to=pyqtgraph ^
+    --nofollow-import-to=IPython ^
+    --nofollow-import-to=notebook ^
+    --nofollow-import-to=jedi ^
+    --nofollow-import-to=unittest ^
+    --nofollow-import-to=doctest ^
+    --nofollow-import-to=bokeh ^
+    --nofollow-import-to=seaborn ^
+    --nofollow-import-to=flask ^
+    --nofollow-import-to=django ^
+    --nofollow-import-to=sqlalchemy ^
+    --nofollow-import-to=zmq ^
+    --nofollow-import-to=tornado ^
+    --nofollow-import-to=pytest ^
+    --nofollow-import-to=tables ^
+    --include-data-file="%CSV_PATH%=a_trade_calendar\a_trade_calendar.csv" ^
+    !EXTRA_DATA_ARGS! ^
+    --include-package=a_trade_calendar ^
+    "%MAIN_SCRIPT%"
+
+rem 11. 演练模式 (--dry-run) 支持
+if "!DRY_RUN!"=="1" (
+    echo ==========================================================
+    echo [DRY-RUN 演练] 模拟命令生成完毕 [不执行实际编译]
+    echo !CMD!
+    echo ==========================================================
+    set "PATH=%OLD_PATH%"
+    exit /b 0
+)
+
+rem 12. 归档历史旧版本 (保留最近 7 天)
+set "ARCHIVE_DIR=%OUTPUT_DIR%\archive"
+if not exist "%ARCHIVE_DIR%" mkdir "%ARCHIVE_DIR%" >nul 2>&1
+if exist "%OUTPUT_DIR%\%OUTPUT_NAME%" (
+    set "TS_NOW=%DATE:~0,4%%DATE:~5,2%%DATE:~8,2%_%TIME:~0,2%%TIME:~3,2%%TIME:~6,2%"
+    set "TS_NOW=!TS_NOW: =0!"
+    copy /y "%OUTPUT_DIR%\%OUTPUT_NAME%" "%ARCHIVE_DIR%\异动联动_Nuitka_!TS_NOW!.exe" >nul 2>&1
+    echo [INFO] Archived previous build to %ARCHIVE_DIR%
+)
+
+rem 13. 执行正式编译
+echo ==========================================
+echo BUILD START: %OUTPUT_NAME%
+echo ==========================================
+echo !CMD!
+echo.
+call !CMD!
+set "BUILD_RESULT=!ERRORLEVEL!"
+
+rem 14. 结果检查与收尾
+echo.
+echo ==========================================
+if exist "%OUTPUT_DIR%\%OUTPUT_NAME%" (
+    echo [SUCCESS] BUILD SUCCESS!
+    echo Target Executable: %OUTPUT_DIR%\%OUTPUT_NAME%
+    set "BUILD_RESULT=0"
+) else (
+    echo [FAILED] BUILD FAILED!
+    set "BUILD_RESULT=1"
+)
+echo ==========================================
+
 set "PATH=%OLD_PATH%"
-echo.
-echo 🔄 PATH restored
-echo.
-pause
-exit /b
+exit /b !BUILD_RESULT!

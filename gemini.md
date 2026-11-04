@@ -7,6 +7,33 @@
   - **Flash（执行者）**：通过 `invoke_subagent(..., Model="flash")` 承接写代码、跑测试、批量扫描等高 Token 消耗的具体事务。
 - **动态裁量**：以质量为主、价格为辅；质量第一、效率第二。轻微修改与极高难度核心问题由 Argon 亲自操刀。
 
+## 2026-11-04 18:10 【异动联动Nuitka轻量极速重构与sqlite3冲突/tables冗余彻底清除】(stock/testpy/tdxgui/build_nuitka_clang.bat, stockAlerts-nuitka-to-exe.cmd, <USER_HOME>\stockAlerts-nuitka-to-exe.cmd)
+- [x] **【彻底解决打包慢（13分钟）与 sqlite3.dll 冲突崩溃】**：
+  - **原因定位**：异动联动是纯 Tkinter + pandas 盘口工具，完全不使用 	ables (PyTables) 与 sqlite3。此前的脚本照搬了 ATS 终端的重型参数 --include-package=tables 与手动注入 sqlite3.dll 数据文件，导致两大致命问题：
+    1. 强行扫描包含庞大的 HDF5 / PyTables 巨型 C 库，导致 Python 层分析与打包耗时长达 13 分钟（797 秒）；
+    2. Python 自身自动包含了 sqlite3.dll 二进制文件，而脚本又手动以 data file 重复注入同名文件，在后处理阶段触发 FATAL: Error, data file to be placed in distribution as 'sqlite3.dll' conflicts with dll 'sqlite3.dll' 崩溃退出；
+  - **瘦身与提速治理**：
+    - 彻底移除 --include-package=tables、	ables._comp_lzo 等，并显式追加 --nofollow-import-to=tables；
+    - 彻底移除 --include-package=sqlite3 与所有手动提取注入的 sqlite3.dll、libcrypto、libssl 重复 data 文件；
+    - 仅保留异动联动真正必需的运行依赖：_trade_calendar.csv、globalYD.ini、code_ths_other.json、pp.ico；
+    - 预计构建时间从 13 分钟大幅缩短至 1~2 分钟，且彻底消除 DLL 重复冲突。
+
+## 2026-11-04 17:15 【异动联动Nuitka打包彻底根除Github下载与本地GCC环境全量复用】(stockAlerts-nuitka-to-exe.cmd, stock/testpy/tdxgui/build_nuitka_clang.bat, stock/testpy/tdxgui/build_nuitka.bat, 	ools/nuitka_smart_optimizer_plugin.py)
+- [x] **【彻底根除异动联动打包触发 WinLibs MinGW Github 下载问题】**：
+  - **原因定位**：历史脚本中强制移除了 D:\mingw64 并设置了 GCC-free 断言；同时在 Python 3.12 下使用 --clang 时，因本地为 VS2019（MSVC v142）与 Python 3.12 官方 MSVC v143 不符，Scons 降级寻找 MinGW，但本地编译器被过滤且自定义缓存脱离已有下载库，触发了去 Github 下载；
+  - **本地环境优先与零下载治理**：
+    - 智能按优先级检测并自动注入本地已存在的 MinGW/GCC 编译器：优先复用本地 Nuitka 专用 14.2.0（E:\Program\LocalTemp\Nuitka\Nuitka\Cache\downloads 与 %LOCALAPPDATA%），次选全局 D:\mingw64\bin；
+    - 移除 --clang 参数与强制排除 GCC 逻辑，追加 --assume-yes-for-downloads=no 彻底关闭网络下载；
+    - 缓存目录 NUITKA_CACHE_DIR 自动对齐本地拥有 210GB ccache 与 downloads 的现成缓存库（E:\Program\LocalTemp\Nuitka\Nuitka\Cache）；
+  - **全套高阶优化完整继承**：
+    - 字节码加速插件适配 Nuitka 2.7.x（覆盖 workspace 路径并保护编译决策）；
+    - 输出产物强制隔离为 异动联动_Nuitka.exe，不与 PyInstaller 的 异动联动.exe 冲突；
+    - 动态无损解析注入 sqlite3.dll、libcrypto-3-x64.dll、libssl-3-x64.dll 与 _trade_calendar.csv；
+    - 包含历史版本 7 天自动归档机制；
+  - **同步更新与测试验证**：
+    - 工作区与 <USER_HOME>\stockAlerts-nuitka-to-exe.cmd 统一对齐为 UTF-8 无 BOM + CRLF；
+    - --dry-run 演练验证通过，编译器 0 秒命中，命令构建成功，0 语法警告。
+
 ## 2026-11-03 16:50 【ATS梯度信号迭代与回放一致性优化方案（三轮交叉复审定稿、P0-P2全量落地与压缩归档自动清理）】(`docs/tasks/2026-11-03_1650_ATS梯度信号迭代与回放一致性优化方案.md`, `ats/fusion/contract.py`, `ats/fusion/adapter.py`, `ats/fusion/anomaly.py`, `ats/fusion/structure_timeline.py`, `ats/fusion/config.py`, `ats/fusion/engine.py`, `ats/fusion/kernel.py`, `ats/fusion/shadow.py`, `ats/fusion/shadow_archive.py`, `ats/fusion/replay.py`, `ats/fusion/trade_sim.py`, `ats/fusion/evaluate.py`, `tests/test_fusion_p0_p1_recompute.py`, `tests/test_fusion_evaluate_p2.py`, `tests/test_fusion_shadow_archive.py`)
 - [x] **【完成 ATS 梯度（SFL）全模块代码与生产影子日志（10,085条/2,222只）深度审计与三轮交叉复审定稿】**：
   - **三大结构性缺口与四处机制缺陷定位**：

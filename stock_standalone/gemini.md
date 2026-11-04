@@ -19,6 +19,19 @@
 - [x] **【自动化测试全绿通过（41 项专项测试 100% PASS）】**：
   - 新增 `test_trigger_rearrange_hotkey_execution` 专项单元测试，全量 41 项测试 100% 全部通过（1.65s）。
 
+## 2026-11-04 15:45 【股票异动联动Nuitka打包配置全链路优化与<USER_HOME>同步】(`stockAlerts-nuitka-to-exe.cmd`, `<USER_HOME>/stockAlerts-nuitka-to-exe.cmd`, `../stock/testpy/tdxgui/build_nuitka_clang.bat`, `../stock/testpy/tdxgui/build_nuitka.bat`, `tools/nuitka_smart_optimizer_plugin.py`)
+- [x] **【股票异动联动（Alerts）Nuitka 构建体系全面对齐现代优化标准】**：
+  - **产物命名隔离（守卫规则）**：产物名统一对齐为 `异动联动_Nuitka.exe`（产品名 `异动联动_Nuitka`），严格与 PyInstaller 生成的 `dist\异动联动.exe` 隔离，互不冲突覆盖；
+  - **VS 2019 + Clang-CL 原生编译器接管**：注入 MSVC 2019 x64 本地环境（`vcvars64.bat` / `vcvarsall.bat x64`），清理 GCC/MinGW 干扰路径并实施断言拦截，启用 `--clang` 编译；
+  - **智能字节码优化插件升级适配**：`tools/nuitka_smart_optimizer_plugin.py` 扩展支持 `pyQuant3` 全局工作区源码路径，将 `异动联动.py` 及本地逻辑编译为 C 原生机器码，将 Pandas、PyTables、Tkinter 等第三方重型包保持为字节码，并注入 `--no-deployment-flag=excluded-module-usage`；
+  - **底层动态库自动解析注入**：动态解析并打包 `sqlite3.dll`、`libcrypto*.dll`、`libssl*.dll`，显式引入 `--enable-plugin=tk-inter`、`--include-package=tables`、`--include-package=sqlite3`、`--include-module=_sqlite3`、`--include-module=_ssl`、`--include-module=_hashlib`、`--include-module=filelock`；
+  - **固定解包临时目录与 GUI 模式**：配置 `--onefile-tempdir-spec="{TEMP}\stockAlerts_Nuitka"` 避免产生磁盘垃圾临时目录并实现毫秒级秒开；配置 `--windows-console-mode=disable` 保持纯净无黑框；
+  - **历史备份归档与 `--dry-run` 演练支持**：构建前自动将旧版本归档至 `build\archive\`；支持 `--dry-run` 参数进行秒级命令预检；
+- [x] **【双向文件校验与完全一致性验证】**：
+  - `stockAlerts-nuitka-to-exe.cmd`（工程根目录）与 `<USER_HOME>\stockAlerts-nuitka-to-exe.cmd` 保持 100% 同步（SHA256 完全对齐，100% CRLF）；
+  - `tdxgui\build_nuitka.bat` 自动转发至 `build_nuitka_clang.bat`，保证无论从哪个入口启动均调用最新的优化流程；
+  - `--dry-run` 预检测试 100% PASS，0 语法报错。
+
 ## 2026-11-04 14:20 【TK与多周期Nuitka打包sqlite3.dll动态依赖与包导入全链路补齐】(`docs/tasks/2026-11-04_1250_ATS输出名统一为ATS_Terminal_Nuitka与打包失败根因修复.md`, `nuitka_build_console_onlyClang.bat`, `nuitka_build_multi_period_dialog_onlyClang.bat`, `nuitka_build_ats_console_onlyClang.bat`)
 - [x] **【彻底解决 TK (instock_MonitorTK) 运行时 sqlite3/dbapi2 ImportError 报错】**：
   - **根因定位**：`sqlite3/dbapi2.py` 执行 `from _sqlite3 import *` 依赖 Windows 底层 `sqlite3.dll`。在 Conda/专用环境中该动态库位于 `Library\bin\sqlite3.dll`，Nuitka 默认不将其打包进根目录；此前 `nuitka_build_console_onlyClang.bat` 遗漏了 `--include-data-file="%SQLITE_DLL%=sqlite3.dll"` 以及 `--include-package=sqlite3`、`--include-module=_sqlite3`；

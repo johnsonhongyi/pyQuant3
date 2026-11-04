@@ -28,6 +28,7 @@ class NuitkaSmartOptimizerPlugin(NuitkaPluginBase):
         super().__init__()
         # 获取工程根目录物理绝对路径（统一规范为小写）
         self._project_root = os.path.abspath(os.path.dirname(os.path.dirname(__file__))).lower()
+        self._workspace_root = os.path.abspath(os.path.dirname(self._project_root)).lower()
         self._bytecode_modules = set()
         self._compiled_modules = set()
         self._logged_packages = set()
@@ -63,16 +64,18 @@ class NuitkaSmartOptimizerPlugin(NuitkaPluginBase):
         # 判定 1：位于 site-packages 或 Python 系统库的第三方依赖
         if "site-packages" in fn_lower or ("python" in fn_lower and "\\lib\\" in fn_lower):
             self._bytecode_modules.add(module_name)
-            self.registerDecisionCompilation(module_name, "bytecode")
+            if hasattr(self, "registerDecisionCompilation"):
+                self.registerDecisionCompilation(module_name, "bytecode")
             if top_name not in self._logged_packages:
                 self._logged_packages.add(top_name)
                 plugins_logger.info(f"[SmartOptimizer] 第三方包保持为字节码 (跳过 C 编译): {top_name}")
             return None
 
         # 判定 2：属于工程源码工作区的核心业务代码
-        if fn_lower.startswith(self._project_root):
+        if fn_lower.startswith(self._project_root) or fn_lower.startswith(self._workspace_root):
             self._compiled_modules.add(module_name)
-            self.registerDecisionCompilation(module_name, "compiled")
+            if hasattr(self, "registerDecisionCompilation"):
+                self.registerDecisionCompilation(module_name, "compiled")
             return None
 
         return None
