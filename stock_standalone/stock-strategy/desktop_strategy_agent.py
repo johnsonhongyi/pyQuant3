@@ -575,6 +575,11 @@ def main(argv=None):
         finally:probe.close()
     catalog=EngineCatalog(ledger,cli,desktop_cli,probe_catalog)
     desktop_probe=DesktopRuntimeProbe()
+    # Chat evidence tools read the live TK/ATS data root from the same supervised probe.
+    peer.desktop_runtime_probe=desktop_probe
+    # The probe only reports data_root while packaged TK/ATS processes are up;
+    # the bridge's own --desktop-root keeps local signal reads alive meanwhile.
+    peer.desktop_root=str(args.desktop_root.resolve())
     peer_error_streak=0
     prefer_chat_queue=False
     unified_queue=True

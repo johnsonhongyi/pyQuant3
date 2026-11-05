@@ -1,4 +1,5 @@
 """Discovery cannot block dispatch and its owned child exits on cancellation."""
+import os
 import subprocess
 import sys
 import threading
@@ -21,7 +22,8 @@ class DesktopRuntimeTests(unittest.TestCase):
             fallback=home/'fallback.exe';fallback.touch()
             with patch.dict('os.environ',{'CODEX_HOME':str(home),'LOCALAPPDATA':str(home),'CODEX_CLI_PATH':''}), \
                  patch('ats.llm.cli_paths.shutil.which',return_value=str(fallback)) as lookup:
-                self.assertEqual(desktop_cli(),str(managed.absolute()))
+                self.assertEqual(os.path.normcase(desktop_cli()),
+                                 os.path.normcase(str(managed.absolute())))
                 lookup.assert_not_called()
                 with patch.dict('os.environ',{'CODEX_CLI_PATH':str(explicit)}):
                     self.assertEqual(desktop_cli(),str(explicit.resolve()))
@@ -36,7 +38,8 @@ class DesktopRuntimeTests(unittest.TestCase):
             for path in (legacy,managed):path.parent.mkdir(parents=True);path.touch()
             with patch.dict('os.environ',{'LOCALAPPDATA':str(root),'CODEX_HOME':str(root),
                                           'CODEX_CLI_PATH':str(legacy)}):
-                self.assertEqual(desktop_cli(),str(managed.absolute()))
+                self.assertEqual(os.path.normcase(desktop_cli()),
+                                 os.path.normcase(str(managed.absolute())))
 
     def test_slow_probe_never_blocks_snapshot_or_shutdown(self):
         entered=threading.Event()

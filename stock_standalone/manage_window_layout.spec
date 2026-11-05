@@ -21,6 +21,9 @@ a = Analysis(
     datas=[
         ("MonitorTK.ico", "."),
         ("webTools/window_manager/window_layout_config.json", "webTools/window_manager"),
+        # AI 对话只读证据限额：冻结包无源码目录，必须显式随包携带，
+        # 否则 EvidenceLimits 只能退回 DEFAULTS，现场改 ini 不生效。
+        ("stock-strategy/chat_evidence.ini", "."),
     ] + [(f, ".") for f in glob.glob("*monitordisplay_config.json")],
     hiddenimports=[
         'webTools.window_manager.core', 
@@ -36,6 +39,7 @@ a = Analysis(
         'desktop_strategy_agent',
         'desktop_antigravity_agent',
         'desktop_chat',
+        'desktop_chat_evidence',
         'desktop_bridge_runtime',
         'desktop_runtime',
         'desktop_model_policy',
