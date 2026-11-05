@@ -8565,22 +8565,31 @@ class SBCIntradayChartDialog(QWidget):
         rearrange_all_sbc_windows(parent_win=self)
 
     def _finish_cache_refresh(self, payload: Dict[str, Any], success: bool):
-        """清缓存后的异步重拉完成后，按实际返回结果反馈，不把启动请求当成成功。"""
+        """清缓存后的异步重拉完成后，按实际返回结果反馈 (彻底杜绝模态子窗口与死锁；单窗独立通知，批量只出唯一汇总)"""
         if not getattr(self, "_cache_refresh_pending", False):
             return
         self._cache_refresh_pending = False
         refresh_code = getattr(self, "_cache_refresh_code", self.code)
         self._cache_refresh_code = ""
+        is_batch = getattr(self, "_is_batch_clearing", False)
+        self._is_batch_clearing = False
+
         if getattr(self, "_is_closing", False):
             return
 
+        stock_name = get_cached_stock_name(refresh_code)
         frame = payload.get("df_target") if isinstance(payload, dict) else None
         if not success or frame is None or frame.empty:
             reason = str(payload.get("fetch_error", "TDX 未返回有效分钟数据")) if isinstance(payload, dict) else "TDX 未返回有效分钟数据"
-            QMessageBox.warning(
-                self, "缓存已清理，行情重拉未完成",
-                f"标的 [{refresh_code}] 的底层行情缓存已清除，但本次没有取得可显示的新分时。\n{reason}\n旧图已清空，请稍后重试刷新。"
-            )
+            self.lbl_info.setText(f"❌ 标的 [{refresh_code}] 缓存已清理，但行情重拉未完成: {reason}")
+            if is_batch:
+                SBCBatchClearCoordinator.get_instance().record_completed(
+                    refresh_code, name=stock_name, success=False, reason=reason, frame_len=0
+                )
+            else:
+                show_sbc_single_clear_notice(
+                    code=refresh_code, name=stock_name, success=False, reason=reason, parent=self
+                )
             return
 
         last_row = frame.iloc[-1]
@@ -8592,19 +8601,23 @@ class SBCIntradayChartDialog(QWidget):
         missing_today = bool(payload.get("cache_refresh_missing_today", False))
         if not missing_today and mode in ("1m", "3d", "5d", "10d") and TDXGlobalCachePool.has_continuous_session():
             missing_today = last_date != datetime.now().strftime("%Y-%m-%d")
-        if missing_today:
-            QMessageBox.warning(
-                self, "缓存已清理，但缺少今日分时",
-                f"标的 [{refresh_code}] 已重新请求 TDX，但返回数据最新日期为 {last_date} {last_time}，没有今日分钟数据。\n"
-                "请检查 TDX 行情源或稍后重试；当前图表不会把旧缓存当作今日行情。"
-            )
-            return
 
-        QMessageBox.information(
-            self, "缓存清理并重拉完成",
-            f"标的 [{refresh_code}] 的 TDX 内存、RamDisk 与 SBC 状态缓存已清理。\n"
-            f"已重新载入 {len(frame):,} 根分时，最新数据 {last_date} {last_time}，收盘价 {last_close:.2f} 元。"
-        )
+        if missing_today:
+            self.lbl_info.setText(f"⚠️ 标的 [{refresh_code}] 缓存已清理，但最新数据为 {last_date} {last_time} (缺少今日分时)")
+        else:
+            self.lbl_info.setText(f"✅ 标的 [{refresh_code}] 缓存已清理，已重载 {len(frame):,} 根分时 ({last_time} {last_close:.2f}元)")
+
+        if is_batch:
+            SBCBatchClearCoordinator.get_instance().record_completed(
+                refresh_code, name=stock_name, success=True, missing_today=missing_today,
+                frame_len=len(frame), last_date=last_date, last_time=last_time, last_close=last_close
+            )
+        else:
+            show_sbc_single_clear_notice(
+                code=refresh_code, name=stock_name, success=True, missing_today=missing_today,
+                frame_len=len(frame), last_date=last_date, last_time=last_time, last_close=last_close,
+                parent=self
+            )
 
     def _on_clear_cache_clicked(self):
         """【🧹 清理缓存】清除当前标的在 TDX 与引擎内存中的错误/旧数据，并强力重置刷新 (支持 Alt 统一队列清理所有窗口)"""
@@ -8615,6 +8628,7 @@ class SBCIntradayChartDialog(QWidget):
 
     def _execute_clear_cache_and_reload(self, is_batch: bool = False, batch_idx: int = 1, batch_total: int = 1):
         """【🧹 执行单窗口清缓存与重拉】可作为单窗点击或统一队列调度的执行单元"""
+        self._is_batch_clearing = is_batch
         c_clean = str(self.code).zfill(6)
         fetcher = TDXRealtimeFetcher.get_instance()
         fetcher.clear_stock_cache(c_clean)
@@ -10277,6 +10291,330 @@ def sync_all_open_sbc_auto_strategy(enabled: bool, trigger_dlg: Optional[SBCIntr
     return len(active_dialogs)
 
 
+
+# ----------------------------------------------------------------------
+# 📢 SBC 缓存清理结果通知体系 (强力置顶、非模态防锁死、任意窗口点击即关)
+# ----------------------------------------------------------------------
+_CURRENT_NOTICE_DIALOG: Optional["SBCClearNoticeDialog"] = None
+
+
+class _NoticeDismissFilter(QObject):
+    """全局事件过滤器：用户在任意窗口点击鼠标或按 Esc，自动关闭当前提示窗口，恢复正常流程，绝不影响点击操作"""
+    def __init__(self, dialog: "SBCClearNoticeDialog"):
+        super().__init__()
+        self._dialog = dialog
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        if event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick):
+            if self._dialog and self._dialog.isVisible():
+                if not (isinstance(obj, QWidget) and (obj is self._dialog or self._dialog.isAncestorOf(obj))):
+                    QTimer.singleShot(0, self._dialog.close)
+        elif event.type() == QEvent.Type.KeyPress:
+            key = getattr(event, "key", lambda: None)()
+            if key in (Qt.Key.Key_Escape, Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+                if self._dialog and self._dialog.isVisible():
+                    QTimer.singleShot(0, self._dialog.close)
+        return False
+
+
+class SBCClearNoticeDialog(QDialog):
+    """【📢 SBC 统一操作提示窗口】
+    两种模式：
+    1. 单独操作：展示单个标的的重拉详情；
+    2. 批量操作：只弹出一个全系统唯一的汇总提示窗口，汇总所有标的的执行状态；
+    - 显式强制置顶 (Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)，绝不被任何 SBC 窗口遮挡；
+    - 非模态 (setModal(False) + show())，绝不阻塞任何事件循环，完全不影响操作；
+    - 任意窗口点击关闭：在任意 SBC 窗口或 ATS 终端点击鼠标、按 Esc/Enter，立即关闭恢复正常流程；
+    - 8 秒自动倒计时淡出机制，彻底防死锁；
+    - 全局单例保护，后弹出的自动关闭旧弹窗，绝不连环叠放。
+    """
+    def __init__(self, title: str, icon_str: str, content_html: str, parent: Optional[QWidget] = None, timeout_sec: int = 8):
+        super().__init__(None)  # 独立顶层窗口，脱离子窗口从属，防止被父窗口裁剪或遮蔽
+        self.setWindowFlags(
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool |
+            Qt.WindowType.FramelessWindowHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setModal(False)
+
+        self._countdown = timeout_sec
+        self._filter = _NoticeDismissFilter(self)
+        app = QApplication.instance()
+        if app:
+            app.installEventFilter(self._filter)
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+
+        container = QFrame(self)
+        container.setObjectName("notice_container")
+        container.setStyleSheet("""
+            QFrame#notice_container {
+                background-color: #161822;
+                border: 2px solid #00E5FF;
+                border-radius: 8px;
+            }
+            QLabel {
+                color: #e2e2e5;
+                font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+            }
+        """)
+        c_layout = QVBoxLayout(container)
+        c_layout.setContentsMargins(16, 14, 16, 14)
+        c_layout.setSpacing(10)
+
+        # 顶部标题栏
+        top_layout = QHBoxLayout()
+        lbl_icon = QLabel(icon_str)
+        lbl_icon.setStyleSheet("font-size: 20px;")
+        lbl_title = QLabel(title)
+        lbl_title.setStyleSheet("font-size: 12pt; font-weight: bold; color: #00E5FF;")
+
+        btn_close = QPushButton("×")
+        btn_close.setFixedSize(24, 24)
+        btn_close.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        btn_close.setStyleSheet("""
+            QPushButton {
+                background-color: transparent;
+                color: #888899;
+                font-size: 16px;
+                font-weight: bold;
+                border: none;
+                border-radius: 12px;
+            }
+            QPushButton:hover {
+                background-color: #ff3344;
+                color: #ffffff;
+            }
+        """)
+        btn_close.clicked.connect(self.close)
+
+        top_layout.addWidget(lbl_icon)
+        top_layout.addWidget(lbl_title)
+        top_layout.addStretch()
+        top_layout.addWidget(btn_close)
+        c_layout.addLayout(top_layout)
+
+        # 内容区域
+        lbl_content = QLabel()
+        lbl_content.setTextFormat(Qt.TextFormat.RichText)
+        lbl_content.setWordWrap(True)
+        lbl_content.setText(content_html)
+        lbl_content.setStyleSheet("font-size: 9.5pt; color: #cfd0d8; line-height: 1.4;")
+        c_layout.addWidget(lbl_content)
+
+        # 底部按钮栏
+        bot_layout = QHBoxLayout()
+        self.lbl_timer = QLabel(f"{self._countdown}s 后自动关闭")
+        self.lbl_timer.setStyleSheet("color: #666677; font-size: 8.5pt;")
+
+        self.btn_confirm = QPushButton("我知道了 (点击任意窗口或按Esc关闭)")
+        self.btn_confirm.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_confirm.setStyleSheet("""
+            QPushButton {
+                background-color: #00E5FF;
+                color: #111116;
+                font-weight: bold;
+                font-size: 9.5pt;
+                padding: 6px 16px;
+                border-radius: 4px;
+                border: none;
+            }
+            QPushButton:hover {
+                background-color: #33eeff;
+            }
+            QPushButton:pressed {
+                background-color: #00b3cc;
+            }
+        """)
+        self.btn_confirm.clicked.connect(self.close)
+
+        bot_layout.addWidget(self.lbl_timer)
+        bot_layout.addStretch()
+        bot_layout.addWidget(self.btn_confirm)
+        c_layout.addLayout(bot_layout)
+
+        main_layout.addWidget(container)
+        self.setFixedWidth(460)
+
+        # 自动倒计时定时器
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._on_tick)
+        self._timer.start(1000)
+
+    def _on_tick(self):
+        self._countdown -= 1
+        if self._countdown <= 0:
+            self._timer.stop()
+            self.close()
+        else:
+            self.lbl_timer.setText(f"{self._countdown}s 后自动关闭")
+
+    def closeEvent(self, event):
+        app = QApplication.instance()
+        if app and hasattr(self, "_filter"):
+            try:
+                app.removeEventFilter(self._filter)
+            except Exception:
+                pass
+        if hasattr(self, "_timer") and self._timer.isActive():
+            self._timer.stop()
+        super().closeEvent(event)
+
+
+def _center_notice_dialog(dlg: QDialog, parent: Optional[QWidget] = None):
+    screen = None
+    if parent and parent.isVisible():
+        screen = parent.screen()
+    if screen is None:
+        app = QApplication.instance()
+        if app:
+            screen = app.primaryScreen()
+    if screen:
+        geo = screen.availableGeometry()
+        dlg.adjustSize()
+        x = geo.center().x() - dlg.width() // 2
+        y = geo.center().y() - dlg.height() // 2
+        dlg.move(x, y)
+
+
+def show_sbc_single_clear_notice(code: str, name: str, success: bool,
+                                missing_today: bool = False, frame_len: int = 0,
+                                last_date: str = "", last_time: str = "",
+                                last_close: float = 0.0, reason: str = "",
+                                parent: Optional[QWidget] = None):
+    global _CURRENT_NOTICE_DIALOG
+    if _CURRENT_NOTICE_DIALOG and _CURRENT_NOTICE_DIALOG.isVisible():
+        try:
+            _CURRENT_NOTICE_DIALOG.close()
+        except Exception:
+            pass
+
+    c_str = str(code).zfill(6)
+    if not success:
+        title = "缓存已清理，行情重拉未完成"
+        icon = "⚠️"
+        content = (
+            f"<span style='color:#ff5c5c; font-weight:bold;'>标的 [{c_str} {name}]</span> 底层行情缓存已清除，但本次没有取得有效分钟数据。<br>"
+            f"<span style='color:#888;'>原因: {reason}</span><br>"
+            "<span style='color:#ffd75e;'>旧图已清空，请稍后重试刷新。</span>"
+        )
+    elif missing_today:
+        title = "缓存已清理，但缺少今日分时"
+        icon = "⚠️"
+        content = (
+            f"<span style='color:#00E5FF; font-weight:bold;'>标的 [{c_str} {name}]</span> 已重新请求 TDX，但返回数据最新日期为 "
+            f"<span style='color:#ffd75e;'>{last_date} {last_time}</span>，缺少今日分钟数据。<br>"
+            "请检查 TDX 行情源或稍后重试；当前图表不会把旧缓存当作今日行情。"
+        )
+    else:
+        title = "缓存清理并重拉完成"
+        icon = "✅"
+        content = (
+            f"标的 <span style='color:#00E5FF; font-weight:bold;'>[{c_str} {name}]</span> 的 TDX 内存、RamDisk 与 SBC 状态缓存已清理。<br>"
+            f"已重新载入 <span style='color:#00ff88; font-weight:bold;'>{frame_len:,}</span> 根分时，最新数据 <span style='color:#ffd75e;'>{last_date} {last_time}</span>，收盘价 <span style='color:#ff5c5c; font-weight:bold;'>{last_close:.2f} 元</span>。"
+        )
+
+    dlg = SBCClearNoticeDialog(title, icon, content, parent=parent, timeout_sec=8)
+    _CURRENT_NOTICE_DIALOG = dlg
+    _center_notice_dialog(dlg, parent)
+    dlg.show()
+    dlg.raise_()
+    dlg.activateWindow()
+
+
+def show_sbc_batch_clear_notice(total_count: int, completed_items: List[Dict[str, Any]], parent: Optional[QWidget] = None):
+    global _CURRENT_NOTICE_DIALOG
+    if _CURRENT_NOTICE_DIALOG and _CURRENT_NOTICE_DIALOG.isVisible():
+        try:
+            _CURRENT_NOTICE_DIALOG.close()
+        except Exception:
+            pass
+
+    success_count = sum(1 for item in completed_items if item.get("success", False))
+    title = "🧹 批量缓存清理并重拉完成"
+    icon = "✅" if success_count == total_count else "⚠️"
+
+    names_summary = []
+    for it in completed_items[:8]:
+        names_summary.append(f"{it.get('name', '')}({it.get('code', '')})")
+    more_str = f" 等共 {len(completed_items)} 个标的" if len(completed_items) > 8 else ""
+    summary_text = "、".join(names_summary) + more_str
+
+    content = (
+        f"已完成对全部 <span style='color:#00E5FF; font-weight:bold;'>{total_count}</span> 个 SBC 盯盘窗口的统一队列错峰清理与重拉！<br>"
+        f"• 成功完成: <span style='color:#00ff88; font-weight:bold;'>{success_count}</span> / {total_count} 个窗口<br>"
+        f"• 包含标的: <span style='color:#e2e2e5;'>{summary_text}</span><br>"
+        "<span style='color:#888899;'>底层内存已释放，分时与指标已全部无感更新对齐。</span>"
+    )
+
+    dlg = SBCClearNoticeDialog(title, icon, content, parent=parent, timeout_sec=10)
+    _CURRENT_NOTICE_DIALOG = dlg
+    _center_notice_dialog(dlg, parent)
+    dlg.show()
+    dlg.raise_()
+    dlg.activateWindow()
+
+
+class SBCBatchClearCoordinator:
+    """全局批量清理协调器：统一收集多窗口重拉结果，并在全部完成后仅弹出 1 个批量提示窗口"""
+    _instance = None
+
+    @classmethod
+    def get_instance(cls) -> "SBCBatchClearCoordinator":
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def __init__(self):
+        self.is_batch_active = False
+        self.total_count = 0
+        self.completed_items = []
+        self.trigger_dlg = None
+        self.timeout_timer = None
+
+    def start_batch(self, total_count: int, trigger_dlg=None):
+        self.is_batch_active = True
+        self.total_count = total_count
+        self.completed_items = []
+        self.trigger_dlg = trigger_dlg
+
+        if self.timeout_timer is not None:
+            self.timeout_timer.stop()
+        self.timeout_timer = QTimer()
+        self.timeout_timer.setSingleShot(True)
+        self.timeout_timer.timeout.connect(self._on_batch_timeout)
+        self.timeout_timer.start(15000)
+
+    def record_completed(self, code: str, success: bool, **info):
+        if not self.is_batch_active:
+            return
+        self.completed_items.append({"code": code, "success": success, **info})
+        if len(self.completed_items) >= self.total_count:
+            self._finish_batch_and_show_notice()
+
+    def _on_batch_timeout(self):
+        if self.is_batch_active:
+            logger.warning(f"[SBCBatchClear] 批量清理超时兜底触发: 已完成 {len(self.completed_items)}/{self.total_count}")
+            self._finish_batch_and_show_notice()
+
+    def _finish_batch_and_show_notice(self):
+        if not self.is_batch_active:
+            return
+        self.is_batch_active = False
+        if self.timeout_timer:
+            self.timeout_timer.stop()
+            self.timeout_timer = None
+
+        show_sbc_batch_clear_notice(
+            total_count=self.total_count,
+            completed_items=list(self.completed_items),
+            parent=self.trigger_dlg
+        )
+        self.completed_items.clear()
+
+
 def sync_all_open_sbc_clear_cache(trigger_dlg: Optional[SBCIntradayChartDialog] = None) -> int:
     """【🧹 全局统一队列调度清理所有已打开 SBC 窗口的标的缓存并错峰重拉】
     当操盘手按住 Alt 点击【清缓】按钮时调用：
@@ -10293,6 +10631,9 @@ def sync_all_open_sbc_clear_cache(trigger_dlg: Optional[SBCIntradayChartDialog] 
     count = len(active_dialogs)
     current_focus_win = trigger_dlg or next((w for w in active_dialogs if w.isActiveWindow()), active_dialogs[0])
     logger.info(f"🧹 [SBC统一调度] 操盘手触发 Alt+清缓，启动统一队列清理 (共 {count} 个窗口)...")
+
+    # 0. 启动批量协调器 (统一收集进度，全部完成后仅弹出 1 个置顶汇总窗口)
+    SBCBatchClearCoordinator.get_instance().start_batch(total_count=count, trigger_dlg=current_focus_win)
 
     # 1. 焦点窗口 0ms 原地立即清理并重载
     try:

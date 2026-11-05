@@ -40,8 +40,19 @@
     - 在 `_init_days` 中，若盘前（<09:15）打开选中了上一交易日，自动置入 `self._pre_market_pending_rollover = True`；若已在 09:15 盘中打开，坚决默认选中今日；
     - 在定时巡检中，当检测到 `is_trade_day and t_str >= "09:15:00"` 且属于跨日挂机或盘前挂机，且当前停留在上一交易日时，自动平滑切入今日实际交易日并触发 `refresh_live()`；
     - 严格保护用户在盘中主动查看历史日或手动复盘的选择，绝不随意篡改。
-- [x] **【自动化测试全绿通过（71 项相关测试 100% PASS）】**：
-  - 新增 Alt+ 队列清理、日志联动、自动测算联动、高开/低开 10 秒慢闪、盘前挂机开盘切日、历史日不篡改等专项单测，`test_sbc_alt_click_broadcast.py`（9 项）、`test_fusion_trade_date_and_tooltip_card.py`（5 项）与关联全量测试全部 100% PASS。
+- [x] **【清缓存双模式通知体系与任意窗口点击即关防死锁闭环】**：
+  - **用户业务诉求**：“批量完成后出现严重的bug,因为有先后问题,导致现在无法点击,找不到那个确认窗口,这里需要alt+清理,这里弹出的窗口不能置顶导致无法操作,可以在任意窗口点击关闭恢复正常流程”、“无法找到弹出的队列通知窗口,现在全部被锁住”、“弹出窗口不要影响操作,不要用子窗口”、“最后通过ats的盯盘右键统一关闭持久化,才可以恢复正常”、“两种模式,单独的操作可以弹窗,批量操作只弹出一个批量的提示窗口,但是需要可以能找到这个窗口”；
+  - **双模式隔离，彻底拔除模态 QMessageBox 子窗口**：
+    - **单独操作（单窗口清缓）**：当前窗口弹出单个标的的清理通知窗口；
+    - **批量操作（Alt+点击清缓）**：各个 SBC 窗口重拉完成后，自身只刷新图表与信息栏，坚决不单独弹窗；统一上报给 `SBCBatchClearCoordinator`，全流程仅且仅在屏幕中央弹出 1 个唯一的批量完成汇总窗口，彻底消除十几层弹窗叠放死锁；
+  - **强制置顶 + 非模态（0 阻塞、绝对能看见）**：
+    - 采用独立顶级无边框窗口（`SBCClearNoticeDialog`），赋予 `WindowStaysOnTopHint | Tool` 强力置顶标志，带高对比发光边框，绝对在所有 SBC 窗口最前，100% 确保操盘手一眼看见；
+    - 严格调用 `setModal(False)` 与 `show()`，绝不阻塞应用事件循环，完全不影响用户点击任何其他 SBC 窗口；
+  - **任意窗口点击关闭恢复正常流程 (`_NoticeDismissFilter`)**：
+    - 安装全局事件过滤器，操盘手在任意 SBC 窗口、ATS 终端窗口或桌面上点击鼠标，或者按 Esc / Enter 键，提示窗口瞬间自动关闭，且鼠标点击事件放行给被点击窗口正常响应；
+    - 配备 8~10 秒安全倒计时淡出机制，彻底解决“界面被锁住、找不到确认窗口”的严重 BUG。
+- [x] **【自动化测试全绿通过（73 项相关测试 100% PASS）】**：
+  - 新增 Alt+ 队列清理、日志联动、自动测算联动、高开/低开 10 秒慢闪、盘前挂机开盘切日、单窗/批量通知隔离、任意窗口点击即关等专项单测，`test_sbc_alt_click_broadcast.py`（11 项）、`test_fusion_trade_date_and_tooltip_card.py`（5 项）与关联全量测试全部 100% PASS。
 
 ## 2026-11-05 09:30 【异动联动Nuitka打包与runall启动窗口位置记忆及自定义列HDF5恢复闭环】(`stock/testpy/tdxgui/build_nuitka_clang.bat`, `stock/testpy/tdxgui/sys_utils.py`, `stock/testpy/tdxgui/异动联动.py`, `stock/webTools/ths-tdx-web.py`, `stock/webTools/findSetWindowPos.py`, `stockAlerts-nuitka-to-exe.cmd`, `tests/test_alerts_nuitka_startup_and_data_fix.py`)
 - [x] **【彻底根除自定义列（dff/dff2/rank/dff3）显示 -100.0% 及过滤条件 Hit: 0 故障】**：
