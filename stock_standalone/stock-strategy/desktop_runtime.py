@@ -29,7 +29,10 @@ def desktop_cli():
         Path(configured).is_relative_to(codex_home/'packages'/package)
         for package in ('app-server-daemon','standalone')))
     if configured and not bundled and Path(configured).is_file():
-        return str(Path(configured).resolve())
+        try:
+            return str(Path(configured).resolve())
+        except (OSError, RuntimeError):
+            return str(Path(configured).absolute())
     from ats.llm.cli_paths import resolve_cli_path
     return resolve_cli_path('','codex')
 

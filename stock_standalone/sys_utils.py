@@ -216,7 +216,7 @@ def get_base_path() -> str:
     """获取包内静态只读资源解压目录 (PACKAGE_DIR)，用于读取内置资源。
     In Onefile mode, it is the Nuitka/PyInstaller temp directory; in source/dev mode, it fallback to the app root directory.
     """
-    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+    if hasattr(sys, "_MEIPASS"):
         return sys._MEIPASS
     if "NUITKA_ONEFILE_DIRECTORY" in os.environ:
         val = os.environ["NUITKA_ONEFILE_DIRECTORY"]
@@ -397,6 +397,11 @@ RESOURCE_MAP = {
         "src": "config/ipo_sentiment.yaml",
         "dst": "config/ipo_sentiment.yaml"
     },
+    # -- 桌面 AI 桥只读证据层限额配置（打包自恢复必须，释放到程序根目录持久化）--
+    "chat_evidence.ini": {
+        "src": "stock-strategy/chat_evidence.ini",
+        "dst": "chat_evidence.ini"
+    },
 }
 
 def get_conf_path(fname, base_dir=None, is_user_save=False, **kwargs):
@@ -412,7 +417,7 @@ def get_conf_path(fname, base_dir=None, is_user_save=False, **kwargs):
     if "NUITKA_ONEFILE_DIRECTORY" in os.environ:
         # Nuitka Onefile 打包模式
         is_onefile = (os.environ["NUITKA_ONEFILE_DIRECTORY"] != base_dir)
-    elif getattr(sys, "frozen", False):
+    elif getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS"):
         # PyInstaller Onefile 打包模式
         if hasattr(sys, "_MEIPASS"):
             is_onefile = (sys._MEIPASS != base_dir)

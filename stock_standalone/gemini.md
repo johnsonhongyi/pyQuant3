@@ -7,6 +7,20 @@
   - **Flash（执行者）**：通过 `invoke_subagent(..., Model="flash")` 承接写代码、跑测试、批量扫描等高 Token 消耗的具体事务。
 - **动态裁量**：以质量为主、价格为辅；质量第一、效率第二。轻微修改与极高难度核心问题由 Argon 亲自操刀。
 
+## 2026-11-05 20:50 【AI对话证据层chat_evidence.ini接入sys_utils打包环境自适应与自动释放持久化闭环】(`stock_standalone/sys_utils.py`, `stock_standalone/webTools/manage_window_layout.py`, `stock_standalone/manage_window_layout.spec`, `stock_standalone/stock-strategy/desktop_chat_evidence.py`, `stock_standalone/stock-strategy/desktop_runtime.py`, `stock_standalone/stock-strategy/test_desktop_chat_evidence.py`, `stock_standalone/stock-strategy/test_desktop_runtime.py`)
+- [x] **【RESOURCE_MAP 登记与打包环境自适应自愈释放】**：
+  - `sys_utils.py` 在 `RESOURCE_MAP` 中登记 `"chat_evidence.ini"`（`src="stock-strategy/chat_evidence.ini"`, `dst="chat_evidence.ini"`）；
+  - `sys_utils.get_base_path()` 识别 `hasattr(sys, "_MEIPASS")` 打包解压根目录，当物理程序路径不存在该配置时，自动从随包内置副本中流式复制归位到程序物理根目录；
+- [x] **【窗口管理器启动与桌面桥双通道自动自愈】**：
+  - `webTools/manage_window_layout.py` 启动初始化根目录后，立即调用 `sys_utils.get_conf_path("chat_evidence.ini")`，保证打包 EXE 运行瞬间物理磁盘即释放出可编辑的持久化配置文件；
+  - `desktop_chat_evidence.py` 的 `EvidenceLimits._candidates` 接入 `sys_utils.get_conf_path`，打包环境下物理配置缺失时自动触发自愈释放并优先获取该物理配置（标记为 `"executable"`），保证现场调整即时生效并持久化；
+- [x] **【规避 Windows 内存盘（RamDisk）WinError 1 底层故障】**：
+  - `desktop_chat_evidence.py` 与 `desktop_runtime.py` 实现 `_safe_resolve`，遇到 Windows 内存盘（`G:\Temp` 等）缺少最终句柄抛出 `[WinError 1] 函数不正确` 时，安全降级为 `Path.absolute()`，彻底修复 SQLite 数据库连接与配置定位报错；
+  - `manage_window_layout.spec` 补齐 `("stock-strategy/chat_evidence.ini", "stock-strategy")` 包内多级映射；
+- [x] **【自动化测试全绿通过（单测 61 项 + 全量 228 项 100% PASS）】**：
+  - `test_desktop_chat_evidence.py` 新增 `test_frozen_config_auto_releases_to_app_root_for_persistence` 自动释放与持久化单测，61 项专项单测 100% 通过；
+  - `stock-strategy` 下全量 228 项单元测试 100% 全部通过（15.70s）。
+
 ## 2026-11-05 20:40 【梯度热榜五大阻断项全面清零与全链路生产级闭环】(`ats/fusion/hot_pool.py`, `ats/fusion/shadow.py`, `ats/fusion/replay.py`, `tests/test_hot_pool_step*`)
 - [x] **【实盘提醒通道送达与 AlertNotifier 契约适配】**：
   - `hot_pool.py:1365` 严格对齐 `notify_special_signal(code, name, reason, score, ...)` 正确签名；

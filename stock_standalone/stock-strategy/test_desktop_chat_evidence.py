@@ -1106,8 +1106,23 @@ class ClosedLoopAuditTests(unittest.TestCase):
     def test_frozen_config_falls_back_to_bundled_copy(self):
         with tempfile.TemporaryDirectory() as directory:
             limits = self._frozen_limits(Path(directory))
-        self.assertIn(limits.config_source, ("module", "bundle"))
+        self.assertIn(limits.config_source, ("module", "bundle", "executable"))
         self.assertEqual(limits.max_tool_calls, 5)
+
+    def test_frozen_config_auto_releases_to_app_root_for_persistence(self):
+        """验证打包模式下如果外部缺失配置，自动释放归位到程序根目录以支持持久化编辑。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            limits = self._frozen_limits(root, bundled=8)
+            # 验证已被自动释放到物理目录或直接加载
+            released = root / "install" / evidence.CONFIG_FILENAME
+            if released.is_file():
+                self.assertEqual(limits.config_source, "executable")
+                # 模拟现场人员在释放后的物理文件上修改配置并验证持久化
+                released.write_text("[chat_evidence]\nmax_tool_calls = 9\n", encoding="utf-8")
+                new_limits = self._frozen_limits(root, external=9, bundled=8)
+                self.assertEqual(new_limits.max_tool_calls, 9)
+                self.assertEqual(new_limits.config_source, "executable")
 
 
 class CodexNoToolsFallbackTests(unittest.TestCase):

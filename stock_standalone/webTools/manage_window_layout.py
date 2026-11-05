@@ -68,6 +68,13 @@ def get_app_root() -> str:
     return calculated_root
 
 _startup_app_root = get_app_root()
+
+# 🚀 底层打包环境自适应机制：启动时确保 AI 对话限额配置自动自愈释放到程序物理根目录以支持持久化
+try:
+    from sys_utils import get_conf_path
+    get_conf_path("chat_evidence.ini", base_dir=_startup_app_root)
+except Exception:
+    pass
 _is_desktop_bridge_worker = (
     os.environ.get('PYQUANT3_CODEX_BRIDGE_WORKER') == '1'
     or os.environ.get('PYQUANT3_ANTIGRAVITY_BRIDGE_WORKER') == '1'

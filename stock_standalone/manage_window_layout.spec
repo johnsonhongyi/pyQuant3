@@ -24,6 +24,7 @@ a = Analysis(
         # AI 对话只读证据限额：冻结包无源码目录，必须显式随包携带，
         # 否则 EvidenceLimits 只能退回 DEFAULTS，现场改 ini 不生效。
         ("stock-strategy/chat_evidence.ini", "."),
+        ("stock-strategy/chat_evidence.ini", "stock-strategy"),
     ] + [(f, ".") for f in glob.glob("*monitordisplay_config.json")],
     hiddenimports=[
         'webTools.window_manager.core', 

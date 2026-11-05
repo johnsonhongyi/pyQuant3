@@ -29,6 +29,28 @@ from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request
 
+try:
+    import sys_utils
+except ImportError:
+    _parent_dir = str(Path(__file__).parent.parent.absolute())
+    if _parent_dir not in sys.path:
+        sys.path.insert(0, _parent_dir)
+    try:
+        import sys_utils
+    except ImportError:
+        sys_utils = None
+
+
+def _safe_resolve(path):
+    """Safely resolve Path, falling back to absolute() to avoid WinError 1 on RamDisks."""
+    if not isinstance(path, Path):
+        path = Path(path)
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError):
+        return path.absolute()
+
+
 CONFIG_FILENAME = "chat_evidence.ini"
 CONFIG_ENV = "STOCK_CHAT_EVIDENCE_CONFIG"
 
@@ -95,7 +117,7 @@ class EvidenceLimits:
         if env:
             return [("env", Path(env))]
         try:
-            exe_dir = Path(sys.executable).resolve().parent
+            exe_dir = _safe_resolve(Path(sys.executable)).parent
         except (OSError, TypeError):
             exe_dir = None
         bundle = getattr(sys, "_MEIPASS", "")
@@ -105,7 +127,21 @@ class EvidenceLimits:
             # EXE or in a stock-strategy/ subfolder mirroring the source layout.
             candidates.append(("executable", exe_dir / CONFIG_FILENAME))
             candidates.append(("install", exe_dir / "stock-strategy" / CONFIG_FILENAME))
-        candidates.append(("module", Path(__file__).resolve().parent / CONFIG_FILENAME))
+
+        # 🚀 打包/发布环境下，若外部物理目录尚未释放配置文件，通过 sys_utils 底层自适应机制从包内自动释放
+        if bundle and exe_dir and sys_utils is not None and hasattr(sys_utils, "get_conf_path"):
+            try:
+                # 仅当外部物理目录尚无配置文件时，尝试自动恢复释放
+                exe_target = exe_dir / CONFIG_FILENAME
+                install_target = exe_dir / "stock-strategy" / CONFIG_FILENAME
+                if not exe_target.is_file() and not install_target.is_file():
+                    restored = sys_utils.get_conf_path(CONFIG_FILENAME, base_dir=str(exe_dir))
+                    if restored and os.path.isfile(restored) and os.path.getsize(restored) > 0:
+                        candidates.append(("executable", Path(restored)))
+            except Exception:
+                pass
+
+        candidates.append(("module", _safe_resolve(Path(__file__)).parent / CONFIG_FILENAME))
         if bundle:
             candidates.append(("bundle", Path(bundle) / CONFIG_FILENAME))
         elif exe_dir:
@@ -548,7 +584,7 @@ def _fallback_data_root(peer):
     if configured:
         candidates.append(Path(str(configured)))
     try:
-        candidates.append(Path(sys.executable).resolve().parent)
+        candidates.append(_safe_resolve(Path(sys.executable)).parent)
     except (OSError, TypeError):
         pass
     for candidate in candidates:
@@ -740,7 +776,8 @@ class EvidenceSession:
         if path is None:
             return {"status": "unavailable", "hint": "本机数据根目录或信号库不可读", "file": spec["file"]}
         table, date_col = spec["table"], spec["date"]
-        with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+        safe_path = _safe_resolve(path)
+        with closing(sqlite3.connect(safe_path.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA query_only=ON")
             exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()

@@ -26,9 +26,9 @@ class DesktopRuntimeTests(unittest.TestCase):
                                  os.path.normcase(str(managed.absolute())))
                 lookup.assert_not_called()
                 with patch.dict('os.environ',{'CODEX_CLI_PATH':str(explicit)}):
-                    self.assertEqual(desktop_cli(),str(explicit.resolve()))
+                    self.assertEqual(os.path.normcase(desktop_cli()),os.path.normcase(str(explicit.absolute())))
                 managed.unlink()
-                self.assertEqual(desktop_cli(),str(fallback.resolve()))
+                self.assertEqual(os.path.normcase(desktop_cli()),os.path.normcase(str(fallback.absolute())))
 
     def test_desktop_exported_versioned_path_does_not_pin_old_engine(self):
         with tempfile.TemporaryDirectory() as directory:
