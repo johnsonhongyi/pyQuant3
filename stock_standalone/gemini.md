@@ -7,6 +7,35 @@
   - **Flash（执行者）**：通过 `invoke_subagent(..., Model="flash")` 承接写代码、跑测试、批量扫描等高 Token 消耗的具体事务。
 - **动态裁量**：以质量为主、价格为辅；质量第一、效率第二。轻微修改与极高难度核心问题由 Argon 亲自操刀。
 
+## 2026-11-05 09:35 【SBC工具栏Alt+统一队列调度与高开10秒慢闪红线及昨日分时防御闭环】(`docs/tasks/2026-11-05_0935_SBC工具栏Alt统一调度与高开慢闪红线及昨日分时防御.md`, `ats/ui/intraday_strategy_dialog.py`, `ats/tdx_realtime_fetcher.py`, `tests/test_sbc_alt_click_broadcast.py`)
+- [x] **【彻底解决 SBC 工具栏 Alt+ 点击【清缓】无效问题，落地全链路统一队列错峰调度体系】**：
+  - **用户业务诉求**：“ats的sbc工具栏点击单个执行,按住alt+点击,统一队列执行,今天出现开盘没有昨日的分时数据,点击清理需要一个一个重置数据,alt+点击清理,没有效果,全面优化这个功能,alt+可以统一调度”；
+  - **核心调度器 (`sync_all_open_sbc_clear_cache`)**：
+    - **0ms 眼前直达**：焦点窗口立即就地清理缓存并重载；
+    - **50ms 错峰队列调度**：其余存活 SBC 窗口以 50ms 安全步进依次通过 `QTimer.singleShot` 加入队列执行，彻底杜绝瞬间并发请求冲击 TDX 单路 socket 或主线程 UI 卡顿；
+    - **全链路反馈**：标题栏与信息栏实时更新 `[统一队列清理 N/Total] 正在重拉 TDX 分时…`，并弹出轻量 Toast 提醒；
+    - **右键菜单无缝支持**：在右键菜单中增加 `🧹 统一队列清理所有窗口缓存 (Alt+清缓)`；
+  - **工具栏全功能 Alt+ 统一调度全面对齐**：
+    - **日志面板 (`self.btn_toggle_log`)**：支持 Alt+点击 统一联动所有已打开窗口展开/收起日志（`sync_all_open_sbc_log_panel`）；
+    - **自动测算 (`self.btn_eval_r`)**：支持 Alt+点击 统一联动所有已打开窗口开启/关闭自动测算（`sync_all_open_sbc_eval_r`）；
+    - **全量 ToolTip 对齐**：明确标注单窗操作与 Alt+点击 全局统一调度的行为说明。
+- [x] **【开盘无昨日分时数据的底层防御与自动补拉机制】**：
+  - **根因定位与修复**：在 09:15~09:30 集合竞价或开盘切日初期（`not can_rollover`），若缓存中的 `df_multi` 缺少上一有效交易日（`latest_prev_day`），原代码直接短路返回旧缓存导致无昨日分时；现已在 `_fetch_multi_day_intraday_bars` 中增加交易日完整性门禁（`is_cache_fresh`），发现缺少昨日分时自动判定失效并穿透拉取 TDX，彻底根除开盘缺少昨日分时数据的问题。
+- [x] **【SBC 撮合成交及开盘价高开/反向低开 10 秒慢闪红线与视觉徽标】**：
+  - **用户业务诉求**：“sbc撮合成交及开盘价高开,这里需要10秒的慢闪的红线开盘线,并在sbc上显示高开或者反向的低开”；
+  - **昨收对比与高开/低开判定**：提取真实行情快照 `last_close`，精确计算 `gap_pct`；识别 `高开`（$\ge +0.05\%$）、`低开`（$\le -0.05\%$）与平开；
+  - **10 秒慢闪脉冲机制 (`SBCGlobalFlashController`)**：
+    - **间隔 2 秒呼吸律动**：单次慢闪呼吸周期设为 **2.0 秒**（0.5Hz，从容深沉，长久盯盘不累眼），10 秒总时长内精准慢闪 **5 次**（$10 \div 2 = 5$ 次）后自动停机并恢复稳态常亮；
+    - **全局统一并发控频 (`MAX_CONCURRENT_FLASH = 2`)**：通过全局单例调度器统一接管，限制同时处于动态慢闪的窗口最大数为 2 个（前台焦点窗口绝对优先抢占），超出名额的窗口直接降级为高开静态红线，彻底杜绝开盘全屏多窗口并发重绘导致的系统卡顿；
+    - **单一集中时钟**：全局仅用一个 120ms 轻量微心跳驱动，无活跃慢闪窗口时自动彻底休眠，0 空转 CPU 开销；
+  - **高开红线、反向低开绿线与视觉标签**：
+    - **高开**：绘制 **红色慢闪虚线**（`QColor(255, 51, 68)`），右侧高亮胶囊显示 `高开:XX.XX`，并在开盘线上绘制精致气泡徽标 `🔥 高开 +X.XX%`；
+    - **反向低开**：绘制 **绿色慢闪虚线**（`QColor(0, 230, 118)`），右侧高亮胶囊显示 `低开:XX.XX`，气泡徽标 `💧 低开 -X.XX%`；
+    - **平开**：绘制 **金黄色虚线**（`QColor(255, 170, 0)`），显示 `平开:XX.XX`；
+    - 顶部信息栏与底部日志联动格式化显示高开/低开百分比与金额。
+- [x] **【自动化测试全绿通过（52 项测试 100% PASS）】**：
+  - 新增 Alt+ 队列清理、日志联动、自动测算联动、高开/低开 10 秒慢闪 4 项专项单测，`test_sbc_alt_click_broadcast.py`（9 项）与关联全量测试（52 项）全部 100% PASS。
+
 ## 2026-11-05 09:30 【异动联动Nuitka打包与runall启动窗口位置记忆及自定义列HDF5恢复闭环】(`stock/testpy/tdxgui/build_nuitka_clang.bat`, `stock/testpy/tdxgui/sys_utils.py`, `stock/testpy/tdxgui/异动联动.py`, `stock/webTools/ths-tdx-web.py`, `stock/webTools/findSetWindowPos.py`, `stockAlerts-nuitka-to-exe.cmd`, `tests/test_alerts_nuitka_startup_and_data_fix.py`)
 - [x] **【彻底根除自定义列（dff/dff2/rank/dff3）显示 -100.0% 及过滤条件 Hit: 0 故障】**：
   - **PyTables 核心数据管道恢复**：此前构建脚本误排除了 tables，导致打包后 `read_hdf_table` 抛出 `No module named 'tables'`，无法读取 `G:\sina_data.h5` 和 `G:\tdx_last_df.h5`（行情与均线表）；现已在 `build_nuitka_clang.bat` 中重新引入 `--include-package=tables`、`--include-module=tables._comp_lzo`、`--include-module=tables._comp_bzip2`、`--include-module=filelock`；

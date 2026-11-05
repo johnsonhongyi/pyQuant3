@@ -4212,10 +4212,21 @@ class TDXRealtimeFetcher:
                         return df_inc
 
             # 若未开盘 (< 09:30) 或为非交易日，且多日缓存有值，直接返回，避免盘前向 TDX 发起无效请求
+            # 🛡️ [开盘无昨日分时防御] 若缓存中最新日期落后于上一有效交易日，说明昨日分时缺失，必须穿透重拉！
             if not can_rollover:
                 df_multi = self.cache_pool.get_multi_day_df(c_clean, days, ttl=86400.0)
                 if df_multi is not None and not df_multi.empty:
-                    return df_multi
+                    is_cache_fresh = True
+                    if "date" in df_multi.columns and expected_listing_dates:
+                        cached_last_date = str(df_multi["date"].iloc[-1])[:10]
+                        # 查找今天之前最近一个有效交易日
+                        prev_trading_days = [d for d in expected_listing_dates if d < today_date_str]
+                        if prev_trading_days:
+                            latest_prev_day = prev_trading_days[-1]
+                            if cached_last_date < latest_prev_day:
+                                is_cache_fresh = False  # 缓存缺少昨日数据，穿透直拉
+                    if is_cache_fresh:
+                        return df_multi
 
             is_idx, mkt, c_target = normalize_tdx_target(c_clean)
             tot_circ_shares = self.get_circulation_shares(c_clean) if not is_idx else 0.0

@@ -541,6 +541,130 @@ SBC_THEMES = {
 }
 
 
+class SBCGlobalFlashController(QObject):
+    """
+    【⚡ SBC 全局慢闪调度器 (集中控频 + 错峰限流 + 0并发卡顿)】
+    1. 统一呼吸节奏：单次呼吸慢闪周期设定为 2.0 秒 (0.5Hz，从容优雅，长久看盘不疲劳)；
+    2. 全局集中时钟：整个进程仅使用一个单一轻量微心跳 (120ms 一跳)，无需每个窗口各启一个定时器；
+    3. 全局并发节流：严格限制同时处于动态慢闪的窗口最大数 (MAX_CONCURRENT_FLASH = 2)，焦点窗口绝对优先；
+    4. 自动休眠回收：当所有窗口均退出慢闪后，全局定时器自动彻底停机，零空转 CPU 开销。
+    """
+    _instance: Optional["SBCGlobalFlashController"] = None
+
+    FLASH_CYCLE_SECONDS: float = 2.0      # 🌟 间隔 2 秒：单个呼吸慢闪完整周期为 2.0 秒
+    TOTAL_DURATION_SECONDS: float = 10.0  # 🌟 10 秒总时长 (正好慢闪 10/2 = 5 次)
+    MAX_CONCURRENT_FLASH: int = 2         # 🌟 全局最多允许 2 个窗口同时慢闪，杜绝全屏窗口并发刷屏卡顿
+
+    def __init__(self):
+        super().__init__()
+        self._active_flash_entries: Dict[Any, float] = {}  # {canvas: start_time}
+        self._master_timer = QTimer(self)
+        self._master_timer.setInterval(120)  # 120ms (约 8fps)，对 2.0s 呼吸慢闪极其丝滑，且 CPU 开销微乎其微
+        self._master_timer.timeout.connect(self._on_master_tick)
+
+    @classmethod
+    def get_instance(cls) -> "SBCGlobalFlashController":
+        if cls._instance is None:
+            cls._instance = SBCGlobalFlashController()
+        return cls._instance
+
+    def request_flash(self, canvas: Any, price: float):
+        """请求将 canvas 加入高开/低开慢闪序列 (全局限流保护)"""
+        if not canvas or price <= 0.001:
+            return
+        now_t = time.time()
+        last_t = getattr(canvas, "_open_flash_start_time", 0.0)
+        # 价格变动或已过冷却期 (30s)
+        if abs(price - getattr(canvas, "_open_flash_price", 0.0)) > 0.001 or (now_t - last_t) > 30.0:
+            canvas._open_flash_price = price
+            canvas._open_flash_start_time = now_t
+
+            # 检查是否在前台焦点窗口
+            is_focus = False
+            try:
+                top_w = canvas.window()
+                is_focus = bool(top_w and top_w.isActiveWindow())
+            except Exception:
+                pass
+
+            # 如果活跃数已满，且当前不是焦点窗口，直接保持静态红线显示 (不加入动态 tick 队列，避免多窗口并发卡顿)
+            if len(self._active_flash_entries) >= self.MAX_CONCURRENT_FLASH and not is_focus:
+                try:
+                    canvas.update()
+                except Exception:
+                    pass
+                return
+
+            # 若焦点窗口请求，且名额已满，将最早进入的非焦点窗口移出，让位给焦点窗口
+            if is_focus and len(self._active_flash_entries) >= self.MAX_CONCURRENT_FLASH and canvas not in self._active_flash_entries:
+                oldest_canvas = min(self._active_flash_entries.keys(), key=lambda c: self._active_flash_entries[c])
+                self.unregister_canvas(oldest_canvas)
+
+            self._active_flash_entries[canvas] = now_t
+            if not self._master_timer.isActive():
+                self._master_timer.start()
+            try:
+                canvas.update()
+            except Exception:
+                pass
+
+    def unregister_canvas(self, canvas: Any):
+        """移除 canvas 并触发一次稳态更新"""
+        if canvas in self._active_flash_entries:
+            del self._active_flash_entries[canvas]
+            try:
+                canvas.update()
+            except Exception:
+                pass
+        if not self._active_flash_entries and self._master_timer.isActive():
+            self._master_timer.stop()
+
+    def _on_master_tick(self):
+        """全局主心跳处理：只刷新名额内的活跃慢闪窗口"""
+        if not self._active_flash_entries:
+            if self._master_timer.isActive():
+                self._master_timer.stop()
+            return
+
+        now_t = time.time()
+        expired = []
+        for canvas, start_t in list(self._active_flash_entries.items()):
+            try:
+                from PyQt6.sip import isdeleted
+                if isdeleted(canvas) or not canvas.isVisible():
+                    expired.append(canvas)
+                    continue
+
+                if (now_t - start_t) >= self.TOTAL_DURATION_SECONDS:
+                    expired.append(canvas)
+                else:
+                    canvas.update()
+            except Exception:
+                expired.append(canvas)
+
+        for c in expired:
+            self.unregister_canvas(c)
+
+    def is_canvas_flashing(self, canvas: Any) -> bool:
+        """判断某个画布当前是否处于动态慢闪状态中"""
+        return canvas in self._active_flash_entries
+
+    def get_pulse_alpha_and_width(self, canvas: Any) -> Tuple[int, float]:
+        """获取当前画布的动态正弦呼吸 Alpha 与线宽 (间隔 2.0 秒)"""
+        start_t = self._active_flash_entries.get(canvas)
+        now_t = time.time()
+        if start_t is None or (now_t - start_t) >= self.TOTAL_DURATION_SECONDS:
+            return 255, 1.2
+
+        # 🌟 间隔 2.0 秒正弦呼吸脉冲 (0.5Hz，从容优雅，长久盯盘不累眼)
+        elapsed = now_t - start_t
+        cycle_phase = (elapsed % self.FLASH_CYCLE_SECONDS) / self.FLASH_CYCLE_SECONDS
+        pulse_factor = 0.5 + 0.5 * math.sin(cycle_phase * 2 * math.pi)
+        alpha = int(100 + 155 * pulse_factor)
+        line_w = 1.2 + 0.8 * pulse_factor
+        return alpha, line_w
+
+
 class SBCChartCanvas(QWidget):
     """
     SBC 多功能走势图画布控件 (支持 1日/2日/3日分时走势图 以及 5分/30分/60分/日K 线的 GG 通道图)
@@ -554,6 +678,7 @@ class SBCChartCanvas(QWidget):
     MARGIN_RIGHT = 58
     MARGIN_TOP = 22
     MARGIN_BOTTOM = 22
+    OPEN_FLASH_DURATION: float = 10.0  # 🌟 开盘/撮合高开红线与低开绿线慢闪持续时长 (秒)，10 秒后自动停机稳态常亮
     _amplitude_data_ready = pyqtSignal(str, object)
 
     def __init__(self, parent=None):
@@ -568,6 +693,9 @@ class SBCChartCanvas(QWidget):
         self.target_sell_max = 0.0
         self.auction_price = 0.0
         self.market_phase = ""
+        self.last_close: float = 0.0
+        self._open_flash_price: float = 0.0
+        self._open_flash_start_time: float = 0.0
         self.signals = []
         self.channel_info = {}  # ⚡ 存储对齐 K 线的通道关键阶梯 (上轨、中轨、下轨、支撑、反转)
         self.channel_info_code = ""
@@ -2252,11 +2380,15 @@ class SBCChartCanvas(QWidget):
             act_refresh.triggered.connect(parent_win.reload_chart)
             menu.addAction(act_refresh)
 
-        # 9. 🧹 清除缓存重刷
+        # 9. 🧹 清除缓存重刷 (支持单窗与 Alt 统一队列清理)
         if parent_win and hasattr(parent_win, '_on_clear_cache_clicked'):
             act_clear = QAction("🧹 清除当前标的行情缓存", self)
             act_clear.triggered.connect(parent_win._on_clear_cache_clicked)
             menu.addAction(act_clear)
+
+            act_clear_all = QAction("🧹 统一队列清理所有窗口缓存 (Alt+清缓)", self)
+            act_clear_all.triggered.connect(lambda: sync_all_open_sbc_clear_cache(trigger_dlg=parent_win if isinstance(parent_win, SBCIntradayChartDialog) else None))
+            menu.addAction(act_clear_all)
 
         if pos is None:
             pos = QCursor.pos()
@@ -2285,6 +2417,14 @@ class SBCChartCanvas(QWidget):
         self._cached_intraday_layout_token = None
         self._cached_kline_layout_token = None
         self._static_layer_token = None
+
+    def _on_open_flash_tick(self):
+        """兼容保留接口：由全局调度器 SBCGlobalFlashController 集中统一驱动"""
+        self.update()
+
+    def trigger_open_flash(self, price: float):
+        """触发撮合成交/开盘价 10 秒慢闪红线 (高开) / 绿线 (反向低开) - 经由全局集中限流调度"""
+        SBCGlobalFlashController.get_instance().request_flash(self, price)
 
     def set_data(self, df_intraday: pd.DataFrame, open_p: float = 0.0, vwap_p: float = 0.0, high_p: float = 0.0, low_p: float = 0.0, sell_min: float = 0.0, sell_max: float = 0.0, signals: list = None, period_mode: str = "1m"):
         self._set_chart_snapshot(df_intraday, signals)
@@ -3221,22 +3361,62 @@ class SBCChartCanvas(QWidget):
             col_auc = QColor("#00E5FF") if auction_finalized else QColor("#FFAA00")
             auc_title = "开" if auction_finalized else "撮"
 
-            # 跨图表集合竞价水平虚线
-            painter.setPen(QPen(col_auc, 1.2, Qt.PenStyle.DashLine))
+            # 确定比对昨收基准价与高开/低开状态
+            lc_ref = getattr(self, "last_close", 0.0)
+            if lc_ref <= 0.001:
+                lc_ref = op_ref
+            gap_pct = ((raw_auc_p - lc_ref) / lc_ref * 100.0) if lc_ref > 0.001 else 0.0
+            is_gap_up = gap_pct >= 0.05
+            is_gap_down = gap_pct <= -0.05
+
+            # 🌟 由全局慢闪调度器获取动态 Alpha 与线宽 (间隔 2.0 秒呼吸周期，全局限流节流防卡顿)
+            alpha, line_w = SBCGlobalFlashController.get_instance().get_pulse_alpha_and_width(self)
+
+            if is_gap_up:
+                col_auc = QColor(255, 51, 68, alpha)       # 🔴 10秒慢闪高开红线
+                col_bg = QColor(255, 51, 68, int(alpha * 0.85))
+                auc_title = "高开" if auction_finalized else "高开撮"
+                badge_text = f"🔥 高开 {gap_pct:+.2f}%"
+            elif is_gap_down:
+                col_auc = QColor(0, 230, 118, alpha)       # 🟢 10秒慢闪低开绿线
+                col_bg = QColor(0, 180, 90, int(alpha * 0.85))
+                auc_title = "低开" if auction_finalized else "低开撮"
+                badge_text = f"💧 低开 {gap_pct:+.2f}%"
+            else:
+                col_auc = QColor(255, 170, 0, alpha)       # 🟡 平开金黄线
+                col_bg = QColor(255, 170, 0, int(alpha * 0.85))
+                auc_title = "平开" if auction_finalized else "平开撮"
+                badge_text = f"⚡ 平开 {raw_auc_p:.2f}"
+
+            # 跨图表集合竞价水平虚线 (支持 10 秒慢闪脉冲)
+            painter.setPen(QPen(col_auc, line_w, Qt.PenStyle.DashLine))
             painter.drawLine(int(margin_left), int(y_auc), int(margin_left + chart_w), int(y_auc))
 
-            # 右侧竞价高亮标签框
-            p_box_w = 56
+            # 图表内开盘徽标 (右侧内缘气泡，所见即所得清晰显示高开或反向低开)
+            painter.setFont(QFont("Microsoft YaHei", 8, QFont.Weight.Bold))
+            badge_w = painter.fontMetrics().horizontalAdvance(badge_text) + 12
+            badge_h = 18
+            badge_x = int(margin_left + chart_w - badge_w - 6)
+            badge_y = max(margin_top + 2, min(margin_top + main_h - badge_h - 2, int(y_auc - badge_h - 3)))
+            painter.setPen(QPen(col_auc, 1.2))
+            painter.setBrush(QBrush(QColor(15, 23, 42, 225)))
+            painter.drawRoundedRect(badge_x, badge_y, badge_w, badge_h, 3, 3)
+            painter.setPen(QPen(col_auc))
+            painter.drawText(badge_x + 6, badge_y + 13, badge_text)
+
+            # 右侧竞价高亮标签框 (自适应宽度，确保高开/低开文字清晰完整展示)
+            disp_text = f"{auc_title}:{raw_auc_p:.2f}"
+            text_w = painter.fontMetrics().horizontalAdvance(disp_text)
+            p_box_w = max(58, text_w + 8)
             p_box_h = 16
             p_box_y = max(margin_top, min(margin_top + chart_h - p_box_h, int(y_auc - p_box_h / 2)))
             reserved_right_y.append(p_box_y + p_box_h / 2)
             painter.setPen(QPen(col_auc, 1.2))
-            painter.setBrush(QBrush(QColor(col_auc.red(), col_auc.green(), col_auc.blue(), 85)))
+            painter.setBrush(QBrush(col_bg))
             painter.drawRoundedRect(int(margin_left + chart_w + 2), int(p_box_y), p_box_w, p_box_h, 2, 2)
 
             painter.setPen(QPen(QColor("#FFFFFF")))
-            painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
-            painter.drawText(int(margin_left + chart_w + 4), int(p_box_y + 12), f"{auc_title}:{raw_auc_p:.2f}")
+            painter.drawText(int(margin_left + chart_w + 4), int(p_box_y + 12), disp_text)
 
         elif len(prices) > 0 and prices[-1] > 0.01:
             last_p = float(prices[-1])
@@ -3261,12 +3441,29 @@ class SBCChartCanvas(QWidget):
             painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
             painter.drawText(int(margin_left + chart_w + 5), int(p_box_y + 12), f"{last_p:.2f}")
 
-        # 🔴 开盘基准线 (保持在右侧显示)
+        # 🔴 开盘基准线 (保持在右侧显示，支持高开红线/低开绿线与 10 秒慢闪)
         if op_ref > 0:
             y_op = price_to_y(op_ref)
-            painter.setPen(QPen(QColor("#ff4444"), 1, Qt.PenStyle.DashLine))
+            lc_ref = getattr(self, "last_close", 0.0)
+            gap_pct = ((op_ref - lc_ref) / lc_ref * 100.0) if lc_ref > 0.001 else 0.0
+            is_gap_up = gap_pct >= 0.05
+            is_gap_down = gap_pct <= -0.05
+
+            alpha, line_w = SBCGlobalFlashController.get_instance().get_pulse_alpha_and_width(self)
+
+            if is_gap_up:
+                col_op = QColor(255, 51, 68, alpha)
+                op_lbl = f"高开:{op_ref:.2f}"
+            elif is_gap_down:
+                col_op = QColor(0, 230, 118, alpha)
+                op_lbl = f"低开:{op_ref:.2f}"
+            else:
+                col_op = QColor(255, 170, 0, alpha)
+                op_lbl = f"开:{op_ref:.2f}"
+
+            painter.setPen(QPen(col_op, line_w, Qt.PenStyle.DashLine))
             painter.drawLine(margin_left, int(y_op), margin_left + chart_w, int(y_op))
-            right_axis_labels.append((y_op, f"开:{op_ref:.2f}", QColor("#ff4444")))
+            right_axis_labels.append((y_op, op_lbl, col_op))
 
         # 🟢 目标止盈线 (保持在右侧显示)
         if self.target_sell_min > 0:
@@ -6074,12 +6271,12 @@ class SBCIntradayChartDialog(QWidget):
 
         btn_clear_cache = QPushButton("🧹 清缓")
         btn_clear_cache.setStyleSheet("QPushButton { background-color: #3b1419; color: #ff6666; font-weight: bold; border: 1px solid #ff6666; border-radius: 3px; padding: 2px 4px; font-size: 8.5pt; } QPushButton:hover { color: #ffffff; border: 1px solid #ff4444; }")
-        btn_clear_cache.setToolTip("强力清除当前标的的内存与磁盘错误缓存并重新拉取")
+        btn_clear_cache.setToolTip("快捷键: 强力清除缓存\n• 单击: 强力清除当前标的的内存与磁盘错误缓存并重新拉取\n• 按住 Alt 点击: 统一队列错峰清理所有已打开窗口缓存并重拉")
         btn_clear_cache.clicked.connect(self._on_clear_cache_clicked)
 
         self.btn_toggle_log = QPushButton("📋 日志 (关)")
         self.btn_toggle_log.setStyleSheet("QPushButton { background-color: #1e1e28; color: #888899; font-weight: normal; border: 1px solid #333344; border-radius: 3px; padding: 2px 5px; font-size: 8.5pt; } QPushButton:hover { color: #ffffff; border: 1px solid #38bdf8; }")
-        self.btn_toggle_log.setToolTip("快捷键: S 键 (当前: 日志面板【已收起】)\n• 点击按钮或按键盘 S 键可展开查看底部实时交易阶段与风控日志")
+        self.btn_toggle_log.setToolTip("快捷键: S 键 (当前: 日志面板【已收起】)\n• 单击: 展开查看底部实时交易阶段与风控日志\n• 按住 Alt 点击: 联动展开/收起所有已打开窗口的日志面板")
         self.btn_toggle_log.clicked.connect(self._toggle_log_panel)
 
         self.btn_linkage = QPushButton("🔗 联动 (F)")
@@ -7500,7 +7697,11 @@ class SBCIntradayChartDialog(QWidget):
             self.btn_eval_r.setToolTip("快捷键: R 键 (当前: 自动测算【已关闭】)\n• 点击按钮或按键盘 R 键开启全自动测算与标记")
 
     def _on_eval_r_clicked(self, toggle: bool = True):
-        """⚡ 快捷键 R / 按钮切换自动测算状态并触发测算"""
+        """⚡ 快捷键 R / 按钮切换自动测算状态并触发测算 (支持 Alt 联动所有窗口)"""
+        if toggle and is_alt_modifier_active():
+            new_val = not getattr(self, 'auto_eval_enabled', True)
+            sync_all_open_sbc_eval_r(new_val, trigger_dlg=self)
+            return
         if toggle:
             self.auto_eval_enabled = not getattr(self, 'auto_eval_enabled', True)
             SBCIntradayChartDialog._global_auto_eval = self.auto_eval_enabled
@@ -7581,8 +7782,12 @@ class SBCIntradayChartDialog(QWidget):
             self.btn_toggle_log.setToolTip("快捷键: S 键 (当前: 日志面板【已收起】)\n• 点击按钮或按键盘 S 键可展开查看底部实时交易阶段与风控日志")
 
     def _toggle_log_panel(self):
-        """📋 快捷键 S / 按钮切换底部实时阶段数据日志面板的展开与收起"""
+        """📋 快捷键 S / 按钮切换底部实时阶段数据日志面板的展开与收起 (支持 Alt 联动所有窗口)"""
         if not hasattr(self, 'log_box') or not self.log_box:
+            return
+        if is_alt_modifier_active():
+            new_vis = self.log_box.isHidden()
+            sync_all_open_sbc_log_panel(new_vis, trigger_dlg=self)
             return
         new_vis = self.log_box.isHidden()
         self.log_box.setVisible(new_vis)
@@ -8402,11 +8607,19 @@ class SBCIntradayChartDialog(QWidget):
         )
 
     def _on_clear_cache_clicked(self):
-        """【🧹 清理缓存】清除当前标的在 TDX 与引擎内存中的错误/旧数据，并强力重置刷新"""
+        """【🧹 清理缓存】清除当前标的在 TDX 与引擎内存中的错误/旧数据，并强力重置刷新 (支持 Alt 统一队列清理所有窗口)"""
+        if is_alt_modifier_active():
+            sync_all_open_sbc_clear_cache(trigger_dlg=self)
+        else:
+            self._execute_clear_cache_and_reload()
+
+    def _execute_clear_cache_and_reload(self, is_batch: bool = False, batch_idx: int = 1, batch_total: int = 1):
+        """【🧹 执行单窗口清缓存与重拉】可作为单窗点击或统一队列调度的执行单元"""
         c_clean = str(self.code).zfill(6)
         fetcher = TDXRealtimeFetcher.get_instance()
         fetcher.clear_stock_cache(c_clean)
-        self.engine.clear_stock_cache(c_clean)
+        if hasattr(self, 'engine') and self.engine:
+            self.engine.clear_stock_cache(c_clean)
 
         # 清除旧画面，等待本次绕过预加载数据的 TDX 请求完成后再恢复走势。
         self._cache_refresh_pending = True
@@ -8423,7 +8636,9 @@ class SBCIntradayChartDialog(QWidget):
         self.canvas._zoom_end_idx = -1
         self.canvas._is_right_anchored = True
         self.canvas._visible_bar_count = None
-        self.lbl_title.setText(f"📊 {c_clean} {get_cached_stock_name(c_clean)} | 正在清缓存并重拉 TDX 分时…")
+
+        batch_prefix = f"[统一队列清理 {batch_idx}/{batch_total}] " if is_batch and batch_total > 1 else ""
+        self.lbl_title.setText(f"📊 {c_clean} {get_cached_stock_name(c_clean)} | {batch_prefix}正在清缓存并重拉 TDX 分时…")
         self.lbl_info.setText("底层行情缓存已清理，正在重新请求 TDX；完成前不显示旧图。")
 
         # 向上同步刷新主工作台
@@ -8959,6 +9174,7 @@ class SBCIntradayChartDialog(QWidget):
             "auction_samples": snap.get("auction_samples", []),
             "market_phase": snap.get("market_phase", ""),
             "auction_price": snap.get("auction_price", 0.0),
+            "last_close": float(snap.get("last_close", 0.0) or 0.0),
             "sigs": sigs,
             "multi_vwap_snapshot": multi_vwap_snapshot,
             "channel_info": channel_info,
@@ -9038,6 +9254,10 @@ class SBCIntradayChartDialog(QWidget):
                     canvas.auction_price = float(payload.get("auction_samples")[-1].get("price", 0.0) or 0.0)
                 except Exception:
                     pass
+            canvas.last_close = float(payload.get("last_close", 0.0) or 0.0)
+            target_flash_p = canvas.auction_price if canvas.auction_price > 0.001 else op
+            if target_flash_p > 0.001:
+                canvas.trigger_open_flash(target_flash_p)
         cache_refresh_missing_today = False
         if cache_refresh_pending and df_target is not None and not df_target.empty and mode in ("1m", "3d", "5d", "10d"):
             if "date" in df_target.columns:
@@ -9188,7 +9408,14 @@ class SBCIntradayChartDialog(QWidget):
             label = "虚拟撮合价（未成交，不计入VWAP）" if phase == "auction_indicative" else "09:25竞价成交/开盘价"
             if phase == "auction_pending":
                 label = "竞价已结束，等待主站确认成交价"
-            self.lbl_info.setText(f"{label}: {payload.get('auction_price', 0.0):.2f} | 历史分时保留")
+            auc_val = float(payload.get('auction_price', 0.0) or 0.0)
+            lc_val = float(payload.get('last_close', 0.0) or 0.0)
+            gap_str = ""
+            if lc_val > 0.001 and auc_val > 0.001:
+                g_pct = (auc_val - lc_val) / lc_val * 100.0
+                tag = "🔥高开" if g_pct >= 0.05 else ("💧低开" if g_pct <= -0.05 else "平开")
+                gap_str = f" ({tag} {g_pct:+.2f}%)"
+            self.lbl_info.setText(f"{label}: {auc_val:.2f}{gap_str} | 历史分时保留")
         elif is_degraded:
             self.lbl_info.setText("行情已加载，策略或指标暂不可用，等待重试")
         elif is_preview:
@@ -10045,6 +10272,115 @@ def sync_all_open_sbc_auto_strategy(enabled: bool, trigger_dlg: Optional[SBCIntr
                 btn.setText("🤖 自动策略 (开)" if enabled else "🤖 自动策略 (关)")
             if hasattr(w, "reload_chart"):
                 w.reload_chart()
+        except Exception:
+            pass
+    return len(active_dialogs)
+
+
+def sync_all_open_sbc_clear_cache(trigger_dlg: Optional[SBCIntradayChartDialog] = None) -> int:
+    """【🧹 全局统一队列调度清理所有已打开 SBC 窗口的标的缓存并错峰重拉】
+    当操盘手按住 Alt 点击【清缓】按钮时调用：
+    1. 立即获取当前所有存活的 SBC 窗口列表；
+    2. 焦点/触发窗口（trigger_dlg）立即原地执行缓存清除与重载（眼前直达，0ms 延迟）；
+    3. 其余背景窗口通过 QTimer 错峰队列（每隔 50ms）依次触发清除缓存与重新拉取，
+       杜绝多窗口同时清缓存重拉引发 TDX socket 拥塞或主线程卡死；
+    4. 弹出轻量 Toast 提示操盘手已启动统一队列清理，提供完整可解释日志与界面进度提示。
+    """
+    active_dialogs = get_all_active_sbc_dialogs()
+    if not active_dialogs:
+        return 0
+
+    count = len(active_dialogs)
+    current_focus_win = trigger_dlg or next((w for w in active_dialogs if w.isActiveWindow()), active_dialogs[0])
+    logger.info(f"🧹 [SBC统一调度] 操盘手触发 Alt+清缓，启动统一队列清理 (共 {count} 个窗口)...")
+
+    # 1. 焦点窗口 0ms 原地立即清理并重载
+    try:
+        if hasattr(current_focus_win, "_execute_clear_cache_and_reload"):
+            current_focus_win._execute_clear_cache_and_reload(is_batch=True, batch_idx=1, batch_total=count)
+    except Exception as e_f:
+        logger.warning(f"[SBC统一调度] 焦点窗口清理异常: {e_f}")
+
+    # 2. 其余窗口依次以 50ms 步进加入错峰队列调度
+    delay = 50
+    step = 50
+    batch_idx = 2
+    for w in active_dialogs:
+        if w is current_focus_win:
+            continue
+        def _schedule_target(target_w=w, idx=batch_idx):
+            try:
+                if target_w and target_w.isVisible():
+                    if hasattr(target_w, "_execute_clear_cache_and_reload"):
+                        target_w._execute_clear_cache_and_reload(is_batch=True, batch_idx=idx, batch_total=count)
+                    elif hasattr(target_w, "_on_clear_cache_clicked"):
+                        target_w._on_clear_cache_clicked()
+            except Exception as e_w:
+                logger.debug(f"[SBC统一调度] 错峰清理窗口异常: {e_w}")
+
+        QTimer.singleShot(delay, _schedule_target)
+        delay += step
+        batch_idx += 1
+
+    # 3. 弹出 Toast 提示反馈
+    try:
+        from ats.ui.rearrange_policy import show_rearrange_toast
+        show_rearrange_toast(
+            f"🧹 已启动 Alt 统一队列清理 (共 {count} 个窗口错峰调度)",
+            parent=current_focus_win,
+            duration_ms=1800
+        )
+    except Exception:
+        pass
+
+    return count
+
+
+def sync_all_open_sbc_log_panel(expand: Optional[bool] = None, trigger_dlg: Optional[SBCIntradayChartDialog] = None) -> int:
+    """【📋 全局联动所有已打开 SBC 窗口展开/收起日志面板】"""
+    active_dialogs = get_all_active_sbc_dialogs()
+    if not active_dialogs:
+        return 0
+    if expand is None:
+        ref_win = trigger_dlg or active_dialogs[0]
+        if hasattr(ref_win, "log_box") and ref_win.log_box:
+            expand = ref_win.log_box.isHidden()
+        else:
+            expand = True
+    for w in active_dialogs:
+        try:
+            if hasattr(w, "log_box") and w.log_box:
+                w.log_box.setVisible(bool(expand))
+                if hasattr(w, "_update_log_btn_style"):
+                    w._update_log_btn_style()
+                if hasattr(w, "lbl_info") and w.lbl_info:
+                    if expand:
+                        w.lbl_info.setText("📋 [日志已联动展开] 已显示底部实时阶段数据与风控日志 (快捷键: S 键 / Alt+点击可联动收起)")
+                    else:
+                        w.lbl_info.setText("📋 [日志已联动收起] 已隐藏底部日志以扩展分时图视界 (快捷键: S 键 / Alt+点击可联动展开)")
+        except Exception:
+            pass
+    return len(active_dialogs)
+
+
+def sync_all_open_sbc_eval_r(enabled: Optional[bool] = None, trigger_dlg: Optional[SBCIntradayChartDialog] = None) -> int:
+    """【⚡ 全局联动开启/关闭所有已打开 SBC 窗口的自动测算】"""
+    active_dialogs = get_all_active_sbc_dialogs()
+    if not active_dialogs:
+        return 0
+    if enabled is None:
+        ref_win = trigger_dlg or active_dialogs[0]
+        enabled = not getattr(ref_win, "auto_eval_enabled", True)
+    SBCIntradayChartDialog._global_auto_eval = bool(enabled)
+    for w in active_dialogs:
+        try:
+            w.auto_eval_enabled = bool(enabled)
+            if hasattr(w, "_update_eval_btn_style"):
+                w._update_eval_btn_style()
+            if hasattr(w, "canvas") and w.canvas:
+                w.canvas.auto_eval_enabled = bool(enabled)
+                if enabled:
+                    w.canvas.run_adaptive_strategy_eval()
         except Exception:
             pass
     return len(active_dialogs)

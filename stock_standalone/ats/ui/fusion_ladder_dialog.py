@@ -2878,8 +2878,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 pass
 
             now_hm = datetime.datetime.now().strftime("%H:%M")
-            # 仅当当天已有记录，或（是真正交易所交易日且时间已达 09:15 盘前）才将今天纳入
-            if (cur_today in days_set) or (is_trade_day and now_hm >= "09:15"):
+            # 只要是法定交易日，候选列表中必须包含今天 (避免盘前开盘后无法切日)
+            if is_trade_day or (cur_today in days_set):
                 days_set.add(cur_today)
 
             # 确保最后一个有效交易日也在候选中
@@ -2890,17 +2890,23 @@ class FusionLadderDialog(QWidget, WindowMixin):
         except Exception:
             self._production_days = [last_trade_day or cur_today]
 
-        # 确定“打开显示最后一个交易日数据”的目标交易日
+        # 确定“打开默认显示的交易日”：
+        # 只要已进入 09:15 开盘时段且为法定交易日，坚决默认选中今日 (绝不退回昨日白板)；盘前则默认展示上一交易日并标记待开盘切日
         now_hm = datetime.datetime.now().strftime("%H:%M")
-        if is_trade_day and now_hm >= "09:15" and (cur_today in days_set):
+        if is_trade_day and now_hm >= "09:15":
             target_default_day = cur_today
+            self._pre_market_pending_rollover = False
         else:
-            # 优先选择有实际影子数据记录的有效交易日，避免开盘前或周末打开白板
-            days_with_data = [d for d in self._production_days if d in days_set]
+            # 盘前或非交易日：优先选择有实际影子数据记录的有效历史交易日
+            days_with_data = [d for d in self._production_days if d in days_set and d != cur_today]
             if days_with_data:
                 target_default_day = days_with_data[-1]
             else:
                 target_default_day = last_trade_day if last_trade_day in self._production_days else self._production_days[-1]
+            if is_trade_day and target_default_day == last_trade_day:
+                self._pre_market_pending_rollover = True
+            else:
+                self._pre_market_pending_rollover = False
 
         self.cmb_day.blockSignals(True)
         self.cmb_day.clear()
@@ -3632,20 +3638,23 @@ class FusionLadderDialog(QWidget, WindowMixin):
             t_str = now_dt.strftime("%H:%M:%S")
             cur_today, is_trade_day, last_trade_day = get_effective_ats_trade_date(now_dt)
 
-            # 1. 挂机跨日自动推进（仅在系统真实发生跨日且新日为法定交易日时自动更新，绝不篡改用户主动查看的历史日）
+            # 1. 挂机与开盘时段自动平滑切入今日实际交易日 (彻底解决开盘前打开导致开盘后一直卡在昨日的问题)
             last_sys_day = getattr(self, "_last_tracked_calendar_day", cur_today)
-            if cur_today != last_sys_day:
-                self._last_tracked_calendar_day = cur_today
-                if is_trade_day and t_str >= "09:15:00":
-                    curr_combo_day = self.cmb_day.currentText().strip()
-                    # 仅当用户此前停留在上一个交易日跟随模式时才平滑递进
-                    if curr_combo_day == last_trade_day:
+            is_cross_day = (cur_today != last_sys_day)
+            self._last_tracked_calendar_day = cur_today
+            if is_trade_day and t_str >= "09:15:00":
+                curr_combo_day = self.cmb_day.currentText().strip()
+                # 触发切日场景：(1)跨日挂机 (2)盘前启动并在开盘时仍处于上一交易日
+                is_pre_market_pending = getattr(self, "_pre_market_pending_rollover", False)
+                if (is_cross_day or is_pre_market_pending) and curr_combo_day == last_trade_day:
+                    idx = self.cmb_day.findText(cur_today)
+                    if idx < 0:
+                        self.cmb_day.addItem(cur_today)
                         idx = self.cmb_day.findText(cur_today)
-                        if idx < 0:
-                            self.cmb_day.addItem(cur_today)
-                            idx = self.cmb_day.findText(cur_today)
-                        self.cmb_day.setCurrentIndex(idx)
-                        self.refresh_live()
+                    self.cmb_day.setCurrentIndex(idx)
+                    self._pre_market_pending_rollover = False
+                    logger.info(f"[FusionLadder] 开盘时段自动从上一交易日({curr_combo_day})平滑切换至今日实际交易日({cur_today})")
+                    self.refresh_live()
 
             # 2. 盘后自动沉淀：15:00 以后自动执行收盘持久化（仅限工作日/交易日执行）
             if is_trade_day and t_str >= "15:00:00" and self._last_auto_settle_day != cur_today:
@@ -3729,6 +3738,22 @@ class FusionLadderDialog(QWidget, WindowMixin):
     # 实时与回补数据展示
     # ------------------------------------------------------------------
     def refresh_live(self) -> None:
+        # 🛡️ 开盘时段智能对齐：若盘前启动遗留且已到 09:15 开盘时段，手动刷新时自动切入今日
+        try:
+            if getattr(self, "_pre_market_pending_rollover", False):
+                cur_today, is_trade_day, last_trade_day = get_effective_ats_trade_date()
+                now_hm = datetime.datetime.now().strftime("%H:%M")
+                if is_trade_day and now_hm >= "09:15":
+                    curr_day = self.cmb_day.currentText().strip()
+                    if curr_day == last_trade_day:
+                        idx = self.cmb_day.findText(cur_today)
+                        if idx < 0:
+                            self.cmb_day.addItem(cur_today)
+                            idx = self.cmb_day.findText(cur_today)
+                        self.cmb_day.setCurrentIndex(idx)
+                        self._pre_market_pending_rollover = False
+        except Exception:
+            pass
         self._queue_shadow_refresh(0, force=True)
 
     def _queue_shadow_refresh(self, index: int, force: bool = True) -> None:
