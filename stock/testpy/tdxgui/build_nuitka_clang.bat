@@ -127,28 +127,9 @@ if exist "!SMART_OPT_PLUGIN!" (
     echo [INFO] Smart Optimizer Plugin not found, proceeding standard mode.
 )
 
-rem 8.5 动态探测 OpenSSL 运行时依赖 (libcrypto/libssl)
-set "DLLS_RESOLVE_FILE=%TEMP%\_resolve_dlls_%RANDOM%.txt"
-set "CRYPTO_DLL="
-set "SSL_DLL="
-"%PYTHON_EXEC%" -c "import sys; from pathlib import Path; pfx=Path(sys.prefix); find=lambda pat: next((str(p) for d in [pfx/'Library'/'bin', pfx/'DLLs'] if d.exists() for p in d.glob(pat)), ''); print('CRYPTO_DLL=' + find('libcrypto*.dll')); print('SSL_DLL=' + find('libssl*.dll'))" > "%DLLS_RESOLVE_FILE%" 2>nul
-if exist "%DLLS_RESOLVE_FILE%" (
-    for /f "usebackq delims=" %%A in ("%DLLS_RESOLVE_FILE%") do set "%%A"
-    del /f /q "%DLLS_RESOLVE_FILE%" >nul 2>&1
-)
-set "EXTRA_DLL_ARGS="
-if defined CRYPTO_DLL if exist "!CRYPTO_DLL!" (
-    for %%F in ("!CRYPTO_DLL!") do set "CRYPTO_NAME=%%~nxF"
-    echo [SUCCESS] OpenSSL Crypto DLL resolved: !CRYPTO_DLL!
-    set EXTRA_DLL_ARGS=!EXTRA_DLL_ARGS! --include-data-file="!CRYPTO_DLL!=!CRYPTO_NAME!"
-)
-if defined SSL_DLL if exist "!SSL_DLL!" (
-    for %%F in ("!SSL_DLL!") do set "SSL_NAME=%%~nxF"
-    echo [SUCCESS] OpenSSL SSL DLL resolved: !SSL_DLL!
-    set EXTRA_DLL_ARGS=!EXTRA_DLL_ARGS! --include-data-file="!SSL_DLL!=!SSL_NAME!"
-)
-
 rem 9. 额外数据文件检查 (globalYD.ini, code_ths_other.json, window_config.json, query_history.json, linkage_config.json, app.ico)
+rem 注意: 绝对不要通过 --include-data-file 手动添加 DLL (如 sqlite3.dll, libcrypto*.dll, libssl*.dll)
+rem 否则会与 Nuitka 内置的 dll-files 插件发生 'conflicts with dll' 冲突崩溃！
 set "EXTRA_DATA_ARGS="
 if exist "globalYD.ini" (
     set EXTRA_DATA_ARGS=!EXTRA_DATA_ARGS! --include-data-file=globalYD.ini=globalYD.ini
@@ -210,7 +191,6 @@ set CMD="%PYTHON_EXEC%" -m nuitka ^
     --nofollow-import-to=pytest ^
     --include-data-file="%CSV_PATH%=a_trade_calendar\a_trade_calendar.csv" ^
     !EXTRA_DATA_ARGS! ^
-    !EXTRA_DLL_ARGS! ^
     --include-package=tables ^
     --include-module=tables._comp_lzo ^
     --include-module=tables._comp_bzip2 ^
