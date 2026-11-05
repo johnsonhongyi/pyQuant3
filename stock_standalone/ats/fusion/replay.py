@@ -204,6 +204,8 @@ class ReplayConfig:
     persist_context: bool = False    # 仅显式启用时写入跨日上下文
     use_production_history: bool = True
     history_root: str = ""
+    enable_hot_pool: bool = False    # 热榜持续跟踪开关
+    hot_pool_config: Optional[Any] = None  # 热榜试验参数集 (HotPoolProvisionalConfig)
 
 
 @dataclass
@@ -218,6 +220,9 @@ class ReplayResult:
     trade_stats: Dict[str, Any] = field(default_factory=dict)
     entries: List[Dict[str, Any]] = field(default_factory=list)   # 赛马入局/剔除事件
     launch_signals: List[Dict[str, Any]] = field(default_factory=list)
+    hot_pool_events: List[Dict[str, Any]] = field(default_factory=list)
+    hot_pool_seats: Dict[str, Any] = field(default_factory=dict)
+    hot_pool_candidates: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -230,6 +235,9 @@ class ReplayResult:
             "trade_stats": self.trade_stats,
             "entries": self.entries,
             "launch_signals": self.launch_signals,
+            "hot_pool_events": self.hot_pool_events,
+            "hot_pool_seats": self.hot_pool_seats,
+            "hot_pool_candidates": self.hot_pool_candidates,
             "records": self.records,
         }
 
@@ -491,6 +499,8 @@ class DayReplay:
         first_only: Optional[bool] = None,
         active_only: bool = False,
         carry_codes: Iterable[str] = (),
+        enable_hot_pool: Optional[bool] = None,
+        hot_pool_carry_states: Optional[List[Dict[str, Any]]] = None,
     ) -> ReplayResult:
         day = day or today_str()
         if first_only is not None:
@@ -640,6 +650,30 @@ class DayReplay:
         from ats.fusion.history_events import HistoricalEvents
         history = HistoricalEvents(self.cfg.history_root or _app_root(), day) if self.cfg.use_production_history else None
 
+        hot_pool: Optional[Any] = None
+        _use_hot_pool = enable_hot_pool if enable_hot_pool is not None else self.cfg.enable_hot_pool
+        if _use_hot_pool:
+            from ats.fusion.hot_pool import HotPoolState, HotPoolProvisionalConfig
+            hp_cfg = self.cfg.hot_pool_config or HotPoolProvisionalConfig()
+            hot_pool = HotPoolState(config=hp_cfg)
+            hot_pool.seed_from_daily_context(
+                trade_date=day,
+                all_codes=codes,
+                daily_ctx_getter=lambda c, d: daily_ctx.get(c) or {},
+                seed_ts=float(clock[0]) if len(clock) else 0.0,
+            )
+            if hot_pool_carry_states:
+                hot_pool.carry_from_previous_day(
+                    trade_date=day,
+                    carried_states=hot_pool_carry_states,
+                    carry_ts=float(clock[0]) if len(clock) else 0.0,
+                )
+            for s_cd in hot_pool.candidates:
+                if s_cd in row_of:
+                    candidate_mask[row_of[s_cd]] = True
+                    candidate_activation.setdefault(s_cd, float(clock[0]))
+        self.last_hot_pool = hot_pool
+
         launch_idx = np.full(n_code, -1, dtype="int64")
         day_high = np.full(n_code, np.nan)
         day_low = np.full(n_code, np.nan)
@@ -712,6 +746,46 @@ class DayReplay:
                         if hist_code not in initial_candidates:
                             candidate_activation.setdefault(hist_code, float(clock[t]))
                         candidate_mask[row_of[hist_code]] = True
+
+            if hot_pool is not None:
+                hp_quotes = {}
+                hp_obs_map = {}
+                for idx_c, cd in enumerate(codes):
+                    if valid[idx_c]:
+                        _v_m20 = vol_mean20[idx_c, t] if vol_mean20 is not None else 0.0
+                        _ratio_est = float(vol[idx_c] / _v_m20) if _v_m20 > 0 else 1.0
+                        _open_px = float(day_open_map.get(cd) or close[idx_c])
+                        hp_quotes[cd] = {
+                            "price": float(close[idx_c]),
+                            "percent": float(pct[idx_c]),
+                            "volume": float(vol[idx_c]),
+                            "vwap": float(vwap[idx_c]),
+                            "trade": float(close[idx_c]),
+                            "open": _open_px,
+                            "ratio": _ratio_est,
+                        }
+                        hp_obs_map[cd] = {
+                            "freshness": "same_day",
+                            "trade_date": day,
+                            "vwap": {
+                                "timing": {"freshness": "same_day"},
+                                "including_current": {"10": float(vwap[idx_c])},
+                            },
+                        }
+                cur_mkt_pct = float(np.mean(pct[v])) if v.any() else 0.0
+                hot_pool.step_frame(
+                    trade_date=day,
+                    event_ts=float(clock[t]),
+                    quotes_map=hp_quotes,
+                    daily_ctx_getter=lambda c, d: daily_ctx.get(c) or {},
+                    obs_evidence_map=hp_obs_map,
+                    market_pct=cur_mkt_pct,
+                    source="replay_bar",
+                )
+                for act_cd in hot_pool.candidates:
+                    if act_cd in row_of and not candidate_mask[row_of[act_cd]]:
+                        candidate_mask[row_of[act_cd]] = True
+                        candidate_activation.setdefault(act_cd, float(clock[t]))
 
             if t % max(1, self.cfg.step) != 0:
                 continue
@@ -1694,11 +1768,20 @@ class DayReplay:
                 "T+1：买入当日不卖出，止损最早次日生效",
             ],
         }
+        hp_events = hot_pool.events_log if hot_pool is not None else []
+        hp_alerts = hot_pool.alerts_log if hot_pool is not None else []
+        hp_seats = {c: st.to_dict() for c, st in hot_pool.seats.items()} if hot_pool is not None else {}
+        hp_candidates = {c: ca.to_dict() for c, ca in hot_pool.candidates.items()} if hot_pool is not None else {}
+        meta["hot_pool_alerts"] = hp_alerts
+        meta["hot_pool_pulses"] = {k: p.to_dict() for k, p in hot_pool.sector_engine.pulses.items()} if hot_pool is not None else {}
         return ReplayResult(
             day=day, records=records, regime_series=regime_series,
             tier_stats=stats, meta=meta, orders=orders, trades=trades, trade_stats=trade_stats,
             entries=entries,
             launch_signals=launch_signals,
+            hot_pool_events=hp_events,
+            hot_pool_seats=hp_seats,
+            hot_pool_candidates=hp_candidates,
         )
 
     def discover(

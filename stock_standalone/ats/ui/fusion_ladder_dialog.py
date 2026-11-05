@@ -1106,12 +1106,19 @@ _TRACK_BASE_HEADERS = [
     "持续分", "证据数", "证据链", "之后MFE%", "MAE%", "收盘%",
 ]
 
+_HOT_POOL_HEADERS = [
+    "席位", "代码", "名称", "板块确认", "所属板块/脉冲", "席位分", "领先时差",
+    "现价", "涨幅%", "板块超额%", "10V状态", "分时承接", "首次观察",
+    "首次提示", "入池来源", "持续根数", "最大回撤%", "状态/退榜原因",
+]
+
 # 各表默认列宽（仅在从未保存过布局时使用；用户调整后由 ATS 表头持久化接管）
 _DEFAULT_COL_WIDTHS: Dict[str, List[int]] = {
     "tbl_live": [56, 74, 104, 76, 78, 64, 52, 52, 52, 52, 64, 108, 78, 70, 104, 82, 52, 62],
     "tbl_replay": [70, 74, 104, 76, 78, 78, 56, 64, 64, 64, 64, 64, 62, 82, 76, 100],
     "tbl_trades": [74, 104, 64, 76, 60, 64, 76, 72, 78, 78, 200],
     "tbl_track": [74, 104, 60, 76, 84, 76, 88, 72, 64, 60, 220, 74, 64, 64],
+    "tbl_hot_pool": [88, 74, 94, 88, 110, 68, 76, 74, 74, 78, 68, 68, 80, 80, 78, 64, 74, 120],
 }
 
 
@@ -1812,6 +1819,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
     _REPLAY_BASE_HEADERS = _REPLAY_BASE_HEADERS
     _TRADES_BASE_HEADERS = _TRADES_BASE_HEADERS
     _TRACK_BASE_HEADERS = _TRACK_BASE_HEADERS
+    _HOT_POOL_HEADERS = _HOT_POOL_HEADERS
     """融合梯度监视器主窗口（系统级独立顶层窗口，对齐 ATS 专业看板体系）。"""
 
     def __init__(self, parent=None):
@@ -2075,6 +2083,46 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self.tbl_live = self._create_interactive_table(self._LIVE_BASE_HEADERS + extra_headers, "tbl_live")
         self.tbl_live.sortItems(1, Qt.SortOrder.AscendingOrder)
         self.tabs.addTab(self.tbl_live, "实时梯度（影子流）")
+
+        # Tab 🔥: 梯度热榜（去弱留强）
+        page_hot_pool = QWidget()
+        v_hp = QVBoxLayout(page_hot_pool)
+        v_hp.setContentsMargins(4, 4, 4, 4)
+        row_hp = QHBoxLayout()
+
+        self.cb_hp_seat = QComboBox()
+        self.cb_hp_seat.addItems([
+            "全部在池 (核心+趋势+底部)",
+            "👑 核心领涨席",
+            "📈 10V 趋势观察席",
+            "🌱 底部潜伏观察席",
+            "📉 降级/淘汰记录席",
+        ])
+        self.cb_hp_seat.currentIndexChanged.connect(self.refresh_hot_pool)
+        row_hp.addWidget(QLabel("席位筛选:"))
+        row_hp.addWidget(self.cb_hp_seat)
+
+        self.cb_hp_pulse = QComboBox()
+        self.cb_hp_pulse.addItem("全部板块脉冲")
+        self.cb_hp_pulse.currentIndexChanged.connect(self.refresh_hot_pool)
+        row_hp.addWidget(QLabel("板块脉冲:"))
+        row_hp.addWidget(self.cb_hp_pulse)
+
+        self.lbl_hp_stats = QLabel("热榜就绪")
+        self.lbl_hp_stats.setStyleSheet("color:#ffaa00; font-weight:bold; margin-left:10px;")
+        row_hp.addWidget(self.lbl_hp_stats)
+        row_hp.addStretch(1)
+
+        btn_hp_ref = QPushButton("🔄 刷新热榜")
+        btn_hp_ref.clicked.connect(self.refresh_hot_pool)
+        row_hp.addWidget(btn_hp_ref)
+        v_hp.addLayout(row_hp)
+
+        self.tbl_hot_pool = self._create_interactive_table(self._HOT_POOL_HEADERS, "tbl_hot_pool")
+        self.tbl_hot_pool.sortItems(5, Qt.SortOrder.DescendingOrder)
+        v_hp.addWidget(self.tbl_hot_pool, 1)
+
+        self.tabs.addTab(page_hot_pool, "🔥 梯度热榜（去弱留强）")
 
         # Tab 1: 按日回放 [时间, 代码, 名称, 现价, 涨幅%, 终收%, 级别, RAR, 仓位%, MFE%, MAE%, 收盘%, 温度℃] + 自定义列
         self.tbl_replay = self._create_interactive_table(self._REPLAY_BASE_HEADERS + extra_headers, "tbl_replay")
@@ -3737,6 +3785,128 @@ class FusionLadderDialog(QWidget, WindowMixin):
     # ------------------------------------------------------------------
     # 实时与回补数据展示
     # ------------------------------------------------------------------
+    def refresh_hot_pool(self) -> None:
+        """刷新梯度热榜表格与统计信息。"""
+        try:
+            from ats.fusion.hot_pool import load_hot_pool_state
+            day = self.cmb_day.currentText().strip() or today_str()
+            hp_state = load_hot_pool_state(day, self.log_dir)
+            if hp_state is None and getattr(self, "_last_replay_res", None) is not None:
+                res = self._last_replay_res
+                if getattr(res, "hot_pool_seats", None):
+                    from ats.fusion.hot_pool import HotPoolState, StockSeatState, SectorPulse
+                    hp_state = HotPoolState()
+                    hp_state.current_trade_date = day
+                    for c, st_d in res.hot_pool_seats.items():
+                        hp_state.seats[c] = StockSeatState.from_dict(st_d)
+                    if getattr(res, "meta", {}).get("hot_pool_pulses"):
+                        for pk, pd_val in res.meta["hot_pool_pulses"].items():
+                            hp_state.sector_engine.pulses[pk] = SectorPulse.from_dict(pd_val)
+
+            # 更新脉冲下拉列表
+            if hp_state is not None:
+                confirmed_pulses = [p for p in hp_state.sector_engine.pulses.values() if p.is_confirmed]
+                curr_sel = self.cb_hp_pulse.currentText()
+                self.cb_hp_pulse.blockSignals(True)
+                self.cb_hp_pulse.clear()
+                self.cb_hp_pulse.addItem("全部板块脉冲")
+                for cp in confirmed_pulses:
+                    t_str = time.strftime("%H:%M", time.localtime(cp.first_pulse_ts)) if cp.first_pulse_ts > 0 else "--:--"
+                    self.cb_hp_pulse.addItem(f"{cp.sector_name} (群起{cp.active_count}/{cp.valid_count} 覆盖{int(cp.coverage_ratio*100)}% 始于{t_str})", cp.sector_key)
+                idx = self.cb_hp_pulse.findText(curr_sel)
+                if idx >= 0:
+                    self.cb_hp_pulse.setCurrentIndex(idx)
+                self.cb_hp_pulse.blockSignals(False)
+
+            if hp_state is None or not hp_state.seats:
+                self._fill_table_hint(self.tbl_hot_pool, f"{day} 暂无热榜记录 (待生成)")
+                self.lbl_hp_stats.setText(f"{day} 暂无热榜数据")
+                return
+
+            seat_filter = self.cb_hp_seat.currentText()
+            pulse_filter_data = self.cb_hp_pulse.currentData()
+
+            target_seats = []
+            for code, st in hp_state.seats.items():
+                if "全部在池" in seat_filter and st.seat not in ("CORE_LEADER", "TREND_WATCH", "BOTTOM_WATCH"):
+                    continue
+                elif "核心领涨" in seat_filter and st.seat != "CORE_LEADER":
+                    continue
+                elif "趋势观察" in seat_filter and st.seat != "TREND_WATCH":
+                    continue
+                elif "底部潜伏" in seat_filter and st.seat != "BOTTOM_WATCH":
+                    continue
+                elif "降级/淘汰" in seat_filter and st.seat != "EVICTED":
+                    continue
+
+                if pulse_filter_data and st.primary_sector != pulse_filter_data:
+                    continue
+
+                target_seats.append(st)
+
+            # 统计
+            n_core = sum(1 for s in hp_state.seats.values() if s.seat == "CORE_LEADER")
+            n_trend = sum(1 for s in hp_state.seats.values() if s.seat == "TREND_WATCH")
+            n_bottom = sum(1 for s in hp_state.seats.values() if s.seat == "BOTTOM_WATCH")
+            n_evicted = sum(1 for s in hp_state.seats.values() if s.seat == "EVICTED")
+            self.lbl_hp_stats.setText(f"👑核心:{n_core} | 📈趋势:{n_trend} | 🌱底部:{n_bottom} | 📉淘汰:{n_evicted} | 共筛选:{len(target_seats)}只")
+
+            self.tbl_hot_pool.setSortingEnabled(False)
+            self.tbl_hot_pool.setRowCount(len(target_seats))
+
+            SEAT_DISPLAY = {
+                "CORE_LEADER": "👑 核心领涨",
+                "TREND_WATCH": "📈 趋势观察",
+                "BOTTOM_WATCH": "🌱 底部潜伏",
+                "EVICTED": "📉 降级/淘汰",
+            }
+
+            for row_idx, st in enumerate(target_seats):
+                s_disp = SEAT_DISPLAY.get(st.seat, st.seat)
+                nm = name_of(st.code)
+                pulse = hp_state.sector_engine.pulses.get(st.primary_sector)
+                sec_disp = pulse.sector_name if pulse else (st.primary_sector.split(":", 1)[-1] if ":" in st.primary_sector else st.primary_sector)
+
+                lead_sec_str = "--"
+                if pulse and pulse.first_pulse_ts > 0 and st.first_observed_ts > 0:
+                    diff_s = int(st.first_observed_ts - pulse.first_pulse_ts)
+                    if diff_s <= 0:
+                        lead_sec_str = f"率先+{abs(diff_s)}s"
+                    else:
+                        lead_sec_str = f"跟风+{diff_s}s"
+
+                t_obs = time.strftime("%H:%M:%S", time.localtime(st.first_observed_ts)) if st.first_observed_ts > 0 else "--:--:--"
+                t_alr = time.strftime("%H:%M:%S", time.localtime(st.first_alert_ts)) if st.first_alert_ts > 0 else "--:--:--"
+                cand = hp_state.candidates.get(st.code)
+                source_str = cand.source if cand else "seed"
+
+                vals = [
+                    s_disp, st.code, nm, st.sector_confirm_state, sec_disp,
+                    st.watch_score, lead_sec_str, st.peak_price, f"{st.alpha_vs_sector:+.2f}%",
+                    f"{st.alpha_vs_sector:+.2f}%", "线上" if st.first_10v_reclaim_ts > 0 else "水下",
+                    "稳固" if st.sustained_bars > 0 else "失守", t_obs, t_alr, source_str,
+                    st.sustained_bars, f"{st.max_drawdown_pct:.1f}%", st.eviction_reason or ("观察中" if st.seat != "EVICTED" else "破位淘汰")
+                ]
+
+                for col_idx, val in enumerate(vals):
+                    item = FusionSortItem(str(val))
+                    if col_idx == 0:
+                        if st.seat == "CORE_LEADER":
+                            item.setForeground(QColor("#ff3344"))
+                        elif st.seat == "TREND_WATCH":
+                            item.setForeground(QColor("#ffaa00"))
+                        elif st.seat == "BOTTOM_WATCH":
+                            item.setForeground(QColor("#00e676"))
+                        elif st.seat == "EVICTED":
+                            item.setForeground(QColor("#888888"))
+                    elif col_idx in (8, 9):
+                        item.setForeground(QColor("#ff5c5c" if "+" in str(val) else "#00ff88"))
+                    self.tbl_hot_pool.setItem(row_idx, col_idx, item)
+
+            self.tbl_hot_pool.setSortingEnabled(True)
+        except Exception as exc:
+            logger.warning("[UI] refresh_hot_pool 异常: %s", exc)
+
     def refresh_live(self) -> None:
         # 🛡️ 开盘时段智能对齐：若盘前启动遗留且已到 09:15 开盘时段，手动刷新时自动切入今日
         try:

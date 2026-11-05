@@ -244,6 +244,12 @@ class FusionShadow:
         self._cuts: Optional[tuple] = None
         self._last_cut_n = 0
 
+        # 梯度热榜持续跟踪独立观察状态机 (Step 3)
+        from ats.fusion.hot_pool import HotPoolState
+        self.hot_pool = HotPoolState()
+        self._last_hot_pool_save_ts = 0.0
+        self._hot_pool_seeded_day = ""
+
         if self.enabled:
             try:
                 os.makedirs(self._log_dir, exist_ok=True)
@@ -1148,3 +1154,77 @@ class FusionShadow:
 
     def top(self, n: int = 10) -> List[Dict[str, Any]]:
         return [d.to_dict() for d in self.bus.top(n)]
+
+    def step_hot_pool(self, df_all_data: Any, now: float) -> None:
+        """驱动梯度热榜持续跟踪（独立观察层，绝不下单，不改既有决策与执行）。"""
+        if df_all_data is None or (hasattr(df_all_data, "empty") and df_all_data.empty):
+            return
+        try:
+            day = today_str(now)
+            # 1. 跨日重置与盘前种子初始化
+            if self._hot_pool_seeded_day != day:
+                self._hot_pool_seeded_day = day
+                from ats.fusion.hot_pool import HotPoolState, load_previous_day_carry_states
+                self.hot_pool = HotPoolState()
+                prev_carry = load_previous_day_carry_states(day, self._log_dir)
+                if prev_carry:
+                    self.hot_pool.carry_from_previous_day(day, prev_carry, carry_ts=now)
+                from ats.fusion.context import get_daily_context
+                d_ctx = get_daily_context()
+                if d_ctx and getattr(d_ctx, "ok", False):
+                    all_cds = [str(c).split(".")[0].zfill(6) for c in df_all_data.index]
+                    self.hot_pool.seed_from_daily_context(day, all_cds, lambda c, d: d_ctx.asof(c, d), seed_ts=now)
+
+            # 2. 构造快照字典
+            quotes_map = {}
+            idx_list = df_all_data.index
+            c_px = df_all_data["trade"] if "trade" in df_all_data.columns else (df_all_data["price"] if "price" in df_all_data.columns else df_all_data.get("close"))
+            c_pct = df_all_data.get("percent") if "percent" in df_all_data.columns else df_all_data.get("pct")
+            c_vw = df_all_data.get("vwap")
+            c_vol = df_all_data.get("volume")
+            c_ratio = df_all_data.get("ratio")
+            c_open = df_all_data.get("open")
+
+            for idx_c in idx_list:
+                c6 = str(idx_c).split(".")[0].zfill(6)
+                try:
+                    px = float(c_px.loc[idx_c]) if c_px is not None else 0.0
+                    if px <= 0.0:
+                        continue
+                    pct_val = float(c_pct.loc[idx_c]) if c_pct is not None else 0.0
+                    vw_val = float(c_vw.loc[idx_c]) if c_vw is not None else px
+                    vol_val = float(c_vol.loc[idx_c]) if c_vol is not None else 0.0
+                    r_val = float(c_ratio.loc[idx_c]) if c_ratio is not None else 1.0
+                    op_val = float(c_open.loc[idx_c]) if c_open is not None else px
+                    quotes_map[c6] = {
+                        "price": px,
+                        "percent": pct_val,
+                        "volume": vol_val,
+                        "vwap": vw_val,
+                        "ratio": r_val,
+                        "open": op_val,
+                        "trade": px,
+                    }
+                except Exception:
+                    continue
+
+            if not quotes_map:
+                return
+
+            from ats.fusion.context import get_daily_context
+            d_ctx = get_daily_context()
+            self.hot_pool.step_frame(
+                trade_date=day,
+                event_ts=now,
+                quotes_map=quotes_map,
+                daily_ctx_getter=lambda c, d: d_ctx.asof(c, d) if (d_ctx and d_ctx.ok) else {},
+                source="live_snapshot",
+            )
+
+            # 3. 按间隔（每 5 秒）原子持久化
+            if now - self._last_hot_pool_save_ts >= 5.0:
+                self._last_hot_pool_save_ts = now
+                from ats.fusion.hot_pool import save_hot_pool_state
+                save_hot_pool_state(self.hot_pool, self._log_dir)
+        except Exception as exc:
+            logger.debug("[FusionShadow] step_hot_pool exception: %s", exc)

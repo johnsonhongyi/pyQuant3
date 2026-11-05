@@ -3003,6 +3003,9 @@ class StockLiveStrategy:
                 seal_rate=0.8,
                 now=now_ts,
             )
+            # 独立驱动梯度热榜持续跟踪 (Step 3 影子观察层)
+            if hasattr(_fusion, 'step_hot_pool'):
+                _fusion.step_hot_pool(df_all_data, now_ts)
 
             # 2. 板块共振（sector_resonance）与板块第一股龙头判定（纯内存字典聚合 + 静态板块映射缓存，耗时 < 2ms）
             sec_col = "category" if "category" in df_all_data.columns else ("hangye" if "hangye" in df_all_data.columns else "")
