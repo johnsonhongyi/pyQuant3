@@ -157,15 +157,15 @@ def test_sector_pulse_dual_track_and_coverage_gate():
     # 即使 2 只股票全部大涨 delta=1.5%，也严禁判定为群起！
     t0 = 1700000000.0
     quotes_low_coverage = {
-        "000001": {"price": 10.0, "percent": 0.0, "ratio": 1.5},
-        "000002": {"price": 10.0, "percent": 0.0, "ratio": 1.5},
+        "000001": {"price": 10.0, "percent": 0.0, "ratio": 1.5, "ts": t0},
+        "000002": {"price": 10.0, "percent": 0.0, "ratio": 1.5, "ts": t0},
     }
     engine.step_frame("2026-11-05", t0, quotes_low_coverage)
 
     t1 = t0 + 60.0
     quotes_low_cov_pulse = {
-        "000001": {"price": 11.5, "percent": 1.5, "ratio": 2.0},
-        "000002": {"price": 11.5, "percent": 1.5, "ratio": 2.0},
+        "000001": {"price": 11.5, "percent": 1.5, "ratio": 2.0, "ts": t1},
+        "000002": {"price": 11.5, "percent": 1.5, "ratio": 2.0, "ts": t1},
     }
     pulses1 = engine.step_frame("2026-11-05", t1, quotes_low_cov_pulse, market_pct=0.0)
     p_semi = pulses1.get("industry:电子-半导体")
@@ -176,19 +176,19 @@ def test_sector_pulse_dual_track_and_coverage_gate():
 
     # 场景 2: 覆盖率达标 (4/5 = 80% >= 50%)，且 3 只增量脉冲达标 -> NEW_IMPULSE
     quotes_full = {
-        "000001": {"price": 10.0, "percent": 0.0, "ratio": 1.5},
-        "000002": {"price": 10.0, "percent": 0.0, "ratio": 1.5},
-        "000003": {"price": 10.0, "percent": 0.0, "ratio": 1.5},
-        "000004": {"price": 10.0, "percent": 0.0, "ratio": 1.0},
+        "000001": {"price": 10.0, "percent": 0.0, "ratio": 1.5, "ts": t0},
+        "000002": {"price": 10.0, "percent": 0.0, "ratio": 1.5, "ts": t0},
+        "000003": {"price": 10.0, "percent": 0.0, "ratio": 1.5, "ts": t0},
+        "000004": {"price": 10.0, "percent": 0.0, "ratio": 1.0, "ts": t0},
     }
     engine._price_windows.clear()
     engine.step_frame("2026-11-05", t0, quotes_full)
 
     quotes_surge = {
-        "000001": {"price": 10.8, "percent": 0.8, "ratio": 2.0},
-        "000002": {"price": 10.7, "percent": 0.7, "ratio": 2.0},
-        "000003": {"price": 10.6, "percent": 0.6, "ratio": 2.0},
-        "000004": {"price": 10.1, "percent": 0.1, "ratio": 1.0},
+        "000001": {"price": 10.8, "percent": 0.8, "ratio": 2.0, "ts": t1},
+        "000002": {"price": 10.7, "percent": 0.7, "ratio": 2.0, "ts": t1},
+        "000003": {"price": 10.6, "percent": 0.6, "ratio": 2.0, "ts": t1},
+        "000004": {"price": 10.1, "percent": 0.1, "ratio": 1.0, "ts": t1},
     }
     pulses2 = engine.step_frame("2026-11-05", t1, quotes_surge, market_pct=0.0)
     p_semi2 = pulses2.get("industry:电子-半导体")
@@ -208,10 +208,10 @@ def test_sector_pulse_dual_track_and_coverage_gate():
     # 时间推移 200 秒（超过 180 秒短窗，短窗增量停滞为 0.0% < 0.5%）-> 进入 DECAY_WATCH
     t2 = t1 + 200.0
     quotes_flat = {
-        "000001": {"price": 10.8, "percent": 0.8, "ratio": 1.0},
-        "000002": {"price": 10.7, "percent": 0.7, "ratio": 1.0},
-        "000003": {"price": 10.6, "percent": 0.6, "ratio": 1.0},
-        "000004": {"price": 10.1, "percent": 0.1, "ratio": 1.0},
+        "000001": {"price": 10.8, "percent": 0.8, "ratio": 1.0, "ts": t2},
+        "000002": {"price": 10.7, "percent": 0.7, "ratio": 1.0, "ts": t2},
+        "000003": {"price": 10.6, "percent": 0.6, "ratio": 1.0, "ts": t2},
+        "000004": {"price": 10.1, "percent": 0.1, "ratio": 1.0, "ts": t2},
     }
     pulses3 = engine.step_frame("2026-11-05", t2, quotes_flat, market_pct=0.0)
     assert pulses3["industry:电子-半导体"].state == "DECAY_WATCH"
@@ -219,10 +219,10 @@ def test_sector_pulse_dual_track_and_coverage_gate():
     # 二次群起 -> REACTIVATED 并累加 re_pulse_count，保留 first_pulse_ts
     t3 = t2 + 60.0
     quotes_re_pulse = {
-        "000001": {"price": 12.0, "percent": 2.0, "ratio": 2.5},
-        "000002": {"price": 11.9, "percent": 1.9, "ratio": 2.5},
-        "000003": {"price": 11.8, "percent": 1.8, "ratio": 2.5},
-        "000004": {"price": 10.2, "percent": 0.2, "ratio": 1.0},
+        "000001": {"price": 12.0, "percent": 2.0, "ratio": 2.5, "ts": t3},
+        "000002": {"price": 11.9, "percent": 1.9, "ratio": 2.5, "ts": t3},
+        "000003": {"price": 11.8, "percent": 1.8, "ratio": 2.5, "ts": t3},
+        "000004": {"price": 10.2, "percent": 0.2, "ratio": 1.0, "ts": t3},
     }
     pulses4 = engine.step_frame("2026-11-05", t3, quotes_re_pulse, market_pct=0.0)
     p_semi4 = pulses4["industry:电子-半导体"]
@@ -302,11 +302,11 @@ def test_hot_pool_four_seats_transitions_and_time_stamps():
     # 000001 站上 10V 与 VWAP -> 准入 TREND_WATCH
     t1 = 1700000060.0
     quotes_t1 = {
-        "000001": {"price": 10.2, "percent": 1.5, "volume": 1000.0, "vwap": 10.15, "ratio": 1.2, "open": 10.0},
-        "000003": {"price": 9.3, "percent": 1.5, "volume": 800.0, "vwap": 9.25, "ratio": 1.5, "open": 9.1},
-        "000002": {"price": 10.0, "percent": 0.0, "volume": 500.0, "vwap": 10.0, "ratio": 1.0, "open": 10.0},
-        "000004": {"price": 10.0, "percent": 0.0, "volume": 500.0, "vwap": 10.0, "ratio": 1.0, "open": 10.0},
-        "000005": {"price": 10.0, "percent": 0.0, "volume": 500.0, "vwap": 10.0, "ratio": 1.0, "open": 10.0},
+        "000001": {"price": 10.2, "percent": 1.5, "volume": 1000.0, "vwap": 10.15, "ratio": 1.2, "open": 10.0, "ts": t1},
+        "000003": {"price": 9.3, "percent": 1.5, "volume": 800.0, "vwap": 9.25, "ratio": 1.5, "open": 9.1, "ts": t1},
+        "000002": {"price": 10.0, "percent": 0.0, "volume": 500.0, "vwap": 10.0, "ratio": 1.0, "open": 10.0, "ts": t1},
+        "000004": {"price": 10.0, "percent": 0.0, "volume": 500.0, "vwap": 10.0, "ratio": 1.0, "open": 10.0, "ts": t1},
+        "000005": {"price": 10.0, "percent": 0.0, "volume": 500.0, "vwap": 10.0, "ratio": 1.0, "open": 10.0, "ts": t1},
     }
     obs_ev_t1 = {
         "000001": {"freshness": "same_day", "vwap": {"timing": {"freshness": "same_day"}, "including_current": {"10": 10.02}}},
@@ -332,11 +332,11 @@ def test_hot_pool_four_seats_transitions_and_time_stamps():
     # 000003 强势收复 10V -> 晋级 TREND_WATCH
     t2 = 1700000240.0
     quotes_t2 = {
-        "000001": {"price": 10.9, "percent": 7.9, "volume": 5000.0, "vwap": 10.40, "ratio": 2.5},
-        "000003": {"price": 10.1, "percent": 9.8, "volume": 4000.0, "vwap": 9.60, "ratio": 2.2},
-        "000002": {"price": 10.8, "percent": 8.0, "volume": 3000.0, "vwap": 10.3, "ratio": 2.0},
-        "000004": {"price": 10.5, "percent": 5.0, "volume": 2000.0, "vwap": 10.2, "ratio": 1.8},
-        "000005": {"price": 10.0, "percent": 0.0, "volume": 500.0, "vwap": 10.0, "ratio": 1.0},
+        "000001": {"price": 10.9, "percent": 7.9, "volume": 5000.0, "vwap": 10.40, "ratio": 2.5, "ts": t2},
+        "000003": {"price": 10.1, "percent": 9.8, "volume": 4000.0, "vwap": 9.60, "ratio": 2.2, "ts": t2},
+        "000002": {"price": 10.8, "percent": 8.0, "volume": 3000.0, "vwap": 10.3, "ratio": 2.0, "ts": t2},
+        "000004": {"price": 10.5, "percent": 5.0, "volume": 2000.0, "vwap": 10.2, "ratio": 1.8, "ts": t2},
+        "000005": {"price": 10.0, "percent": 0.0, "volume": 500.0, "vwap": 10.0, "ratio": 1.0, "ts": t2},
     }
     obs_ev_t2 = {
         "000001": {"freshness": "same_day", "vwap": {"timing": {"freshness": "same_day"}, "including_current": {"10": 10.08}}},
@@ -357,11 +357,11 @@ def test_hot_pool_four_seats_transitions_and_time_stamps():
     # 000003 大幅破位失守 10V -> 淘汰进入 EVICTED
     t3 = 1700000420.0
     quotes_t3 = {
-        "000001": {"price": 10.4, "percent": 3.0, "volume": 5500.0, "vwap": 10.45, "ratio": 1.8}, # 回撤
-        "000003": {"price": 9.7, "percent": 5.4, "volume": 4200.0, "vwap": 9.80, "ratio": 1.2},   # 破位失守 10V(10.01)
-        "000002": {"price": 10.8, "percent": 8.0, "volume": 3000.0, "vwap": 10.3, "ratio": 2.0},
-        "000004": {"price": 10.5, "percent": 5.0, "volume": 2000.0, "vwap": 10.2, "ratio": 1.8},
-        "000005": {"price": 10.0, "percent": 0.0, "volume": 500.0, "vwap": 10.0, "ratio": 1.0},
+        "000001": {"price": 10.4, "percent": 3.0, "volume": 5500.0, "vwap": 10.45, "ratio": 1.8, "ts": t3}, # 回撤
+        "000003": {"price": 9.7, "percent": 5.4, "volume": 4200.0, "vwap": 9.80, "ratio": 1.2, "ts": t3},   # 破位失守 10V(10.01)
+        "000002": {"price": 10.8, "percent": 8.0, "volume": 3000.0, "vwap": 10.3, "ratio": 2.0, "ts": t3},
+        "000004": {"price": 10.5, "percent": 5.0, "volume": 2000.0, "vwap": 10.2, "ratio": 1.8, "ts": t3},
+        "000005": {"price": 10.0, "percent": 0.0, "volume": 500.0, "vwap": 10.0, "ratio": 1.0, "ts": t3},
     }
     obs_ev_t3 = {
         "000001": {"freshness": "same_day", "vwap": {"timing": {"freshness": "same_day"}, "including_current": {"10": 10.08}}},

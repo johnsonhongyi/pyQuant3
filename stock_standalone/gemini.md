@@ -7,6 +7,39 @@
   - **Flash（执行者）**：通过 `invoke_subagent(..., Model="flash")` 承接写代码、跑测试、批量扫描等高 Token 消耗的具体事务。
 - **动态裁量**：以质量为主、价格为辅；质量第一、效率第二。轻微修改与极高难度核心问题由 Argon 亲自操刀。
 
+## 2026-11-05 23:05 【ATS语音报警中心全功能对齐、股票代码防数值朗读、席位淘汰防抖冷却与SSOT内存直连闭环】(`ats/alert_notifier.py`, `ats/fusion/hot_pool.py`, `ats/fusion/shadow.py`, `ats/ui/fusion_ladder_dialog.py`, `stock_live_strategy.py`, `alert_manager.py`, `run_ats.py`, `tests/test_ats_alert_notifier_hot_pool_closed_loop.py`)
+- [x] **【彻底解决后台幽灵播报根因与退出彻底静默】**：
+  - **排查并杀死后台幽灵进程**：通过进程深度扫描揪出残留的单测子进程（PID 10844，之前运行 `pytest` 生成了大量热榜告警塞入 Windows SAPI COM 队列，退出时未释放卡死在后台持续向物理声卡发音），已强制终止该进程；
+  - **单测沙箱与退出彻底静默协议 (`AlertNotifier.shutdown`)**：在 `AlertNotifier` 中增加 `shutdown()` 协议（置位 `_shutting_down`、清除 `_notify_queue`、终止所有语音子线程），并在 `run_ats.py` 的 `aboutToQuit` 与 `ATSMainWindow.closeEvent` 中严格连接执行；`AlertNotifier._speak_text` 增加单测沙箱静音检查，严禁单测打扰真实物理声卡，并杜绝强行将已停止的底层 `AlertManager` 置为开启状态；
+- [x] **【彻底消除“60万零137”股票代码数值发音 Bug】**：
+  - **中文股票名可靠解析**：彻底修复 `hot_pool.py:1473` 导入错误的 `from ats.fusion.adapter import name_of`，修正为 `sys_utils.resolve_stock_name` 与 `ats.fusion.names.name_of` 权威双源解析，确保 100% 提取真实股票名称（如“浪潮软件”）；
+  - **六位代码逐字数字化防数值朗读**：在 `alert_manager.normalize_speech_text` 及 `AlertNotifier` 语音通道中引入正则逐字汉字化转译（`\b\d{6}\b` 转为 `六 零 零 一 三 七` 等），且在已有中文名时优先播报中文名，SAPI 绝不再把股票代码误读成十进制数十万大数字；
+- [x] **【彻底消灭席位高频震荡（Chattering Loop）与海量虚假提示】**：
+  - **席位淘汰防抖冷冻门禁 (`Anti-Chattering Gate`)**：标的被置为 `EVICTED` 淘汰后，强制执行 300 秒（5分钟）冷冻期，冷却期未过严禁重新准入 `TREND_WATCH`，彻底阻断席位超额挤出与重新准入秒级反复拉锯死循环；
+  - **容量超额常规维护去噪**：席位容量满额时的末位换血修剪（`trend_capacity_exceeded_eviction`）属于后台容量上限正常维护，仅记录审计日志，绝不向语音通道外发打扰；
+- [x] **【SSOT 内存优先直连彻底解决梯度天梯窗口空空如也】**：
+  - **内存单例直读 (`FusionShadow.get_active_instance`)**：`FusionShadow` 注册进程级全局活跃单例；`FusionLadderDialog.refresh_hot_pool` 优先直连内存中的 `hot_pool` 实例，0 毫秒呈现真实在席标的，彻底解决前台读磁盘、后台跑内存导致的数据脱节与界面空白；
+- [x] **【ATS 独立语音报警中心主线程依附与 Toast 弹窗时间队列打通】**：
+  - **Qt 主线程依附与 QueuedConnection 跨线程投递**：`AlertNotifier` 初始化时强制 `moveToThread` 依附 Qt 主 GUI 线程，信号槽连接使用 `Qt.ConnectionType.QueuedConnection`，彻底修复子线程直接创建 `InAppToastWidget` 抛异常导致“只有语音无弹窗”的底层架构缺陷；
+  - **Toast 点击定向直达唤醒 `FusionLadderDialog` 并切到 Tab 1**：`activate_and_locate_target_window` 针对梯度热榜信号优先定向唤起 `FusionLadderDialog`，自动切换到 Tab 1（🔥 梯度热榜），多维清除席位、脉冲、搜索框筛选障碍，精准高亮定位对应标的行；
+- [x] **【全量专项与回归自动化测试 100% 全部 PASS】**：
+  - 新增 `tests/test_ats_alert_notifier_hot_pool_closed_loop.py`（6 项全通），全套 18 项专项回归测试 100% 全部通过（9.26s）。
+
+## 2026-11-05 22:20 【时间戳新鲜度硬门禁、取消英文全面自然纯中文播报、Toast多维过滤清除定位闭环】(`ats/fusion/hot_pool.py`, `ats/alert_notifier.py`, `ats/ui/fusion_ladder_dialog.py`, `tests/test_hot_pool_toast_voice_locate_fix.py`, `tests/test_hot_pool_step1_step2.py`)
+- [x] **【彻底解决缺失行情时间戳仍可通过席位与脉冲门禁的隐患（阻断项 3）】**：
+  - **无时效证明行情硬拦截**：`SectorPulseEngine` 价格窗口更新前校验、板块成员覆盖率统计、以及 `HotPoolState` 逐股席位状态评估三处门禁，由原来的 `if q_ts > 0.0 and ...` 彻底升级为 `if q_ts <= 0.0 or (event_ts - q_ts > 60.0 or q_ts - event_ts > 120.0): continue`；
+  - **时效性证明硬要求**：缺失时间戳（`q_ts <= 0.0`）坚决视为无时效证明的不可靠数据，绝不进入价格窗口，绝不通过席位评估；
+- [x] **【彻底取消英文播报，实现 100% 纯正地道自然中文播报（阻断项 4）】**：
+  - **全量转译字典与动态规则（`translate_reason_to_cn`）**：建立覆盖 100% 全部状态原因的模块级转译系统，包括动态板块脉冲确认（`所属半导体板块脉冲确认共振`）、昨日席位继承（`继承昨日趋势观察席位`）、赛马分反超（`领涨分被000001反超`）及龙头更替（`领跑标的由A更替为B`）；
+  - **单一权威通知源，根除重复播报与漏报**：后台状态机演进（`_emit_alert`）作为唯一权威通知发起方，第一时间入队；前台 `refresh_hot_pool` 仅维护已见集合，坚决移除前台重复调用 `notify_special_signal`，彻底消除同提醒播报两遍、前台读原始英文 reason 及 5 秒内超 15 条丢失 Toast 的隐患；
+  - **AlertNotifier 纯中文自然语音硬门禁**：梯度热榜语音分支在转译基础上增加纯英文 ASCII 单词与下划线彻底清洗过滤（`re.sub(r'[a-zA-Z]+', '', clean_r).replace('_', ' ')`），TTS 引擎 100% 仅朗读自然纯正中文（如“梯度热榜，浦发银行，晋级核心领涨：核心席位超额顺延降级”）；
+- [x] **【Toast 点击直达全维度清除过滤阻碍精准定位（阻断项 4）】**：
+  - **全维度阻碍自愈**：`locate_stock_in_table` 在当前表格未检索到标的时，不仅将席位筛选切换为“全部席位 (含淘汰)”，更自动重置板块脉冲筛选为“全部板块脉冲”（`currentIndex = 0`），并自动清空限制性搜索关键词；
+  - **刷新后精准滚动高亮**：触发重载后精准匹配代码列，取消行隐藏、选中行并居中平滑滚动显示，联动主图广播；
+- [x] **【真实端到端生产链路全量测试全绿通过（阻断项 5）】**：
+  - **重构真实验证**：重构 `tests/test_hot_pool_toast_voice_locate_fix.py`，真实验证缺少时间戳拦截、真实捕获生产语音分支纯中文输出、真实驱动 `locate_stock_in_table` 多维清除并定位、以及真实断言单测严禁访问/污染宿主物理盘 `G:\fusion_shadow`；
+  - **全量回归 100% 全部通过**：专项 4 项 + 关联回归 15 项共 19 项单元与回放测试全部通过。
+
 ## 2026-11-05 21:10 【梯度热榜刷新无效果与单测污染清理、无下划线自然语音与Toast点击联动定位闭环】(`ats/fusion/hot_pool.py`, `ats/alert_notifier.py`, `ats/ui/fusion_ladder_dialog.py`, `tests/test_hot_pool_toast_voice_locate_fix.py`)
 - [x] **【彻底根治单测残留污染导致刷新只有 1 只标的（600000 浦发银行）】**：
   - **深层根因定位**：`hot_pool` 历史落盘无条件默认写入 `G:\fusion_shadow`，单测运行产生仅含 600000 的 mock 数据覆盖了宿主物理盘；实盘收盘后界面点击刷新时，因优先读取物理盘单测残留文件导致界面仅显示 1 只假数据；

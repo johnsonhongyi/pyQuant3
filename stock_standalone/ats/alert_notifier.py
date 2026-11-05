@@ -173,17 +173,35 @@ def activate_and_locate_target_window(parent: Optional[Any], code: str = "", rea
             pass
 
     if target_p is None and app:
-        active_w = app.activeWindow()
-        if active_w and getattr(active_w, '__class__', None).__name__ != "InAppToastWidget":
-            target_p = active_w
-        else:
+        # 梯度热榜信号：优先精准定向检索 FusionLadderDialog
+        is_hp = ("梯度热榜" in str(reason))
+        if is_hp:
             for w in app.topLevelWidgets():
-                if w.isVisible() and getattr(w, '__class__', None).__name__ in (
-                    "DailyLimitUpDialog", "HotSectorLeaderboard", "MultiPeriodDialog", "ATSMainWindow",
-                    "IPOSubnewDetectorDialog", "IPOCommandRoomDialog", "FusionLadderDialog"
-                ):
+                if getattr(w, '__class__', None).__name__ == "FusionLadderDialog":
                     target_p = w
                     break
+            if target_p is None:
+                for w in app.topLevelWidgets():
+                    if getattr(w, '__class__', None).__name__ == "ATSMainWindow":
+                        if hasattr(w, "open_fusion_ladder"):
+                            try:
+                                target_p = w.open_fusion_ladder()
+                            except Exception:
+                                pass
+                        break
+
+        if target_p is None:
+            active_w = app.activeWindow()
+            if active_w and getattr(active_w, '__class__', None).__name__ != "InAppToastWidget":
+                target_p = active_w
+            else:
+                for w in app.topLevelWidgets():
+                    if w.isVisible() and getattr(w, '__class__', None).__name__ in (
+                        "DailyLimitUpDialog", "HotSectorLeaderboard", "MultiPeriodDialog", "ATSMainWindow",
+                        "IPOSubnewDetectorDialog", "IPOCommandRoomDialog", "FusionLadderDialog"
+                    ):
+                        target_p = w
+                        break
 
     # 2. 物理级唤醒与置顶展示
     if target_p is not None:
@@ -220,7 +238,11 @@ def activate_and_locate_target_window(parent: Optional[Any], code: str = "", rea
         logger.info(f"🎯 [TOAST_LINK] 直达唤醒来源窗口 [{p_name}] 并高亮定位标的: {code_str}")
 
         if target_p is not None:
-            # 优先 locate_stock_in_table (DailyLimitUpDialog, HotSectorLeaderboard, MultiPeriodDialog)
+            # 若目标为天梯热榜对话框，确保切换到 Tab 1 (🔥 梯度热榜)
+            if getattr(target_p, '__class__', None).__name__ == "FusionLadderDialog":
+                if hasattr(target_p, "tabs") and hasattr(target_p.tabs, "setCurrentIndex"):
+                    target_p.tabs.setCurrentIndex(1)
+            # 优先 locate_stock_in_table (DailyLimitUpDialog, HotSectorLeaderboard, MultiPeriodDialog, FusionLadderDialog)
             if hasattr(target_p, 'locate_stock_in_table'):
                 try:
                     target_p.locate_stock_in_table(code_str, auto_popup=True, reason=reason)
@@ -515,10 +537,16 @@ class AlertNotifier(QObject if HAS_PYQT else object):
         self._current_toast = None
         load_toast_screen_config()
         
-        # 跨线程安全投递绑定
+        # 跨线程安全投递绑定与主线程依附保障
         if HAS_PYQT:
             try:
-                self.sig_notify_request.connect(self._enqueue_notification_item)
+                app = QApplication.instance()
+                if app:
+                    app_thread = app.thread()
+                    if self.thread() != app_thread:
+                        self.moveToThread(app_thread)
+                from PyQt6.QtCore import Qt
+                self.sig_notify_request.connect(self._enqueue_notification_item, Qt.ConnectionType.QueuedConnection)
             except Exception as e_sig:
                 logger.debug(f"Signal connect error: {e_sig}")
 
@@ -984,6 +1012,12 @@ class AlertNotifier(QObject if HAS_PYQT else object):
     def notify_special_signal(self, code, name, reason, score=90.0, win_rate="85.0%", parent=None, is_force=False, source: str = "", alert_only: bool = False):
         """推送信信号弹窗与语音 (具备跨线程投递、全自动限频与去重保护、单股冷却与异动突变即时放行)
         
+        # 🛡️ 退出状态或单测环境静默阻断
+        if getattr(self, '_is_shutdown', False):
+            return
+        if bool(os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in sys.modules) and not is_force:
+            return
+        
         Args:
             code: 股票代码
             name: 股票名称
@@ -1328,8 +1362,28 @@ class AlertNotifier(QObject if HAS_PYQT else object):
         elif "缺口加速" in reason:
             voice_text = f"缺口加速买点，{name}，跳空高开未补缺"
         elif "梯度热榜" in reason or source == "梯度热榜":
-            # 专有梯度热榜自然语音播报：彻底消除下划线，提取通顺的席位与逻辑
-            clean_r = str(reason).replace("【梯度热榜】", "").replace("_", " ")
+            # 专有梯度热榜自然语音播报：彻底消除下划线与英文，实现 100% 自然纯中文播报
+            import re
+            try:
+                from ats.fusion.hot_pool import translate_reason_to_cn, TRANSITION_CN
+            except Exception:
+                translate_reason_to_cn = lambda r: str(r).replace("_", " ")
+                TRANSITION_CN = {}
+
+            clean_r = str(reason).replace("【梯度热榜】", "").strip()
+            # 若含有下划线或英文字符，执行专业中文转译
+            if "_" in clean_r or any(c.isascii() and c.isalpha() for c in clean_r):
+                if ":" in clean_r:
+                    trans_part, r_part = clean_r.split(":", 1)
+                    trans_cn = TRANSITION_CN.get(trans_part.strip(), trans_part.strip())
+                    clean_r = f"{trans_cn}：{translate_reason_to_cn(r_part.strip())}"
+                elif "：" in clean_r:
+                    trans_part, r_part = clean_r.split("：", 1)
+                    clean_r = f"{trans_part.strip()}：{translate_reason_to_cn(r_part.strip())}"
+                else:
+                    clean_r = translate_reason_to_cn(clean_r)
+            # 消除任何残余的纯英文 ASCII 单词与下划线，杜绝 TTS 读出英文
+            clean_r = re.sub(r'[a-zA-Z]+', '', clean_r).replace("_", " ")
             clean_r = re.sub(r'[^\w\s\u4e00-\u9fa5，。！、：:]', ' ', clean_r)
             clean_r = ' '.join(clean_r.split())[:35]
             voice_text = f"梯度热榜，{name}，{clean_r}"
@@ -1340,7 +1394,14 @@ class AlertNotifier(QObject if HAS_PYQT else object):
             clean_reason = ' '.join(clean_reason.split())[:20]
             voice_text = f"特异信号，{name}，{clean_reason}"
         
-        # 全局硬防护：无论任何分支产生的 voice_text，彻底杜绝任何下划线被 TTS 朗读
+        # 🛡️ 股票代码转逐字朗读防数值化：如 "600137" 转换为 "六零零一三七"，绝不被 Windows SAPI 朗读为 "六十万零一百三十七"
+        _DIGIT_MAP = {'0': '零', '1': '一', '2': '二', '3': '三', '4': '四', '5': '五', '6': '六', '7': '七', '8': '八', '9': '九'}
+        # 1. 替换连续 6 位阿拉伯数字为单个汉字逐字发音
+        voice_text = re.sub(r'(?<!\d)\d{6}(?!\d)', lambda m: ''.join(_DIGIT_MAP.get(c, c) for c in m.group(0)), voice_text)
+        # 2. 如果已经有真实的中文股票名称，播报文本中若出现“标的六零零一三七”，直接简化为中文股票名
+        if name and not any(ch.isdigit() for ch in str(name)) and "标的" not in str(name):
+            voice_text = re.sub(r'标的[零一二三四五六七八九]{6}', str(name), voice_text)
+        # 3. 全局硬防护：彻底杜绝任何下划线被 TTS 朗读
         voice_text = voice_text.replace("_", " ")
         if self.is_voice_enabled():
             self._speak_text(voice_text)
@@ -1378,23 +1439,26 @@ class AlertNotifier(QObject if HAS_PYQT else object):
 
     def _speak_text(self, text: str):
         """标准 safe 子线程语音播报：基于 AlertManager / SAPI.SpVoice，绝对不与 Tk/Qt/Vis 冲突"""
-        if not text or not self.is_voice_enabled():
+        if not text or not self.is_voice_enabled() or getattr(self, '_is_shutdown', False):
+            return
+        # 🛡️ 单测沙箱模式严禁向真实声卡输出物理语音
+        if bool(os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in sys.modules):
             return
 
         def _worker():
-            if not self.is_voice_enabled():
+            if not self.is_voice_enabled() or getattr(self, '_is_shutdown', False):
                 return
             # 1. 优先使用项目标准的 alert_manager (无缝集成队列与全系统配置)
             try:
                 from alert_manager import get_alert_manager
                 mgr = get_alert_manager()
-                if self._voice_stop_event.is_set():
+                if self._voice_stop_event.is_set() or getattr(self, '_is_shutdown', False):
                     return
-                # 🛡️ 确保底层 AlertManager 语音开关处于就绪状态 (与 AlertNotifier 保持一致)
-                if hasattr(mgr, 'voice_enabled') and not mgr.voice_enabled:
-                    mgr.voice_enabled = True
+                # 🛡️ 尊重底层 AlertManager 开关状态，若底层已停止或被外部禁用，绝不流氓强开
                 if hasattr(mgr, 'enabled') and not mgr.enabled:
-                    mgr.enabled = True
+                    return
+                if hasattr(mgr, 'voice_enabled') and not mgr.voice_enabled:
+                    return
                 if hasattr(mgr, 'speak'):
                     mgr.speak(text, priority=0)
                     return
@@ -1435,6 +1499,22 @@ class AlertNotifier(QObject if HAS_PYQT else object):
             t = threading.Thread(target=_worker, name="ATSSafeVoiceThread", daemon=True)
             t.start()
             self._voice_threads.append(t)
+
+
+    def shutdown(self):
+        """彻底安全注销 AlertNotifier，清空排队队列并终止所有语音子线程"""
+        self._is_shutdown = True
+        self._voice_stop_event.set()
+        with self._voice_lock:
+            self._notify_queue.clear()
+            self._voice_threads.clear()
+        if hasattr(self, '_current_toast') and self._current_toast is not None:
+            try:
+                self._current_toast.close()
+            except Exception:
+                pass
+            self._current_toast = None
+        logger.info("✅ AlertNotifier 已彻底注销并终止后台语音线程")
 
 
 def get_alert_notifier() -> AlertNotifier:

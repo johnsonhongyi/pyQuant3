@@ -200,6 +200,14 @@ def main():
         from ats.bounded_evaluation_store import evaluation_store
         threading.Thread(target=evaluation_store.flush, name='ATS-ArchiveClose', daemon=False).start()
     app.aboutToQuit.connect(flush_archives)
+
+    def shutdown_alert_notifier():
+        try:
+            from ats.alert_notifier import get_alert_notifier
+            get_alert_notifier().shutdown()
+        except Exception:
+            pass
+    app.aboutToQuit.connect(shutdown_alert_notifier)
     if window._ipo_learning_console_enabled:
         try:
             from ats.strategy.ipo_gate_context_provider import get_default_ipo_gate_context_provider

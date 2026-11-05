@@ -7803,6 +7803,11 @@ class ATSMainWindow(QMainWindow):
         notifier = AlertNotifier._instance
         if notifier is None:
             return True
+        try:
+            if hasattr(notifier, "shutdown"):
+                notifier.shutdown()
+        except Exception:
+            pass
         return notifier._stop_voice_workers(self._exit_cleanup_deadline)
 
     def closeEvent(self, event):

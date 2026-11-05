@@ -47,6 +47,71 @@ logger = logging.getLogger(__name__)
 # 1. 试验参数集 (Provisional & Calibrated Config)
 # =====================================================================
 
+TRANSITION_CN = {
+    "FIRST_OBSERVED_BOTTOM": "底部潜伏观察",
+    "FIRST_OBSERVED_TREND": "站上趋势观察",
+    "PROMOTED_TO_TREND": "晋级趋势观察",
+    "PROMOTED_TO_CORE_LEADER": "晋级核心领涨",
+    "DEMOTED_TO_TREND": "回落趋势观察",
+    "REARMED": "重新站回趋势",
+    "LEADER_SWITCH": "领涨龙头更替",
+    "EVICTED": "跌破失守淘汰",
+    "SEAT_EVICTION": "席位淘汰出局",
+}
+
+REASON_CN_MAP = {
+    "core_capacity_exceeded_demotion": "核心席位超额顺延降级",
+    "trend_capacity_exceeded_demotion": "趋势席位超额末位淘汰",
+    "bottom_capacity_exceeded_demotion": "底部席位超额末位淘汰",
+    "new_leader_outperformed": "新领头羊赛马分反超",
+    "break_10v_and_momentum_weak": "失守10V且分时走弱",
+    "max_drawdown_exceeded": "冲高回撤超阈值",
+    "stale_timeout_evicted": "盘中失守超时淘汰",
+    "10v_reclaim_with_healthy_turnover": "站稳10V且换手健康",
+    "10v_structure_reclaim": "突破收复10V形态",
+    "bottom_base_and_intraday_support": "筑底基座且分时承接",
+    "reclaim_10v_and_vwap": "站回10V与均线",
+    "lead_race_breakout": "赛马突破晋级领涨",
+    "break_10v_and_vwap_support": "失守10V与均线支撑",
+    "leader_alpha_decay": "龙头超额收益衰减",
+    "leader_break_10v": "龙头失守10V破位",
+    "rearmed_structure_reclaim": "重新站回趋势形态",
+    "delayed_budget_consumed": "激活配额顺延入席",
+    "bottom_support_break": "跌破底部基座支撑",
+    "drawdown_eviction": "冲高回撤超阈值淘汰",
+}
+
+
+def translate_reason_to_cn(reason: str) -> str:
+    """将内部英文或带参数理由 100% 转译为自然流畅的专业中文，消除所有下划线和英文单词。"""
+    if not reason:
+        return "形态异动触发"
+    r = str(reason).strip()
+    if r in REASON_CN_MAP:
+        return REASON_CN_MAP[r]
+
+    if r.startswith("pulse_confirmed_"):
+        sec = r.replace("pulse_confirmed_", "").replace("industry:", "").replace("theme:", "")
+        return f"所属{sec}板块脉冲确认共振"
+    if r.startswith("carried_from_"):
+        from_seat = r.replace("carried_from_", "")
+        from_seat_cn = TRANSITION_CN.get(from_seat, from_seat)
+        return f"继承昨日{from_seat_cn}席位"
+    if r.startswith("leader_surpassed_by_"):
+        other_code = r.replace("leader_surpassed_by_", "")
+        return f"领涨分被{other_code}反超"
+    if r.startswith("leader_switch_from_"):
+        parts = r.replace("leader_switch_from_", "").split("_to_")
+        if len(parts) == 2:
+            return f"领跑标的由{parts[0]}更替为{parts[1]}"
+        return "领涨龙头更替"
+
+    cn_clean = r.replace("_", " ")
+    for k, v in REASON_CN_MAP.items():
+        cn_clean = cn_clean.replace(k.replace("_", " "), v)
+    return cn_clean
+
+
 @dataclass
 class HotPoolProvisionalConfig:
     """预登记可调整的初始试验参数集。
@@ -162,12 +227,15 @@ def evaluate_10v_quality(
     obs_fresh = str(obs_evidence.get("freshness") or "unknown")
     res.obs_freshness = obs_fresh
 
-    vwap_dict = obs_evidence.get("vwap") or {}
-    timing_dict = vwap_dict.get("timing") or {}
+    vwap_raw = obs_evidence.get("vwap")
+    vwap_dict = vwap_raw if isinstance(vwap_raw, dict) else {}
+    timing_raw = vwap_dict.get("timing")
+    timing_dict = timing_raw if isinstance(timing_raw, dict) else {}
     timing_fresh = str(timing_dict.get("freshness") or "unknown")
     res.vwap_timing_freshness = timing_fresh
 
-    incl = vwap_dict.get("including_current") or {}
+    incl_raw = vwap_dict.get("including_current")
+    incl = incl_raw if isinstance(incl_raw, dict) else {}
     dyn_10 = incl.get("10")
     if dyn_10 is not None:
         try:
@@ -377,7 +445,7 @@ class SectorPulseEngine:
                 continue
             # 价格窗口更新前必须先执行逐股时间戳新鲜度校验，过期陈旧数据绝不进入价格窗口
             q_ts = float(q.get("ts") or q.get("timestamp") or 0.0)
-            if q_ts > 0.0 and (event_ts - q_ts > 60.0 or q_ts - event_ts > 120.0):
+            if q_ts <= 0.0 or (event_ts - q_ts > 60.0 or q_ts - event_ts > 120.0):
                 continue
             hist = self._price_windows.setdefault(code, [])
             hist.append((event_ts, px, pct))
@@ -428,7 +496,7 @@ class SectorPulseEngine:
                     continue
                 # 逐股行情新鲜度门禁：过滤陈旧或跨日延迟数据，防止虚假抬高覆盖率
                 q_ts = float(q.get("ts") or q.get("timestamp") or 0.0)
-                if q_ts > 0.0 and (event_ts - q_ts > 60.0 or q_ts - event_ts > 120.0):
+                if q_ts <= 0.0 or (event_ts - q_ts > 60.0 or q_ts - event_ts > 120.0):
                     continue
                 pct = float(q.get("percent") or q.get("pct") or 0.0)
                 valid_members.append(c)
@@ -630,6 +698,9 @@ class HotPoolState:
         self.budget_delayed_queue: List[str] = []
         self.budget_delayed_count: int = 0
         self.budget_delay_ms: float = 0.0
+
+        # 统一系统报警回调机制 (与主系统 instock_MonitorTK._safe_on_voice_alert 对齐)
+        self.alert_callback: Optional[Callable[[str, str, str], None]] = None
 
     # -----------------------------------------------------------------
     # 路径 1: 盘前日线种子 (premarket_seed) — 精确收敛至 ~150–450 只
@@ -996,7 +1067,7 @@ class HotPoolState:
 
             # 逐股行情时间戳门禁：陈旧/延迟行情坚决跳过席位评估，绝不放行不可靠数据
             q_ts = float(q.get("ts") or q.get("timestamp") or 0.0)
-            if q_ts > 0.0 and (event_ts - q_ts > 60.0 or q_ts - event_ts > 120.0):
+            if q_ts <= 0.0 or (event_ts - q_ts > 60.0 or q_ts - event_ts > 120.0):
                 continue
 
             daily = daily_ctx_getter(code, trade_date)
@@ -1183,6 +1254,10 @@ class HotPoolState:
 
             # 5. 降级/淘汰记录席 (EVICTED)
             elif current_seat == "EVICTED":
+                # 🛡️ 防抖防震荡冷却门禁 (Anti-Chattering Gate)：
+                # 被淘汰后强制执行 300 秒（5分钟）冷冻期，冷却期未过严禁重新准入，彻底杜绝容量挤出与重新准入的高频反复死循环震荡
+                if (event_ts - st.evicted_ts) < 300.0:
+                    continue
                 # 重新站回结构且再次确认个股自身承接与板块共振才允许恢复 (rearm)
                 if is_above_10v and has_self_evidence and is_sector_confirmed:
                     self._transition_seat(st, "TREND_WATCH", event_ts, "rearmed_structure_reclaim", px, best_pulse)
@@ -1394,57 +1469,59 @@ class HotPoolState:
         if len(self.alerts_log) > 500:
             del self.alerts_log[:100]
 
-        # 接入实盘全局通知通道 (AlertNotifier，严格适配 code, name, reason, score 等签名)
+        # 🛡️ 席位容量超额挤出属于常规容量维护，仅记录日志，绝不进行高频突发报警打扰
+        if transition == "EVICTED" and "capacity_exceeded" in str(reason):
+            return
+
+        # 1. 提取真实中文股票名 (sys_utils.resolve_stock_name 与 ats.fusion.names.name_of)
+        stock_name = ""
         try:
-            from ats.alert_notifier import get_alert_notifier
-            notifier = get_alert_notifier()
-            if notifier is not None:
-                # 确保重要席位转移打分 >= 88.0，且 is_force=True，彻底打破 78.0 分静默过滤墙
-                alert_score = max(float(st.watch_score or 0.0), 88.0)
+            from sys_utils import resolve_stock_name
+            stock_name = resolve_stock_name(st.code)
+        except Exception:
+            pass
+        if not stock_name:
+            try:
+                from ats.fusion.names import name_of
+                stock_name = name_of(st.code)
+            except Exception:
+                pass
+        if not stock_name or stock_name == st.code:
+            _DIGIT_MAP = {'0': '零', '1': '一', '2': '二', '3': '三', '4': '四', '5': '五', '6': '六', '7': '七', '8': '八', '9': '九'}
+            digits_cn = ''.join(_DIGIT_MAP.get(c, c) for c in str(st.code))
+            stock_name = f"标的{digits_cn}"
 
-                # 1. 提取真实中文股票名，避免机械播报"标的600000"
-                stock_name = ""
-                try:
-                    from ats.fusion.adapter import name_of
-                    stock_name = name_of(st.code)
-                except Exception:
-                    pass
-                if not stock_name or stock_name == st.code:
-                    stock_name = f"标的{st.code}"
+        # 2. 席位变动与理由中文转译，彻底消除下划线与英文机械音
+        cn_trans = TRANSITION_CN.get(transition, str(transition).replace("_", " "))
+        clean_reason_str = translate_reason_to_cn(str(reason))
+        alert_reason = f"【梯度热榜】{stock_name} {cn_trans}：{clean_reason_str}"
+        alert["reason_cn"] = clean_reason_str
+        alert["alert_reason"] = alert_reason
 
-                # 2. 席位变动与理由中文转译，彻底消除下划线与英文机械音
-                TRANSITION_CN = {
-                    "FIRST_OBSERVED_BOTTOM": "底部潜伏观察",
-                    "FIRST_OBSERVED_TREND": "站上趋势观察",
-                    "PROMOTED_TO_TREND": "晋级趋势观察",
-                    "PROMOTED_TO_CORE_LEADER": "晋级核心领涨",
-                    "DEMOTED_TO_TREND": "回落趋势观察",
-                    "REARMED": "重新站回趋势",
-                    "LEADER_SWITCH": "领涨龙头更替",
-                    "EVICTED": "跌破失守淘汰",
-                }
-                REASON_CN_MAP = {
-                    "core_capacity_exceeded_demotion": "核心席位超额顺延降级",
-                    "trend_capacity_exceeded_demotion": "趋势席位超额末位淘汰",
-                    "bottom_capacity_exceeded_demotion": "底部席位超额末位淘汰",
-                    "new_leader_outperformed": "新领头羊赛马分反超",
-                    "break_10v_and_momentum_weak": "失守10V且分时走弱",
-                    "max_drawdown_exceeded": "冲高回撤超阈值",
-                    "stale_timeout_evicted": "盘中失守超时淘汰",
-                    "10v_reclaim_with_healthy_turnover": "站稳10V且换手健康",
-                }
-                cn_trans = TRANSITION_CN.get(transition, str(transition).replace("_", " "))
-                clean_reason_str = REASON_CN_MAP.get(str(reason), str(reason).replace("_", " "))
-                alert_reason = f"【梯度热榜】{stock_name} {cn_trans}：{clean_reason_str}"
+        # 3. 统一系统级回调投递 (直连 instock_MonitorTK._safe_on_voice_alert，进入弹窗与时间队列)
+        if getattr(self, 'alert_callback', None) is not None:
+            try:
+                self.alert_callback(st.code, stock_name, alert_reason)
+            except Exception:
+                pass
 
-                notifier.notify_special_signal(
-                    code=st.code,
-                    name=stock_name,
-                    reason=alert_reason,
-                    score=alert_score,
-                    is_force=True,
-                    source="梯度热榜",
-                )
+        # 4. 接入 Qt/ATS 实盘全局通知通道 (具备单测沙箱静音防护)
+        try:
+            import os, sys
+            is_test_env = bool(os.environ.get("PYTEST_CURRENT_TEST") or "pytest" in sys.modules)
+            if not is_test_env:
+                from ats.alert_notifier import get_alert_notifier
+                notifier = get_alert_notifier()
+                if notifier is not None:
+                    alert_score = max(float(st.watch_score or 0.0), 88.0)
+                    notifier.notify_special_signal(
+                        code=st.code,
+                        name=stock_name,
+                        reason=alert_reason,
+                        score=alert_score,
+                        is_force=True,
+                        source="梯度热榜",
+                    )
         except Exception:
             pass
 
@@ -1643,18 +1720,19 @@ def _write_hot_pool_payload(
 ) -> bool:
 
     dirs = []
-    # 单元测试运行时严格禁止默认污染宿主物理盘 G:\fusion_shadow
-    if not _is_running_pytest():
-        if ramdisk_dir and os.path.exists(ramdisk_dir):
-            dirs.append(ramdisk_dir)
-        elif os.path.exists(r"G:\fusion_shadow"):
-            dirs.append(r"G:\fusion_shadow")
-    else:
-        if ramdisk_dir and os.path.exists(ramdisk_dir):
-            dirs.append(ramdisk_dir)
-
+    # 明确指定的 log_dir 具有最高物理优先级
     if log_dir and log_dir not in dirs:
         dirs.append(log_dir)
+
+    # 单元测试运行时严格禁止默认污染宿主物理盘 G:\fusion_shadow
+    if not _is_running_pytest():
+        if ramdisk_dir and os.path.exists(ramdisk_dir) and ramdisk_dir not in dirs:
+            dirs.append(ramdisk_dir)
+        elif os.path.exists(r"G:\fusion_shadow") and r"G:\fusion_shadow" not in dirs:
+            dirs.append(r"G:\fusion_shadow")
+    else:
+        if ramdisk_dir and os.path.exists(ramdisk_dir) and ramdisk_dir not in dirs:
+            dirs.append(ramdisk_dir)
     if not dirs:
         dirs.append(os.path.join(_app_root(), "logs", "fusion_shadow"))
 
@@ -1692,16 +1770,25 @@ def load_hot_pool_state(
 ) -> Optional[HotPoolState]:
     """加载指定交易日的热榜状态。"""
     dirs = []
-    if ramdisk_dir and os.path.exists(ramdisk_dir):
-        dirs.append(ramdisk_dir)
-    elif os.path.exists(r"G:\fusion_shadow"):
-        dirs.append(r"G:\fusion_shadow")
+    # 明确指定的 log_dir 具有最高物理优先级
     if log_dir and os.path.exists(log_dir) and log_dir not in dirs:
         dirs.append(log_dir)
+
+    # 单元测试运行时严格禁止读取宿主物理盘 G:\fusion_shadow
+    if not _is_running_pytest():
+        if ramdisk_dir and os.path.exists(ramdisk_dir) and ramdisk_dir not in dirs:
+            dirs.append(ramdisk_dir)
+        elif os.path.exists(r"G:\fusion_shadow") and r"G:\fusion_shadow" not in dirs:
+            dirs.append(r"G:\fusion_shadow")
+    else:
+        if ramdisk_dir and os.path.exists(ramdisk_dir) and ramdisk_dir not in dirs:
+            dirs.append(ramdisk_dir)
 
     try:
         from ats.ui.fusion_ladder_dialog import _shadow_dir_candidates
         for cd in _shadow_dir_candidates():
+            if _is_running_pytest() and ("g:" in str(cd).lower() or ("fusion_shadow" in str(cd).lower() and "temp" not in str(cd).lower())):
+                continue
             if cd and os.path.exists(cd) and cd not in dirs:
                 dirs.append(cd)
     except Exception:
@@ -1738,16 +1825,25 @@ def load_previous_day_carry_states(
 ) -> Dict[str, StockSeatState]:
     """开盘自动寻找上一有效交易日的 hot_pool 档案，提取昨日收盘处于在席状态的标的。"""
     dirs = []
-    if ramdisk_dir and os.path.exists(ramdisk_dir):
-        dirs.append(ramdisk_dir)
-    elif os.path.exists(r"G:\fusion_shadow"):
-        dirs.append(r"G:\fusion_shadow")
+    # 明确指定的 log_dir 具有最高物理优先级
     if log_dir and os.path.exists(log_dir) and log_dir not in dirs:
         dirs.append(log_dir)
+
+    # 单元测试运行时严格禁止读取宿主物理盘 G:\fusion_shadow
+    if not _is_running_pytest():
+        if ramdisk_dir and os.path.exists(ramdisk_dir) and ramdisk_dir not in dirs:
+            dirs.append(ramdisk_dir)
+        elif os.path.exists(r"G:\fusion_shadow") and r"G:\fusion_shadow" not in dirs:
+            dirs.append(r"G:\fusion_shadow")
+    else:
+        if ramdisk_dir and os.path.exists(ramdisk_dir) and ramdisk_dir not in dirs:
+            dirs.append(ramdisk_dir)
 
     try:
         from ats.ui.fusion_ladder_dialog import _shadow_dir_candidates
         for cd in _shadow_dir_candidates():
+            if _is_running_pytest() and ("g:" in str(cd).lower() or ("fusion_shadow" in str(cd).lower() and "temp" not in str(cd).lower())):
+                continue
             if cd and os.path.exists(cd) and cd not in dirs:
                 dirs.append(cd)
     except Exception:

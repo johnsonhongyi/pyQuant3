@@ -800,6 +800,9 @@ class StockLiveStrategy:
     def set_alert_callback(self, callback: Callable[[str, str, str], None]) -> None:
         """设置报警回调函数"""
         self.alert_callback = callback
+        if hasattr(self, "_fusion_shadow") and self._fusion_shadow is not None:
+            if hasattr(self._fusion_shadow, "set_alert_callback"):
+                self._fusion_shadow.set_alert_callback(callback)
 
     def set_realtime_service(self, service):
         """注入实时数据服务"""
@@ -2995,6 +2998,8 @@ class StockLiveStrategy:
             if _fusion is None:
                 from ats.fusion.shadow import FusionShadow
                 _fusion = FusionShadow()
+                if getattr(self, "alert_callback", None) and hasattr(_fusion, "set_alert_callback"):
+                    _fusion.set_alert_callback(self.alert_callback)
                 self._fusion_shadow = _fusion
             _fusion.update_market_breadth(
                 up_ratio=up_ratio,

@@ -3824,7 +3824,22 @@ class FusionLadderDialog(QWidget, WindowMixin):
             from ats.fusion.hot_pool import load_hot_pool_state
             day = self.cmb_day.currentText().strip() or today_str()
             log_dir = getattr(self, "log_dir", "")
-            hp_state = load_hot_pool_state(day, log_dir)
+
+            # 🛡️ SSOT 内存优先架构：实盘运行中优先直连当前进程活跃的 FusionShadow.hot_pool 实例，保证前台与后台 100% 实时同源对齐
+            hp_state = None
+            try:
+                from ats.fusion.shadow import FusionShadow
+                shadow_inst = FusionShadow.get_active_instance()
+                if shadow_inst is not None and getattr(shadow_inst, "hot_pool", None) is not None:
+                    mem_hp = shadow_inst.hot_pool
+                    if mem_hp.seats and (not day or mem_hp.current_trade_date == day or not mem_hp.current_trade_date):
+                        hp_state = mem_hp
+            except Exception:
+                pass
+
+            # 离线分析或历史日期回退读取磁盘持久化切片
+            if hp_state is None:
+                hp_state = load_hot_pool_state(day, log_dir)
             if hp_state is None and getattr(self, "_last_replay_res", None) is not None:
                 res = self._last_replay_res
                 if getattr(res, "hot_pool_seats", None):
@@ -3953,37 +3968,15 @@ class FusionLadderDialog(QWidget, WindowMixin):
             self.tbl_hot_pool.setSortingEnabled(True)
             self.lbl_status.setText(f"状态: 热榜已刷新 ({len(target_seats)}只在席)")
 
-            # 前台感知增量告警并触发 Toast 弹窗 (挂载 parent=self，实现点击直达与高亮联动)
+            # 前台仅维护增量告警标记，通知已由后台 HotPoolState._emit_alert 权威即时单次发出，杜绝重复播报
             seen_keys = getattr(self, "_seen_hot_pool_alert_keys", None)
             if seen_keys is None:
                 seen_keys = self._seen_hot_pool_alert_keys = set()
 
             if hp_state and hp_state.alerts_log:
-                for alr in hp_state.alerts_log[-15:]:
+                for alr in hp_state.alerts_log:
                     a_key = (alr.get("trade_date"), alr.get("code"), alr.get("transition"), alr.get("pulse_id"))
-                    if a_key not in seen_keys:
-                        seen_keys.add(a_key)
-                        if getattr(self, "_hot_pool_initialized", False):
-                            try:
-                                from ats.alert_notifier import get_alert_notifier
-                                notifier = get_alert_notifier()
-                                if notifier:
-                                    c_code = str(alr.get("code", "")).strip().zfill(6)
-                                    c_name = name_of(c_code)
-                                    r_msg = alr.get("reason", "")
-                                    sc_val = float(alr.get("watch_score") or 88.0)
-                                    notifier.notify_special_signal(
-                                        code=c_code,
-                                        name=c_name,
-                                        reason=r_msg,
-                                        score=sc_val,
-                                        parent=self,
-                                        is_force=True,
-                                        source="梯度热榜",
-                                        alert_only=True,
-                                    )
-                            except Exception:
-                                pass
+                    seen_keys.add(a_key)
             self._hot_pool_initialized = True
         except Exception as exc:
             logger.warning("[UI] refresh_hot_pool 异常: %s", exc)
@@ -4006,8 +3999,10 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 found_row = r
                 break
 
-        # 3. 若当前过滤条件隐藏了该标的 (例如被淘汰标的)，自动切换为"全部席位 (含淘汰)"并重新检索
+        # 3. 若当前过滤条件隐藏了该标的 (如被席位、板块脉冲或搜索框隐藏)，自动清除全维度过滤阻碍并重新检索
         if found_row < 0:
+            need_refresh = False
+            # 3.1 席位筛选恢复为全部席位
             cur_seat_filter = self.cb_hp_seat.currentText()
             if "全部席位" not in cur_seat_filter:
                 idx = self.cb_hp_seat.findText("全部席位 (含淘汰)")
@@ -4015,11 +4010,29 @@ class FusionLadderDialog(QWidget, WindowMixin):
                     self.cb_hp_seat.setCurrentIndex(idx)
                 else:
                     self.cb_hp_seat.setCurrentText("全部席位 (含淘汰)")
-                for r in range(tbl.rowCount()):
-                    it = tbl.item(r, 1)
-                    if it and it.text().strip().zfill(6) == code_str:
-                        found_row = r
-                        break
+                need_refresh = True
+
+            # 3.2 板块脉冲筛选恢复为"全部板块脉冲"
+            if hasattr(self, "cb_hp_pulse") and self.cb_hp_pulse.currentIndex() != 0:
+                self.cb_hp_pulse.setCurrentIndex(0)
+                need_refresh = True
+
+            # 3.3 搜索框若不包含该标的，清空搜索关键词
+            if hasattr(self, "ed_search") and self.ed_search.text().strip():
+                if code_str not in self.ed_search.text().strip():
+                    self.ed_search.clear()
+                    need_refresh = True
+
+            # 若触发了任何筛选变更，立即重新刷新表格
+            if need_refresh:
+                self.refresh_hot_pool()
+
+            # 重新全量扫描行
+            for r in range(tbl.rowCount()):
+                it = tbl.item(r, 1)
+                if it and it.text().strip().zfill(6) == code_str:
+                    found_row = r
+                    break
 
         # 4. 定位与高亮
         if found_row >= 0:

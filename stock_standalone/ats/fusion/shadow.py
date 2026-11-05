@@ -115,6 +115,11 @@ def _app_root() -> str:
 
 class FusionShadow:
     """影子观察器。线程安全，失败静默。"""
+    _ACTIVE_INSTANCE: Optional["FusionShadow"] = None
+
+    @classmethod
+    def get_active_instance(cls) -> Optional["FusionShadow"]:
+        return cls._ACTIVE_INSTANCE
 
     @staticmethod
     def _tracks_source(source: str) -> bool:
@@ -249,6 +254,8 @@ class FusionShadow:
         self.hot_pool = HotPoolState(config=HotPoolCalibratedConfig())
         self._last_hot_pool_save_ts = 0.0
         self._hot_pool_seeded_day = ""
+        self.alert_callback: Optional[Callable[[str, str, str], None]] = None
+        FusionShadow._ACTIVE_INSTANCE = self
 
         if self.enabled:
             try:
@@ -257,6 +264,12 @@ class FusionShadow:
                 register_archive_worker(self._log_dir)
             except Exception as exc:
                 logger.warning("[fusion] 影子日志目录创建失败，降级为仅内存: %s", exc)
+
+    def set_alert_callback(self, cb: Optional[Callable[[str, str, str], None]]) -> None:
+        """设置全局/系统级报警回调函数 (直连主系统 instock_MonitorTK._safe_on_voice_alert)"""
+        self.alert_callback = cb
+        if hasattr(self, "hot_pool") and self.hot_pool is not None:
+            self.hot_pool.alert_callback = cb
 
     def write_checkpoint(self, kind: str = "STATE_CHECKPOINT") -> Optional[Dict[str, Any]]:
         """写入检查点记录（STATE_CHECKPOINT 或 EOF_CHECKPOINT）。"""
@@ -1168,10 +1181,14 @@ class FusionShadow:
                 recovered = load_hot_pool_state(day, self._log_dir)
                 if recovered is not None and getattr(recovered, "current_trade_date", "") == day:
                     self.hot_pool = recovered
+                    if self.alert_callback is not None:
+                        self.hot_pool.alert_callback = self.alert_callback
                     logger.info("[FusionShadow] 成功从本地恢复当日热榜快照: %s, 席位数: %d, 候选数: %d",
                                 day, len([s for s in recovered.seats.values() if s.seat != "NONE"]), len(recovered.candidates))
                 else:
                     self.hot_pool = HotPoolState(config=HotPoolCalibratedConfig())
+                    if self.alert_callback is not None:
+                        self.hot_pool.alert_callback = self.alert_callback
                     prev_carry = load_previous_day_carry_states(day, self._log_dir)
                     if prev_carry:
                         self.hot_pool.carry_from_previous_day(day, prev_carry, carry_ts=now)

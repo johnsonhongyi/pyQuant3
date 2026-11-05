@@ -28,12 +28,22 @@ logger = LoggerFactory.getLogger(name="AlertManager")
 _VOICE_WORKER_DEBUG_ENABLED = False
 
 def normalize_speech_text(text: str) -> str:
-    """语音文本标准化：严格仅保留中英文、数字与安全标点，过滤所有 Emoji 与特殊符号"""
+    """语音文本标准化：严格仅保留中英文、数字与安全标点，过滤所有 Emoji 与特殊符号，并将 6 位股票代码转为逐字朗读避免数值发音"""
     text = str(text)
     text = text.replace('%', '百分之')
     text = re.sub(r'(?<!\d)-(\d+(\.\d+)?)', r'负\1', text)
     text = re.sub(r'(?<!\d)\+(\d+(\.\d+)?)', r'正\1', text)
     text = re.sub(r'(\d+)\.(\d+)', r'\1点\2', text)
+    
+    # 🛡️ 股票代码转逐字朗读防数值化：如 "600137" 转换为 "六零零一三七"，绝不被 Windows SAPI 朗读为 "六十万零一百三十七"
+    _DIGIT_MAP = {'0': '零', '1': '一', '2': '二', '3': '三', '4': '四', '5': '五', '6': '六', '7': '七', '8': '八', '9': '九'}
+    def _code_to_cn_digits(match):
+        code_digits = match.group(0)
+        return ''.join(_DIGIT_MAP.get(ch, ch) for ch in code_digits)
+
+    # 匹配独立的 6 位连续数字 (标准 A 股代码) 并转为汉字单个数字
+    text = re.sub(r'(?<!\d)\d{6}(?!\d)', _code_to_cn_digits, text)
+
     # 白名单保留中文、字母、数字、常用标点
     text = re.sub(r'[^\w\s\u4e00-\u9fa5，。！、]', ' ', text)
     # 限制单条语音最多 60 个字符，避免长时间占用声卡
