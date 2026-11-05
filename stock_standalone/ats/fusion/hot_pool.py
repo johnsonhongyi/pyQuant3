@@ -1401,10 +1401,45 @@ class HotPoolState:
             if notifier is not None:
                 # 确保重要席位转移打分 >= 88.0，且 is_force=True，彻底打破 78.0 分静默过滤墙
                 alert_score = max(float(st.watch_score or 0.0), 88.0)
-                alert_reason = f"【梯度热榜】{transition}: {reason}"
+
+                # 1. 提取真实中文股票名，避免机械播报"标的600000"
+                stock_name = ""
+                try:
+                    from ats.fusion.adapter import name_of
+                    stock_name = name_of(st.code)
+                except Exception:
+                    pass
+                if not stock_name or stock_name == st.code:
+                    stock_name = f"标的{st.code}"
+
+                # 2. 席位变动与理由中文转译，彻底消除下划线与英文机械音
+                TRANSITION_CN = {
+                    "FIRST_OBSERVED_BOTTOM": "底部潜伏观察",
+                    "FIRST_OBSERVED_TREND": "站上趋势观察",
+                    "PROMOTED_TO_TREND": "晋级趋势观察",
+                    "PROMOTED_TO_CORE_LEADER": "晋级核心领涨",
+                    "DEMOTED_TO_TREND": "回落趋势观察",
+                    "REARMED": "重新站回趋势",
+                    "LEADER_SWITCH": "领涨龙头更替",
+                    "EVICTED": "跌破失守淘汰",
+                }
+                REASON_CN_MAP = {
+                    "core_capacity_exceeded_demotion": "核心席位超额顺延降级",
+                    "trend_capacity_exceeded_demotion": "趋势席位超额末位淘汰",
+                    "bottom_capacity_exceeded_demotion": "底部席位超额末位淘汰",
+                    "new_leader_outperformed": "新领头羊赛马分反超",
+                    "break_10v_and_momentum_weak": "失守10V且分时走弱",
+                    "max_drawdown_exceeded": "冲高回撤超阈值",
+                    "stale_timeout_evicted": "盘中失守超时淘汰",
+                    "10v_reclaim_with_healthy_turnover": "站稳10V且换手健康",
+                }
+                cn_trans = TRANSITION_CN.get(transition, str(transition).replace("_", " "))
+                clean_reason_str = REASON_CN_MAP.get(str(reason), str(reason).replace("_", " "))
+                alert_reason = f"【梯度热榜】{stock_name} {cn_trans}：{clean_reason_str}"
+
                 notifier.notify_special_signal(
                     code=st.code,
-                    name=f"标的{st.code}",
+                    name=stock_name,
                     reason=alert_reason,
                     score=alert_score,
                     is_force=True,
@@ -1596,6 +1631,10 @@ def save_hot_pool_state(
     return _write_hot_pool_payload(day, payload, log_dir, ramdisk_dir)
 
 
+def _is_running_pytest() -> bool:
+    return "PYTEST_CURRENT_TEST" in os.environ
+
+
 def _write_hot_pool_payload(
     day: str,
     payload: str,
@@ -1604,10 +1643,16 @@ def _write_hot_pool_payload(
 ) -> bool:
 
     dirs = []
-    if ramdisk_dir and os.path.exists(ramdisk_dir):
-        dirs.append(ramdisk_dir)
-    elif os.path.exists(r"G:\fusion_shadow"):
-        dirs.append(r"G:\fusion_shadow")
+    # 单元测试运行时严格禁止默认污染宿主物理盘 G:\fusion_shadow
+    if not _is_running_pytest():
+        if ramdisk_dir and os.path.exists(ramdisk_dir):
+            dirs.append(ramdisk_dir)
+        elif os.path.exists(r"G:\fusion_shadow"):
+            dirs.append(r"G:\fusion_shadow")
+    else:
+        if ramdisk_dir and os.path.exists(ramdisk_dir):
+            dirs.append(ramdisk_dir)
+
     if log_dir and log_dir not in dirs:
         dirs.append(log_dir)
     if not dirs:
@@ -1672,6 +1717,14 @@ def load_hot_pool_state(
             try:
                 with open(p, "r", encoding="utf-8") as f:
                     data = json.load(f)
+                # 防污染自愈校验：如果位于全局目录 (非测试沙箱) 且包含测试用例残留，则跳过并回退
+                if not _is_running_pytest() and "temp" not in str(target_dir).lower():
+                    cands = data.get("candidates", {})
+                    if len(cands) <= 1 and cands:
+                        first_cand = next(iter(cands.values()), {})
+                        if first_cand.get("reason") in ("test", "__test_mock__"):
+                            logger.warning("[HotPool] 自动跳过含有测试残留标记的脏数据文件: %s", p)
+                            continue
                 return HotPoolState.from_dict(data)
             except Exception as exc:
                 logger.warning("[HotPool] 读取状态异常 %s: %s", p, exc)

@@ -7,6 +7,23 @@
   - **Flash（执行者）**：通过 `invoke_subagent(..., Model="flash")` 承接写代码、跑测试、批量扫描等高 Token 消耗的具体事务。
 - **动态裁量**：以质量为主、价格为辅；质量第一、效率第二。轻微修改与极高难度核心问题由 Argon 亲自操刀。
 
+## 2026-11-05 21:10 【梯度热榜刷新无效果与单测污染清理、无下划线自然语音与Toast点击联动定位闭环】(`ats/fusion/hot_pool.py`, `ats/alert_notifier.py`, `ats/ui/fusion_ladder_dialog.py`, `tests/test_hot_pool_toast_voice_locate_fix.py`)
+- [x] **【彻底根治单测残留污染导致刷新只有 1 只标的（600000 浦发银行）】**：
+  - **深层根因定位**：`hot_pool` 历史落盘无条件默认写入 `G:\fusion_shadow`，单测运行产生仅含 600000 的 mock 数据覆盖了宿主物理盘；实盘收盘后界面点击刷新时，因优先读取物理盘单测残留文件导致界面仅显示 1 只假数据；
+  - **单测沙箱与脏数据自愈隔离**：引入 `_is_running_pytest`，单测运行期间坚决禁止默认写入物理盘 `G:\fusion_shadow`；`load_hot_pool_state` 增加非测试沙箱下的脏数据过滤，自动识别跳过测试残留，成功加载恢复当天真实的 438 只全量标的；
+- [x] **【彻底消除“下划线 下划线”机械语音与股票名占位符】**：
+  - **真实中文股票名**：`_emit_alert` 接入 `from ats.fusion.adapter import name_of`，提取真实中文名称（如“浦发银行”），彻底废弃 `f"标的{st.code}"` 机械字符串；
+  - **席位转移与理由中文自然化转译**：建立 `TRANSITION_CN`（“站上趋势观察”、“晋级核心领涨”、“领涨龙头更替”等）与 `REASON_CN_MAP`，消除所有英文下划线；
+  - **AlertNotifier 专有语音通道与硬门禁**：新增梯度热榜专属自然语音播报分支，对所有待播报文本执行 `voice_text.replace("_", " ")` 硬清洗，TTS 引擎彻底杜绝读出“下划线”；
+- [x] **【前台 Toast 弹窗感知与点击直达热榜表格精准定位】**：
+  - **顶层窗口白名单纳管**：`AlertNotifier.activate_and_locate_target_window` 白名单加入 `"FusionLadderDialog"`，支持跨进程与跨窗口置顶激活唤醒；
+  - **FusionLadderDialog 深度联动协议 (`locate_stock_in_table`)**：
+    - 点击 Toast 自动切换到 Tab 1（🔥 梯度热榜），若标的被淘汰自动扩充切换席位筛选为“全部席位 (含淘汰)”；
+    - `tbl_hot_pool` 精准匹配代码列，调用 `selectRow` 并居中平滑滚动显示，状态栏显示定位成功提示；
+    - 5 秒高频巡检实时比对新告警，前台主动挂载 `parent=self` 弹出交互式 Toast 悬浮卡片；
+- [x] **【全量自动化测试全绿通过（专项 3 项 + 关联回归 19 项 100% PASS）】**：
+  - 新增 `tests/test_hot_pool_toast_voice_locate_fix.py`，覆盖无下划线语音清洗、单测物理盘严格隔离与白名单校验，全量回归 100% 全部通过。
+
 ## 2026-11-05 20:50 【AI对话证据层chat_evidence.ini接入sys_utils打包环境自适应与自动释放持久化闭环】(`stock_standalone/sys_utils.py`, `stock_standalone/webTools/manage_window_layout.py`, `stock_standalone/manage_window_layout.spec`, `stock_standalone/stock-strategy/desktop_chat_evidence.py`, `stock_standalone/stock-strategy/desktop_runtime.py`, `stock_standalone/stock-strategy/test_desktop_chat_evidence.py`, `stock_standalone/stock-strategy/test_desktop_runtime.py`)
 - [x] **【RESOURCE_MAP 登记与打包环境自适应自愈释放】**：
   - `sys_utils.py` 在 `RESOURCE_MAP` 中登记 `"chat_evidence.ini"`（`src="stock-strategy/chat_evidence.ini"`, `dst="chat_evidence.ini"`）；

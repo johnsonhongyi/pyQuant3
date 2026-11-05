@@ -180,7 +180,7 @@ def activate_and_locate_target_window(parent: Optional[Any], code: str = "", rea
             for w in app.topLevelWidgets():
                 if w.isVisible() and getattr(w, '__class__', None).__name__ in (
                     "DailyLimitUpDialog", "HotSectorLeaderboard", "MultiPeriodDialog", "ATSMainWindow",
-                    "IPOSubnewDetectorDialog", "IPOCommandRoomDialog"
+                    "IPOSubnewDetectorDialog", "IPOCommandRoomDialog", "FusionLadderDialog"
                 ):
                     target_p = w
                     break
@@ -1327,11 +1327,21 @@ class AlertNotifier(QObject if HAS_PYQT else object):
             voice_text = f"光脚加速买点，{name}，开盘即最低"
         elif "缺口加速" in reason:
             voice_text = f"缺口加速买点，{name}，跳空高开未补缺"
+        elif "梯度热榜" in reason or source == "梯度热榜":
+            # 专有梯度热榜自然语音播报：彻底消除下划线，提取通顺的席位与逻辑
+            clean_r = str(reason).replace("【梯度热榜】", "").replace("_", " ")
+            clean_r = re.sub(r'[^\w\s\u4e00-\u9fa5，。！、：:]', ' ', clean_r)
+            clean_r = ' '.join(clean_r.split())[:35]
+            voice_text = f"梯度热榜，{name}，{clean_r}"
         else:
             import re
-            clean_reason = re.sub(r'[^\w\s\u4e00-\u9fa5，。！、]', ' ', str(reason))
+            clean_reason = str(reason).replace("_", " ")
+            clean_reason = re.sub(r'[^\w\s\u4e00-\u9fa5，。！、]', ' ', clean_reason)
             clean_reason = ' '.join(clean_reason.split())[:20]
             voice_text = f"特异信号，{name}，{clean_reason}"
+        
+        # 全局硬防护：无论任何分支产生的 voice_text，彻底杜绝任何下划线被 TTS 朗读
+        voice_text = voice_text.replace("_", " ")
         if self.is_voice_enabled():
             self._speak_text(voice_text)
         else:

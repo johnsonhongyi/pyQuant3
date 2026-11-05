@@ -2117,6 +2117,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self.cb_hp_seat = QComboBox()
         self.cb_hp_seat.addItems([
             "全部在池 (核心+趋势+底部)",
+            "全部席位 (含淘汰)",
             "👑 核心领涨席",
             "📈 10V 趋势观察席",
             "🌱 底部潜伏观察席",
@@ -3863,6 +3864,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
             for code, st in hp_state.seats.items():
                 if "全部在池" in seat_filter and st.seat not in ("CORE_LEADER", "TREND_WATCH", "BOTTOM_WATCH"):
                     continue
+                elif "全部席位" in seat_filter:
+                    pass
                 elif "核心领涨" in seat_filter and st.seat != "CORE_LEADER":
                     continue
                 elif "趋势观察" in seat_filter and st.seat != "TREND_WATCH":
@@ -3948,8 +3951,100 @@ class FusionLadderDialog(QWidget, WindowMixin):
                     self.tbl_hot_pool.setItem(row_idx, col_idx, item)
 
             self.tbl_hot_pool.setSortingEnabled(True)
+            self.lbl_status.setText(f"状态: 热榜已刷新 ({len(target_seats)}只在席)")
+
+            # 前台感知增量告警并触发 Toast 弹窗 (挂载 parent=self，实现点击直达与高亮联动)
+            seen_keys = getattr(self, "_seen_hot_pool_alert_keys", None)
+            if seen_keys is None:
+                seen_keys = self._seen_hot_pool_alert_keys = set()
+
+            if hp_state and hp_state.alerts_log:
+                for alr in hp_state.alerts_log[-15:]:
+                    a_key = (alr.get("trade_date"), alr.get("code"), alr.get("transition"), alr.get("pulse_id"))
+                    if a_key not in seen_keys:
+                        seen_keys.add(a_key)
+                        if getattr(self, "_hot_pool_initialized", False):
+                            try:
+                                from ats.alert_notifier import get_alert_notifier
+                                notifier = get_alert_notifier()
+                                if notifier:
+                                    c_code = str(alr.get("code", "")).strip().zfill(6)
+                                    c_name = name_of(c_code)
+                                    r_msg = alr.get("reason", "")
+                                    sc_val = float(alr.get("watch_score") or 88.0)
+                                    notifier.notify_special_signal(
+                                        code=c_code,
+                                        name=c_name,
+                                        reason=r_msg,
+                                        score=sc_val,
+                                        parent=self,
+                                        is_force=True,
+                                        source="梯度热榜",
+                                        alert_only=True,
+                                    )
+                            except Exception:
+                                pass
+            self._hot_pool_initialized = True
         except Exception as exc:
             logger.warning("[UI] refresh_hot_pool 异常: %s", exc)
+
+    def locate_stock_in_table(self, code: str, auto_popup: bool = True, reason: str = "") -> bool:
+        """实现 AlertNotifier 通信协议：在当前对话框中高亮定位指定标的并联动。"""
+        if not code:
+            return False
+        code_str = str(code).strip().zfill(6)
+
+        # 1. 自动切换到 Tab 1 (梯度热榜)
+        self.tabs.setCurrentIndex(1)
+
+        # 2. 在热榜表格中查找代码 (第 1 列)
+        found_row = -1
+        tbl = self.tbl_hot_pool
+        for r in range(tbl.rowCount()):
+            it = tbl.item(r, 1)
+            if it and it.text().strip().zfill(6) == code_str:
+                found_row = r
+                break
+
+        # 3. 若当前过滤条件隐藏了该标的 (例如被淘汰标的)，自动切换为"全部席位 (含淘汰)"并重新检索
+        if found_row < 0:
+            cur_seat_filter = self.cb_hp_seat.currentText()
+            if "全部席位" not in cur_seat_filter:
+                idx = self.cb_hp_seat.findText("全部席位 (含淘汰)")
+                if idx >= 0:
+                    self.cb_hp_seat.setCurrentIndex(idx)
+                else:
+                    self.cb_hp_seat.setCurrentText("全部席位 (含淘汰)")
+                for r in range(tbl.rowCount()):
+                    it = tbl.item(r, 1)
+                    if it and it.text().strip().zfill(6) == code_str:
+                        found_row = r
+                        break
+
+        # 4. 定位与高亮
+        if found_row >= 0:
+            tbl.selectRow(found_row)
+            item = tbl.item(found_row, 1)
+            if item:
+                from PyQt6.QtWidgets import QAbstractItemView
+                tbl.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtCenter)
+            tbl.setFocus()
+
+            # 唤醒并置顶窗口
+            if auto_popup:
+                if hasattr(self, "isMinimized") and self.isMinimized():
+                    self.showNormal()
+                if getattr(self, "is_hidden_state", False):
+                    if hasattr(self, "_expand_window"):
+                        self._expand_window()
+                self.show()
+                self.raise_()
+                self.activateWindow()
+
+            nm = name_of(code_str)
+            self.lbl_status.setText(f"🎯 梯度热榜已精准定位: {nm} ({code_str})")
+            return True
+        return False
 
     def refresh_live(self) -> None:
         # 🛡️ 开盘时段智能对齐：若盘前启动遗留且已到 09:15 开盘时段，手动刷新时自动切入今日
