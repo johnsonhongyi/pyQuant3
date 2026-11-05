@@ -128,6 +128,9 @@ class PaperExecutionAdapter(ExecutionAdapter):
         self._t1_warning_lock = threading.Lock()
         self._t1_warning_state = {}
         self._t1_state_day = ""
+        self._last_gate_rejection_log_time = 0.0
+        self._last_gate_rejection_reason = ""
+        self._gate_rejection_suppressed_count = 0
         
         # 探测测试环境与物理持久化路径
         import os
@@ -314,7 +317,18 @@ class PaperExecutionAdapter(ExecutionAdapter):
                 cash -= price * quantity + fee
             elif action in {"SELL", "REDUCE"}:
                 old = positions.get(code)
+                is_manual = (
+                    "MANUAL" in str(order.get("order_id") or "").upper()
+                    or "MANUAL" in str(order.get("request_id") or "").upper()
+                    or any(k in str(order.get("reason") or "").lower() for k in ("手工", "手动", "manual", "一键全平", "操盘手"))
+                )
                 if old is None or quantity > old["volume"] + 1e-6:
+                    if is_manual:
+                        # 手动处置外部/历史遗留持仓：扣减可能剩余的持仓，并结算现金回款，避免抛出致命对账错误导致熔断
+                        if old is not None:
+                            positions.pop(code, None)
+                        cash += price * quantity - fee
+                        continue
                     problems.append(f"SELL_EXCEEDS_LEDGER_POSITION:{code}:{index}")
                     continue
                 remaining = max(0.0, old["volume"] - quantity)
@@ -673,7 +687,19 @@ class PaperExecutionAdapter(ExecutionAdapter):
             )
         )
         if self._execution_block_reason and not is_manual_sell:
-            logger.error("[Trade Gate] PAPER order rejected: %s", self._execution_block_reason)
+            import time
+            now_mono = time.monotonic()
+            last_log_time = getattr(self, "_last_gate_rejection_log_time", 0.0)
+            suppressed_count = getattr(self, "_gate_rejection_suppressed_count", 0)
+            reason = self._execution_block_reason
+            if now_mono - last_log_time >= 60.0 or getattr(self, "_last_gate_rejection_reason", "") != reason:
+                supp_msg = f" (suppressed {suppressed_count} repeated rejections)" if suppressed_count > 0 else ""
+                logger.error("[Trade Gate] PAPER order rejected: %s%s", reason, supp_msg)
+                self._last_gate_rejection_log_time = now_mono
+                self._last_gate_rejection_reason = reason
+                self._gate_rejection_suppressed_count = 0
+            else:
+                self._gate_rejection_suppressed_count = suppressed_count + 1
             return False
         if (not math.isfinite(order.size_pct) or not math.isfinite(order.price)
                 or (action != "SELL" and order.size_pct <= 0) or order.price <= 0):
@@ -878,6 +904,39 @@ class PaperExecutionAdapter(ExecutionAdapter):
         for code, position in positions.items():
             position.update(facts.get(self._canonical_code(code), {}))
         return positions
+
+    def realign_ledger_baseline(self, source: str = "MANUAL_RECONCILE_ALIGN") -> dict[str, Any]:
+        """将当前内存中确认的真实 positions 和 cash 原子化固化为新的 ledger_baseline，清空阻断原因并持久化。"""
+        with self._submit_lock:
+            order_count = len(self.orders)
+            through_order_id = str(self.orders[-1].get("order_id") or "") if order_count > 0 else ""
+            orders_sha256 = self._ledger_history_digest(self.orders)
+            baseline_positions = {
+                code: {
+                    "volume": float(pos.volume),
+                    "entry_price": float(pos.entry_price),
+                }
+                for code, pos in self.account.positions.items()
+                if float(pos.volume) > 0 and float(pos.entry_price) > 0
+            }
+            self.ledger_baseline = {
+                "schema_version": 1,
+                "status": "ALIGNED",
+                "source": source,
+                "created_at": datetime.now().astimezone().isoformat(),
+                "order_count": order_count,
+                "through_order_id": through_order_id,
+                "orders_sha256": orders_sha256,
+                "cash": float(self.account.cash),
+                "positions": baseline_positions,
+            }
+            self._execution_block_reason = ""
+            self._save_state()
+            logger.info(
+                f"✅ [PaperAdapter] Successfully realigned ledger baseline to order {order_count} "
+                f"(cash={self.account.cash}, positions={len(baseline_positions)}). Block reason cleared."
+            )
+            return self.ledger_baseline
 
     def get_restore_status(self) -> dict[str, Any]:
         return {
