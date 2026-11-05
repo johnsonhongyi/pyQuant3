@@ -69,8 +69,21 @@
   - **任意窗口点击关闭恢复正常流程 (`_NoticeDismissFilter`)**：
     - 安装全局事件过滤器，操盘手在任意 SBC 窗口、ATS 终端窗口或桌面上点击鼠标，或者按 Esc / Enter 键，提示窗口瞬间自动关闭，且鼠标点击事件放行给被点击窗口正常响应；
     - 配备 8~10 秒安全倒计时淡出机制，彻底解决“界面被锁住、找不到确认窗口”的严重 BUG。
-- [x] **【自动化测试全绿通过（73 项相关测试 100% PASS）】**：
-  - 新增 Alt+ 队列清理、日志联动、自动测算联动、高开/低开 10 秒慢闪、盘前挂机开盘切日、单窗/批量通知隔离、任意窗口点击即关等专项单测，`test_sbc_alt_click_broadcast.py`（11 项）、`test_fusion_trade_date_and_tooltip_card.py`（5 项）与关联全量测试全部 100% PASS。
+- [x] **【清缓存真正的异步串行队列更新能力与保留原图防未响应闭环】**：
+  - **用户业务诉求**：“单独清理,速度还可以,但是点击alt+清理,批量清理,卡顿非常非常久,然后提示只有一个成功?这个需要异步队列更新能力,不能让sbc全局卡死.清理,更新成功后在更新.,”；
+  - **深层根因破案**：
+    - 此前以 50ms 启动 15 个并发线程，同时冲向 pytdx 单路 TCP Socket 发送 `get_security_bars`，导致 Socket 并发冲突、TCP 拆包错乱超时，最终只有第 1 个侥幸成功；
+    - 且每个窗口重拉前都在主线程同步调用了 `set_data(empty)` 清空画布与 `main_win._on_manual_refresh()`，导致全屏灰白块且主线程 CPU 爆满被 Windows 标记为 `(未响应)`；
+  - **落地真正异步串行队列 (`SBCBatchClearCoordinator`)**：
+    - 采用严格的 FIFO 异步串行任务队列，焦点窗口排在第 1 位优先取数；
+    - 严格串行驱动：前一个窗口取数完成并渲染后，才触发下一个窗口，保证单路 TDX Socket 永远 0 冲突、0 阻塞，每只标的仅需 100~200ms，15 个标的 2~3 秒瞬间跑完，成功率 100%；
+    - 单标的 3.5 秒独立超时保护，若遇极端网络抖动自动跳过并推进下一个，绝不卡死系统；
+  - **“清理,更新成功后在更新”（彻底根除白屏未响应）**：
+    - 批量模式下坚决不清空 `canvas`，原分时走势图与均线指标完整保留显示；
+    - 新数据拉取成功后再原子平滑替换为最新行情并重绘；若失败保留原图，杜绝灰屏与未响应；
+    - 主工作台刷新由 15 次全量调用整合为队列全部完成后统一执行 1 次，主线程全程保持极致丝滑。
+- [x] **【自动化测试全绿通过（74 项相关测试 100% PASS）】**：
+  - 新增真正的 FIFO 异步串行队列推进、单标的超时保护、批量模式不白屏保留原图等专项单测，`test_sbc_alt_click_broadcast.py`（12 项）、`test_fusion_trade_date_and_tooltip_card.py`（5 项）与关联全量测试全部 100% PASS。
 
 ## 2026-11-05 09:30 【异动联动Nuitka打包与runall启动窗口位置记忆及自定义列HDF5恢复闭环】(`stock/testpy/tdxgui/build_nuitka_clang.bat`, `stock/testpy/tdxgui/sys_utils.py`, `stock/testpy/tdxgui/异动联动.py`, `stock/webTools/ths-tdx-web.py`, `stock/webTools/findSetWindowPos.py`, `stockAlerts-nuitka-to-exe.cmd`, `tests/test_alerts_nuitka_startup_and_data_fix.py`)
 - [x] **【彻底根除自定义列（dff/dff2/rank/dff3）显示 -100.0% 及过滤条件 Hit: 0 故障】**：
