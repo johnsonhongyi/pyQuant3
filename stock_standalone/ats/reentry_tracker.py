@@ -44,13 +44,20 @@ class ReentryTracker:
         now = time.time()
         self._last_db_load_time = now
         
-        # 常见数据库路径探测
+        # 常见数据库路径探测（优先使用 sys_utils.get_app_root 自适应打包与源码环境）
+        try:
+            from sys_utils import get_app_root
+            app_root = get_app_root()
+        except Exception:
+            app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
         db_candidates = [
+            os.path.join(app_root, "trading_signals.db"),
+            os.path.join(app_root, "signal_strategy.db"),
+            os.path.join(app_root, "stock_trade.db"),
             "trading_signals.db",
             "signal_strategy.db",
             "stock_trade.db",
-            os.path.join(os.path.dirname(__file__), "..", "trading_signals.db"),
-            os.path.join(os.path.dirname(__file__), "..", "signal_strategy.db"),
         ]
 
         found_trades = {}

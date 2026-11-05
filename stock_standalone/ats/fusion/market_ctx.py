@@ -25,8 +25,15 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+def _app_root() -> str:
+    try:
+        from sys_utils import get_app_root
+        return get_app_root()
+    except Exception:
+        return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 DEFAULT_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    _app_root(),
     "logs", "fusion_state", "market_history.json",
 )
 

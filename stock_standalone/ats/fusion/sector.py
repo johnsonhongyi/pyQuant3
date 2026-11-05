@@ -33,6 +33,13 @@ _CANDIDATES = (
 
 def _find_last_df_path() -> Optional[str]:
     try:
+        from sys_utils import get_app_root
+        cand = os.path.join(get_app_root(), "JSONData", "tdx_last_df.h5")
+        if os.path.exists(cand):
+            return cand
+    except Exception:
+        pass
+    try:
         from JohnsonUtil import commonTips as cct  # type: ignore
         p = cct.get_run_path_tdx_Path("tdx_last_df")
         if p and os.path.exists(p):
@@ -164,7 +171,13 @@ def load_external_heat(day: str, root: Optional[str] = None) -> Dict[str, int]:
     """
     import json
 
-    base = root or os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "logs", "heat_boards")
+    if not root:
+        try:
+            from sys_utils import get_app_root
+            root = get_app_root()
+        except Exception:
+            root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    base = os.path.join(root, "logs", "heat_boards")
     path = os.path.join(base, "{}.json".format(day))
     if not os.path.exists(path):
         return {}

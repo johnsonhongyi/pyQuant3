@@ -32,6 +32,13 @@ _DAILY_CANDIDATES = (
 
 def _find_daily_path() -> Optional[str]:
     try:
+        from sys_utils import get_app_root
+        cand = os.path.join(get_app_root(), "JSONData", "tdx_all_df_300.h5")
+        if os.path.exists(cand):
+            return cand
+    except Exception:
+        pass
+    try:
         from JohnsonUtil import commonTips as cct  # type: ignore
         p = cct.get_run_path_tdx_Path("tdx_all_df_300")
         if p and os.path.exists(p):

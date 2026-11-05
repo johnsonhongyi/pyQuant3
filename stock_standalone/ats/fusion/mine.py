@@ -290,7 +290,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                 else:
                     md += "| {} | {} | {:+.1f}% | ❌ | - | - | - |\n".format(i, r["code"], r["profit"])
 
-    out_dir = args.out or os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "logs", "fusion_mine")
+    try:
+        from sys_utils import get_app_root
+        default_out = os.path.join(get_app_root(), "logs", "fusion_mine")
+    except Exception:
+        default_out = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "logs", "fusion_mine")
+    out_dir = args.out or default_out
     os.makedirs(out_dir, exist_ok=True)
     base = os.path.join(out_dir, "mine_{}".format("_".join(d[-5:].replace("-", "") for d in days)))
     with open(base + ".md", "w", encoding="utf-8") as f:

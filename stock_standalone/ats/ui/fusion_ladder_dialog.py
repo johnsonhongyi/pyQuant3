@@ -1822,6 +1822,25 @@ class FusionLadderDialog(QWidget, WindowMixin):
     _HOT_POOL_HEADERS = _HOT_POOL_HEADERS
     """融合梯度监视器主窗口（系统级独立顶层窗口，对齐 ATS 专业看板体系）。"""
 
+    @property
+    def log_dir(self) -> str:
+        """获取当前配置的首选影子日志目录。"""
+        root = ""
+        if hasattr(self, "ed_trade_root") and self.ed_trade_root:
+            root = self.ed_trade_root.text().strip()
+        if not root:
+            root = str(load_config_node("fusion_trade_center_root", "") or "").strip()
+        if root:
+            return os.path.join(root, "logs", "fusion_shadow")
+        cands = _shadow_dir_candidates()
+        if cands:
+            return cands[0]
+        try:
+            from sys_utils import get_app_root
+            return os.path.join(get_app_root(), "logs", "fusion_shadow")
+        except Exception:
+            return os.path.join(os.getcwd(), "logs", "fusion_shadow")
+
     def __init__(self, parent=None):
         # [🚀 独立顶层解耦] 必须传 None，彻底切断 Win32 HWND Owner 从属关系，成为系统级独立窗口
         super().__init__(None)
@@ -2360,14 +2379,16 @@ class FusionLadderDialog(QWidget, WindowMixin):
         if idx == 0:
             return self.tbl_live
         elif idx == 1:
-            return self.tbl_replay
+            return self.tbl_hot_pool
         elif idx == 2:
-            return self.tbl_trades
+            return self.tbl_replay
         elif idx == 3:
+            return self.tbl_trades
+        elif idx == 4:
             return self.tbl_track
-        elif idx == 6:
-            return self.tbl_cross_day
         elif idx == 7:
+            return self.tbl_cross_day
+        elif idx == 8:
             return self.tbl_paper_follow
         return None
 
@@ -2978,9 +2999,11 @@ class FusionLadderDialog(QWidget, WindowMixin):
             self._live_sig = None
             self._tab_signatures.clear()
             index = self.tabs.currentIndex()
-            if index in (0, 3):
+            if index in (0, 4):
                 self._queue_shadow_refresh(index)
-            if self.tabs.currentIndex() in (6, 7):
+            elif index == 1:
+                self.refresh_hot_pool()
+            if self.tabs.currentIndex() in (7, 8):
                 self._start_cross_day(day)
 
     def _on_hit_only_toggled(self, checked: bool) -> None:
@@ -3025,15 +3048,18 @@ class FusionLadderDialog(QWidget, WindowMixin):
         # 未显示的表格只标记过期；赛马页可能读取大量记录并请求行情，
         # 不能在用户操作其他页面时同步执行。
         self._live_sig = None
-        getattr(self, "_tab_signatures", {}).pop(3, None)
+        getattr(self, "_tab_signatures", {}).pop(4, None)
         active_tab = self.tabs.currentIndex()
         if active_tab == 0:
             self._queue_shadow_refresh(0)
             return
-        if active_tab != 3:
+        if active_tab == 1:
+            self.refresh_hot_pool()
+            return
+        if active_tab != 4:
             return
         try:
-            self._queue_shadow_refresh(3)
+            self._queue_shadow_refresh(4)
         except Exception:
             pass
 
@@ -3729,7 +3755,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
             )
             try:
                 handoff_data = store.handoff(day)
-                logger.info(f"[FusionLadderDialog] 今日收盘上下文已自动沉淀并完成次日交接: {handoff_data.get('label')}")
+                ho_label = handoff_data.get('label') or (f"{handoff_data.get('from', '')}~{handoff_data.get('to', '')} (共{handoff_data.get('days', 0)}日)" if handoff_data.get('days') else handoff_data.get('note', ''))
+                logger.info(f"[FusionLadderDialog] 今日收盘上下文已自动沉淀并完成次日交接: {ho_label}")
             except Exception:
                 pass
 
@@ -3790,7 +3817,8 @@ class FusionLadderDialog(QWidget, WindowMixin):
         try:
             from ats.fusion.hot_pool import load_hot_pool_state
             day = self.cmb_day.currentText().strip() or today_str()
-            hp_state = load_hot_pool_state(day, self.log_dir)
+            log_dir = getattr(self, "log_dir", "")
+            hp_state = load_hot_pool_state(day, log_dir)
             if hp_state is None and getattr(self, "_last_replay_res", None) is not None:
                 res = self._last_replay_res
                 if getattr(res, "hot_pool_seats", None):
@@ -3880,9 +3908,11 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 cand = hp_state.candidates.get(st.code)
                 source_str = cand.source if cand else "seed"
 
+                cur_px = getattr(st, "price", 0.0) or st.peak_price
+                cur_pct = getattr(st, "pct", 0.0)
                 vals = [
                     s_disp, st.code, nm, st.sector_confirm_state, sec_disp,
-                    st.watch_score, lead_sec_str, st.peak_price, f"{st.alpha_vs_sector:+.2f}%",
+                    st.watch_score, lead_sec_str, cur_px, f"{cur_pct:+.2f}%",
                     f"{st.alpha_vs_sector:+.2f}%", "线上" if st.first_10v_reclaim_ts > 0 else "水下",
                     "稳固" if st.sustained_bars > 0 else "失守", t_obs, t_alr, source_str,
                     st.sustained_bars, f"{st.max_drawdown_pct:.1f}%", st.eviction_reason or ("观察中" if st.seat != "EVICTED" else "破位淘汰")
@@ -3953,7 +3983,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
             signature = (signature, int(time.time() // 30))
         context = (_ShadowRefreshContext((getattr(self, "_py_parent", None),
                                           getattr(self, "parent_window", None)))
-                   if index == 3 else None)
+                   if index == 4 else None)
         result = {}
         submitted_at = time.perf_counter()
 
@@ -4067,7 +4097,10 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 or getattr(self, "is_hidden_state", False)):
             return
         idx = self.tabs.currentIndex()
-        if idx not in (0, 3):
+        if idx == 1:
+            self.refresh_hot_pool()
+            return
+        if idx not in (0, 4):
             return
         if self._worker is not None and self._worker.isRunning():
             return
@@ -5082,19 +5115,24 @@ class FusionLadderDialog(QWidget, WindowMixin):
                 self._queue_shadow_refresh(0, force=False)
             except Exception as exc:
                 logger.debug("[FusionLadder] 实时梯度刷新失败: %s", exc)
-        elif index == 3:
+        elif index == 1:
             try:
-                self._queue_shadow_refresh(3)
+                self.refresh_hot_pool()
+            except Exception as exc:
+                logger.debug("[FusionLadder] 梯度热榜刷新失败: %s", exc)
+        elif index == 4:
+            try:
+                self._queue_shadow_refresh(4)
             except Exception as exc:
                 logger.debug("[FusionLadder] 赛马跟踪渲染失败: %s", exc)
-        elif index in (6, 7):
+        elif index in (7, 8):
             self._start_cross_day(day)
-        elif index == 2 and self.tbl_trades.rowCount() == 0:
+        elif index == 3 and self.tbl_trades.rowCount() == 0:
             self._fill_table_hint(
                 self.tbl_trades,
                 "T+1 订单由回放撮合产生：实盘影子流不下单。点 [▶ 跑回放] 后这里显示当日模拟成交。",
             )
-        elif index == 4 and not self.txt_panel.toPlainText().strip():
+        elif index == 5 and not self.txt_panel.toPlainText().strip():
             self.txt_panel.setPlainText(
                 "信号面板由回放统计生成。实盘阶段可先看[实时梯度]与[赛马跟踪]；"
                 "收盘后点 [▶ 跑回放] 即可得到完整统计。"
@@ -5406,7 +5444,7 @@ class FusionLadderDialog(QWidget, WindowMixin):
             QTimer.singleShot(0, lambda: self._start_cross_day(pending))
 
     def _refresh_cross_day_if_visible(self) -> None:
-        if self.isVisible() and self.tabs.currentIndex() in (6, 7):
+        if self.isVisible() and self.tabs.currentIndex() in (7, 8):
             self._start_cross_day(self.cmb_day.currentText().strip() or today_str())
 
     def _refresh_paper_source(self) -> None:
@@ -5529,13 +5567,13 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self.btn_iteration.setEnabled(True)
         self.progress.setValue(100)
         self.txt_report.setPlainText(render_iteration(output))
-        self.tabs.setCurrentIndex(5)
+        self.tabs.setCurrentIndex(6)
         self._set_status("状态：逐日迭代完成｜档案 {}".format(output["run_dir"]))
         self.lbl_status.setStyleSheet("color:#8fd18f; font-weight:bold;")
 
     def run_focus(self) -> None:
         codes = [c.strip() for c in self.ed_focus.text().split(",") if c.strip()]
-        self.tabs.setCurrentIndex(5)
+        self.tabs.setCurrentIndex(6)
         self._start_worker(codes)
 
     # ------------------------------------------------------------------

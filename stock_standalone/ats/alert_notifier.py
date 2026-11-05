@@ -24,7 +24,11 @@ except ImportError:
 
 
 _active_toasts = set()
-ALERT_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "config", "alert_notifier_layout.json")
+try:
+    from sys_utils import get_conf_path, get_app_root, get_base_path
+    ALERT_CONFIG_FILE = get_conf_path("alert_notifier_layout.json")
+except Exception:
+    ALERT_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "config", "alert_notifier_layout.json")
 _ALERT_CONFIG_LOCK = threading.Lock()
 _has_loaded_screen_config = False
 
@@ -631,7 +635,13 @@ class AlertNotifier(QObject if HAS_PYQT else object):
                     pass
 
             self.tray_icon = QSystemTrayIcon(parent_obj)
-            icon_path = os.path.join(os.path.dirname(__file__), "..", "MonitorTK32.ico")
+            try:
+                from sys_utils import get_base_path, get_app_root
+                icon_path = os.path.join(get_base_path(), "MonitorTK32.ico")
+                if not os.path.exists(icon_path):
+                    icon_path = os.path.join(get_app_root(), "MonitorTK32.ico")
+            except Exception:
+                icon_path = os.path.join(os.path.dirname(__file__), "..", "MonitorTK32.ico")
             if os.path.exists(icon_path):
                 self.tray_icon.setIcon(QIcon(icon_path))
             else:

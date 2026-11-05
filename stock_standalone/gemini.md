@@ -7,6 +7,35 @@
   - **Flash（执行者）**：通过 `invoke_subagent(..., Model="flash")` 承接写代码、跑测试、批量扫描等高 Token 消耗的具体事务。
 - **动态裁量**：以质量为主、价格为辅；质量第一、效率第二。轻微修改与极高难度核心问题由 Argon 亲自操刀。
 
+## 2026-11-05 19:45 【全面重构ATS路径模式对齐TK底层打包环境自适应规范闭环】(`ats/alert_notifier.py`, `ats/reentry_tracker.py`, `ats/multi_period_channel_strategy.py`, `ats/fusion/*`, `tests/test_ats_packaged_path_adaptive.py`)
+- [x] **【全面清理 ATS 硬编码路径，统一对齐 sys_utils 底层打包自适应架构】**：
+  - **用户业务诉求**：“全面修复ats中路径方式不是tk,ats实现的底层的打包环境自适应方式.”；
+  - **排查与深层痛点定位**：
+    - `ats` 历史模块及部分新增模块存在直接使用 `os.path.dirname(os.path.dirname(os.path.abspath(__file__)))` 或 `os.getcwd()` 获取路径的粗糙写法；
+    - 在 Nuitka Onefile / PyInstaller 打包环境下，`__file__` 指向临时解压目录（如 `C:\Users\...\AppData\Local\Temp\onefile_...`），在这些目录下读写日志、数据库、会话快照不仅会导致数据写入临时目录被随手清理丢失，更无法跨日继承历史上下文，且若从不同工作目录启动会定位到错误路径；
+  - **架构与自适应落地修复**：
+    - **系统级根目录规范化 (`sys_utils.get_app_root()`)**：在 `alert_notifier`、`reentry_tracker`、`multi_period_channel_*`、`fusion/session_ctx`、`fusion/market_ctx`、`fusion/live_bridge`、`fusion/hot_pool`、`fusion/mine`、`fusion/pipeline`、`fusion/sector`、`fusion/context`、`fusion/premarket` 等全量模块中，彻底消除裸 `__file__` 向上跳级与 `os.getcwd()` 依赖，统一优先从 `sys_utils.get_app_root()` 动态解析宿主物理应用程序根目录；
+    - **配置文件与静态资源规范化 (`get_conf_path` / `get_base_path`)**：`alert_notifier.ALERT_CONFIG_FILE` 对齐 `get_conf_path("alert_notifier_layout.json")`，图标读取对齐 `get_base_path()` 并向 `get_app_root()` 回退；
+    - **数据库与数据文件多源智能命中**：`reentry_tracker` 数据库搜索池及 `fusion/context`、`fusion/premarket` 的 H5 缓存优先检测 `get_app_root()` 物理路径，无缝兼容 Dev 源码开发模式与打包物理 EXE 独立部署；
+- [x] **【自动化测试全绿通过（专项单测 4 项 + 关联回归 19 项 100% PASS）】**：
+  - 新增 `tests/test_ats_packaged_path_adaptive.py`，全覆盖验证打包环境变量（`INSTOCK_APP_ROOT`）、各核心模块路径自适应收敛、数据库与热榜日志目录安全隔离等，19 项核心回归测试 100% 全部通过。
+
+## 2026-11-05 19:30 【ATS梯度热榜refresh_hot_pool缺失log_dir属性修复及Tab索引对齐闭环】(`ats/ui/fusion_ladder_dialog.py`, `ats/fusion/hot_pool.py`, `tests/test_hot_pool_dialog_fix.py`)
+- [x] **【彻底解决 FusionLadderDialog 刷新热榜报 'FusionLadderDialog' object has no attribute 'log_dir' 异常】**：
+  - **用户业务诉求**：“[WARNING] [UI] refresh_hot_pool 异常: 'FusionLadderDialog' object has no attribute 'log_dir' 修复ats最新方案的实现产生的bug”；
+  - **深层根因定位**：
+    - `FusionLadderDialog.refresh_hot_pool` 调用了 `load_hot_pool_state(day, self.log_dir)`，但 `FusionLadderDialog` 类中从未声明 `log_dir` 属性或属性方法，导致点击刷新、切换筛选条件或切换标签页时直接抛出 `AttributeError`；
+    - 底层 `load_hot_pool_state`、`save_hot_pool_state`、`load_previous_day_carry_states` 将 `log_dir: str` 作为必填位置参数，在未传参或传 None 时缺乏鲁棒的多根目录探测机制；
+    - 在新增 Tab 1“🔥 梯度热榜（去弱留强）”后，`_get_active_table`、`_on_tab_changed`、`_on_day_changed`、`_silent_refresh` 等硬编码的 Tab 索引（0~7）未同步向后顺延，导致热榜无法响应搜索过滤，且赛马跟踪/验收复盘索引错位；
+    - 热榜表格中“现价”与“涨幅%”原代码误将 `st.alpha_vs_sector` 填入两次；收盘自动沉淀的交接日志因缺少 `label` 字段打印了 `: None`；
+  - **架构与健壮性修复落地**：
+    - **FusionLadderDialog 补齐 `log_dir` Property 与双重安全防护**：动态根据 `ed_trade_root`、`fusion_trade_center_root` 及 `_shadow_dir_candidates()` 获取当前活跃影子日志目录；`refresh_hot_pool` 采用 `getattr(self, 'log_dir', '')` 安全调用；
+    - **底层 HotPool 工具函数可选入参与多根自动探测**：`log_dir: Optional[str] = None`，在 None 或空时自动依次检索 Ramdisk、已配置根目录及全局 `_shadow_dir_candidates()`，杜绝崩溃；
+    - **Tab 索引全面校准对齐**：完整对齐 Tab 0~8 映射（0: 实时梯度, 1: 梯度热榜, 2: 按日回放, 3: T+1订单, 4: 赛马跟踪, 5: 信号面板, 6: 验收复盘, 7: 跨日跟踪, 8: 交易中心），搜索过滤完美绑定当前热榜表格，切换 Tab 1 自动刷新，定时器静默刷新兼顾 Tab 1；
+    - **字段显示与日志细节打磨**：`StockSeatState` 增加 `price` 与 `pct` 实时量价缓存，表格列与表头 100% 精准对应；收盘沉淀日志兼容 `from~to` 区间与 `note` 描述，杜绝 `: None`；
+- [x] **【自动化测试全绿通过（专项单测 2 项 + 关键 UI 回归 12 项 100% PASS）】**：
+  - 新增 `tests/test_hot_pool_dialog_fix.py`，全覆盖验证 `log_dir` 动态属性、`refresh_hot_pool` 安全调用、Tab 激活表格映射以及 `load_hot_pool_state` 在 `log_dir=None` 下的容错性，关联 12 项测试 100% 全部通过。
+
 ## 2026-11-05 19:10 【异动联动Nuitka打包配置添加--onefile-cache-mode=temporary实现退出自动清理闭环】(`stock/testpy/tdxgui/build_nuitka_clang.bat`)
 - [x] **【异动联动 Nuitka 编译参数新增退出自动清理临时目录】**：
   - **用户业务诉求**：“异动联动添加--onefile-cache-mode=temporary 退出后默认可以自动清理.”；

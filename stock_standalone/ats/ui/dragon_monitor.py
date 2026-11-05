@@ -119,7 +119,7 @@ class DragonLeaderMonitorDialog(QDialog, WindowMixin):
             self.db_path = os.path.join(self.data_dir, "ats_dragon_leaders.json")
             
             # Auto-migrate old data from the root data directory if present
-            old_data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data")
+            old_data_dir = os.path.join(get_app_root(), "data")
             old_db_path = os.path.join(old_data_dir, "ats_dragon_leaders.json")
             if os.path.exists(old_db_path) and not os.path.exists(self.db_path):
                 try:

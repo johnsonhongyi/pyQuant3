@@ -192,7 +192,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     res = run_day(day, top_n=args.top, step=args.step)
     md = render(res)
 
-    out_dir = args.out or os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "logs", "fusion_pipeline")
+    try:
+        from sys_utils import get_app_root
+        default_out = os.path.join(get_app_root(), "logs", "fusion_pipeline")
+    except Exception:
+        default_out = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "logs", "fusion_pipeline")
+    out_dir = args.out or default_out
     os.makedirs(out_dir, exist_ok=True)
     base = os.path.join(out_dir, day)
     with open(base + ".md", "w", encoding="utf-8") as f:

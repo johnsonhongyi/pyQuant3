@@ -35,12 +35,19 @@ import time
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional
 
+def _app_root() -> str:
+    try:
+        from sys_utils import get_app_root
+        return get_app_root()
+    except Exception:
+        return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 DEFAULT_ROOT = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    _app_root(),
     "logs", "fusion_state", "session_ctx",
 )
 TEMP_HISTORY_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    _app_root(),
     "logs", "market_temp_history.json",
 )
 KEEP_DAYS = 120
@@ -502,7 +509,7 @@ def ledger_summary(day: str, root: Optional[str] = None) -> Dict[str, int]:
     import gzip
 
     base = root or os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        _app_root(),
         "logs", "signal_snapshots",
     )
     path = os.path.join(base, "signal_ledger_latest.json.gz")

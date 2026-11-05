@@ -26,6 +26,14 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from ats.fusion.sector import SectorMap, ThemeMap, get_sector_map, get_theme_map
 
+def _app_root() -> str:
+    try:
+        from sys_utils import get_app_root
+        return get_app_root()
+    except Exception:
+        return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
 try:
     from ats.persistence_lock import directory_write_lock, replace_with_retry
     _HAS_PERSIST_LOCK = True
@@ -542,7 +550,9 @@ class StockSeatState:
     eviction_price: float = 0.0          # 淘汰时价格
     eviction_count: int = 0              # 累计淘汰次数
 
-    # 评分缓存
+    # 评分与实时量价缓存
+    price: float = 0.0                   # 实时现价
+    pct: float = 0.0                     # 实时涨幅%
     watch_score: float = 0.0
     alpha_vs_sector: float = 0.0
     evidence: Dict[str, Any] = field(default_factory=dict)
@@ -983,6 +993,10 @@ class HotPoolState:
             st.primary_sector = pri_sec
             st.sector_confirm_state = sec_confirm_state
 
+            # 记录最新现价与涨幅
+            st.price = px
+            st.pct = pct
+
             # 更新最高价与回撤
             if px > st.peak_price:
                 st.peak_price = px
@@ -1333,7 +1347,7 @@ class HotPoolState:
 
 def save_hot_pool_state(
     state: HotPoolState,
-    log_dir: str,
+    log_dir: Optional[str] = None,
     ramdisk_dir: Optional[str] = None,
 ) -> bool:
     """跨进程原子持久化当前交易日热榜状态。
@@ -1345,11 +1359,15 @@ def save_hot_pool_state(
     day = state.current_trade_date or time.strftime("%Y-%m-%d")
     payload = json.dumps(state.to_dict(), ensure_ascii=False, indent=2)
 
-    dirs = [log_dir]
+    dirs = []
     if ramdisk_dir and os.path.exists(ramdisk_dir):
         dirs.append(ramdisk_dir)
     elif os.path.exists(r"G:\fusion_shadow"):
         dirs.append(r"G:\fusion_shadow")
+    if log_dir and log_dir not in dirs:
+        dirs.append(log_dir)
+    if not dirs:
+        dirs.append(os.path.join(_app_root(), "logs", "fusion_shadow"))
 
     success = False
     for target_dir in dirs:
@@ -1380,7 +1398,7 @@ def save_hot_pool_state(
 
 def load_hot_pool_state(
     day: str,
-    log_dir: str,
+    log_dir: Optional[str] = None,
     ramdisk_dir: Optional[str] = None,
 ) -> Optional[HotPoolState]:
     """加载指定交易日的热榜状态。"""
@@ -1389,7 +1407,20 @@ def load_hot_pool_state(
         dirs.append(ramdisk_dir)
     elif os.path.exists(r"G:\fusion_shadow"):
         dirs.append(r"G:\fusion_shadow")
-    dirs.append(log_dir)
+    if log_dir and os.path.exists(log_dir) and log_dir not in dirs:
+        dirs.append(log_dir)
+
+    try:
+        from ats.ui.fusion_ladder_dialog import _shadow_dir_candidates
+        for cd in _shadow_dir_candidates():
+            if cd and os.path.exists(cd) and cd not in dirs:
+                dirs.append(cd)
+    except Exception:
+        pass
+
+    fallback_dir = os.path.join(_app_root(), "logs", "fusion_shadow")
+    if os.path.exists(fallback_dir) and fallback_dir not in dirs:
+        dirs.append(fallback_dir)
 
     for target_dir in dirs:
         p = os.path.join(target_dir, f"hot_pool_{day}.json")
@@ -1405,15 +1436,29 @@ def load_hot_pool_state(
 
 def load_previous_day_carry_states(
     current_day: str,
-    log_dir: str,
+    log_dir: Optional[str] = None,
     ramdisk_dir: Optional[str] = None,
 ) -> Dict[str, StockSeatState]:
     """开盘自动寻找上一有效交易日的 hot_pool 档案，提取昨日收盘处于在席状态的标的。"""
-    dirs = [log_dir]
+    dirs = []
     if ramdisk_dir and os.path.exists(ramdisk_dir):
         dirs.append(ramdisk_dir)
     elif os.path.exists(r"G:\fusion_shadow"):
         dirs.append(r"G:\fusion_shadow")
+    if log_dir and os.path.exists(log_dir) and log_dir not in dirs:
+        dirs.append(log_dir)
+
+    try:
+        from ats.ui.fusion_ladder_dialog import _shadow_dir_candidates
+        for cd in _shadow_dir_candidates():
+            if cd and os.path.exists(cd) and cd not in dirs:
+                dirs.append(cd)
+    except Exception:
+        pass
+
+    fallback_dir = os.path.join(_app_root(), "logs", "fusion_shadow")
+    if os.path.exists(fallback_dir) and fallback_dir not in dirs:
+        dirs.append(fallback_dir)
 
     all_files = []
     for d in dirs:

@@ -45,8 +45,15 @@ from ats.fusion.ranking import score_entry
 from ats.fusion.session_ctx import SessionContextStore, TEMP_HISTORY_PATH
 from ats.fusion.lifecycle import MarketLifecycle
 
+def _app_root() -> str:
+    try:
+        from sys_utils import get_app_root
+        return get_app_root()
+    except Exception:
+        return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 DEFAULT_STATE = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    _app_root(),
     "logs", "fusion_state", "tracker_state.json",
 )
 

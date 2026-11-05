@@ -41,6 +41,13 @@ _CANDIDATES = (
 
 def _find_premarket_path() -> Optional[str]:
     try:
+        from sys_utils import get_app_root
+        cand = os.path.join(get_app_root(), "JSONData", "tdx_last_df.h5")
+        if os.path.exists(cand):
+            return cand
+    except Exception:
+        pass
+    try:
         from JohnsonUtil import commonTips as cct  # type: ignore
         p = cct.get_run_path_tdx_Path("tdx_last_df")
         if p and os.path.exists(p):

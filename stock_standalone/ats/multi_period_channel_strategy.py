@@ -23,8 +23,12 @@ import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional, Tuple, Any
 
-# 确保上一级项目根目录在 sys.path 中 (支持在 ats/ 目录直接命令行调用)
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# 确保上一级项目根目录在 sys.path 中 (支持在 ats/ 目录直接命令行调用与打包自适应)
+try:
+    from sys_utils import get_app_root
+    PROJECT_ROOT = get_app_root()
+except Exception:
+    PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
