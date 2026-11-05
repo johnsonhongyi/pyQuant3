@@ -679,6 +679,8 @@ class DayReplay:
         day_low = np.full(n_code, np.nan)
 
         prev_day_vol: Optional[np.ndarray] = None
+        # 计算截至各 bar 的当日累计成交量矩阵 (严格对齐动态 10V 的累计量口径)
+        cum_volume_mat = np.cumsum(np.nan_to_num(mat.get("volume", np.zeros_like(mat["close"]))), axis=1)
 
         for t in range(n_t):
             close = mat["close"][:, t]
@@ -755,14 +757,17 @@ class DayReplay:
                         _v_m20 = vol_mean20[idx_c, t] if vol_mean20 is not None else 0.0
                         _ratio_est = float(vol[idx_c] / _v_m20) if _v_m20 > 0 else 1.0
                         _open_px = float(day_open_map.get(cd) or close[idx_c])
+                        # 传入截至当前 bar 的累计成交量（严格匹配动态 10V 口径）
+                        cum_vol_val = float(cum_volume_mat[idx_c, t])
                         hp_quotes[cd] = {
                             "price": float(close[idx_c]),
                             "percent": float(pct[idx_c]),
-                            "volume": float(vol[idx_c]),
+                            "volume": cum_vol_val,
                             "vwap": float(vwap[idx_c]),
                             "trade": float(close[idx_c]),
                             "open": _open_px,
                             "ratio": _ratio_est,
+                            "ts": float(clock[t]),
                         }
                         hp_obs_map[cd] = {
                             "freshness": "same_day",
@@ -772,7 +777,8 @@ class DayReplay:
                                 "including_current": {"10": float(vwap[idx_c])},
                             },
                         }
-                cur_mkt_pct = float(np.mean(pct[v])) if v.any() else 0.0
+                # 实盘与回放严格对齐：全市场涨幅中位数 (median)
+                cur_mkt_pct = float(np.median(pct[v])) if v.any() else 0.0
                 hot_pool.step_frame(
                     trade_date=day,
                     event_ts=float(clock[t]),

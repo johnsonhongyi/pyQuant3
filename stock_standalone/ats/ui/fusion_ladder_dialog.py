@@ -1943,6 +1943,11 @@ class FusionLadderDialog(QWidget, WindowMixin):
         self._follow_timer.timeout.connect(self._refresh_cross_day_if_visible)
         self._follow_timer.start(30000)
 
+        # 梯度热榜（Tab 1）专属 5 秒高频巡检定时器，保障实时盯盘体验
+        self._hot_pool_timer = QTimer(self)
+        self._hot_pool_timer.timeout.connect(self._refresh_hot_pool_if_visible)
+        self._hot_pool_timer.start(5000)
+
     def _init_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 6)
@@ -3910,10 +3915,19 @@ class FusionLadderDialog(QWidget, WindowMixin):
 
                 cur_px = getattr(st, "price", 0.0) or st.peak_price
                 cur_pct = getattr(st, "pct", 0.0)
+                # 10V 状态显式区分当前是否仍在线上 (线上 vs 失守/水下)
+                is_above = getattr(st, "is_above_10v", False)
+                if is_above:
+                    v10_disp = "线上"
+                elif st.first_10v_reclaim_ts > 0:
+                    v10_disp = "失守(线下)"
+                else:
+                    v10_disp = "水下"
+
                 vals = [
                     s_disp, st.code, nm, st.sector_confirm_state, sec_disp,
                     st.watch_score, lead_sec_str, cur_px, f"{cur_pct:+.2f}%",
-                    f"{st.alpha_vs_sector:+.2f}%", "线上" if st.first_10v_reclaim_ts > 0 else "水下",
+                    f"{st.alpha_vs_sector:+.2f}%", v10_disp,
                     "稳固" if st.sustained_bars > 0 else "失守", t_obs, t_alr, source_str,
                     st.sustained_bars, f"{st.max_drawdown_pct:.1f}%", st.eviction_reason or ("观察中" if st.seat != "EVICTED" else "破位淘汰")
                 ]
@@ -4090,6 +4104,14 @@ class FusionLadderDialog(QWidget, WindowMixin):
                          values[int((len(values) - 1) * .95)], values[int((len(values) - 1) * .99)],
                          values[-1], len(values))
             self._ui_probe_samples.clear()
+
+    def _refresh_hot_pool_if_visible(self) -> None:
+        """当用户切到梯度热榜（Tab 1）且窗口可见时，执行高频静默刷新。"""
+        if (getattr(self, "_is_closing", False) or not self.isVisible() or self.isMinimized()
+                or getattr(self, "is_hidden_state", False)):
+            return
+        if self.tabs.currentIndex() == 1:
+            self.refresh_hot_pool()
 
     def _auto_refresh_live(self) -> None:
         """定时静默刷新：只有影子文件真的变了才重绘，避免无谓重建表格。"""

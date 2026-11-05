@@ -161,7 +161,7 @@ def test_sector_pulse_dual_track_and_coverage_gate():
         "000002": {"price": 10.0, "percent": 0.0, "ratio": 1.5},
     }
     engine.step_frame("2026-11-05", t0, quotes_low_coverage)
-    
+
     t1 = t0 + 60.0
     quotes_low_cov_pulse = {
         "000001": {"price": 11.5, "percent": 1.5, "ratio": 2.0},
@@ -412,9 +412,10 @@ def test_day_replay_pure_candidate_coverage_mode():
     assert isinstance(res.hot_pool_seats, dict)
     assert isinstance(res.hot_pool_events, list)
 
+    active_seated = [s for s in res.hot_pool_seats.values() if s.get("seat") not in ("NONE", None)]
     print(f"\n[实证结果] 日期: {day}")
     print(f"热榜激活候选总数: {len(res.hot_pool_candidates)}")
-    print(f"热榜入席标的总数: {len(res.hot_pool_seats)}")
+    print(f"热榜在席有效标的总数: {len(active_seated)} (候选总池: {len(res.hot_pool_seats)})")
     print(f"热榜席位流转事件数: {len(res.hot_pool_events)}")
 
     # 检查实盘标的 000995, 300139 等是否成功在热榜中留存

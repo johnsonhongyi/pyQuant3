@@ -7,6 +7,50 @@
   - **Flash（执行者）**：通过 `invoke_subagent(..., Model="flash")` 承接写代码、跑测试、批量扫描等高 Token 消耗的具体事务。
 - **动态裁量**：以质量为主、价格为辅；质量第一、效率第二。轻微修改与极高难度核心问题由 Argon 亲自操刀。
 
+## 2026-11-05 20:40 【梯度热榜五大阻断项全面清零与全链路生产级闭环】(`ats/fusion/hot_pool.py`, `ats/fusion/shadow.py`, `ats/fusion/replay.py`, `tests/test_hot_pool_step*`)
+- [x] **【实盘提醒通道送达与 AlertNotifier 契约适配】**：
+  - `hot_pool.py:1365` 严格对齐 `notify_special_signal(code, name, reason, score, ...)` 正确签名；
+  - 重要席位转移显式保证打分 `>= 88.0` 并设置 `is_force=True`，彻底打破 `>= 78.0` 分的静默过滤壁垒，确保早期形态提示 100% 正常送达；
+- [x] **【逐股新鲜度门禁与 10V 质量硬门禁】**：
+  - `shadow.py` 严格提取行情真实时间戳 `ts`，缺失时标记为 0.0，严禁静默填入 `now`；只有在 `ts > 0` 且 `abs(now - ts) <= 60s` 时方可标记为 `same_day`；
+  - `hot_pool.py` 在更新价格窗口前与个股席位评估路径均增加逐股新鲜度门禁，陈旧/延迟数据坚决跳过席位评估；
+  - 成交量为 0 时拒绝生成动态 10V；动态值不可用时，静态质量为 `tp_fallback`（典型价回退）或 `unavailable` 坚决判定为不达标（`ref_10v = 0.0`），彻底杜绝不可靠数据放行；
+- [x] **【跨日早涨消歧与延迟队列有序消费】**：
+  - `StockSeatState` 增加 `first_observed_ts_today` 字段；跨日继承时置为 0.0，评分严格使用当日首次观察时间，杜绝昨日继承标的因历史时间戳虚高获得数万秒领先加分；
+  - 席位淘汰时释放日内激活配额；延迟队列消费逻辑闭环，`to_dict` / `from_dict` 完整持久化与恢复 `intraday_activated_count` 和 `budget_delayed_queue`；
+- [x] **【崩溃恢复与异步落盘彻底闭环】**：
+  - 崩溃恢复测试中快照直接写入 `shadow._log_dir`（即 `root/logs/fusion_shadow`），验证 `shadow2` 重启实例化后 100% 恢复当日席位与候选状态；
+  - `to_dict` 对 `events_log`、`alerts_log`、`evicted_history`、`prime_leader_by_sector` 执行深解耦拷贝，杜绝异步序列化与主线程数据竞争；异步写盘全局监控上次提交 `Future` 执行异常并记录预警；
+- [x] **【早期信号解析健壮性与真实留出集回放实证】**：
+  - `shadow.py` 采用通用解析函数 `_parse_signal_val`，全面兼容 Pandas 输出的 float `1.0`、bool `True` 等格式，杜绝漏掉底部观察入口；
+  - 专项测试直接调度 `DayReplay` 跑通留出验证集 `2026-11-04`，全套 19 项关联专项测试全部 100% PASS（75.79s）。
+
+## 2026-11-05 20:10 【梯度热榜复审意见全面修正与实盘链路闭环】(`ats/fusion/hot_pool.py`, `ats/fusion/shadow.py`, `ats/fusion/replay.py`, `ats/ui/fusion_ladder_dialog.py`, `tests/test_hot_pool_step*`)
+- [x] **【实盘已校准配置与关键观察证据接入】**：
+  - `HotPoolState` 构造函数默认参数及 `FusionShadow` 实例化统一对齐 `HotPoolCalibratedConfig(premarket_seed_budget=400, is_provisional=False)`；
+  - `shadow.py` 的 `step_hot_pool` 遍历构建行情切片时，同步构建 `obs_evidence_map`（含当日新鲜度、实时 VWAP、以及 `sig_bottom/sig_launch/sig_start/has_bottom_base` 早期信号），传入 `hot_pool.step_frame(..., obs_evidence_map=obs_evidence_map)`，彻底接通动态 10V 及策略早期观察入席分支；
+- [x] **【板块覆盖率分母与逐股行情新鲜度门禁】**：
+  - `SectorPulseEngine` 初始化时结合 `sector_map` / `theme_map` 全量代码锁定固定全市场分母，杜绝首帧残缺行情导致分母缩水覆盖率虚高；
+  - 行情切片附加时间戳 `ts`，在板块引擎与个股席位评估中检查新鲜度（陈旧延时数据不计入有效报价）；
+  - 缺失真实 VWAP 或量比时显式标记为 0，严禁静默填入 `px` 或 `1.0` 从而伪装通过承接门禁；
+- [x] **【领涨早涨加分、席位容量上限与全局预算消费】**：
+  - `compute_leader_race_score` 引入首次观察/入席时间 `first_observed_ts` 与领先时差加分，真实体现“早涨”先发优势；
+  - 核心领涨席（限 15）、趋势观察席（限 60）、底部潜伏席（限 60）增加容量上限；`LEADER_SWITCH` 发生时将原榜首降为 `TREND_WATCH` 腾出核心席位，超额时按 `watch_score` 赛马末位换血；
+  - `intraday_activation_budget` 升级为全局计数，`budget_delayed_queue` 建立有序消费机制；
+- [x] **【同日崩溃恢复与提示幂等闭环】**：
+  - `FusionShadow` 启动/跨日检测时优先检查并加载当日已存在的 `hot_pool_{day}.json`，实现进程崩溃重启 100% 恢复当日席位与候选状态；
+  - 提示记录 `alert` 显式持久化 `pulse_id`，引入脉冲轮次 `f"{int(pulse.first_pulse_ts)}_{pulse.re_pulse_count}"` 区分同日二次脉冲，反序列化恢复 `_emitted_alert_keys` 时准确读取各记录的 `pulse_id`；
+- [x] **【回放口径一致性与验收报告对齐】**：
+  - 回放传入截至当前 bar 的累计成交量（非单根 bar 量），市场基准涨幅统一采用中位数（`median`）；
+  - 明确区分候选池总量与在席有效标的（`seat != NONE`）；
+  - 新增具备真实参数扰动对比与留出验证集实证的网格校准测试；
+- [x] **【UI 实时监控、AlertNotifier 接入与异步落盘】**：
+  - `_emit_alert` 接入 `AlertNotifier.get_instance().notify_special_signal` 实盘提示通道；
+  - 表格 10V 列反映当前现价是否高于 10V（“线上” vs “失守(线下)” / “水下”）；热榜接入专属 5 秒高频巡检定时器；
+  - 消除 `indent=2` 采用紧凑 JSON，`events_log` 滚动保留 1000 条，提供 `save_hot_pool_state_async` 后台 Worker 异步落盘，彻底消除策略主循环毫秒级阻塞风险；
+- [x] **【自动化测试全绿通过（专项单测 6 项 + 关联回归 19 项 100% PASS）】**：
+  - 消除测试代码行尾空格，19 项核心测试全部 100% 通过（89.66s）。
+
 ## 2026-11-05 19:45 【全面重构ATS路径模式对齐TK底层打包环境自适应规范闭环】(`ats/alert_notifier.py`, `ats/reentry_tracker.py`, `ats/multi_period_channel_strategy.py`, `ats/fusion/*`, `tests/test_ats_packaged_path_adaptive.py`)
 - [x] **【全面清理 ATS 硬编码路径，统一对齐 sys_utils 底层打包自适应架构】**：
   - **用户业务诉求**：“全面修复ats中路径方式不是tk,ats实现的底层的打包环境自适应方式.”；

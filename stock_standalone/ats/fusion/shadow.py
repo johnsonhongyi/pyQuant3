@@ -244,9 +244,9 @@ class FusionShadow:
         self._cuts: Optional[tuple] = None
         self._last_cut_n = 0
 
-        # 梯度热榜持续跟踪独立观察状态机 (Step 3)
-        from ats.fusion.hot_pool import HotPoolState
-        self.hot_pool = HotPoolState()
+        # 梯度热榜持续跟踪独立观察状态机 (Step 3 生产采用已校准定稿配置)
+        from ats.fusion.hot_pool import HotPoolState, HotPoolCalibratedConfig
+        self.hot_pool = HotPoolState(config=HotPoolCalibratedConfig())
         self._last_hot_pool_save_ts = 0.0
         self._hot_pool_seeded_day = ""
 
@@ -1161,22 +1161,29 @@ class FusionShadow:
             return
         try:
             day = today_str(now)
-            # 1. 跨日重置与盘前种子初始化
+            # 1. 跨日重置与盘前种子初始化 (闭合同日崩溃恢复)
             if self._hot_pool_seeded_day != day:
                 self._hot_pool_seeded_day = day
-                from ats.fusion.hot_pool import HotPoolState, load_previous_day_carry_states
-                self.hot_pool = HotPoolState()
-                prev_carry = load_previous_day_carry_states(day, self._log_dir)
-                if prev_carry:
-                    self.hot_pool.carry_from_previous_day(day, prev_carry, carry_ts=now)
-                from ats.fusion.context import get_daily_context
-                d_ctx = get_daily_context()
-                if d_ctx and getattr(d_ctx, "ok", False):
-                    all_cds = [str(c).split(".")[0].zfill(6) for c in df_all_data.index]
-                    self.hot_pool.seed_from_daily_context(day, all_cds, lambda c, d: d_ctx.asof(c, d), seed_ts=now)
+                from ats.fusion.hot_pool import HotPoolState, HotPoolCalibratedConfig, load_hot_pool_state, load_previous_day_carry_states
+                recovered = load_hot_pool_state(day, self._log_dir)
+                if recovered is not None and getattr(recovered, "current_trade_date", "") == day:
+                    self.hot_pool = recovered
+                    logger.info("[FusionShadow] 成功从本地恢复当日热榜快照: %s, 席位数: %d, 候选数: %d",
+                                day, len([s for s in recovered.seats.values() if s.seat != "NONE"]), len(recovered.candidates))
+                else:
+                    self.hot_pool = HotPoolState(config=HotPoolCalibratedConfig())
+                    prev_carry = load_previous_day_carry_states(day, self._log_dir)
+                    if prev_carry:
+                        self.hot_pool.carry_from_previous_day(day, prev_carry, carry_ts=now)
+                    from ats.fusion.context import get_daily_context
+                    d_ctx = get_daily_context()
+                    if d_ctx and getattr(d_ctx, "ok", False):
+                        all_cds = [str(c).split(".")[0].zfill(6) for c in df_all_data.index]
+                        self.hot_pool.seed_from_daily_context(day, all_cds, lambda c, d: d_ctx.asof(c, d), seed_ts=now)
 
-            # 2. 构造快照字典
+            # 2. 构造快照字典与实盘观察证据链 (包含逐股行情时间戳与真实量价门禁)
             quotes_map = {}
+            obs_evidence_map = {}
             idx_list = df_all_data.index
             c_px = df_all_data["trade"] if "trade" in df_all_data.columns else (df_all_data["price"] if "price" in df_all_data.columns else df_all_data.get("close"))
             c_pct = df_all_data.get("percent") if "percent" in df_all_data.columns else df_all_data.get("pct")
@@ -1184,6 +1191,25 @@ class FusionShadow:
             c_vol = df_all_data.get("volume")
             c_ratio = df_all_data.get("ratio")
             c_open = df_all_data.get("open")
+            c_ts = df_all_data.get("time") if "time" in df_all_data.columns else (df_all_data.get("timestamp") if "timestamp" in df_all_data.columns else df_all_data.get("server_ts"))
+            c_sig_bot = df_all_data.get("sig_bottom")
+            c_sig_launch = df_all_data.get("sig_launch")
+            c_sig_start = df_all_data.get("sig_start")
+            c_base = df_all_data.get("has_bottom_base")
+
+            def _parse_signal_val(series_obj: Any, idx: Any) -> int:
+                if series_obj is None:
+                    return 0
+                try:
+                    val = series_obj.loc[idx]
+                    if val is None or (isinstance(val, float) and pd.isna(val)):
+                        return 0
+                    if isinstance(val, (int, float, np.integer, np.floating)):
+                        return 1 if float(val) > 0.0 else 0
+                    s = str(val).strip().lower()
+                    return 1 if s in ("1", "true", "t", "yes") else 0
+                except Exception:
+                    return 0
 
             for idx_c in idx_list:
                 c6 = str(idx_c).split(".")[0].zfill(6)
@@ -1192,10 +1218,23 @@ class FusionShadow:
                     if px <= 0.0:
                         continue
                     pct_val = float(c_pct.loc[idx_c]) if c_pct is not None else 0.0
-                    vw_val = float(c_vw.loc[idx_c]) if c_vw is not None else px
+                    # 真实 VWAP 与真实量比检查，缺失时严禁伪装为现价或 1.0
+                    raw_vw = float(c_vw.loc[idx_c]) if c_vw is not None else 0.0
+                    vw_val = raw_vw if raw_vw > 0.0 else 0.0
                     vol_val = float(c_vol.loc[idx_c]) if c_vol is not None else 0.0
-                    r_val = float(c_ratio.loc[idx_c]) if c_ratio is not None else 1.0
+                    raw_r = float(c_ratio.loc[idx_c]) if c_ratio is not None else 0.0
+                    r_val = raw_r if raw_r > 0.0 else 0.0
                     op_val = float(c_open.loc[idx_c]) if c_open is not None else px
+
+                    # 提取真实时间戳，严禁缺失时默认填入 now
+                    raw_ts = c_ts.loc[idx_c] if c_ts is not None else None
+                    ts_val = 0.0
+                    if raw_ts is not None and pd.notna(raw_ts):
+                        try:
+                            ts_val = float(raw_ts)
+                        except (ValueError, TypeError):
+                            ts_val = 0.0
+
                     quotes_map[c6] = {
                         "price": px,
                         "percent": pct_val,
@@ -1204,6 +1243,35 @@ class FusionShadow:
                         "ratio": r_val,
                         "open": op_val,
                         "trade": px,
+                        "ts": ts_val,
+                    }
+
+                    # 健壮解析早期信号（全面兼容 float 1.0、bool True、字符串 "1" 等 Pandas 常见格式）
+                    s_bot = _parse_signal_val(c_sig_bot, idx_c)
+                    s_launch = _parse_signal_val(c_sig_launch, idx_c)
+                    s_start = _parse_signal_val(c_sig_start, idx_c)
+                    s_base = _parse_signal_val(c_base, idx_c)
+
+                    # 真实新鲜度判定：时间戳在 60s 以内方可标为 same_day
+                    is_ts_fresh = (ts_val > 0.0 and abs(now - ts_val) <= 60.0)
+                    freshness_label = "same_day" if is_ts_fresh else ("missing_ts" if ts_val == 0.0 else "stale")
+
+                    # 动态 10V 仅在成交量与分时 VWAP 均真实有效且行情新鲜时才提供，严禁缺失量时伪装放行
+                    has_dyn_vwap = (vw_val > 0.0 and vol_val > 0.0 and is_ts_fresh)
+
+                    obs_evidence_map[c6] = {
+                        "freshness": freshness_label,
+                        "trade_date": day,
+                        "early_signals": {
+                            "sig_bottom": {"value": s_bot},
+                            "sig_launch": {"value": s_launch},
+                            "sig_start": {"value": s_start},
+                            "has_bottom_base": {"value": s_base},
+                        },
+                        "vwap": {
+                            "timing": {"freshness": freshness_label},
+                            "including_current": {"10": vw_val} if has_dyn_vwap else {},
+                        },
                     }
                 except Exception:
                     continue
@@ -1213,18 +1281,23 @@ class FusionShadow:
 
             from ats.fusion.context import get_daily_context
             d_ctx = get_daily_context()
+            # 市场涨幅中位数 (与实盘统一)
+            mkt_pct = float(c_pct.median()) if (c_pct is not None and hasattr(c_pct, "median")) else 0.0
+
             self.hot_pool.step_frame(
                 trade_date=day,
                 event_ts=now,
                 quotes_map=quotes_map,
                 daily_ctx_getter=lambda c, d: d_ctx.asof(c, d) if (d_ctx and d_ctx.ok) else {},
-                source="live_snapshot",
+                obs_evidence_map=obs_evidence_map,
+                market_pct=mkt_pct,
+                source=source,
             )
 
-            # 3. 按间隔（每 5 秒）原子持久化
+            # 3. 按间隔（每 5 秒）异步安全持久化 (后台 Worker 落盘，彻底消除主循环阻塞风险)
             if now - self._last_hot_pool_save_ts >= 5.0:
                 self._last_hot_pool_save_ts = now
-                from ats.fusion.hot_pool import save_hot_pool_state
-                save_hot_pool_state(self.hot_pool, self._log_dir)
+                from ats.fusion.hot_pool import save_hot_pool_state_async
+                save_hot_pool_state_async(self.hot_pool, self._log_dir)
         except Exception as exc:
             logger.debug("[FusionShadow] step_hot_pool exception: %s", exc)
