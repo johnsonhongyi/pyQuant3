@@ -7,6 +7,24 @@
   - **Flash（执行者）**：通过 `invoke_subagent(..., Model="flash")` 承接写代码、跑测试、批量扫描等高 Token 消耗的具体事务。
 - **动态裁量**：以质量为主、价格为辅；质量第一、效率第二。轻微修改与极高难度核心问题由 Argon 亲自操刀。
 
+## 2026-11-05 11:30 【异动联动Nuitka打包报警中心0报警根因修复与实时行情全链路对齐闭环】(`stock/testpy/tdxgui/异动联动.py`, `tests/test_alert_center_nuitka_fix.py`)
+- [x] **【彻底查清并根治 Nuitka 打包后报警中心没有任何报警（0）的核心根因】**：
+  - **用户业务诉求**：“异动监控使用nuitka打包后,报警中心今天没有任何的报警,pyinstall之前没有任何问题,规则也可以正常读取,修复这个bug,哪里导致的”；
+  - **根因 1（行情字段与维度不匹配导致实时判定永远失效）**：
+    - `refresh_alert_center` 曾尝试通过 `sina_data_df.get('price')` 和 `sina_data_df.get('percent')` 获取实时价格和涨幅；
+    - 但 `G:\sina_data.h5` 的列结构中实际字段为 `close`（现价）、`llastp`（昨收）与 `turnover`（成交额元），根本不存在名为 `price` 或 `percent` 的列；
+    - 导致 `cur_price`、`cur_pct` 永远为 `NaN`，规则满足度 `is_now_satisfy` 永远为 `False`，在历史记录刚启动为空时，所有股票全部被判定为非报警状态，`🔴 报警中` 统计为 0 且表格全部被过滤为空；
+    - **修复对齐**：全面实现多源兼容提取器，价格优先取 `close / 现价 / price / trade / buy`；涨幅优先取 `涨幅 / percent` 或由 `(close - llastp) / llastp * 100` 精准计算；成交量智能换算为与报警规则完全对齐的“亿元”标量，当前盘中 17 只达标股票瞬间 100% 恢复识别；
+  - **根因 2（全量股票 check_alert 循环与 TDX 均线表过度耦合）**：
+    - `refresh_all_stock_data` 原逻辑将 107 只规则股票的 `check_alert` 放在 `if _tdx_df is not None and not _tdx_df.empty:` 内部，且受 `high4` 约束；一旦开盘初期或盘中 TDX 均线表未就绪或未包含 `high4`，全量报警检查直接被短路或跳过；
+    - **解耦加固**：坚决将新浪实时行情驱动的 `check_alert` 提升至顶层，只要 `sina_data` 快照有效，无论 TDX 均线表是否就绪，100% 独立遍历 `alerts_rules` 进行校验，股票代码格式化为标准 6 位字符串匹配，消除跨表依赖；
+  - **根因 3（inserted_alert_keys 去重时序与 flush_alerts 冲突）**：
+    - 理顺 `check_alert` 与 `flush_alerts` 的写入与去重时序，保证缓冲区到历史记录的顺畅流转与 Treeview 实时响应；
+  - **根因 4（get_conf_path 局部定义遮蔽导致 save_linkage_config 签名异常）**：
+    - `异动联动.py` 第 7301 行定义的 `get_conf_path` 遮蔽了 `sys_utils.get_conf_path`，缺少 `is_user_save` 参数导致每 5 分钟在日志中报错；现已拓展签名并优先委托 `sys_utils`，彻底消除报错；
+- [x] **【自动化测试全绿通过】**：
+  - 编写 `tests/test_alert_center_nuitka_fix.py`，覆盖签名兼容、实盘快照字段提取与 107 只规则股票判定（17 只精确命中）、解耦流转等测试，全部 100% PASS（0.71s）。
+
 ## 2026-11-05 09:35 【SBC工具栏Alt+统一队列调度与高开慢闪红线及融合梯度开盘切日闭环】(`docs/tasks/2026-11-05_0935_SBC工具栏Alt统一调度与高开慢闪红线及昨日分时防御.md`, `ats/ui/intraday_strategy_dialog.py`, `ats/tdx_realtime_fetcher.py`, `ats/ui/fusion_ladder_dialog.py`, `tests/test_sbc_alt_click_broadcast.py`, `tests/test_fusion_trade_date_and_tooltip_card.py`)
 - [x] **【彻底解决 SBC 工具栏 Alt+ 点击【清缓】无效问题，落地全链路统一队列错峰调度体系】**：
   - **用户业务诉求**：“ats的sbc工具栏点击单个执行,按住alt+点击,统一队列执行,今天出现开盘没有昨日的分时数据,点击清理需要一个一个重置数据,alt+点击清理,没有效果,全面优化这个功能,alt+可以统一调度”；

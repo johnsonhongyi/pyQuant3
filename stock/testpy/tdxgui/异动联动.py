@@ -7298,17 +7298,19 @@ def get_resource_file(rel_path, out_name=None,BASE_DIR=None,spec=None,log=logger
 # --------------------------------------
 BASE_DIR = get_base_path()
 
-def get_conf_path(fname,rel_path=None,log=logger):
+def get_conf_path(fname, rel_path=None, log=logger, base_dir=None, is_user_save=False, *args, **kwargs):
     """
-    获取并验证 stock_codes.conf
+    获取并验证配置文件路径（兼容 sys_utils.get_conf_path 全签名）。
+    """
+    try:
+        from sys_utils import get_conf_path as sys_get_conf_path
+        target_base = base_dir if base_dir is not None else (rel_path if isinstance(rel_path, str) and os.path.isdir(rel_path) else BASE_DIR)
+        return sys_get_conf_path(fname, base_dir=target_base, is_user_save=is_user_save)
+    except Exception:
+        pass
 
-    逻辑：
-      1. 优先使用 BASE_DIR/stock_codes.conf
-      2. 不存在 → 从 JSONData/stock_codes.conf 释放
-      3. 校验文件
-    """
-    # default_path = os.path.join(BASE_DIR, "stock_codes.conf")
-    default_path = os.path.join(BASE_DIR, fname)
+    target_base = base_dir if base_dir is not None else BASE_DIR
+    default_path = os.path.join(target_base, fname)
 
     # --- 1. 直接存在 ---
     if os.path.exists(default_path):
@@ -12889,22 +12891,61 @@ def refresh_alert_center():
         if is_custom:
             custom_stocks_count += 1
 
-        # 股票名称与实时行情
+        # 股票名称与实时行情（多源兼容：新浪H5快照 / 监控小窗口）
         raw_name = "未知"
         cur_price = None
         cur_pct = None
         cur_vol = None
         if sina_data_df is not None and not sina_data_df.empty:
-            raw_name = sina_data_df.get("name", pd.Series(dtype=object)).get(code, "未知")
-            try:
-                cur_price = float(sina_data_df.get("price", pd.Series(dtype=float)).get(code, float("nan")))
-            except Exception: pass
-            try:
-                cur_pct = float(sina_data_df.get("percent", pd.Series(dtype=float)).get(code, float("nan")))
-            except Exception: pass
-            try:
-                cur_vol = float(sina_data_df.get("turnover", pd.Series(dtype=float)).get(code, float("nan")))
-            except Exception: pass
+            # 1. 股票名称
+            name_col = sina_data_df.get("name")
+            if name_col is not None and code in name_col.index:
+                raw_name = str(name_col.get(code, "未知"))
+            
+            # 2. 价格 (close / 现价 / price / trade / buy)
+            for p_col in ("close", "现价", "price", "trade", "buy"):
+                if p_col in sina_data_df.columns and code in sina_data_df.index:
+                    try:
+                        p_val = float(sina_data_df[p_col].get(code, float("nan")))
+                        if not np.isnan(p_val) and p_val > 0:
+                            cur_price = p_val
+                            break
+                    except Exception:
+                        pass
+
+            # 3. 涨幅 (涨幅 / percent / 由 close 与 llastp 实时精准计算)
+            for pct_col in ("涨幅", "percent"):
+                if pct_col in sina_data_df.columns and code in sina_data_df.index:
+                    try:
+                        pct_val = float(sina_data_df[pct_col].get(code, float("nan")))
+                        if not np.isnan(pct_val):
+                            cur_pct = pct_val
+                            break
+                    except Exception:
+                        pass
+            if cur_pct is None and cur_price is not None and "llastp" in sina_data_df.columns and code in sina_data_df.index:
+                try:
+                    lp = float(sina_data_df["llastp"].get(code, float("nan")))
+                    if not np.isnan(lp) and lp > 0:
+                        cur_pct = round((cur_price - lp) / lp * 100.0, 2)
+                except Exception:
+                    pass
+
+            # 4. 成交量/额 (转换为与报警规则对齐的“亿元”标量)
+            if "turnover" in sina_data_df.columns and code in sina_data_df.index:
+                try:
+                    to_val = float(sina_data_df["turnover"].get(code, float("nan")))
+                    if not np.isnan(to_val):
+                        cur_vol = round(to_val / 100.0 / 10000.0 / 100.0, 2)
+                except Exception:
+                    pass
+            elif "volume" in sina_data_df.columns and code in sina_data_df.index:
+                try:
+                    v_val = float(sina_data_df["volume"].get(code, float("nan")))
+                    if not np.isnan(v_val):
+                        cur_vol = round(v_val / 100.0, 1)  # 手
+                except Exception:
+                    pass
         else:
             raw_name = monitor_windows.get(code, {}).get("stock_info", ["", "未知"])[1]
 
@@ -13221,24 +13262,12 @@ def flush_alerts():
             # [AL-LINK] 自动刷新触发的弹出设为 is_auto=True，避免自动联动
             open_alert_center(is_auto=True)
 
-            # ---- 本批次去重 ----
-            batch_seen = set()
-            unique_alerts = []
+            # ---- 本批次写入历史（防重复） ----
             for alert in alerts_buffer:
                 unique_key = f"{alert.get('time','')}-{alert.get('stock_code','')}-{alert.get('status','')}"
-                if unique_key in batch_seen:
-                    continue
-                batch_seen.add(unique_key)
-
-                if unique_key in inserted_alert_keys:
-                    continue
-
-                inserted_alert_keys.add(unique_key)
-                unique_alerts.append(alert)
-
-            # ---- 将去重后的 alerts 写入历史 ----
-            for alert in unique_alerts:
-                alerts_history.append(alert)
+                if unique_key not in inserted_alert_keys:
+                    inserted_alert_keys.add(unique_key)
+                    alerts_history.append(alert)
 
             # 清空缓冲
             alerts_buffer = []
@@ -13565,43 +13594,31 @@ def refresh_all_stock_data():
         data = df
         sina_realtime_status = True
         _tdx_df = _get_tdx_data_df()
-        # ② 只取 high4 列
+        
+        # ② 若有 TDX 数据，合并 high4 并执行突破判定
         if _tdx_df is not None and not _tdx_df.empty:
-            if 'high4' not in _tdx_df.columns:
-                logger.error(f'high4 not in _tdx_df count:{len(_tdx_df)}')
-
-            else:
+            if 'high4' in _tdx_df.columns:
                 high4_df = _tdx_df[['high4']]
-                # ③ 合并到 sina_data_df
                 if data is not None and not data.empty:
                     data = data.join(high4_df, how='left')
-            check_monitor_break_high4(monitor_windows=monitor_windows,df=data, logger=logger)
-            for stock_code, row in data.iterrows():
-                if stock_code  in alerts_rules.keys():
-                    price = row.close
-                    name = row['name']
-                    percent = round((row.close - row.llastp) / row.llastp *100,1)
-                    amount = round(row.turnover/100/10000/100,1)
-                    logger.debug(f'sina_data-check_alert:{stock_code} {name}')
-                    check_alert(stock_code, price, percent, amount , name)
-        else:
-            data = _get_stock_changes()
-            if data is not None and not data.empty:
-                if '涨幅' not in data.columns:
-                    data = process_full_dataframe(data)
-                data = get_latest_valid_data(data)
-                for _, row in data.iterrows():
-                    stock_code = row["代码"]
-                    if stock_code  in alerts_rules.keys():
-                        # if stock_code == '603083':
-                        #     import ipdb;ipdb.set_trace()
-                        name = row["名称"]
-                        price = row["价格"]
-                        change = row["涨幅"]
-                        volume = row["量"]
-                        # 调用你的报警检查
-                        if not sina_realtime_status:
-                            check_alert(stock_code, price, change, volume,name)
+            else:
+                logger.error(f'high4 not in _tdx_df count:{len(_tdx_df)}')
+            check_monitor_break_high4(monitor_windows=monitor_windows, df=data, logger=logger)
+        
+        # ③ 核心报警检查（新浪实时行情驱动，坚决不依赖 TDX 均线表是否就绪）
+        for stock_code, row in data.iterrows():
+            code_str = str(stock_code).zfill(6)
+            if code_str in alerts_rules.keys():
+                try:
+                    price = float(getattr(row, 'close', 0.0))
+                    name = str(getattr(row, 'name', code_str))
+                    llastp = float(getattr(row, 'llastp', 0.0))
+                    percent = round((price - llastp) / llastp * 100.0, 1) if llastp > 0 else 0.0
+                    turnover = float(getattr(row, 'turnover', 0.0))
+                    amount = round(turnover / 100.0 / 10000.0 / 100.0, 1) if turnover > 0 else 0.0
+                    check_alert(code_str, price, percent, amount, name)
+                except Exception as e_row:
+                    logger.debug(f"check_alert skip {code_str}: {e_row}")
                             
     elif loaded_df is not None and not loaded_df.empty:
         data = loaded_df.copy()  # 每只股票：code, price, change, volume
