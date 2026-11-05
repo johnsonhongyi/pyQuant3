@@ -7,7 +7,7 @@
   - **Flash（执行者）**：通过 `invoke_subagent(..., Model="flash")` 承接写代码、跑测试、批量扫描等高 Token 消耗的具体事务。
 - **动态裁量**：以质量为主、价格为辅；质量第一、效率第二。轻微修改与极高难度核心问题由 Argon 亲自操刀。
 
-## 2026-11-05 09:35 【SBC工具栏Alt+统一队列调度与高开10秒慢闪红线及昨日分时防御闭环】(`docs/tasks/2026-11-05_0935_SBC工具栏Alt统一调度与高开慢闪红线及昨日分时防御.md`, `ats/ui/intraday_strategy_dialog.py`, `ats/tdx_realtime_fetcher.py`, `tests/test_sbc_alt_click_broadcast.py`)
+## 2026-11-05 09:35 【SBC工具栏Alt+统一队列调度与高开慢闪红线及融合梯度开盘切日闭环】(`docs/tasks/2026-11-05_0935_SBC工具栏Alt统一调度与高开慢闪红线及昨日分时防御.md`, `ats/ui/intraday_strategy_dialog.py`, `ats/tdx_realtime_fetcher.py`, `ats/ui/fusion_ladder_dialog.py`, `tests/test_sbc_alt_click_broadcast.py`, `tests/test_fusion_trade_date_and_tooltip_card.py`)
 - [x] **【彻底解决 SBC 工具栏 Alt+ 点击【清缓】无效问题，落地全链路统一队列错峰调度体系】**：
   - **用户业务诉求**：“ats的sbc工具栏点击单个执行,按住alt+点击,统一队列执行,今天出现开盘没有昨日的分时数据,点击清理需要一个一个重置数据,alt+点击清理,没有效果,全面优化这个功能,alt+可以统一调度”；
   - **核心调度器 (`sync_all_open_sbc_clear_cache`)**：
@@ -22,7 +22,7 @@
 - [x] **【开盘无昨日分时数据的底层防御与自动补拉机制】**：
   - **根因定位与修复**：在 09:15~09:30 集合竞价或开盘切日初期（`not can_rollover`），若缓存中的 `df_multi` 缺少上一有效交易日（`latest_prev_day`），原代码直接短路返回旧缓存导致无昨日分时；现已在 `_fetch_multi_day_intraday_bars` 中增加交易日完整性门禁（`is_cache_fresh`），发现缺少昨日分时自动判定失效并穿透拉取 TDX，彻底根除开盘缺少昨日分时数据的问题。
 - [x] **【SBC 撮合成交及开盘价高开/反向低开 10 秒慢闪红线与视觉徽标】**：
-  - **用户业务诉求**：“sbc撮合成交及开盘价高开,这里需要10秒的慢闪的红线开盘线,并在sbc上显示高开或者反向的低开”；
+  - **用户业务诉求**：“sbc撮合成交及开盘价高开,这里需要10秒的慢闪的红线开盘线,并在sbc上显示高开或者反向的低开”、“慢闪几次会自动停止”、“间隔2秒.避免导致sbc高开太多导致卡顿,可以全局控制慢闪触发情况,避免同时触发导致系统压力”；
   - **昨收对比与高开/低开判定**：提取真实行情快照 `last_close`，精确计算 `gap_pct`；识别 `高开`（$\ge +0.05\%$）、`低开`（$\le -0.05\%$）与平开；
   - **10 秒慢闪脉冲机制 (`SBCGlobalFlashController`)**：
     - **间隔 2 秒呼吸律动**：单次慢闪呼吸周期设为 **2.0 秒**（0.5Hz，从容深沉，长久盯盘不累眼），10 秒总时长内精准慢闪 **5 次**（$10 \div 2 = 5$ 次）后自动停机并恢复稳态常亮；
@@ -33,8 +33,15 @@
     - **反向低开**：绘制 **绿色慢闪虚线**（`QColor(0, 230, 118)`），右侧高亮胶囊显示 `低开:XX.XX`，气泡徽标 `💧 低开 -X.XX%`；
     - **平开**：绘制 **金黄色虚线**（`QColor(255, 170, 0)`），显示 `平开:XX.XX`；
     - 顶部信息栏与底部日志联动格式化显示高开/低开百分比与金额。
-- [x] **【自动化测试全绿通过（52 项测试 100% PASS）】**：
-  - 新增 Alt+ 队列清理、日志联动、自动测算联动、高开/低开 10 秒慢闪 4 项专项单测，`test_sbc_alt_click_broadcast.py`（9 项）与关联全量测试（52 项）全部 100% PASS。
+- [x] **【融合梯度监视器盘前启动开盘自动切入今日实际交易日】**：
+  - **用户业务诉求**：“今天nuitka打包的梯度一直没有数据”、“又重启了ats的nuitka版本,也可以正常显示数据,看来是在开盘前打开了,导致一直在使用1104数据,但是开盘后没有自动切换实际交易日”；
+  - **深层根因定位**：`_check_and_auto_settle_closing` 原逻辑用 `if cur_today != last_sys_day:` 作为切日前提，早晨盘前开机使得 `last_sys_day` 在启动时即等于今日自然日，开盘进入 09:15 后自然日未跨日，导致定时器永远不触发切日逻辑，下拉框持续卡在昨日 `2026-11-04`，显示无影子记录；
+  - **盘前遗留待切日标记与平滑切换**：
+    - 在 `_init_days` 中，若盘前（<09:15）打开选中了上一交易日，自动置入 `self._pre_market_pending_rollover = True`；若已在 09:15 盘中打开，坚决默认选中今日；
+    - 在定时巡检中，当检测到 `is_trade_day and t_str >= "09:15:00"` 且属于跨日挂机或盘前挂机，且当前停留在上一交易日时，自动平滑切入今日实际交易日并触发 `refresh_live()`；
+    - 严格保护用户在盘中主动查看历史日或手动复盘的选择，绝不随意篡改。
+- [x] **【自动化测试全绿通过（71 项相关测试 100% PASS）】**：
+  - 新增 Alt+ 队列清理、日志联动、自动测算联动、高开/低开 10 秒慢闪、盘前挂机开盘切日、历史日不篡改等专项单测，`test_sbc_alt_click_broadcast.py`（9 项）、`test_fusion_trade_date_and_tooltip_card.py`（5 项）与关联全量测试全部 100% PASS。
 
 ## 2026-11-05 09:30 【异动联动Nuitka打包与runall启动窗口位置记忆及自定义列HDF5恢复闭环】(`stock/testpy/tdxgui/build_nuitka_clang.bat`, `stock/testpy/tdxgui/sys_utils.py`, `stock/testpy/tdxgui/异动联动.py`, `stock/webTools/ths-tdx-web.py`, `stock/webTools/findSetWindowPos.py`, `stockAlerts-nuitka-to-exe.cmd`, `tests/test_alerts_nuitka_startup_and_data_fix.py`)
 - [x] **【彻底根除自定义列（dff/dff2/rank/dff3）显示 -100.0% 及过滤条件 Hit: 0 故障】**：
