@@ -7,6 +7,15 @@
   - **Flash（执行者）**：通过 `invoke_subagent(..., Model="flash")` 承接写代码、跑测试、批量扫描等高 Token 消耗的具体事务。
 - **动态裁量**：以质量为主、价格为辅；质量第一、效率第二。轻微修改与极高难度核心问题由 Argon 亲自操刀。
 
+## 2026-11-05 19:10 【异动联动Nuitka打包配置添加--onefile-cache-mode=temporary实现退出自动清理闭环】(`stock/testpy/tdxgui/build_nuitka_clang.bat`)
+- [x] **【异动联动 Nuitka 编译参数新增退出自动清理临时目录】**：
+  - **用户业务诉求**：“异动联动添加--onefile-cache-mode=temporary 退出后默认可以自动清理.”；
+  - **参数落地与配置机制**：
+    - 在核心构建脚本 `stock/testpy/tdxgui/build_nuitka_clang.bat` 中，在 `--onefile` 与 `--onefile-tempdir-spec="{TEMP}\stockAlerts_Nuitka"` 之后添加 `--onefile-cache-mode=temporary`；
+    - 使编译产出的 `异动联动_Nuitka.exe` 在运行时自动解压到临时目录，退出后由 Nuitka Onefile Runtime 自动清理删除解压后的临时二进制目录，彻底消除磁盘残留；
+  - **验证结果**：
+    - 执行 `--dry-run` 模拟演练通过，确认命令行完整生成且环境依赖无损。
+
 ## 2026-11-05 14:50 【ATS底部资金与通达信官方一致性保障及三屏幕笔记本内屏SBC重排防溢出闭环】(`ats/capital_dragon_engine.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_market_summary_and_sbc_screen_tile.py`)
 - [x] **【彻底解决 ATS 底部资金 1.47万亿 vs 1.91万亿不一致根因，锁定通达信官方三大指数 SSOT 唯一权威源】**：
   - **用户业务诉求**：“ats的底部资金异常,实际以及成交了已1.9万亿了,持续修复过很多次一直没有保证数据一致性”；

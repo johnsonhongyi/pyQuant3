@@ -155,6 +155,7 @@ rem 10. 构建 Nuitka 编译命令 (恢复 tables/HDF5 数据管道，优化 Ope
 set CMD="%PYTHON_EXEC%" -m nuitka ^
     --onefile ^
     --onefile-tempdir-spec="{TEMP}\stockAlerts_Nuitka" ^
+    --onefile-cache-mode=temporary ^
     --assume-yes-for-downloads ^
     --enable-plugin=tk-inter ^
     --windows-console-mode=disable ^
