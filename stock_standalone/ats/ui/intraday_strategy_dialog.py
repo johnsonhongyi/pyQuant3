@@ -11863,43 +11863,54 @@ def rearrange_all_sbc_windows(parent_win=None):
 
         ordered_pxys, orig_rows, orig_cols = _sort_proxies_by_spatial_display_order(pxys_on_screen)
 
-        # 统一计算网格行列数 (4个窗口严格为 2x2 田字格，绝不排成 3+1 畸形导致错位)
+        # 💡 【核心自适应网格设计】：根据当前所在物理屏幕的真实工作区尺寸自适应计算网格与窗口尺寸
+        # 彻底解决笔记本内屏（1080P/125%~150%缩放）在多屏幕环境下重排时窗口溢出右侧可视区域的严重 Bug
+        pad_left = 10
+        pad_top = 10
+        pad_right = 10
+        pad_bottom = 10
+        margin_x = 8
+        margin_y = 8
+
+        avail_w = max(380, sg.width() - pad_left - pad_right)
+        avail_h = max(260, sg.height() - pad_top - pad_bottom)
+
+        min_window_w = 420
+        min_window_h = 280
+
+        # 初步根据窗口总数确定基准列数
         if count <= 2:
-            cols = 2
+            cols = count
         elif count == 3:
-            cols = 3 if orig_rows == 1 else 2
+            cols = 3 if (orig_rows == 1 and avail_w >= 3 * min_window_w + 2 * margin_x) else 2
         elif count == 4:
-            cols = 2  # 💡 4个窗口标准 2x2
+            cols = 2  # 💡 4个窗口标准 2x2 田字格
         elif count in (5, 6):
-            cols = 3  # 💡 6个窗口标准 3x2
+            cols = 3  # 💡 6个窗口基准 3x2
         elif count in (7, 8):
-            cols = 4  # 💡 8个窗口标准 4x2
+            cols = 4  # 💡 8个窗口基准 4x2
         else:
             cols = max(orig_cols, math.ceil(math.sqrt(count)))
 
+        # 🛡️ 屏幕自适应列数约束：若当前屏幕宽度不足以容纳当前列数 (每列低于 min_window_w)，智能自动降列收敛
+        while cols > 1 and int((avail_w - (cols - 1) * margin_x) / cols) < min_window_w:
+            cols -= 1
+
+        cols = max(1, cols)
         rows = math.ceil(count / cols)
 
-        margin_x = 8
-        margin_y = 8
-        pad_left = 12
-        pad_top = 12
-        pad_right = 12
-        pad_bottom = 12
-
-        avail_w = max(640, sg.width() - pad_left - pad_right)
-        avail_h = max(420, sg.height() - pad_top - pad_bottom)
-
+        # 严格按屏幕当前可用宽度与高度等分计算，严禁使用超出屏幕的写死大尺寸下限
         calc_w = int((avail_w - (cols - 1) * margin_x) / cols)
-        target_w = max(640, min(calc_w, avail_w))
+        target_w = max(320, min(calc_w, avail_w))
 
         calc_h = int((avail_h - (rows - 1) * margin_y) / rows)
         if rows == 1:
             target_h = min(calc_h, int(target_w * 0.62), int(avail_h * 0.65))
         else:
             target_h = calc_h
-        target_h = max(420, min(target_h, avail_h))
+        target_h = max(260, min(target_h, avail_h))
 
-        logger.debug(f"[SBC重排] 保持原有显示顺序统一平铺 {count} 个窗口: {target_w}x{target_h} ({cols}列 x {rows}行)")
+        logger.debug(f"[SBC重排] 保持原有显示顺序统一平铺 {count} 个窗口: {target_w}x{target_h} ({cols}列 x {rows}行) on screen {sg.width()}x{sg.height()}")
 
         for idx_d, pxy in enumerate(ordered_pxys):
             r = idx_d // cols
@@ -11907,6 +11918,12 @@ def rearrange_all_sbc_windows(parent_win=None):
 
             pos_x = sg.left() + pad_left + c * (target_w + margin_x)
             pos_y = sg.top() + pad_top + r * (target_h + margin_y)
+
+            # 🛡️ 严格屏幕物理可视边界钳位硬门禁 (绝对保证任意窗口 100% 完整落在当前物理屏幕工作区内)
+            if pos_x + target_w > sg.right() - pad_right:
+                pos_x = max(sg.left() + pad_left, sg.right() - pad_right - target_w)
+            if pos_y + target_h > sg.bottom() - pad_bottom:
+                pos_y = max(sg.top() + pad_top, sg.bottom() - pad_bottom - target_h)
 
             # 🚀 极致性能优化：平铺过程全部静默排布 (activate=False)，彻底消除 Windows DWM 频闪与排队拥塞
             pxy.apply_geometry(pos_x, pos_y, target_w, target_h, activate=False)

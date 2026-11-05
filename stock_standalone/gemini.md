@@ -7,6 +7,29 @@
   - **Flash（执行者）**：通过 `invoke_subagent(..., Model="flash")` 承接写代码、跑测试、批量扫描等高 Token 消耗的具体事务。
 - **动态裁量**：以质量为主、价格为辅；质量第一、效率第二。轻微修改与极高难度核心问题由 Argon 亲自操刀。
 
+## 2026-11-05 14:50 【ATS底部资金与通达信官方一致性保障及三屏幕笔记本内屏SBC重排防溢出闭环】(`ats/capital_dragon_engine.py`, `ats/ui/intraday_strategy_dialog.py`, `tests/test_market_summary_and_sbc_screen_tile.py`)
+- [x] **【彻底解决 ATS 底部资金 1.47万亿 vs 1.91万亿不一致根因，锁定通达信官方三大指数 SSOT 唯一权威源】**：
+  - **用户业务诉求**：“ats的底部资金异常,实际以及成交了已1.9万亿了,持续修复过很多次一直没有保证数据一致性”；
+  - **深层根因定位**：
+    - 通达信官方客户端底部“总成交 19095 亿”原生对应三大指数：`(1, '999999')` 上证指数（8800~9085亿，含主板与科创板）、`(0, '399001')` 深证成指（10200~10538亿，含主板与创业板）、`(2, '899050')` 北证50（155~159亿），三者原生相加为 1.91~1.97 万亿；
+    - 历史代码在 `CapitalDragonEngine._compute_market_summary_from_df` 中只提取了 `row.get('amount')`，面对系统内新浪/DataFrame 的 `turnover` 列名直接返回 0；
+    - 当后台线程短暂停滞或冷启动时，主窗口调用 `get_market_indices_and_volume_summary(df_all=cur_df)` 回填，不仅从残缺的个股池累加出缩水数值（14767.2 亿），更将该缩水值写回覆盖了后台权威缓存 `self._bg_market_summary_cache`，导致全天被污染为 1.47 万亿；
+  - **架构与 SSOT 权威保障落地**：
+    - **权威数据源物理锁定**：大盘总成交额严格绑定三大指数 `(1, '999999')`、`(0, '399001')`、`(2, '899050')`，坚决杜绝任何从个股列表累加拼凑大盘资金；
+    - **双字段提取兼容与防平安银行误匹配**：全面兼容 `amount`、`turnover`、`amt` 字段；`idx_key == 'sh'` 时严格排除纯数字 000001（平安银行）及个股名称，门禁阈值确保指数成交额不被个股几十亿误替代；
+    - **防残缺污染与本地持久化切片恢复**：残缺个股 DataFrame 绝不允许写回覆盖 `_bg_market_summary_cache`；引入 `_save_latest_market_summary` 与 `_get_or_load_latest_market_summary`，冷启动与断网瞬间无缝加载上一有效切片（1.9+ 万亿），首帧不为 0、不缩水；
+- [x] **【彻底根治多屏幕环境下笔记本内屏 SBC 窗口重排溢出可视区域 Bug】**：
+  - **用户业务诉求**：“以及修复在三屏幕中的笔记本内屏行sbc重排会出现超出显示区域的bug”；
+  - **深层根因定位**：
+    - `rearrange_all_sbc_windows` 原计算逻辑中写死了 `target_w = max(640, min(calc_w, avail_w))` 与 `target_h = max(420, ...)`；
+    - 在笔记本内屏（1080P/125%~150% 缩放，有效工作区宽仅 1536 甚至 1280 像素）排布 3 列时，强制 640 像素导致 3 窗口总宽达到 1948 像素，第 3 列窗口（如梅雁吉祥）直接超出屏幕右侧 412 像素；
+  - **自适应网格与屏幕物理边界硬门禁**：
+    - **动态列数收敛**：若当前物理屏幕工作区不足以容纳设定的列数（单列宽度低于 `min_window_w=420`），自动收敛列数（自适应收缩为 2 列等）；
+    - **等分自适应尺寸**：去除硬编码大尺寸下限，根据屏幕实际可用尺寸 `avail_w` 和 `avail_h` 精准等分；
+    - **严格物理边界钳位硬门禁**：在设置几何前严格执行 `pos_x = min(pos_x, sg.right() - pad_right - target_w)` 与 `pos_y = min(pos_y, sg.bottom() - pad_bottom - target_h)`，在几何上 100% 保证所有窗口完整落在当前屏幕可视工作区内；
+- [x] **【自动化测试全绿通过（专项单测 3 项 + 关联回归 18 项 100% PASS）】**：
+  - 新增 `tests/test_market_summary_and_sbc_screen_tile.py`，全覆盖验证 SSOT 大盘资金提取、防个股污染、多字段兼容、笔记本内屏多窗口严格边界等，100% 全部通过。
+
 ## 2026-11-05 14:10 【梯度热榜（去弱留强）双入口四席位持续跟踪与留出集验收闭环】(`docs/tasks/2026-11-05_1207_梯度热榜持续跟踪复审方案.md`, `ats/fusion/hot_pool.py`, `ats/fusion/replay.py`, `ats/fusion/shadow.py`, `stock_live_strategy.py`, `ats/ui/fusion_ladder_dialog.py`, `tests/test_hot_pool_step1_step2.py`, `tests/test_hot_pool_step3_step4.py`)
 - [x] **【Step 1 口径、语义冻结与双 10V 质量硬门禁及双轨板块脉冲引擎】**：
   - **双 10V 质量门禁 (`Dual10VQuality` / `evaluate_10v_quality`)**：显式区分截至昨日日线的静态 `10V`（识别前 9 日量价键缺失导致的 `tp_fallback` vs `verified_amt_vol`）与含今日实时累计量价的动态 `10V`；强制校验 `same_day` 新鲜度与前 9 日量价完整性，未通过时严禁将 `including_current["10"]` 用于席位趋势判定；提供 `compare_sbc_vwap_source` 按图表周期（`1m/3d/5d/10d`）、输入源、时间戳与单位核对 SBC 金线；

@@ -1279,29 +1279,70 @@ class CapitalDragonEngine:
         *args, **kwargs
     ) -> Dict[str, Any]:
         """
-        获取全市场四大核心指数（上证、深证、创业板、北证）的资金、量比，以及全市交易额和较昨日增减交易额 (SSOT)
-        纯粹只读通达信官方后台缓存（< 0.1ms，零网络IO，绝对不被个股列表污染）
+        获取全市场核心指数（上证、深证、创业板、北证）的资金、量比，以及全市交易额和较昨日增减交易额 (SSOT 唯一权威源)
+        优先只读通达信官方后台缓存（< 0.1ms，零网络IO，绝对不被不完整/缩水的个股列表污染）。
+        冷启动时若缓存未就绪，自动触发一次极速后台计算或从持久化切片恢复，绝不允许非指数个股累加污染。
         """
-        now = time.time()
-        last_ts = getattr(self, '_bg_market_summary_ts', 0.0)
-        force = kwargs.get('force', False)
-        min_interval = kwargs.get('min_interval', 30.0)
-
-        # 仅供离线单元测试分支显式传入 df_all 时使用
-        if df_all is not None and not df_all.empty:
-            if force or (now - last_ts >= min_interval) or (not self._bg_market_summary_cache):
-                return self._compute_market_summary_from_df(df_all, now_dt)
-
-        # 生产环境：纯粹只读通达信原生后台线程计算的高精度 SSOT 缓存
         cached = self._bg_market_summary_cache
-        if cached:
+        if cached and float(cached.get('total_amt', 0.0) or 0.0) > 0:
             return dict(cached)
+
+        # 尝试从持久化切片恢复兜底
+        saved = self._get_or_load_latest_market_summary()
+        if saved and float(saved.get('total_amt', 0.0) or 0.0) > 0:
+            self._bg_market_summary_cache = saved
+            return dict(saved)
+
+        # 仅供离线单元测试分支显式传入包含四大指数的 df_all 时使用
+        if df_all is not None and not df_all.empty:
+            summary_from_df = self._compute_market_summary_from_df(df_all, now_dt)
+            if float(summary_from_df.get('total_amt', 0.0) or 0.0) > 0:
+                return summary_from_df
+
+        # 触发一次同步兜底计算 (耗时约 0.2s)
+        try:
+            self._compute_market_summary_bg()
+            if self._bg_market_summary_cache:
+                return dict(self._bg_market_summary_cache)
+        except Exception:
+            pass
 
         return {'formatted_html': '', 'plain_text': '', 'sh_amt': 0.0, 'sz_amt': 0.0,
                 'cy_amt': 0.0, 'bj_amt': 0.0, 'total_amt': 0.0, 'diff_amt': 0.0, 'diff_str': ''}
 
+    def _get_or_load_latest_market_summary(self) -> Optional[Dict[str, Any]]:
+        """从本地持久化加载最新有效大盘切片，杜绝冷启动与网络抖动时数据显示为0或被误覆盖"""
+        import os, json
+        from sys_utils import get_app_root
+        summary_file = os.path.join(get_app_root(), "datacsv", "latest_market_summary.json")
+        if os.path.exists(summary_file):
+            try:
+                with open(summary_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if data and float(data.get('total_amt', 0.0) or 0.0) > 0:
+                    return data
+            except Exception:
+                pass
+        return None
+
+    def _save_latest_market_summary(self, data: Dict[str, Any]) -> None:
+        """持久化保存最新大盘摘要切片 (原子写入)"""
+        try:
+            import os, json
+            from sys_utils import get_app_root
+            data_dir = os.path.join(get_app_root(), "datacsv")
+            os.makedirs(data_dir, exist_ok=True)
+            summary_file = os.path.join(data_dir, "latest_market_summary.json")
+            tmp_file = summary_file + f".tmp_{os.getpid()}"
+            with open(tmp_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            if os.path.exists(tmp_file):
+                os.replace(tmp_file, summary_file)
+        except Exception:
+            pass
+
     def _compute_market_summary_from_df(self, df_all: pd.DataFrame, now_dt: Optional[Any] = None) -> Dict[str, Any]:
-        """从传入的 df_all 提取大盘摘要（四大指数极轻量提取，耗时 <0.1ms，与资金主线 100% SSOT 同源）"""
+        """从传入的 df_all 提取大盘摘要（四大核心指数严格提取，支持 amount/turnover 双字段兼容，严禁非指数个股污染）"""
         import datetime
         if now_dt is None:
             now_dt = datetime.datetime.now()
@@ -1313,12 +1354,18 @@ class CapitalDragonEngine:
         clean_codes_s = codes_s.map(_clean_code)
 
         for idx_key, target_code in [('sh', '999999'), ('sz', '399001'), ('cy', '399006'), ('bj', '899050')]:
-            cand_codes = [target_code, '000001'] if idx_key == 'sh' else [target_code]
+            # 上证指数在不同源中可能标记为 999999 或 sh000001；单纯的纯数字 000001 (平安银行) 严禁误匹配
+            cand_codes = [target_code, 'sh000001', 'sh999999'] if idx_key == 'sh' else [target_code, f'sz{target_code}' if idx_key in ('sz', 'cy') else f'bj{target_code}']
             for cand in cand_codes:
-                match_mask = (clean_codes_s == cand) | (codes_s == cand)
+                cand_clean = _clean_code(cand)
+                match_mask = (codes_s == cand) | (clean_codes_s == cand_clean)
                 if match_mask.any():
                     row = df_all[match_mask].iloc[0]
-                    raw_amt = float(row.get('amount', 0.0) or 0.0)
+                    # 严防纯数字 000001 误匹配为平安银行: 平安银行成交额通常仅数十亿，大盘指数成交额至少千亿级 (>= 500亿)
+                    raw_name = str(row.get('name', ''))
+                    if idx_key == 'sh' and ('平安' in raw_name or '银行' in raw_name):
+                        continue
+                    raw_amt = float(row.get('amount') or row.get('turnover') or row.get('amt') or 0.0)
                     # 三级数量级严格自适应转换 (元/万元/亿元精准区分，杜绝千亿大盘误除10000)
                     if raw_amt >= 1e9: # 元 (如 280,000,000,000)
                         amt_yi = raw_amt / 1e8
@@ -1326,6 +1373,10 @@ class CapitalDragonEngine:
                         amt_yi = raw_amt / 10000.0
                     else: # 亿元 (如 2800.5)
                         amt_yi = raw_amt
+
+                    # 若上证指数成交额过小 (< 1000 亿在正常交易时间)，极可能是个股误匹配，丢弃
+                    if idx_key in ('sh', 'sz') and amt_yi < 500.0:
+                        continue
 
                     raw_vr = float(row.get('vol_ratio', 0.0) or 0.0)
                     if raw_vr <= 0.05:
@@ -1347,10 +1398,13 @@ class CapitalDragonEngine:
                     if amt_yi > 0:
                         extracted[idx_key] = {'amount_yi': round(amt_yi, 2), 'vol_ratio': round(raw_vr, 2)}
                     break
-        res = self._build_summary_result(extracted, prev_data, now_dt)
 
-        self._bg_market_summary_cache = res
-        self._bg_market_summary_ts = time.time()
+        res = self._build_summary_result(extracted, prev_data, now_dt)
+        # 仅当四大指数完整且总成交额合理时才更新缓存，杜绝残缺数据污染
+        if float(res.get('total_amt', 0.0) or 0.0) >= 5000.0 or not self._bg_market_summary_cache:
+            self._bg_market_summary_cache = res
+            self._bg_market_summary_ts = time.time()
+            self._save_latest_market_summary(res)
         return res
 
 
@@ -1481,6 +1535,7 @@ class CapitalDragonEngine:
         res = self._build_summary_result(extracted, prev_data, now_dt)
         self._bg_market_summary_cache = res
         self._bg_market_summary_ts = time.time()
+        self._save_latest_market_summary(res)
 
     def _get_or_load_yesterday_benchmark(self) -> dict:
         """获取或从本地持久化加载昨日指数基准数据，杜绝盘中出现较昨 0.0亿与量比假死"""
