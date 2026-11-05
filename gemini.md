@@ -7,6 +7,21 @@
   - **Flash（执行者）**：通过 `invoke_subagent(..., Model="flash")` 承接写代码、跑测试、批量扫描等高 Token 消耗的具体事务。
 - **动态裁量**：以质量为主、价格为辅；质量第一、效率第二。轻微修改与极高难度核心问题由 Argon 亲自操刀。
 
+## 2026-11-05 08:40 【彻底修复TK监控Nuitka打包缺失JSONData动态模块(wencaiData)与H5压缩模块】(stock_standalone/nuitka_build_console_onlyClang.bat, stock_standalone/nuitka_build_console.bat)
+- [x] **【彻底解决 TK 监控打包运行后报 ModuleNotFoundError: No module named 'JSONData.wencaiData'】**：
+  - **原因定位**：
+    1. 在 JSONData/tdx_data_Day.py 中，wcd = LazyModule('JSONData.wencaiData') 是在运行期通过 importlib.import_module 动态懒加载的；
+    2. TK 监控主控打包脚本 
+uitka_build_console_onlyClang.bat 中未指定 --include-package=JSONData，且静态依赖分析无法嗅探动态字符串导入，导致 wencaiData.py 被 Nuitka 裁剪剔除；
+    3. 同时 
+uitka_build_console_onlyClang.bat 遗漏了 JohnsonUtil 全包包含以及 PyTables 底层压缩插件 	ables._comp_lzo / 	ables._comp_bzip2，可能导致压缩 HDF5 读取异常；
+  - **全链路包补全与治理**：
+    - 在 
+uitka_build_console_onlyClang.bat 与 
+uitka_build_console.bat 中正式追加 --include-package=JSONData 与 --include-package=JohnsonUtil，将整个包及其子模块 100% 纳入编译分发，彻底杜绝动态懒加载模块丢失；
+    - 补齐 --include-module=tables._comp_lzo、--include-module=tables._comp_bzip2 与 --include-module=next_day_anomaly_watch，保证压缩 H5 缓存加载与次日异动监控完备；
+  - **版本已固化**：修改已通过语法检查并提交版本库。
+
 ## 2026-11-04 19:20 【异动联动全面对齐TK/ATS打包路径功能与Nuitka Onefile持久化自愈】(stock/testpy/tdxgui/sys_utils.py, stock/testpy/tdxgui/异动联动.py, stock/testpy/tdxgui/history_manager.py, stock/testpy/tdxgui/gui_utils.py, stock/testpy/tdxgui/SendTDXTools.py, stock/testpy/tdxgui/LoggerFactory.py, stock/testpy/tdxgui/test_nuitka_path_alignment.py)
 - [x] **【彻底解决 Nuitka Onefile 下路径被劫持至 Temp 导致配置/分组/过滤历史全部丢失（图2空白）问题】**：
   - **原因定位**：
