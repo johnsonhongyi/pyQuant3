@@ -370,8 +370,11 @@ if __name__ == '__main__':
     #     run_system_fpath('C:\\Users\\Johnson\\Documents\\TDX\\55188\\开盘啦板块竞价.exe')
     #     time.sleep(2)
     
-    if not find_window_by_title_background('异动联动.exe'): 
-        run_system_fpath('C:\\Users\\Johnson\\Documents\\TDX\\55188\\异动联动.exe')
+    if not (find_window_by_title_background('异动联动.exe') or find_window_by_title_background('异动联动_Nuitka.exe') or find_window_by_title_background('异动联动')): 
+        target_yd = r'<USER_HOME>\Documents\TDX\55188\异动联动_Nuitka.exe'
+        if not os.path.exists(target_yd):
+            target_yd = r'<USER_HOME>\Documents\TDX\55188\异动联动.exe'
+        run_system_fpath(target_yd)
         time.sleep(2)
     
     if not find_window_by_title_background('涨停采集工具共享版'): 

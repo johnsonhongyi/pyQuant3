@@ -2607,7 +2607,7 @@ def update_linkage_status():
 def save_linkage_config():
     """保存联动开关状态到本地 JSON"""
     try:
-        config_path = os.path.join(BASE_DIR, "linkage_config.json")
+        config_path = get_conf_path("linkage_config.json", BASE_DIR, is_user_save=True)
         config = {
             "tdx": tdx_var.get() if tdx_var else True,
             "ths": ths_var.get() if ths_var else True,
@@ -2639,7 +2639,7 @@ def on_link_code_changed():
 def load_linkage_config():
     """从本地 JSON 加载联动开关状态"""
     try:
-        config_path = os.path.join(BASE_DIR, "linkage_config.json")
+        config_path = get_conf_path("linkage_config.json", BASE_DIR)
         if os.path.exists(config_path):
             with open(config_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
@@ -8183,6 +8183,12 @@ def fast_insert(tree, dataframe):
                         
                     top_all['dff'].replace([np.inf, -np.inf], np.nan, inplace=True)
                     top_all['dff'].fillna(0, inplace=True)
+                    # [🚀 核心修复] 防御无有效现价股票计算出 -100.0% 的伪数据
+                    if 'buy' in top_all.columns:
+                        invalid_mask = (pd.to_numeric(top_all['buy'], errors='coerce').fillna(0) <= 0)
+                        for dcol in ('dff', 'dff2', 'dff3'):
+                            if dcol in top_all.columns:
+                                top_all.loc[invalid_mask, dcol] = 0.0
                     
                     # ----------------- 计算实时量比 vol_ratio -----------------
                     try:
@@ -14160,8 +14166,37 @@ if __name__ == "__main__":
     init_monitors()
     root = tk.Tk()
     root.title("股票异动数据监控")
-    root.geometry("500x600")
     root.minsize(300, 400)    # 恢复原有的最小尺寸限制
+
+    # [🚀 核心修复] 优先从 window_config.json 恢复 root 主窗口的位置与尺寸，彻底解决跟随 runall.bat 启动位置丢失问题
+    saved_root_geom = WINDOW_GEOMETRIES.get("root")
+    if saved_root_geom and isinstance(saved_root_geom, str) and "+" in saved_root_geom:
+        try:
+            root.geometry(saved_root_geom)
+            logger.info(f"🚀 已成功从配置恢复主窗口位置与尺寸: {saved_root_geom}")
+        except Exception as e_geom:
+            logger.warning(f"恢复主窗口 geometry 失败 ({saved_root_geom}): {e_geom}")
+            root.geometry("500x600")
+    else:
+        root.geometry("500x600")
+
+    _root_cfg_timer = None
+    def _on_root_configure_save(event):
+        global _root_cfg_timer, WINDOW_GEOMETRIES
+        if event.widget != root:
+            return
+        try:
+            if root.winfo_width() > 100 and root.winfo_height() > 100:
+                cur_geom = root.geometry()
+                if WINDOW_GEOMETRIES.get("root") != cur_geom:
+                    WINDOW_GEOMETRIES["root"] = cur_geom
+                    if _root_cfg_timer:
+                        _root_cfg_timer.cancel()
+                    _root_cfg_timer = threading.Timer(1.5, schedule_save_positions)
+                    _root_cfg_timer.start()
+        except Exception:
+            pass
+    root.bind("<Configure>", _on_root_configure_save, add="+")
 
     root.resizable(True, True)
 

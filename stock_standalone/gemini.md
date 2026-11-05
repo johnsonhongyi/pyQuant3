@@ -7,6 +7,19 @@
   - **Flash（执行者）**：通过 `invoke_subagent(..., Model="flash")` 承接写代码、跑测试、批量扫描等高 Token 消耗的具体事务。
 - **动态裁量**：以质量为主、价格为辅；质量第一、效率第二。轻微修改与极高难度核心问题由 Argon 亲自操刀。
 
+## 2026-11-05 09:30 【异动联动Nuitka打包与runall启动窗口位置记忆及自定义列HDF5恢复闭环】(`stock/testpy/tdxgui/build_nuitka_clang.bat`, `stock/testpy/tdxgui/sys_utils.py`, `stock/testpy/tdxgui/异动联动.py`, `stock/webTools/ths-tdx-web.py`, `stock/webTools/findSetWindowPos.py`, `stockAlerts-nuitka-to-exe.cmd`, `tests/test_alerts_nuitka_startup_and_data_fix.py`)
+- [x] **【彻底根除自定义列（dff/dff2/rank/dff3）显示 -100.0% 及过滤条件 Hit: 0 故障】**：
+  - **PyTables 核心数据管道恢复**：此前构建脚本误排除了 tables，导致打包后 `read_hdf_table` 抛出 `No module named 'tables'`，无法读取 `G:\sina_data.h5` 和 `G:\tdx_last_df.h5`（行情与均线表）；现已在 `build_nuitka_clang.bat` 中重新引入 `--include-package=tables`、`--include-module=tables._comp_lzo`、`--include-module=tables._comp_bzip2`、`--include-module=filelock`；
+  - **动态避坑 DLL 路径冲突**：不显式添加 sqlite3.dll 的 data-file（由 tables 自带插件托管，杜绝冲突崩溃），同时动态探测打包 OpenSSL `libcrypto*.dll` 与 `libssl*.dll`；
+  - **除法负值防御**：在 `异动联动.py` 计算 dff 时增加现价有效性检查，`buy <= 0` 时强制填 0.0，杜绝停牌/无价格股票算出 `-100.0%` 的伪数据；
+  - **联动配置持久化路径对齐**：在 `sys_utils.py` 中将 `linkage_config.json` 纳入资源映射，`save_linkage_config` 与 `load_linkage_config` 统一切换为 `get_conf_path("linkage_config.json")`，确保历史过滤条件在真实物理目录下 100% 留存和恢复，消除启动时下拉框空白；
+- [x] **【彻底解决跟随 runall.bat 启动无法获取正确窗口位置故障】**：
+  - **主窗口原生几何位置（Geometry）自愈记忆与恢复**：`异动联动.py` 启动时优先从 `window_config.json` 恢复 `WINDOW_GEOMETRIES["root"]` 设定的坐标与大小；绑定 `<Configure>` 监听器（1.5s 防抖），用户拖动或缩放窗口后自动持久化；
+  - **自动化排布脚本智能兼容**：`findSetWindowPos.py` 中，当检测到 `'股票异动数据监控'` 不在当前分辨率字典时，自动注入缺省排布坐标 `'0,0,494,825'`，确保 100% 执行排布；
+  - **启动脚本与自动部署闭环**：`ths-tdx-web.py` 兼容识别 `异动联动_Nuitka.exe` 与 `异动联动.exe`，避免重复拉起；`stockAlerts-nuitka-to-exe.cmd` 构建成功后自动将 `异动联动_Nuitka.exe` 同步部署至 `<USER_HOME>\Documents\TDX\55188\`；
+- [x] **【自动化测试全绿通过】**：
+  - 编写 `tests/test_alerts_nuitka_startup_and_data_fix.py` 4 项专项回归测试 100% PASS；全套回归单测 100% 全部通过。
+
 ## 2026-11-04 15:25 【异动联动小窗口与主界面新增Alt+F智能重排快捷键闭环】(`stock/testpy/tdxgui/异动联动.py`, `tests/test_rearrange_policy_customization.py`)
 - [x] **【监控小窗口与主界面全局新增 Alt+F 快捷键实现窗口智能重排】**：
   - **用户业务诉求**：“异动联动中的小窗口q键是自动拉到最前显示,添加一个功能键alt+f实习重排功能”；

@@ -46,6 +46,10 @@ RESOURCE_MAP: Dict[str, Dict[str, str]] = {
         "src": "filter_stock_codes.json",
         "dst": "filter_stock_codes.json"
     },
+    "linkage_config.json": {
+        "src": "linkage_config.json",
+        "dst": "linkage_config.json"
+    },
     "app.ico": {
         "src": "app.ico",
         "dst": "app.ico"

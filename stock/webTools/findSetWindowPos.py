@@ -1243,6 +1243,8 @@ if __name__ == '__main__':
     for proc in appendProc:
         if proc not in positon.keys():
             proc_title.append(proc)   # good src 
+            if proc == '\xe8\x82\xa1\xe7\xa5\xa8\xe5\xbc\x82\xe5\x8a\xa8\xe6\x95\xb0\xe6\x8d\xae\xe7\x9b\x91\xe6\x8e\xa7':
+                positon[proc] = '0,0,494,825'
             print(f'add pro :{proc} to proc_title')
 
 
