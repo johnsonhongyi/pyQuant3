@@ -87,16 +87,9 @@ def safe_float(val: Any, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return default
 
-# 默认预备通达信 HQ 服务器 (实测 100% 存活、低延迟优质黄金主站池，置顶江苏主站与西安电信主力集群)
+# 默认预备通达信 HQ 服务器 (实测 100% 存活、低延迟优质黄金主站池，置顶江苏主站，剔除无盘口假活节点)
 FALLBACK_TDX_HOSTS = [
     ("通达信江苏主站", "223.112.100.140", 7709),
-    ("通达信西安主站1", "117.34.114.16", 7709),
-    ("通达信西安主站4", "117.34.114.17", 7709),
-    ("通达信西安主站7", "117.34.114.15", 7709),
-    ("通达信西安主站8", "117.34.114.27", 7709),
-    ("通达信西安主站3", "117.34.114.13", 7709),
-    ("通达信西安主站5", "117.34.114.20", 7709),
-    ("通达信上海主站", "180.153.18.170", 7709),
 ]
 
 def get_trading_segment_info(now_ts: float, segment_mode: str = "30m") -> Tuple[str, str, float, float]:
@@ -245,36 +238,66 @@ def extract_hosts_from_tdx_cfg(cfg_path: str) -> List[Tuple[str, str, int]]:
     return hosts
 
 
-def get_all_tdx_hosts() -> List[Tuple[str, str, int]]:
-    """获取所有可用 TDX 服务器（高可用黄金活跃主站优先，本地有效配置补充，杜绝陈年废弃死站）"""
+def get_all_tdx_hosts(include_full: bool = False, exclude_cooldown: bool = True) -> List[Tuple[str, str, int]]:
+    """
+    获取所有可用 TDX 服务器（支持快速精简池与全网扩围容灾深搜池，黑名单冷静期智能过滤）
+    :param include_full: False 为精简快速池（黄金主站 + 本地优选）；True 为全网深搜容灾池（本地全部 + pytdx 官方库全量）
+    :param exclude_cooldown: 是否自动跳过处于冷静期黑名单的已知失效/假死节点
+    """
     all_hosts = []
     seen = set()
+    now_t = time.time()
+
+    fetcher_inst = getattr(TDXRealtimeFetcher, "_instance", None)
+    cooldown_map = getattr(fetcher_inst, "_dead_hosts_cooldown", {}) if fetcher_inst else {}
+
+    def is_usable(ip_addr: str, port_num: int) -> bool:
+        if (ip_addr, port_num) in seen:
+            return False
+        if exclude_cooldown:
+            exp_t = cooldown_map.get((ip_addr, port_num), 0.0)
+            if now_t < exp_t:
+                return False
+        return True
 
     # 1. 优先注入实测 100% 存活、低延迟的黄金主力主站
     for name, ip, port in FALLBACK_TDX_HOSTS:
-        if (ip, port) not in seen:
+        if is_usable(ip, port):
             seen.add((ip, port))
             all_hosts.append((name, ip, port))
 
-    # 2. 本地配置文件提取的节点去重补充 (限制数量与端口，杜绝臃肿死站池)
+    # 2. 本地配置文件提取的节点去重补充 (connect.cfg 等)
     cfg_paths = get_local_tdx_config_paths()
     local_count = 0
     for path in cfg_paths:
         parsed = extract_hosts_from_tdx_cfg(path)
         for name, ip, port in parsed:
-            # 严格过滤非 7709 端口或已知重复节点
-            if port != 7709 or (ip, port) in seen:
+            if port != 7709:
                 continue
-            seen.add((ip, port))
-            all_hosts.append((name, ip, port))
-            local_count += 1
-            if len(all_hosts) >= 16:
-                break
-        if len(all_hosts) >= 16:
+            if is_usable(ip, port):
+                seen.add((ip, port))
+                all_hosts.append((name, ip, port))
+                local_count += 1
+                if not include_full and len(all_hosts) >= 16:
+                    break
+        if not include_full and len(all_hosts) >= 16:
             break
 
+    # 3. 终极容灾备用：若处于全网深搜容灾模式，补充 pytdx 官方主站库 (100+ 节点)
+    if include_full:
+        try:
+            import pytdx.config.hosts as official_hosts
+            for item in official_hosts.hq_hosts:
+                if len(item) >= 3 and int(item[2]) == 7709:
+                    o_name, o_ip, o_port = str(item[0]), str(item[1]), int(item[2])
+                    if is_usable(o_ip, o_port):
+                        seen.add((o_ip, o_port))
+                        all_hosts.append((o_name, o_ip, o_port))
+        except Exception:
+            pass
+
     logger.info(
-        f"⚡ [TDX自适应] 精简高可用候选池: {len(all_hosts)} 个节点 (黄金主力: {len(FALLBACK_TDX_HOSTS)} 个, 本地补充: {local_count} 个)"
+        f"⚡ [TDX自适应] 候选节点池: {len(all_hosts)} 个 (模式: {'全网扩围深搜' if include_full else '快速优选'}, 黄金主力: {len(FALLBACK_TDX_HOSTS)} 个, 本地补充: {local_count} 个)"
     )
     return all_hosts
 
@@ -2519,6 +2542,9 @@ class TDXRealtimeFetcher:
         self._last_server_init_warn_time: float = 0.0
         self._last_connect_fail_warn_time: float = 0.0
 
+        # 🛡️ 异常节点黑名单与冷静期映射 {(ip, port): expire_timestamp} (默认冷静 15 分钟，杜绝反复在失效节点踩坑)
+        self._dead_hosts_cooldown: Dict[Tuple[str, int], float] = {}
+
 
         # 工业级 1 分钟滑动窗口价格时序队列 {code: deque([(t, price), ...], maxlen=60)}
         self._price_timeline_history: Dict[str, collections.deque] = {}
@@ -2812,12 +2838,19 @@ class TDXRealtimeFetcher:
             self._log_buffer.clear()
             self._log_buffer.append(f"[{time.strftime('%H:%M:%S')}] 🧹 [INFO] 日志缓存已清空")
 
+    def mark_host_dead(self, ip: str, port: int, duration: float = 900.0):
+        """【🛡️ 节点假死标记】将失效/假活节点加入黑名单冷静期（默认 15 分钟），并同步移出活跃池"""
+        with self._conn_lock:
+            self._dead_hosts_cooldown[(ip, port)] = time.time() + duration
+            self.active_hosts_pool = [h for h in self.active_hosts_pool if (h[2], h[3]) != (ip, port)]
+            self.add_log(f"⚠️ 节点 [{ip}:{port}] 已标记为失效假死，加入冷静期黑名单 ({int(duration)}s)", level="WARN")
+
     def _ping_single_host(self, host_item: Tuple[str, str, int]) -> Optional[Tuple[float, str, str, int]]:
         name, ip, port = host_item
         test_api = TdxHq_API(heartbeat=False)
         t0 = time.time()
         try:
-            if test_api.connect(ip, port, time_out=0.4):
+            if test_api.connect(ip, port, time_out=0.8):
                 cost = (time.time() - t0) * 1000
                 # 盘中拉取行情快照验证，非交易时段兼容证券总数握手校验 (防假活/拒绝服务节点)
                 quotes = test_api.get_security_quotes([(0, "000001"), (1, "600519")])
@@ -2826,10 +2859,12 @@ class TDXRealtimeFetcher:
                     lc = safe_float(quotes[0].get("last_close", 0.0))
                     if p > 0 or lc > 0:
                         return (cost, name, ip, port)
-                # 兼容非交易时段/夜间清算：检查基础协议握手与股票列表
-                cnt = test_api.get_security_count(0)
-                if isinstance(cnt, int) and cnt > 0:
-                    return (cost, name, ip, port)
+                # 仅在非交易时段/夜间清算允许兼容基础协议握手，盘中严禁将无盘口假活节点误判为正常
+                is_allowed, _, _ = is_tdx_trading_allowed()
+                if not is_allowed:
+                    cnt = test_api.get_security_count(0)
+                    if isinstance(cnt, int) and cnt > 0:
+                        return (cost, name, ip, port)
         except Exception:
             pass
         finally:
@@ -2883,6 +2918,31 @@ class TDXRealtimeFetcher:
         except Exception:
             pass
 
+        # 3. 🛡️ 全网扩围深搜容灾机制：若黄金主站与常用优选池均未探测到有效节点，自动激活全网深度探测！
+        if not valid_results:
+            self.add_log("⚠️ 黄金主力主站与优选池均未响应，自动激活全网扩围深搜探针寻找有效主站...", level="WARN")
+            full_hosts = get_all_tdx_hosts(include_full=True, exclude_cooldown=True)
+            remaining_hosts = [h for h in full_hosts if h not in test_targets]
+            # 分批（每批 8~10 个）并发快速探测，首胜即退
+            chunk_size = 10
+            for i_h in range(0, min(len(remaining_hosts), 80), chunk_size):
+                batch_targets = remaining_hosts[i_h:i_h + chunk_size]
+                try:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(batch_targets), 8)) as executor:
+                        futs = {executor.submit(self._ping_single_host, h): h for h in batch_targets}
+                        for fut in concurrent.futures.as_completed(futs, timeout=1.2):
+                            try:
+                                res = fut.result()
+                                if res:
+                                    valid_results.append(res)
+                                    break
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                if valid_results:
+                    break
+
         if valid_results:
             valid_results.sort(key=lambda x: x[0])
             self.active_hosts_pool = valid_results
@@ -2918,7 +2978,7 @@ class TDXRealtimeFetcher:
                     pass
 
     def _probe_host_alive(self, api: TdxHq_API) -> bool:
-        """轻量探针：验证连接的主站是否能真实通信 (兼容盘中五档盘口、早盘未开盘及非交易时段/夜间清算)"""
+        """轻量探针：验证连接的主站是否能真实通信 (盘中严格校验五档盘口，杜绝假活节点；非交易时段/夜间清算兼容证券总数)"""
         try:
             q = api.get_security_quotes([(0, "000001")])
             if q and len(q) >= 1:
@@ -2926,9 +2986,12 @@ class TDXRealtimeFetcher:
                 lc = safe_float(q[0].get("last_close", 0.0))
                 if p > 0 or lc > 0:
                     return True
-            # 兼容非交易时段/夜间盘后清算：通过证券统计总数验证主站可用性
-            cnt = api.get_security_count(0)
-            return bool(isinstance(cnt, int) and cnt > 0)
+            # 仅在非交易时段/夜间盘后清算兼容：通过证券统计总数验证主站可用性 (盘中无盘口坚决判定假死)
+            is_allowed, _, _ = is_tdx_trading_allowed()
+            if not is_allowed:
+                cnt = api.get_security_count(0)
+                return bool(isinstance(cnt, int) and cnt > 0)
+            return False
         except Exception:
             return False
 
@@ -2967,14 +3030,17 @@ class TDXRealtimeFetcher:
             name, ip, port = self.current_host
             self.api = TdxHq_API(heartbeat=False)
             try:
-                # 毫秒级极速直连：单站握手超时设为 0.5s
-                if self.api.connect(ip, port, time_out=0.5):
-                    # 必须验证真实行情探针 (兼容非交易时段与早盘未开盘)
+                # 稳定直连：单站握手超时设为 1.2s，避免偶发网络抖动误杀优质主站
+                if self.api.connect(ip, port, time_out=1.2):
+                    # 必须验证真实行情探针 (盘中严格要求有盘口，非交易时段兼容握手)
                     if not probe or self._probe_host_alive(self.api):
                         self._is_connected = True
                         self._global_connect_fail_count = 0
                         self._global_connect_cooldown_until = 0.0
                         self._remember_successful_host()
+                        self._unlisted_or_dormant_codes.clear()
+                        self._no_quote_counts.clear()
+                        self._no_quote_last_attempt.clear()
                         self.add_log(f"已成功连接到主站 [{name}] ({ip}:{port}) (行情探针正常)", level="INFO")
                         return True
                     else:
@@ -3002,7 +3068,7 @@ class TDXRealtimeFetcher:
             for cost, f_name, f_ip, f_port in failover_targets[:max_try]:
                 try:
                     self.api = TdxHq_API(heartbeat=False)
-                    if self.api.connect(f_ip, f_port, time_out=0.5):
+                    if self.api.connect(f_ip, f_port, time_out=1.0):
                         if not probe or self._probe_host_alive(self.api):
                             self._is_connected = True
                             self.current_host = (f_name, f_ip, f_port)
@@ -3010,6 +3076,9 @@ class TDXRealtimeFetcher:
                             self._global_connect_fail_count = 0
                             self._global_connect_cooldown_until = 0.0
                             self._remember_successful_host()
+                            self._unlisted_or_dormant_codes.clear()
+                            self._no_quote_counts.clear()
+                            self._no_quote_last_attempt.clear()
                             self.add_log(f"故障切换成功连接到备用服务器 [{f_name}] ({f_ip}:{f_port}), 延迟: {cost:.1f}ms", level="INFO")
                             return True
                         else:
@@ -3060,9 +3129,13 @@ class TDXRealtimeFetcher:
             old_host = self.current_host
             self.disconnect()
             curr_ip_port = (old_host[1], old_host[2]) if old_host else None
+            if curr_ip_port:
+                self.mark_host_dead(curr_ip_port[0], curr_ip_port[1], duration=900.0)
+
             # 活跃池中剔除当前失效节点，精简至最多 2 个候选站
             candidate_pool = [h for h in self.active_hosts_pool if (h[2], h[3]) != curr_ip_port]
             if not candidate_pool:
+                # 活跃池已耗尽，触发自适应扩围重选（包含全网深搜容灾）
                 self._init_best_server(force=True)
                 candidate_pool = [h for h in self.active_hosts_pool if (h[2], h[3]) != curr_ip_port]
 
@@ -3644,6 +3717,8 @@ class TDXRealtimeFetcher:
                                             continue
                                     except Exception as e_retry:
                                         self.add_log(f"新主站重试异常: {e_retry}", level="WARN")
+                                # 🚨 主站已确认假死且重试未果，坚决禁止执行二分拆包轰炸与正常股票误杀，直接终止当前循环
+                                break
 
                             # 批次未返回盘口数据：带 60s 日志防刷频
                             if not hasattr(self, "_last_batch_warn_time"):

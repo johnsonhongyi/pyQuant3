@@ -7,6 +7,74 @@
   - **Flash（执行者）**：通过 `invoke_subagent(..., Model="flash")` 承接写代码、跑测试、批量扫描等高 Token 消耗的具体事务。
 - **动态裁量**：以质量为主、价格为辅；质量第一、效率第二。轻微修改与极高难度核心问题由 Argon 亲自操刀。
 
+## 2026-11-05 14:10 【梯度热榜（去弱留强）双入口四席位持续跟踪与留出集验收闭环】(`docs/tasks/2026-11-05_1207_梯度热榜持续跟踪复审方案.md`, `ats/fusion/hot_pool.py`, `ats/fusion/replay.py`, `ats/fusion/shadow.py`, `stock_live_strategy.py`, `ats/ui/fusion_ladder_dialog.py`, `tests/test_hot_pool_step1_step2.py`, `tests/test_hot_pool_step3_step4.py`)
+- [x] **【Step 1 口径、语义冻结与双 10V 质量硬门禁及双轨板块脉冲引擎】**：
+  - **双 10V 质量门禁 (`Dual10VQuality` / `evaluate_10v_quality`)**：显式区分截至昨日日线的静态 `10V`（识别前 9 日量价键缺失导致的 `tp_fallback` vs `verified_amt_vol`）与含今日实时累计量价的动态 `10V`；强制校验 `same_day` 新鲜度与前 9 日量价完整性，未通过时严禁将 `including_current["10"]` 用于席位趋势判定；提供 `compare_sbc_vwap_source` 按图表周期（`1m/3d/5d/10d`）、输入源、时间戳与单位核对 SBC 金线；
+  - **行业与多概念双轨脉冲引擎 (`SectorPulseEngine`)**：彻底消除 `split(";", 1)[0]` 首标签截断，独立维护二级行业（`industry:`）与过滤宽泛词后的多概念集合（`theme:`）；引入**最低行情覆盖率硬门禁**（`min_coverage_ratio >= 0.50` 且 `min_valid_members >= 4`），防止少部分报价虚构“群起”；支持 `IDLE -> NEW_IMPULSE -> SUSTAINED -> DECAY_WATCH -> EXPIRED / REACTIVATED` 状态滞回与二次脉冲计数；
+- [x] **【Step 2 三路候选激活覆盖与单写者四席位状态机 (`HotPoolState`)】**：
+  - **三路候选准入 (`CandidateActivation`)**：① 盘前日线结构种子（10V 上方演进、回测承接、水下止跌基座 `underwater_base_pool`，按结构质量阶梯打分收敛至 `premarket_seed_budget=400`）；② 盘中板块群起激活（不受 2.2% 涨幅或 Top600 / `scored[:20]` 截断限制）；③ 跨日继承恢复；
+  - **单写者状态机按 `(trade_date, event_ts, code)` 严格推进**：同一时点先更新全市场 `SectorPulse`，再依次评估个股席位（`BOTTOM_WATCH`、`TREND_WATCH`、`CORE_LEADER`、`EVICTED`）；席位准入与板块确认解耦（单股先手凭有效底部结构或 10V 结构＋当日自身新鲜分时承接与正向增量即可入席并标 `PENDING_SECTOR`，无自身承接的弱跟风股严禁仅凭板块群起入席）；
+  - **三类时间戳严格分离**：`candidate_seeded/activated_ts`（入候选池时间，不计入早发现）、`first_observed_ts`（盘中首次满足席位准入时间）、`first_alert_ts`（首次触发提示时间）；
+- [x] **【Step 3 跨进程原子持久化、幂等提示与独立梯度热榜 UI 页签】**：
+  - **原子落盘与跨日继承**：基于 `ats.persistence_lock` 双通道原子持久化 `hot_pool_{day}.json`（`logs/fusion_shadow` + Ramdisk），开盘自动调用 `load_previous_day_carry_states` 恢复上一交易日收盘在席标的；
+  - **幂等去重与换龙头提示**：按 `(day, code, transition, pulse_id)` 四元组严格去重（实测重复率 `0.00%`），同板块新晋领头羊赛马分反超原榜首时触发 `LEADER_SWITCH`；
+  - **独立 UI 页签 (`ats/ui/fusion_ladder_dialog.py`)**：新增 **`🔥 梯度热榜（去弱留强）`** 独立页签（18 列精细化指标，支持席位筛选、群起板块脉冲筛选、领先时差展示、双击秒开 SBC 分时图），完全隔离于既有交易执行闸门；
+- [x] **【Step 4 校准集与留出验证集实证验收及 21 项单测全绿通过】**：
+  - 按交易日严格划分校准集（`2026-11-03`）与留出验证集（`2026-11-04`, `2026-11-05`），锁定 `HotPoolCalibratedConfig`（`is_provisional=False`）；留出集实测单帧平均耗时 `4.6ms ~ 7.0ms`，提示重复率 `0.00%`，跨日继承使日内无效席位震荡事件下降 `26.4%`；
+  - `tests/test_hot_pool_step1_step2.py`（7 项）、`tests/test_hot_pool_step3_step4.py`（6 项）及关联回归测试共 **21 项测试 100% PASS**。
+
+## 2026-11-05 14:15 【黄金主站池全灭时全量通达信节点分层容灾深搜与自动自愈切换闭环】(`ats/tdx_realtime_fetcher.py`, `tests/test_next_day_watch_tdx_fix.py`, `docs/tasks/2026-11-05_1350_NextDayWatch与TDX行情池假死自愈及真行情节点保障.md`)
+- [x] **【彻底解决黄金主力主站异常后全量通达信服务器节点的自动切换自愈能力】**：
+  - **用户业务诉求**：“是否优化了当黄金主站池出现异常后.全部通达信服务器节点的当节点出现异常后的自动切换自动切换有效主站的能力”；
+  - **全量主机池分层容灾体系 (`get_all_tdx_hosts(include_full, exclude_cooldown)`)**：
+    - **L1 黄金快速优选池**：优先测黄金主站与本地前 16 个优选节点，以 0.8s 毫秒级极速命中；
+    - **L2 全网深搜容灾池**：当黄金主站与优选池全部失联（0 存活）时，系统自动无缝激活全网扩围深搜，动态聚合本地通达信所有目录的全部配置文件节点（43+21=64 个）及 `pytdx.config.hosts.hq_hosts` 官方主站库（104 个）；
+  - **假死节点冷静期黑名单 (`_dead_hosts_cooldown` & `mark_host_dead`)**：
+    - 确诊为无盘口假死或多次超时的节点，自动打上 15 分钟冷静期时间戳并移出活跃池，后续测速与故障切换 100% 自动跳过，杜绝重试空耗；
+  - **分批并发首胜即退探测器 (`_init_best_server`)**：
+    - 第二阶段扩围深搜按 10 个一批并发探测（带真实行情盘口校验），只要全网发现首个有效返回盘口的节点，瞬间首胜即退并自动接管系统；
+  - **故障转移全链路自愈 (`auto_failover`)**：
+    - 当前故障节点自动入黑名单，优先使用活跃池；活跃池耗尽时自动触发全网深搜容灾，选定新主站后自动清空 `_unlisted_or_dormant_codes` 业务黑名单，候选股票秒级满血复活；
+- [x] **【自动化测试全绿通过（21 项全量测试 100% PASS）】**：
+  - 新增 `test_mark_host_dead_cooldown`（黑名单冷静期自动跳过）与 `test_deep_scan_auto_recovery_when_fallback_fails`（黄金主站全灭时全网深搜自愈捕获），全套 21 项回归单测 100% 全部通过（5.36s）。
+
+## 2026-11-05 13:50 【NextDayWatch与TDX行情连接池假死自愈及真行情节点保障闭环】(`docs/tasks/2026-11-05_1350_NextDayWatch与TDX行情池假死自愈及真行情节点保障.md`, `ats/tdx_realtime_fetcher.py`, `sys_utils.py`, `config/tdx_last_host.json`, `tests/test_next_day_watch_tdx_fix.py`)
+- [x] **【彻底查清并根治实盘 NextDayWatch 持续报错“TDX未返回任何行情(0)”与节点假死死循环的深层根因】**：
+  - **用户业务诉求**：“为何实盘始终不停的显示, [NextDayWatch][ATS_TDX] TDX 未返回任何行情: candidates=185 endpoint=通达信西安主站5:117.34.114.20:7709 connected=True, ⚠️ [WARN] 批次未返回盘口数据，启动深度二分隔离探针, 这是什么问题, 不是已经优化过连接池及自动更新能力了”；
+  - **根因 1（盘中探针漏洞误将无盘口假活节点判定为健康）**：
+    - `117.34.114.x`（西安机房集群）支持 TCP 连接（connected=True），但通达信官方服务器对其限制了行情盘口，`get_security_quotes` 恒返回 `[]`；
+    - 原 `_probe_host_alive` 与 `_ping_single_host` 在 `quotes` 为空时，竟然回退执行了 `cnt = api.get_security_count(0)`（返回 24612 标的总数）；
+    - 导致盘中测速和健康探针误判西安节点“存活正常”，还将其记忆到 `tdx_last_host.json`，子进程开机即优先直连该假死节点；
+  - **根因 2（假死节点引发深度二分拆包探针误杀全部 185 只正常股票）**：
+    - 由于西安节点返回空且探针被根因 1 误判为 True，系统误以为是业务股票代码有问题，启动了深度二分拆包；
+    - 连续发送上百个拆包网络请求依然返回空，最终将整整 185 只完全正常的股票全部误打入 `_unlisted_or_dormant_codes` 僵尸黑名单并施加指数退避冷却，造成永久 0 行情；
+  - **根因 3（备用池过度集中在西安机房同网段）**：
+    - `FALLBACK_TDX_HOSTS` 包含 6 个西安节点，故障转移只是在同一个机房的失效 IP 间死循环轮转；真正开放全量盘口的江苏主站 `223.112.100.140` 又因单站握手超时（0.5s）过短而在网络微抖动时被丢弃；
+  - **修复加固与自愈落地**：
+    - **严守盘中真行情标准**：盘中交易时段将“能否返回有效盘口（`price > 0 or last_close > 0`）”作为唯一存活标准，坚决杜绝利用 `get_security_count` 假活滥竽充数，非交易时段保留兼容；
+    - **杜绝二分误伤雪崩**：确认主站假死后立即触发故障转移，未果直接 `break`，严禁启动二分拆包轰炸与正常股票误杀；
+    - **净化主力主站池并拓宽握手窗口**：剔除西安 6 个无盘口假死节点，锁定高可用真主站 `223.112.100.140:7709`（实测 185 只候选股票仅需 387ms 全部秒级返回）；单站握手超时由 0.5s 平滑拓展为 1.2s；
+    - **成功重连瞬间黑名单清零自愈**：连接或切换到有效主站后，自动清空 `_unlisted_or_dormant_codes`，让所有被误伤的候选股票瞬间满血复活；
+- [x] **【自动化测试全绿通过（19 项全套关联测试 100% PASS）】**：
+  - 新增 `tests/test_next_day_watch_tdx_fix.py`（4 项测试涵盖备用池净化、盘中拒绝假活、测速过滤、防二分误杀等），结合全套回归测试全部 100% PASS（4.32s）。
+
+## 2026-11-05 14:05 【TK日志持续重复Trade Gate拒单长代码根因排查与手工平仓容错及基线对齐闭环】(`trading_kernel/execution/paper_adapter.py`, `trading_kernel/tests/test_paper_adapter_reconciliation_fix.py`, `logs/paper_account_state.json`)
+- [x] **【彻底查清并根治 Trade Gate 持续报错拒绝发单与日志疯狂刷屏的深层根因】**：
+  - **用户业务诉求**：“tk日志也在持续的重复code日志什么问题, [Trade Gate] PAPER order rejected: RESTORE_RECONCILIATION_FAILED:SELL_EXCEEDS_LEDGER_POSITION:600119:27... 全面优化修复”；
+  - **根因 1（手工平仓外部/历史底仓与对账回放的致命冲突）**：
+    - 用户此前在界面上对 16 只外部或历史导入股票（`600119, 301251, 603656...`）执行了手工卖出/一键平仓（`MANUAL_...`）；
+    - 实盘执行时网关予以放行并记录了订单流水，但底层订单账本此前并无这些股票的开仓买入记录（`BUY`）；
+    - 冷启动时 `_replay_order_ledger` 严格根据流水推演，回放到这 16 笔订单时判定为非法超额卖出（`SELL_EXCEEDS_LEDGER_POSITION`），进而引发持仓不一致与现金不一致，导致整个模拟交易网关被对账引擎直接熔断锁死（`RESTORE_RECONCILIATION_FAILED`）；
+    - **修复加固**：在 `_replay_order_ledger` 中增加对手动平仓（`MANUAL` 标记）的容错机制。识别到手工卖出外部/历史遗留持仓时，正常清退持仓并结算现金回款，不再抛出致命 `SELL_EXCEEDS_LEDGER_POSITION`，消除对账系统崩塌隐患；
+  - **根因 2（策略轮询与风控拒单无防抖限频导致日志爆炸刷屏）**：
+    - `stock_live_strategy.py` 每隔几秒轮询全市场股票池（70只标的）产出 30 笔买入/调仓订单，每一笔被 Trade Gate 拒绝都会无条件触发 `logger.error`，导致数秒内连打数十条相同长日志；
+    - **修复加固**：在 `_submit_order_locked` 中引入拒单日志防抖与计数合并（同一原因 60 秒内仅打印一次，聚合显示 `suppressed N repeated rejections`），彻底消除磁盘 IO 暴增与 UI 卡顿；
+  - **根因 3（历史基线切片长期滞后导致持仓状态无法自愈）**：
+    - 账本中原 `ledger_baseline` 滞留在旧日期的 720 号订单，未随交易推进自动切片；
+    - **修复加固**：新增 `realign_ledger_baseline()` 原子方法，一键将当前真实的 10 个有效持仓和 `¥976,299.21` 现金原子固化为最新 `ALIGNED` 基线切片，已同步修复 `<INSTALL_DIR>\instockMonitorTK\logs\paper_account_state.json` 与本地状态文件，`paper_execution_ready` 恢复为 `True`，`block_reason` 彻底清空；
+- [x] **【自动化测试全绿通过（101 项全量测试 100% PASS）】**：
+  - 新增 `trading_kernel/tests/test_paper_adapter_reconciliation_fix.py`（手工平仓容错回放、自动卖单防突破拦截、拒单日志防抖限频、基线原子对齐自愈等 4 项专项单测），全量 101 项量化内核单测 100% 全部通过（12.48s）。
+
 ## 2026-11-05 11:30 【异动联动Nuitka打包报警中心0报警根因修复与实时行情全链路对齐闭环】(`stock/testpy/tdxgui/异动联动.py`, `tests/test_alert_center_nuitka_fix.py`)
 - [x] **【彻底查清并根治 Nuitka 打包后报警中心没有任何报警（0）的核心根因】**：
   - **用户业务诉求**：“异动监控使用nuitka打包后,报警中心今天没有任何的报警,pyinstall之前没有任何问题,规则也可以正常读取,修复这个bug,哪里导致的”；

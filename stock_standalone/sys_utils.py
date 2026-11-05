@@ -399,7 +399,7 @@ RESOURCE_MAP = {
     },
 }
 
-def get_conf_path(fname, base_dir=None):
+def get_conf_path(fname, base_dir=None, is_user_save=False, **kwargs):
     """获取并验证配置文件路径，如果物理磁盘不存在，自动创建层级目录并从内置资源包中智能解压自愈"""
     get_base_path() # 提前触发自愈以防 is_onefile 判定被绕过
     if base_dir is None:
