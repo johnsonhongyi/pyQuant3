@@ -77,6 +77,7 @@ from JohnsonUtil.commonTips import timed_ctx
 from JohnsonUtil import johnson_cons as ct
 from JSONData import tdx_data_Day as tdd
 from JSONData import stockFilter as stf
+from JSONData import sina_data
 from logger_utils import LoggerFactory, init_logging, with_log_level, realtime_service_logs, realtime_logs_lock
 # from stock_live_strategy import StockLiveStrategy
 # from realtime_data_service import DataPublisher
@@ -6056,8 +6057,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         unique_dates = None
 
                     if unique_dates is None:
-                        from JSONData.sina_data import Sina
-                        sina = Sina(readonly=True)
+                        sina = sina_data.Sina(readonly=True)
                         unique_dates = sina.get_tick_dates()
                         setattr(self, cache_attr, unique_dates)
                         setattr(self, cache_time_attr, now)
@@ -8298,7 +8298,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 5. 清理 Sina 内存缓存引用 (仅在非交易时段进行，交易时段保持常驻以避免磁盘重读与文件锁死锁)
             if not cct.get_work_time():
                 try:
-                    from JSONData import sina_data
                     sina_data.Sina(readonly=True).clear_unified_cache(force_gc=False)
                 except Exception as gc_err:
                     logger.warning(f"Error clearing Sina cache in GC loop: {gc_err}")
@@ -8324,7 +8323,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 预先导入，避免线程内 import 触发 GIL 异常
         try:
             from market_pulse_engine import DailyPulseEngine
-            from JSONData import sina_data
         except ImportError:
             return
 
@@ -8348,7 +8346,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 def _async_stats_aggregation():
                     try:
                         from market_pulse_engine import DailyPulseEngine
-                        from JSONData import sina_data
                         
                         source_df = getattr(self, 'df_all', None)
                         if source_df is None or source_df.empty: return
@@ -24331,7 +24328,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 # 3. 兜底：使用权威本地 tdx API
                 try:
-                    from JSONData import tdx_data_Day as tdd
                     name = tdd.get_sina_data_code(code_clean)
                     if name and name != "未知":
                         _GLOBAL_CODE_NAME_CACHE[code_clean] = name
