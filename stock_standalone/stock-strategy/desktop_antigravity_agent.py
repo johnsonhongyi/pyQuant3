@@ -517,7 +517,16 @@ def run_antigravity_chat(peer: DesktopPeer, job: dict, cli: str, runtime: Path, 
         def bounded_event(text):
             if not evidence or not limits.enabled:
                 return make_prompt_event(text)
-            for budget in (limits.prefetch_max_bytes, 8192, None):
+            # Prefer the full semantically compacted bundle; if the user prompt
+            # itself is large, step down to a still-usable 24 KB/8 KB bundle
+            # instead of jumping straight to almost no evidence.
+            budgets = [limits.prefetch_max_bytes,
+                       min(limits.prefetch_max_bytes, 24000), 8192, None]
+            tried = set()
+            for budget in budgets:
+                if budget in tried:
+                    continue
+                tried.add(budget)
                 event = make_prompt_event(text, budget)
                 if len(event.encode('utf-8')) <= 60 * 1024:
                     return event

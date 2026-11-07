@@ -35,9 +35,13 @@ from desktop_chat_evidence import (
     _json_size,
     finish_payload,
     instructions,
+    compact_endpoint_data,
     match_evidence,
+    parse_dataset_window,
     slim,
     tool_definitions,
+    wants_history,
+    wants_kline,
 )
 
 THREAD = "01a13f4b-5f5a-7fb0-990c-a22bdbe42f68"
@@ -62,13 +66,14 @@ class FakeResponse(io.BytesIO):
 
 
 class FakeOpener:
-    def __init__(self, payload=None, raw=None):
+    def __init__(self, payload=None, raw=None, routes=None):
         self.payload = payload if payload is not None else {
             "status": "ok",
             "trade_date": date.today().isoformat(),
             "data": {"rows": [{"code": "600371", "name": "万向德农", "note": "fixture"}]},
         }
         self.raw = raw
+        self.routes = routes or {}
         self.requests = []
 
     def open(self, request, timeout=None):
@@ -77,14 +82,20 @@ class FakeOpener:
             "method": request.get_method(),
             "timeout": timeout,
         })
-        body = self.raw if self.raw is not None else json.dumps(self.payload, ensure_ascii=False).encode("utf-8")
+        route = self.routes.get(urlsplit(request.full_url).path)
+        if isinstance(route, bytes):
+            body = route
+        elif route is not None:
+            body = json.dumps(route, ensure_ascii=False).encode("utf-8")
+        else:
+            body = self.raw if self.raw is not None else json.dumps(self.payload, ensure_ascii=False).encode("utf-8")
         return FakeResponse(body)
 
 
 class FakePeer:
-    def __init__(self, payload=None, raw=None, base="http://localhost:20073/"):
+    def __init__(self, payload=None, raw=None, base="http://localhost:20073/", routes=None):
         self.base = base
-        self.opener = FakeOpener(payload=payload, raw=raw)
+        self.opener = FakeOpener(payload=payload, raw=raw, routes=routes)
         self.desktop_runtime_probe = None
 
 
@@ -196,6 +207,68 @@ def make_desktop(root):
     }
 
 
+def build_multi_day_fixture(root, days=6):
+    """Full local fixture plus a realistic multi-day 市场脉搏 limit-up pool."""
+    build_local_fixture(root)
+    dates = [(date.today() - timedelta(days=index)).isoformat() for index in range(days)]
+    path = root / "market_pulse.db"
+    path.unlink(missing_ok=True)
+    rows = []
+    for index, day in enumerate(dates):
+        for code, name, sector, reason, plan in (
+            ("600371", "万向德农", "农业;种业;乡村振兴",
+             "冲击涨停/封死|巨量爆发", "缩量回调至分时均线/5日线是低吸机会"),
+            ("002384", "东山精密", "消费电子;苹果概念;PCB",
+             "冲击涨停/封死|【主线先锋】(消费电子)", "涨停持股/排单"),
+            ("300364", "中文在线", "文化传媒;AIGC;数据要素",
+             "突破前两日高点", "普通关注: 等待放量突破信号。"),
+        ):
+            rows.append(("INSERT INTO daily_stocks VALUES (?,?,?,?,?,?,?)",
+                         (day, code, name, sector, 80.0 + index, reason, plan)))
+    _write_db(path, """
+        CREATE TABLE daily_stocks(date TEXT, code TEXT, name TEXT, sector TEXT,
+                                  score REAL, reason TEXT, action_plan TEXT);
+    """, rows)
+    return dates
+
+
+def build_large_history_fixture(root, days=10, per_day=14):
+    """Production-scale 市场脉搏 history: the node exceeds a 7-14 KB budget.
+
+    The small 3-rows-per-day fixture never exercised the shrink ladder, so a
+    real 10-day bundle could silently lose limit_up_pool / pullback_candidates
+    / sector_momentum / symbols while all unit tests still passed.
+    """
+    build_local_fixture(root)
+    dates = [(date.today() - timedelta(days=index)).isoformat() for index in range(days)]
+    path = root / "market_pulse.db"
+    path.unlink(missing_ok=True)
+    sectors = ("光伏设备;光伏概念;HJT电池", "消费电子;苹果概念;PCB",
+               "文化传媒;AIGC;数据要素", "汽车零部件;机器人概念;减速器",
+               "化学制药;CXO;创新药", "航运港口;跨境物流;一带一路",
+               "上海国企改革;体育产业;参股券商", "半导体;先进封装;国产替代")
+    rows = []
+    for index, day in enumerate(dates):
+        for offset in range(per_day):
+            code = "60%04d" % (100 + offset)
+            sector = sectors[offset % len(sectors)]
+            reason = ("【主线先锋】(%s)|冲击涨停/封死|巨量爆发|连榜%d天|封单金额%d万"
+                      % (sector.split(";")[0], index + 1, 8000 + offset * 137))
+            plan = ("【主升浪4连阳】:缩量回调至分时均线/5日线是低吸机会；"
+                    "若放量跌破%s日线则止损，目标位看前高，仓位控制三成以内。" % (5 + offset % 5))
+            if offset % 5 == 4:
+                reason = "突破前两日高点|温和放量"
+                plan = "普通关注: 等待放量突破信号。"
+            rows.append(("INSERT INTO daily_stocks VALUES (?,?,?,?,?,?,?)",
+                         (day, code, "测试个股%02d" % offset, sector,
+                          80.0 + index, reason, plan)))
+    _write_db(path, """
+        CREATE TABLE daily_stocks(date TEXT, code TEXT, name TEXT, sector TEXT,
+                                  score REAL, reason TEXT, action_plan TEXT);
+    """, rows)
+    return dates
+
+
 class EvidenceLimitsTests(unittest.TestCase):
     def test_config_values_are_hard_clamped_to_caps(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -289,8 +362,12 @@ class SlimAndWhitelistTests(unittest.TestCase):
             forbidden = {"path", "url", "sql", "command", "file", "table"}
             self.assertFalse(forbidden.intersection(schema.get("properties", {})), name)
         self.assertEqual(schemas["get_section"]["properties"]["section"]["enum"], sorted(SECTIONS))
+        self.assertIn("symbols", schemas["get_section"]["properties"])
         self.assertEqual(schemas["get_local_signals"]["properties"]["source"]["enum"],
-                         ["all", "summary"] + sorted(LOCAL_SOURCES))
+                         ["all", "summary", "history"] + sorted(LOCAL_SOURCES))
+        self.assertIn("history", schemas["get_section"]["properties"]["section"]["enum"])
+        self.assertIn("kline", schemas["get_section"]["properties"]["section"]["enum"])
+        self.assertIn("window_days", schemas["get_section"]["properties"])
 
     def test_instructions_authorize_evidence_without_boundary_boilerplate(self):
         codex = instructions("codex")
@@ -326,6 +403,15 @@ class SlimAndWhitelistTests(unittest.TestCase):
         sections, local = match_evidence("帮我总结一下市场")
         self.assertFalse(local)
         self.assertEqual(sections, ["auto_follow", "limit_up"])
+
+    def test_long_mixed_prompt_keeps_stock_research_limit_up_and_trend_sections(self):
+        prompt = ("结合个股分析页内容,短线连板数据,趋势剔除等数据及桌面的异动信号等数据"
+                  "找到利好那些个股,选出有实际操作机会的10只个股,及板块")
+        sections, local = match_evidence(prompt)
+        self.assertTrue(local)
+        for name in ("linkage", "market", "stock_research", "limit_up", "themes"):
+            self.assertIn(name, sections, sections)
+        self.assertLessEqual(len(sections), 6)
 
     def test_freshness_distinguishes_today_from_historical_records(self):
         self.assertEqual(_freshness(date.today().isoformat())["freshness"], "today")
@@ -396,6 +482,22 @@ class ServerEvidenceTests(unittest.TestCase):
         self.assertEqual(parse_qs(urlsplit(url).query)["symbols"], ["600371.SH"])
         self.assertNotIn("evil.example", url)
         self.assertNotIn("orders", url)
+
+    def test_multiple_quote_symbols_are_validated_before_network(self):
+        peer = FakePeer()
+        session = EvidenceSession(peer, limits=limits_with(), desktop={})
+        session.tool("get_section", {"section": "quotes",
+                                     "symbols": "600371.SH,300364.SZ,002384"})
+        self.assertEqual(len(peer.opener.requests), 1)
+        query = parse_qs(urlsplit(peer.opener.requests[0]["url"]).query)
+        self.assertEqual(query["symbols"], ["600371.SH,300364.SZ,002384"])
+
+        peer = FakePeer()
+        session = EvidenceSession(peer, limits=limits_with(), desktop={})
+        result = session._section("quotes", {"symbols": "600371; DROP TABLE x"}, 8192)
+        self.assertEqual(result["endpoints"], [])
+        self.assertEqual(result["errors"][0]["status"], "skipped")
+        self.assertEqual(peer.opener.requests, [])
 
     def test_endpoint_byte_cap_reports_unavailable_without_raising(self):
         limits = limits_with(endpoint_max_bytes=128)
@@ -646,6 +748,320 @@ class PrefetchTests(unittest.TestCase):
         raw = session.prefetch("本机tk及ats的所有异动信号", max_bytes=100000)
         self.assertLessEqual(len(raw.encode("utf-8")), 4096)
         self.assertTrue(json.loads(raw)["truncated"])
+
+
+class EvidenceIntegrityTests(unittest.TestCase):
+    """Regressions for the real Web-session data-loss diagnosis."""
+
+    @staticmethod
+    def _no_empty_pruned_lists(value):
+        if isinstance(value, dict):
+            if value.get("items") == [] and value.get("total", 0) > 0:
+                return False
+            return all(EvidenceIntegrityTests._no_empty_pruned_lists(item)
+                       for item in value.values())
+        if isinstance(value, list):
+            return all(EvidenceIntegrityTests._no_empty_pruned_lists(item)
+                       for item in value)
+        return True
+
+    @staticmethod
+    def _as_items(value):
+        if isinstance(value, dict) and isinstance(value.get("items"), list):
+            return value["items"]
+        if isinstance(value, list):
+            return value
+        return []
+
+    @staticmethod
+    def _collect_values(value, key, found):
+        if isinstance(value, dict):
+            if key in value:
+                found.add(str(value[key]))
+            for item in value.values():
+                EvidenceIntegrityTests._collect_values(item, key, found)
+        elif isinstance(value, list):
+            for item in value:
+                EvidenceIntegrityTests._collect_values(item, key, found)
+
+    @staticmethod
+    def _limit_up_payload():
+        today = date.today().isoformat()
+        levels = []
+        for level in range(4, 0, -1):
+            stocks = []
+            for index in range(12):
+                symbol = "%06d.SH" % (601000 + level * 100 + index)
+                name = "连板股%02d" % index
+                if level == 4 and index == 0:
+                    symbol, name = "601599.SH", "浙文影业"
+                stocks.append({
+                    "symbol": symbol, "name": name, "price": 4.62 + index / 10,
+                    "change_percent": 10.0, "streak": level,
+                    "streak_label": "%d天%d板" % (level, level),
+                    "industry": "纺织制造", "primary_theme": "AI应用",
+                    "raw_concepts": ["概念%d" % item for item in range(12)],
+                    "theme_evidence": ["证据%d" % item for item in range(12)],
+                    "first_limit_time": "09:25:00", "source": "fixture",
+                })
+            levels.append({"level": level, "label": "%d板" % level,
+                           "count": len(stocks), "stocks": stocks})
+        current = {"trade_date": today, "limit_up_count": 84, "board_count": 21,
+                   "first_board_count": 63, "max_streak": 4, "reopened_count": 36,
+                   "total_amount": 50222047842, "levels": levels}
+        return {
+            "comparison_ready": True, "session_status": "收盘快照",
+            "current": current, "previous": dict(current, trade_date="2026-11-04"),
+            "advance": [{"from_level": 1, "to_level": 2, "base": 106,
+                         "success": 17, "rate": 0.16}],
+            "industry_heat": [{"name": "光伏设备" if index == 0 else "行业%d" % index,
+                               "count": 11, "board_count": 2, "max_streak": 3,
+                               "heat": 100 - index} for index in range(49)],
+            "concept_heat": [{"name": "光伏" if index == 0 else "概念%d" % index,
+                              "count": 8, "board_count": 5, "max_streak": 4,
+                              "heat": 100 - index,
+                              "leaders": ["闽发铝业 4板", "永臻股份 3板"]}
+                             for index in range(130)],
+            "concept_meta": {"trade_date": today, "stale": False,
+                             "source": "fixture", "fetched_at": today + "T21:25:00+08:00"},
+        }
+
+    @staticmethod
+    def _research_payload(count=30):
+        today = date.today().isoformat()
+        known = [("600487.SH", "亨通光电"), ("300299.SZ", "富春股份"),
+                 ("002307.SZ", "北新路桥")]
+        rows = []
+        for index in range(count):
+            symbol, name = (known[index] if index < len(known)
+                            else ("%06d.SZ" % (300000 + index), "研究股%02d" % index))
+            rows.append({
+                "id": "research-%03d" % index,
+                "request": {"symbol": symbol, "purpose": "new_position",
+                            "horizon": "swing", "analysis_level": "standard",
+                            "model": "fixture", "desktop_node_id": "node"},
+                "name": name, "status": "succeeded", "stage": "completed",
+                "headline": "研究结论 %d：量价与基本面需交叉核验" % index,
+                "score": 40 + index, "completed_at": today + "T12:00:00Z",
+                "content_text": "长研报正文" * 200,
+            })
+        return rows
+
+    @staticmethod
+    def _market_routes():
+        today = date.today().isoformat()
+        return {
+            "/api/v1/market/indexes": {"data": [
+                {"code": "000001", "name": "上证指数", "price": 3689.91,
+                 "change_percent": 0.1, "trade_time": today + "T15:00:00+08:00",
+                 "status": "closed"} for _ in range(17)]},
+            "/api/v1/market/flows": {"data": [
+                {"dimension": "industry", "code": "industry-%02d" % index,
+                 "name": "行业%02d" % index, "change_percent": 1.5,
+                 "net_inflow": 1000000 + index} for index in range(20)]},
+            "/api/v1/stocks/hot-ranks": {"data": {
+                "stocks": [{"symbol": "002086.SZ" if index == 0 else "%06d.SZ" % (2000 + index),
+                            "code": "002086" if index == 0 else "%06d" % (2000 + index),
+                            "name": "东方海洋" if index == 0 else "热门股%02d" % index,
+                            "source_count": 2, "consensus_score": 199 - index}
+                           for index in range(20)],
+                "total": 142, "updated_at": today + "T13:12:20Z", "stale": False}},
+            "/api/v1/market/billboard": {"data": [
+                {"trade_date": today, "symbol": "002131.SZ" if index == 0 else "%06d.SZ" % (3000 + index),
+                 "name": "利欧股份" if index == 0 else "龙虎股%02d" % index,
+                 "close_price": 4.39, "change_percent": 10.02,
+                 "reason": "日涨幅偏离值达到7%", "summary": "普通席位买入",
+                 "net_amount": 329947550 - index} for index in range(10)]},
+        }
+
+    @staticmethod
+    def _quote_routes():
+        today = date.today().isoformat()
+        return {
+            "/api/v1/quotes/realtime": {"data": [
+                {"symbol": "600371.SH", "name": "万向德农", "price": 10.2,
+                 "change_percent": 2.1, "trade_time": today + "T15:35:00+08:00",
+                 "meta": {"stale": False, "trade_date": today}},
+                {"symbol": "002384.SZ", "name": "东山精密", "price": 20.4,
+                 "change_percent": -0.8, "trade_time": today + "T15:35:00+08:00",
+                 "meta": {"stale": False, "trade_date": today}},
+            ]},
+        }
+
+    def test_semantic_slim_never_empties_nonempty_lists(self):
+        payload = {
+            "as_of": "2026-11-05T13:00:00+00:00",
+            "freshness_note": FRESHNESS_NOTE,
+            "candidates": [{"code": "600371", "name": "万向德农",
+                            "latest_date": date.today().isoformat(),
+                            "stale": False, "sample_reasons": ["TK交易异动"]}
+                           for _ in range(50)],
+            "endpoints": [{"label": "板块%d" % index,
+                           "data": {"rows": [{"symbol": "600371.SH",
+                                               "name": "万向德农"} for _ in range(30)]}}
+                          for index in range(5)],
+        }
+        result, truncated = slim(payload, 4096, 80)
+        self.assertTrue(truncated)
+        self.assertLessEqual(_json_size(result), 4096)
+        self.assertTrue(self._no_empty_pruned_lists(result))
+        self.assertIn("600371", evidence._dump(result))
+
+    def test_compact_endpoint_preserves_limit_up_stocks_and_heat(self):
+        payload = self._limit_up_payload()
+        compacted, truncated = compact_endpoint_data(payload, 6000, 900)
+        text = evidence._dump(compacted)
+        self.assertTrue(truncated)
+        self.assertLessEqual(_json_size(compacted), 6000)
+        self.assertIn(date.today().isoformat(), text)
+        self.assertIn("601599.SH", text)
+        self.assertIn("浙文影业", text)
+        self.assertIn("光伏设备", text)
+        self.assertIn("光伏", text)
+        self.assertTrue(self._no_empty_pruned_lists(compacted))
+
+    def test_compact_endpoint_preserves_multiple_research_records(self):
+        payload = self._research_payload(30)
+        compacted, truncated = compact_endpoint_data(payload, 8000, 900)
+        symbols = set()
+        self._collect_values(compacted, "symbol", symbols)
+        self.assertTrue(truncated)
+        self.assertLessEqual(_json_size(compacted), 8000)
+        self.assertGreaterEqual(len(symbols), 8, symbols)
+        self.assertIn("600487.SH", symbols)
+        self.assertIn("300299.SZ", symbols)
+        self.assertIn("002307.SZ", symbols)
+        self.assertTrue(self._no_empty_pruned_lists(compacted))
+
+    def test_section_compacts_large_endpoint_without_empty_lists(self):
+        limits = limits_with(section_max_bytes=8192, string_max_chars=200)
+        peer = FakePeer(payload={"status": "ok",
+                                 "trade_date": date.today().isoformat(),
+                                 "data": self._limit_up_payload()})
+        session = EvidenceSession(peer, limits=limits, desktop={})
+        result = session.tool("get_section", {"section": "limit_up"})
+        self.assertLessEqual(_json_size(result), limits.section_max_bytes)
+        self.assertTrue(self._no_empty_pruned_lists(result))
+        self.assertTrue(self._as_items(result.get("endpoints")))
+        self.assertIn("601599.SH", evidence._dump(result))
+        self.assertTrue(result["truncated"])
+
+    def test_prefetch_preserves_server_boards_local_candidates_and_quotes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            build_local_fixture(root)
+            today = date.today().isoformat()
+            routes = self._market_routes()
+            routes.update(self._quote_routes())
+            routes.update({
+                "/api/v1/short-term/limit-up-ladder": {"data": self._limit_up_payload()},
+                "/api/v1/short-term/emotion-history": {"data": {
+                    "points": [{"trade_date": today, "emotion_score": 71.07,
+                                "phase": "发酵/主升"} for _ in range(28)],
+                    "latest": {"trade_date": today, "emotion_score": 71.07},
+                }},
+                "/api/v1/stocks/research": {"data": self._research_payload(30)},
+                "/api/v1/linkage/targets": {"data": {"targets": [
+                    {"label": "桌面桥%d" % index, "online": "1", "status": "ok"}
+                    for index in range(5)]}},
+                "/api/v1/linkage/events": {"data": {"events": [
+                    {"event_type": "heat.rank_changed", "trade_date": today,
+                     "occurred_at": today + "T01:55:00Z",
+                     "payload": {"symbol": "600371.SH", "to_rank": 20}}
+                    for _ in range(10)]}},
+                "/api/v1/auto-follow": {"data": {"state": {
+                    "trade_date": today, "cycle_status": "outside_session",
+                    "candidates": [{"code": "600371", "name": "万向德农"}
+                                   for _ in range(16)]}}},
+            })
+            peer = FakePeer(routes=routes)
+            session = EvidenceSession(peer, limits=limits_with(),
+                                       desktop=make_desktop(root))
+            prompt = ("结合个股分析页内容,短线连板数据,趋势剔除等数据及桌面的异动信号等数据"
+                      "找到利好那些个股,选出有实际操作机会的10只个股,及板块")
+            raw = session.prefetch(prompt, max_bytes=48000)
+            bundle = json.loads(raw)
+            self.assertLessEqual(len(raw.encode("utf-8")), 48000)
+            self.assertTrue(self._no_empty_pruned_lists(bundle))
+            for section in ("stock_research", "limit_up", "market", "quotes", "themes"):
+                self.assertIn(section, bundle["sections"], section)
+
+            symbols = set()
+            self._collect_values(bundle["sections"]["stock_research"], "symbol", symbols)
+            self.assertGreaterEqual(len(symbols), 8, symbols)
+            limit_up_text = evidence._dump(bundle["sections"]["limit_up"])
+            self.assertIn("601599.SH", limit_up_text)
+            self.assertIn("浙文影业", limit_up_text)
+            self.assertIn("光伏设备", limit_up_text)
+            market_text = evidence._dump(bundle["sections"]["market"])
+            for name in ("上证指数", "东方海洋", "利欧股份"):
+                self.assertIn(name, market_text)
+            quote_text = evidence._dump(bundle["sections"]["quotes"])
+            self.assertIn("600371.SH", quote_text)
+            self.assertIn("万向德农", quote_text)
+            self.assertIn("quote_cross_check_note", bundle)
+
+            candidates = self._as_items(bundle["local_signals"].get("candidates"))
+            self.assertIn("600371", [item.get("code") for item in candidates])
+            quote_urls = [urlsplit(item["url"]) for item in peer.opener.requests
+                          if urlsplit(item["url"]).path == "/api/v1/quotes/realtime"]
+            self.assertTrue(quote_urls)
+            self.assertIn("600371", parse_qs(quote_urls[0].query)["symbols"][0])
+            audit = [item for item in session.audit if item["tool"] == "prefetch"][-1]
+            self.assertTrue(audit["quotes"])
+            self.assertIn("quotes", audit["sections"])
+
+    def test_small_prefetch_budget_still_preserves_candidates_and_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            build_local_fixture(root)
+            routes = self._market_routes()
+            routes.update(self._quote_routes())
+            routes.update({
+                "/api/v1/short-term/limit-up-ladder": {"data": self._limit_up_payload()},
+                "/api/v1/stocks/research": {"data": self._research_payload(30)},
+            })
+            peer = FakePeer(routes=routes)
+            session = EvidenceSession(peer, limits=limits_with(),
+                                       desktop=make_desktop(root))
+            raw = session.prefetch("在系统的所有异动信号中找到可以落地的实际个股，"
+                                   "使用个股分析及短线连板的数据", max_bytes=12000)
+        bundle = json.loads(raw)
+        self.assertLessEqual(len(raw.encode("utf-8")), 12000)
+        self.assertTrue(self._no_empty_pruned_lists(bundle))
+        candidates = self._as_items(bundle["local_signals"].get("candidates"))
+        self.assertIn("600371", [item.get("code") for item in candidates])
+        self.assertTrue(self._as_items(
+            bundle["sections"]["stock_research"].get("endpoints")))
+        self.assertIn("600371.SH", evidence._dump(bundle))
+
+    def test_codex_baseline_bundle_keeps_rows_after_final_trim(self):
+        # The final bundle pass must only shrink strings, never re-prune the
+        # endpoint rows that compact_endpoint_data already selected.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            build_local_fixture(root)
+            routes = self._market_routes()
+            routes.update(self._quote_routes())
+            routes.update({
+                "/api/v1/short-term/limit-up-ladder": {"data": self._limit_up_payload()},
+                "/api/v1/stocks/research": {"data": self._research_payload(30)},
+            })
+            peer = FakePeer(routes=routes)
+            session = EvidenceSession(peer, limits=limits_with(),
+                                       desktop=make_desktop(root))
+            raw = session.prefetch("在系统的所有异动信号中找到可以落地的实际个股，"
+                                   "使用个股分析及短线连板的数据", max_bytes=24000)
+        bundle = json.loads(raw)
+        self.assertLessEqual(len(raw.encode("utf-8")), 24000)
+        self.assertTrue(self._no_empty_pruned_lists(bundle))
+        symbols = set()
+        self._collect_values(bundle["sections"]["stock_research"], "symbol", symbols)
+        self.assertGreaterEqual(len(symbols), 8, symbols)
+        self.assertIn("601599.SH", evidence._dump(bundle["sections"]["limit_up"]))
+        self.assertIn("浙文影业", evidence._dump(bundle["sections"]["limit_up"]))
+        self.assertIn("600371.SH", evidence._dump(bundle["sections"]["quotes"]))
+        self.assertIn("利欧股份", evidence._dump(bundle["sections"]["market"]))
 
 
 class CodexApp:
@@ -928,9 +1344,10 @@ class ClosedLoopAuditTests(unittest.TestCase):
             self.assertEqual(request["method"], "GET")
 
     def test_defaults_cover_cold_cache_and_large_inspection_payloads(self):
-        self.assertGreaterEqual(DEFAULTS["request_timeout_seconds"], 12)
+        self.assertGreaterEqual(DEFAULTS["request_timeout_seconds"], 20)
         self.assertGreaterEqual(DEFAULTS["endpoint_max_bytes"], 1500000)
-        self.assertGreaterEqual(DEFAULTS["codex_prefetch_max_bytes"], 1)
+        self.assertGreaterEqual(DEFAULTS["prefetch_max_bytes"], 48000)
+        self.assertGreaterEqual(DEFAULTS["codex_prefetch_max_bytes"], 24000)
         self.assertGreaterEqual(DEFAULTS["prefetch_max_bytes"],
                                 DEFAULTS["codex_prefetch_max_bytes"])
         for key, value in DEFAULTS.items():
@@ -1205,6 +1622,257 @@ class CodexNoToolsFallbackTests(unittest.TestCase):
         self.assertLessEqual(result["evidence_bundle_bytes"], DEFAULTS["prefetch_max_bytes"])
         self.assertIn("evidence_config_source", result)
         self.assertTrue(any(item["tool"] == "prefetch" for item in result["evidence_audit"]))
+
+
+class MultiDayEvidenceTests(unittest.TestCase):
+    """Regressions for dynamic dataset windows and multi-day board momentum."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.dates = build_multi_day_fixture(self.root, days=6)
+        self.desktop = make_desktop(self.root)
+        self.limits = limits_with()
+        self.peer = FakePeer()
+        self.session = EvidenceSession(self.peer, limits=self.limits, desktop=self.desktop)
+
+    # --- dataset window -----------------------------------------------------
+
+    def test_dataset_window_ladder_is_fixed_and_clamped(self):
+        cases = [
+            ("【数据集：当日】找异动", 1),
+            ("【数据集：最近2日】找异动", 2),
+            ("【数据集：最近5日】板块动能", 5),
+            ("【数据集：10日】回踩企稳", 10),
+            ("普通问题", 2),
+            ("10日内的涨停过的回踩企稳的个股有哪些", 10),
+            ("最近几个交易日的多日数据", 10),
+            ("5日板块动能", 5),
+            ("使用个股分析及短线连板的数据", 2),
+        ]
+        for prompt, expected in cases:
+            with self.subTest(prompt=prompt):
+                self.assertEqual(parse_dataset_window(prompt, 10), expected)
+        self.assertEqual(parse_dataset_window("【数据集：10日】", 5), 5)
+        self.assertEqual(parse_dataset_window("【数据集：999日】", 10), 10)
+        self.assertIn(parse_dataset_window("任意文本", 10), (1, 2, 5, 10))
+
+    def test_annotation_wins_and_same_day_cross_check_is_not_a_window_request(self):
+        prompt = ("【数据集：10日】找出10日内涨停过且当日行情已核验的个股，"
+                  "须给出当日行情/实时报价核验结果")
+        self.assertEqual(parse_dataset_window(prompt, 10), 10)
+        self.assertEqual(parse_dataset_window("须给出当日行情/实时报价核验结果", 10), 2)
+
+    def test_multi_day_keywords_route_to_local_history_and_kline(self):
+        prompt = "10日内的涨停过的回踩企稳的个股有哪些"
+        sections, want_local = match_evidence(prompt)
+        self.assertTrue(want_local)
+        self.assertTrue(wants_history(prompt))
+        self.assertTrue(wants_kline(prompt))
+        self.assertIn("limit_up", sections)
+        self.assertLessEqual(len(sections), 6)
+
+    # --- whitelist ----------------------------------------------------------
+
+    def test_new_sections_are_fixed_get_endpoints_without_write_on_get(self):
+        for name in ("history", "kline"):
+            self.assertIn(name, SECTIONS)
+            for endpoint in SECTIONS[name]["endpoints"]:
+                with self.subTest(section=name, path=endpoint["path"]):
+                    self.assertTrue(endpoint["path"].startswith("/api/v1/"))
+                    self.assertNotIn("..", endpoint["path"])
+                    self.assertNotIn(endpoint["path"], evidence.WRITE_ON_GET_ENDPOINTS)
+        self.assertIn("/api/v1/market/news",
+                      [item["path"] for item in SECTIONS["history"]["endpoints"]])
+        self.assertIn("/api/v1/quotes/kline/batch",
+                      [item["path"] for item in SECTIONS["kline"]["endpoints"]])
+
+    def test_kline_limit_is_narrowed_by_window_never_widened(self):
+        for window, expected in ((2, 7), (10, 15)):
+            with self.subTest(window=window):
+                self.peer.opener.requests.clear()
+                self.session._section("kline", {"symbols": "600371,002384",
+                                                "window_days": window}, 20000)
+                queries = [parse_qs(urlsplit(item["url"]).query)
+                           for item in self.peer.opener.requests
+                           if urlsplit(item["url"]).path == "/api/v1/quotes/kline/batch"]
+                self.assertEqual(len(queries), 1)
+                self.assertEqual(int(queries[0]["limit"][0]), expected)
+                self.assertEqual(queries[0]["period"][0], "day")
+                self.assertEqual(queries[0]["symbols"][0], "600371,002384")
+
+    # --- local multi-day aggregation ---------------------------------------
+
+    def test_history_builds_limit_up_pool_pullback_and_sector_momentum(self):
+        result = self.session._history(6, 20000)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["window_days"], 6)
+        self.assertEqual(result["trading_days"], self.dates)
+        self.assertEqual(result["rows_scanned"], 18)
+        self.assertTrue(result["limit_up_by_day"])
+        self.assertEqual(result["limit_up_by_day"][0]["limit_up_count"], 2)
+        pool_codes = [item["code"] for item in result["limit_up_pool"]]
+        self.assertIn("600371", pool_codes)
+        self.assertIn("002384", pool_codes)
+        self.assertNotIn("300364", pool_codes)
+        pullback_codes = [item["code"] for item in result["pullback_candidates"]]
+        self.assertIn("600371", pullback_codes)
+        self.assertNotIn("002384", pullback_codes)
+        self.assertTrue(result["sector_momentum"])
+        self.assertTrue(result["symbols"])
+        self.assertIn("lag_days", result)
+        self.assertIn("dataset_note", result)
+        self.assertIn("history_note", result)
+        self.assertLessEqual(_json_size(result), 20000)
+
+    def test_history_uses_read_only_select_only_sql(self):
+        real_connect = sqlite3.connect
+        uris, statements = [], []
+
+        def tracked_connect(database, *args, **kwargs):
+            uris.append((str(database), dict(kwargs)))
+            return RecordingConnection(real_connect(database, *args, **kwargs), statements)
+
+        with patch.object(evidence.sqlite3, "connect", side_effect=tracked_connect):
+            result = self.session._history(6, 20000)
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(any("mode=ro" in uri and kwargs.get("uri") is True
+                            for uri, kwargs in uris))
+        self.assertIn("PRAGMA query_only=ON", statements)
+        for sql in statements:
+            self.assertTrue(re.match(r"^\s*(SELECT|PRAGMA)\b", sql, re.I), sql)
+
+    def test_history_window_is_clamped_and_missing_store_is_explicit(self):
+        result = self.session._history(999, 20000)
+        self.assertLessEqual(result["window_days"], CAPS["dataset_max_days"])
+        self.assertEqual(result["window_days"], 10)
+        missing = EvidenceSession(self.peer, limits=self.limits,
+                                  desktop={"data_root": str(self.root / "missing")})
+        result = missing._history(10, 20000)
+        self.assertEqual(result["status"], "unavailable")
+        self.assertIn("market_pulse.db", json.dumps(result, ensure_ascii=False))
+
+    def test_history_never_empties_non_empty_lists_under_tight_budget(self):
+        result = self.session._history(6, 1500)
+        self.assertTrue(EvidenceIntegrityTests._no_empty_pruned_lists(result))
+        self.assertLessEqual(_json_size(result), 1500)
+        self.assertIn("freshness_note", result)
+
+    def test_production_scale_history_keeps_every_analytical_list(self):
+        """A 10-day node larger than its budget must never lose the row lists.
+
+        This is the live regression: a 9-19 KB history node squeezed into
+        ~7 KB used to be structurally pruned down to dates/notes only, which
+        made the model answer "本机多日数据未下发".
+        """
+        large_root = self.root / "large"
+        large_root.mkdir()
+        dates = build_large_history_fixture(large_root, days=10, per_day=14)
+        session = EvidenceSession(self.peer, limits=self.limits,
+                                  desktop=make_desktop(large_root))
+        full = session._history(10, 60000)
+        self.assertGreater(_json_size(full), 7414)
+        tight = session._history(10, 7414)
+        self.assertLessEqual(_json_size(tight), 7414)
+        self.assertEqual(tight["trading_days"], dates)
+        for key in ("limit_up_by_day", "limit_up_pool",
+                    "pullback_candidates", "sector_momentum", "symbols"):
+            self.assertIn(key, tight, key)
+            self.assertTrue(tight[key], key)
+        self.assertIn("freshness_note", tight)
+        self.assertIn("dataset_note", tight)
+        self.assertIn("history_note", tight)
+        # Structural pruning marks itself with _truncated_keys: its absence
+        # proves the shrink ladder stayed row-oriented.
+        self.assertNotIn("_truncated_keys", tight)
+        self.assertTrue(EvidenceIntegrityTests._no_empty_pruned_lists(tight))
+
+    def test_prefetch_production_scale_history_keeps_rows_and_no_empty_wrappers(self):
+        large_root = self.root / "large"
+        large_root.mkdir()
+        build_large_history_fixture(large_root, days=10, per_day=14)
+        session = EvidenceSession(self.peer, limits=self.limits,
+                                  desktop=make_desktop(large_root))
+        prompt = ("【数据集：10日】使用多日数据对板块动能分析筛选，"
+                  "10日内涨停过的回踩企稳的个股有哪些")
+        raw = session.prefetch(prompt, max_bytes=56000)
+        bundle = json.loads(raw)
+        self.assertLessEqual(len(raw.encode("utf-8")), 56000)
+        history = bundle["local_history"]
+        self.assertEqual(len(history["trading_days"]), 10)
+        for key in ("limit_up_by_day", "limit_up_pool",
+                    "pullback_candidates", "sector_momentum", "symbols"):
+            self.assertIn(key, history, key)
+            self.assertTrue(EvidenceIntegrityTests._as_items(history[key]) or
+                            (key == "symbols" and history[key]), key)
+        self.assertNotIn("_truncated_keys", history)
+        self.assertTrue(EvidenceIntegrityTests._as_items(bundle["local_signals"]["candidates"]))
+        self.assertTrue(EvidenceIntegrityTests._no_empty_pruned_lists(bundle))
+        self.assertIn("kline", bundle["sections"])
+        self.assertIn("quotes", bundle["sections"])
+
+    def test_local_tool_history_source_dispatches_to_aggregation(self):
+        result = self.session.tool("get_local_signals", {"source": "history", "days": 5})
+        self.assertEqual(result["kind"], "history")
+        self.assertEqual(result["window_days"], 5)
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("limit_up_pool", result)
+
+    # --- prefetch integration ----------------------------------------------
+
+    def test_ten_day_prompt_mounts_local_signals_history_kline_and_quotes(self):
+        prompt = ("【数据集：10日】使用服务器端多日的涨停数据，10日内涨停过的回踩企稳的个股有哪些？"
+                  "结合多日数据对板块动能分析筛选")
+        raw = self.session.prefetch(prompt, max_bytes=48000)
+        bundle = json.loads(raw)
+        self.assertLessEqual(len(raw.encode("utf-8")), 48000)
+        self.assertEqual(bundle["dataset_window"]["days"], 10)
+        self.assertIn("local_signals", bundle)
+        self.assertIn("local_history", bundle)
+        history = bundle["local_history"]
+        for key in ("limit_up_pool", "pullback_candidates", "sector_momentum",
+                    "limit_up_by_day", "trading_days"):
+            self.assertIn(key, history, key)
+        for section in ("kline", "quotes", "limit_up", "market"):
+            self.assertIn(section, bundle["sections"], section)
+        self.assertIn("kline_note", bundle)
+        self.assertIn("quote_cross_check_note", bundle)
+        audit = [item for item in self.session.audit if item["tool"] == "prefetch"][-1]
+        self.assertTrue(audit["history"])
+        self.assertEqual(audit["dataset_days"], 10)
+        self.assertTrue(audit["kline"])
+
+    def test_default_two_day_selector_keeps_bundle_small(self):
+        prompt = "【数据集：最近2日】在系统的所有异动信号中找到可以落地的实际个股"
+        raw = self.session.prefetch(prompt, max_bytes=30000)
+        bundle = json.loads(raw)
+        self.assertEqual(bundle["dataset_window"]["days"], 2)
+        self.assertIn("local_signals", bundle)
+        self.assertNotIn("local_history", bundle)
+        self.assertLessEqual(len(raw.encode("utf-8")), 30000)
+
+    def test_non_local_prompt_explains_missing_node_without_boundary_boilerplate(self):
+        raw = self.session.prefetch("使用个股分析及短线连板的数据", max_bytes=12000)
+        bundle = json.loads(raw)
+        self.assertNotIn("local_signals", bundle)
+        state = bundle["local_signals_state"]
+        self.assertIn("自动挂载", state)
+        self.assertIn("不是权限限制", state)
+        self.assertNotIn("未授权", state)
+
+    def test_multi_day_defaults_and_instructions_stay_consistent(self):
+        for key in ("dataset_max_days", "history_max_rows", "history_max_bytes",
+                    "kline_max_symbols"):
+            self.assertIn(key, DEFAULTS)
+            self.assertIn(key, CAPS)
+            self.assertLessEqual(DEFAULTS[key], CAPS[key], key)
+        self.assertEqual(DEFAULTS["dataset_max_days"], 10)
+        for text in (instructions("codex"), instructions("agy")):
+            self.assertIn("local_history", text)
+            self.assertIn("dataset_window", text)
+            self.assertIn("10日", text)
+        self.assertIn("source=history", instructions("codex"))
 
 
 if __name__ == "__main__":
